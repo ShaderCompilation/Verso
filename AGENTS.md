@@ -23,6 +23,8 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 |---|---|
 | `cargo sim` | Build and run the desktop simulator |
 | `cargo kindle-build` | Release build for the Kindle (armv7, via cargo-zigbuild) |
+| `cargo test` | Unit tests |
+| `scripts/deploy.sh` | Build, copy to the Kindle, run through the launcher, stream the log (Kindle must be awake, KOReader closed) |
 | `scripts/gen-fbink-bindings.sh` | Regenerate FBInk bindings after updating the submodule |
 
 - Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `third_party/FBInk` (submodule), `assets/`, `dist/`, `scripts/`, `docs/`.
