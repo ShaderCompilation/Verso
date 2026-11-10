@@ -1,0 +1,6 @@
+# Shortcuts:
+#   cargo sim           -> run the desktop simulator
+#   cargo kindle-build  -> release build for the Kindle (needs zig + cargo-zigbuild, see docs/setup.md)
+[alias]
+sim = "run -p verso"
+kindle-build = "zigbuild -p verso --release --no-default-features --features kindle --target armv7-unknown-linux-gnueabihf.2.35"
