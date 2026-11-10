@@ -1,0 +1,18 @@
+{
+	"items": [
+	{
+		"name": "Verso",
+		"priority": 0,
+		"items": [
+		{
+			"name": "Start Verso",
+			"priority": 1,
+			"action": "/bin/sh",
+			"params": "/mnt/us/verso/verso.sh",
+			"status": false,
+			"internal": "status Starting Verso"
+		}
+		]
+	}
+	]
+}
