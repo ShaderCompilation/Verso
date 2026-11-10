@@ -26,4 +26,6 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 
 - Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `third_party/FBInk` (submodule), `assets/`, `dist/`, `scripts/`, `docs/`.
 - The Kindle is reachable with `ssh kindle`. It's the user's own reading device: don't run anything destructive on it, and always make sure the Kindle UI comes back after testing.
+  - Only write inside `/mnt/us/extensions/verso` and `/tmp`.
+  - Never run `mntroot`, factory reset, firmware updates, or `dd`, and never touch `/var/local`, `/etc` or the jailbreak files.
 - Full setup and build details: [docs/setup.md](docs/setup.md).
