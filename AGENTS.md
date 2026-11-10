@@ -4,6 +4,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 
 ## How to work with the user
 
+- **Ask for help when needed.** Feel free to ask the user to do something you can't do yourself. Explain what you need them to do and why.
 - **Questions get answers, not code.** If the user asks a question ("how would we…", "what do you think about…", "is it possible to…"), answer it. Don't edit files or start implementing until the user says "go" (or otherwise clearly asks you to build it).
 - **Plan before building.** For a new phase or a sizable feature, write or update the plan in `docs/` first and wait for the go-ahead.
 - **The user delegates technical decisions.** Pick libraries, architecture and code style yourself, but explain choices in plain language. Record each decision as a short "Decision / Why" note in the relevant doc.
