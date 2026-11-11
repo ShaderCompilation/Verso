@@ -5,8 +5,8 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 ## How to work with the user
 
 - **Ask for help when needed.** Feel free to ask the user to do something you can't do yourself. Explain what you need them to do and why.
-- **Questions get answers, not code.** If the user asks a question ("how would we…", "what do you think about…", "is it possible to…"), answer it. Don't edit files or start implementing until the user says "go" (or otherwise clearly asks you to build it).
-- **Plan before building.** For a new phase or a sizable feature, write or update the plan in `docs/` first and wait for the go-ahead.
+- **Questions get answers; instructions get action.** If the user is exploring an idea or asking for advice ("how would we…", "what do you think about…", "is it possible to…"), answer and wait for a go-ahead before editing files or implementing. A request to do work ("implement Phase 5", "fix this", "change the wording", "can you implement…") is already authorization to carry it out; don't ask for a second go-ahead just because it is a new phase or a sizable feature.
+- **Use the existing plan.** `docs/plan.md` is the implementation plan. When asked to implement a phase or item, work from it and keep its progress current. Create a separate plan or wait for plan approval only when the user explicitly asks for that workflow. Make routine technical decisions as part of implementation and record them in the relevant docs.
 - **The user delegates technical decisions.** Pick libraries, architecture and code style yourself, but explain choices in plain language. Record each decision as a short "Decision / Why" note in the relevant doc.
 - **Keep docs current.** Update the status markers (✅ 🔄 ⬜) in `docs/plan.md` as work progresses. Mark device facts as **(measured)** or **(to verify)**.
 
