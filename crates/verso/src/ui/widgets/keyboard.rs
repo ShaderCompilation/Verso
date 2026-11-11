@@ -41,11 +41,23 @@ impl Keyboard {
         } else {
             &["qwertyuiop", "asdfghjkl", "zxcvbnm"]
         };
+        // On narrow panels pack across logical rows rather than leaving one or
+        // two letters on an otherwise empty row. Keep the scope visible above us.
+        let rows: Vec<String> = if cols < 10 {
+            rows.iter()
+                .flat_map(|row| row.chars())
+                .collect::<Vec<_>>()
+                .chunks(cols)
+                .map(|chunk| chunk.iter().collect())
+                .collect()
+        } else {
+            rows.iter().map(|row| (*row).to_owned()).collect()
+        };
         let count: usize = rows.iter().map(|row| row.chars().count().div_ceil(cols)).sum();
         let h = (count as i32 + 2) * (t.target + gap) + 2 * gap;
         self.rect = Rect::new(screen.x, screen.bottom() - h, screen.w, h);
         let mut y = self.rect.y + gap;
-        for row in rows {
+        for row in &rows {
             let chars: Vec<_> = row.chars().collect();
             for chunk in chars.chunks(cols) {
                 let key_w = (width - (cols as i32 - 1) * gap) / cols as i32;
@@ -183,7 +195,7 @@ mod tests {
             for language in 0..3 {
                 k.language = language;
                 k.place(k.screen, &t);
-                assert!(k.rect.y > t.top_bar + 2 * t.target);
+                assert!(k.rect.y > t.top_bar + 2 * t.target + t.mm(10.0));
                 for (i, (b, _)) in k.keys.iter().enumerate() {
                     assert!(b.rect().w >= t.target && b.rect().h >= t.target);
                     for (other, _) in &k.keys[i + 1..] {

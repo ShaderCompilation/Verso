@@ -101,3 +101,27 @@ The committed CSVs contain numeric results only. The original settings and
 copyrighted page captures are not committed. Remove temporary device settings
 and caches after collecting evidence, and verify the launcher has restored the
 Kindle UI and removed its PID file.
+
+
+## Library search
+
+`python3 scripts/capture-search.py` generates the original multilingual screenshot
+fixtures and a 10,000-entry cached-only index under `screenshots/phase7/`.
+`VERSO_SEARCH_BENCH=1 VERSO_DATA=/path/to/state verso` reads that index and exits
+before any platform/engine initialization. It measures lazy cache construction,
+192 literal queries, matching plus cloning/Recent sorting with default reading
+state, folded-text bytes and process RSS. Timings exclude UI drawing and panel I/O.
+
+Keep the real library index and private framebuffer evidence on the Kindle; copy
+only aggregate numbers. `search-results.csv` contains the 2026-11-11 device
+results. Match queries include empty, broad Latin, Cyrillic and absent strings.
+The diagnostic RSS is not normal app RSS. For app startup compare the same copied
+index, covers and per-book state between builds, through the normal launcher.
+For keyboard timing use the probe's release markers and successful SEND_UPDATE
+calls before the next touch; distinguish first update request, last submission
+and optical panel response. The report does not measure optical response.
+
+If injected coordinates repeat across fresh evdev sessions, prime both axes
+with a harmless corner contact before the first scripted action: the input
+subsystem can omit unchanged ABS values. Send touches only while Verso holds the
+touchscreen. Always check launcher cleanup and restored Kindle UI after a run.

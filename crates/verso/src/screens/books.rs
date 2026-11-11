@@ -632,7 +632,7 @@ impl Screen for Books {
         }
         cx.line(
             &if self.search.is_some() {
-                format!("{} results", self.books.len())
+                counted(self.books.len(), "result")
             } else if self.navigation.tab == Tab::AllBooks {
                 format!("All books  {}", self.books.len())
             } else {

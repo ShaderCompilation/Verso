@@ -108,7 +108,7 @@ fn parse_args() -> Result<Options> {
         }
     }
     if !opts.script.is_empty() && opts.screenshot.is_none() {
-        bail!("--tap/--press/--swipe only work with --screenshot");
+        bail!("scripted input only works with --screenshot");
     }
     Ok(opts)
 }
