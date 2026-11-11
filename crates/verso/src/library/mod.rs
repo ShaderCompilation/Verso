@@ -2,6 +2,7 @@
 #![allow(dead_code)] // Consumed by the worker and screen in the following Phase 5 steps.
 
 pub mod epub;
+pub mod worker;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
