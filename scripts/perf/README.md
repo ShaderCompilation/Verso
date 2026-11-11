@@ -213,3 +213,50 @@ count and maximum difference for 13 scenes in `screens.csv`; PNG container bytes
 can differ with the grayscale encoder. See the
 [buffer-memory report](../../docs/research/buffer-memory.md) for results and the
 distinction between payload allocation and measured process memory.
+
+## Position persistence comparison
+
+`redraw.py --experiment persistence` uses `/mnt/us/verso/persistence-check`
+with fresh state per run. The baseline is `9f838e4` plus the same two timing
+logs retained in the implementation: `Store::save_book` records elapsed atomic
+write time and success; the main loop records the `after_present` UI hook.
+The write timer includes serialization, directory creation, temporary-file
+write, file synchronization, rename and supported directory synchronization.
+It excludes the preceding book-record read; the baseline UI-hook timer includes
+that read. Both variants use identical logging, probes, book and typography.
+The optimized write timer runs on the position thread. Debug logging happens
+after each measured scope. No artificial storage delay is added.
+
+Run two independent launches per variant at each pace. Keep `--turn-delay-us
+850000` for ordinary turns; use `150000` for rapid input. Each helper contact
+lasts 50 ms; helper startup and device scheduling add time, so derive actual
+release intervals from the trace instead of treating the delay as the cadence.
+The faster 50000-delay trial did not retain one identifiable update per tap and
+is excluded. All reported runs must pass the existing 24-update, frame-hash and
+flash-order checks. Do not compare coalesced burst output as 24 independent turns.
+
+```sh
+python3 scripts/perf/redraw.py after /tmp/after-verso \
+  --experiment persistence --turn-delay-us 150000 \
+  --book /mnt/us/verso/testbooks/BOOK.epub \
+  --probe /tmp/probe --preload /tmp/probe.so \
+  --output /tmp/persistence/after-rapid-1.json
+```
+
+Add `--memory-check` to one ordinary run per build. Add `--position-check` to
+verify the saved page advances by 24, book close/reopen restores exactly the
+same page, real sleep/wake preserves it, and normal termination completes the
+last displayed turn. `--failure-check` deliberately puts an empty directory at
+the isolated position temporary-file path, verifies that a turn cannot replace
+the previous record, that close and SIGTERM are refused, and that input still
+works before repairing the path and retrying close. It removes that directory
+before launcher cleanup even if validation fails. These checks run after the
+timed interval; no production records are modified. Use both check flags on an
+optimized run. Position strings stay out of exported JSON; only numeric page
+and progress values and hashes are saved.
+
+`analyze-redraw.py` also exports per-turn save and UI-hook times, confirms 24
+successful writes per timed run, and reports the persistence thread's CPU.
+Compare normal and rapid groups separately; process CPU includes the worker.
+Memory snapshots from one launch per build are diagnostic, not independent
+memory repetitions. See the [persistence report](../../docs/research/position-persistence.md).

@@ -61,6 +61,26 @@ def summarize(path):
               'page_hash': r['page_hash'], 'restored_hash': r['restored_hash'],
               'flashes': len(flashes), 'completion_waits': len(waits),
               'wake_hash': r.get('wake_hash', ''), 'post_wake_turn': r.get('post_wake_turn', '')}
+    if r.get('persistence'):
+        result['turn_delay_us'] = r['turn_delay_us']
+        writes = re.findall(r'position write: ([\d.]+)(ms|µs|ns|s), ok=(true|false)', r['persistence'])
+        hooks = re.findall(r'after_present: ([\d.]+)(ms|µs|ns|s)', r['persistence'])
+        assert len(writes) == len(hooks) == 24, 'Expected one save per presented turn'
+        assert all(w[2] == 'true' for w in writes), 'Position write failed'
+        for label, values in [('save', writes), ('after_present', hooks)]:
+            ms = [duration(v[0], v[1]) for v in values]
+            result[label + '_median_ms'] = round(statistics.median(ms), 4)
+            result[label + '_p95_ms'] = round(sorted(ms)[math.ceil(.95 * len(ms)) - 1], 4)
+            result[label + '_max_ms'] = round(max(ms), 4)
+            for event, value in zip(events, ms):
+                event[label + '_ms'] = round(value, 4)
+        # Position worker CPU is included in process CPU, and recorded separately.
+        def thread_cpu(records):
+            return sum(cpu(s) for s in records.splitlines() if '(verso-position)' in s)
+        result['position_cpu_seconds'] = round(thread_cpu(r['end_tasks']) - thread_cpu(r['start_tasks']), 3)
+        result['close_reopen_checked'] = r.get('close_reopen_checked', False)
+        result['exit_checked'] = r.get('exit_checked', False)
+        result['failure_recovery_checked'] = r.get('failure_recovery_checked', False)
     return result, events
 
 

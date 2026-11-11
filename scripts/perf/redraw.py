@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated Kindle redraw comparison. See README.md before running."""
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -53,6 +54,7 @@ def framebuffer_hash():
 
 
 def main():
+    global APP
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('variant')
     parser.add_argument('binary', type=Path)
@@ -64,7 +66,16 @@ def main():
                         help='After timing, check real sleep/wake restoration and the next turn')
     parser.add_argument('--memory-check', action='store_true',
                         help='Sample smaps/status in library, reader and menu outside timed turns')
+    parser.add_argument('--turn-delay-us', type=int, default=850000,
+                        help='Delay after each 50 ms contact (default: 850000)')
+    parser.add_argument('--experiment', choices=['redraw', 'persistence'], default='redraw')
+    parser.add_argument('--position-check', action='store_true',
+                        help='Verify saved page, close/reopen, sleep and normal-exit completion')
+    parser.add_argument('--failure-check', action='store_true',
+                        help='Block only the isolated position temp file, check errors and recover')
     args = parser.parse_args()
+    APP = '/mnt/us/verso/' + args.experiment + '-check'
+    assert 0 < args.turn_delay_us <= 1000000
     assert re.fullmatch(r'[a-z0-9-]+', args.variant)
     ready()
     remote(f'mkdir -p {APP}/bin {APP}/books')
@@ -113,6 +124,12 @@ def main():
         remote(
                f'{probe} 636 848 seek_menu; sleep 1; {probe} 338 1164 seek; sleep 2; '
                f'{probe} 636 848 seek_close; sleep 2')
+        def position():
+            records = json.loads(remote(f'cat {state}/books/*.json'))
+            return {'page': records['page'], 'progress': records['progress'],
+                    'position_hash': hashlib.sha256(records['position'].encode()).hexdigest()}
+
+        initial_position = position() if args.position_check else None
         sample('reader_start')
         remote(f'cp {APP}/verso.log {APP}/{run}.setup.log; : > {APP}/verso.log; '
                f'cat /proc/{pid}/stat > {APP}/{run}.start.stat; '
@@ -120,7 +137,7 @@ def main():
                f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe mark turns_start')
         # One remote shell avoids per-tap SSH setup in the measured interval.
         remote(f'i=1; while [ "$i" -le 24 ]; do {probe} 1100 1000 "turn_$i"; '
-               f'usleep 850000; i=$((i+1)); done; '
+               f'usleep {args.turn_delay_us}; i=$((i+1)); done; '
                f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe mark turns_end; '
                f'cat /proc/{pid}/stat > {APP}/{run}.end.stat; '
                f'for t in /proc/{pid}/task/*; do cat "$t/stat"; done > {APP}/{run}.end.tasks; '
@@ -128,6 +145,8 @@ def main():
         # Keep private logs on-device. Export numeric frame/gesture data only.
         frames = remote(f'grep -E "frame: drawn|Down\\(|Tap\\(|presented [0-9]+ update" {APP}/verso.log')
         results = {'variant': args.variant, 'run': run, 'frames': frames,
+                   'turn_delay_us': args.turn_delay_us,
+                   'persistence': remote(f'grep -E "position write:|after_present:" {APP}/verso.log || true'),
                    'setup_frames': remote(f'grep "frame: drawn" {APP}/{run}.setup.log'),
                    'trace': remote(f'cat {trace}'),
                    'page_hash': remote(f'cat {APP}/{run}.page.hash').split()[0]}
@@ -154,7 +173,46 @@ def main():
         sample('restored')
         results['restored_hash'] = remote(f'cat {APP}/{run}.restored.hash').split()[0]
         assert results['page_hash'] == results['restored_hash'], 'Menu did not restore page'
-        if args.wake_check:
+        lifecycle_hash = results['page_hash']
+        if args.failure_check:
+            saved = position()
+            # A directory at the temporary-file path produces EISDIR without
+            # changing the valid record. Restrict mutations to isolated state.
+            remote(f'for f in {state}/books/*.json; do mkdir "$f.tmp"; done; '
+                   f'{probe} 1100 1000 failed_save; sleep 1')
+            assert position() == saved
+            wait_for(f'grep -q "saving position:" {APP}/verso.log')
+            try:
+                remote(f'{probe} 636 848 failure_menu; sleep 1; '
+                       f'{probe} 65 70 failed_close; sleep 1; kill -TERM {pid}; sleep 1')
+                assert remote(f'test -e /proc/{pid} && echo alive') == 'alive'
+                wait_for(f'grep -q "ERROR verso::app.*exit:" {APP}/verso.log')
+                # Input must still work after the rejected signal exit. Dismiss
+                # its toast and close the reader menu before recovery.
+                remote(f'{probe} 636 1380 dismiss_error; sleep 4; '
+                       f'{probe} 636 848 failure_menu_close; sleep 1')
+            finally:
+                remote(f'for f in {state}/books/*.json; do rmdir "$f.tmp"; done')
+            remote(f'{probe} 636 848 recovery_menu; sleep 1; '
+                   f'{probe} 65 70 recovered_close; sleep 1')
+            recovered = position()
+            assert recovered['page'] == saved['page'] + 1
+            results['failure_recovery_checked'] = True
+            # Reopen before the remaining sleep/exit checks.
+            remote(f'{probe} 200 550 recovery_reopen; sleep 3')
+            lifecycle_hash = framebuffer_hash()
+            results['recovered_page_hash'] = lifecycle_hash
+        if args.position_check:
+            saved = position()
+            assert saved['page'] == initial_position['page'] + 24 + int(args.failure_check)
+            results['saved_after_turns'] = saved
+            remote(f'{probe} 636 848 close_menu; sleep 1; {probe} 65 70 book_close; sleep 1')
+            assert position() == saved
+            remote(f'{probe} 200 550 reopen; sleep 3')
+            assert position() == saved
+            assert framebuffer_hash() == lifecycle_hash, 'Reopen changed page'
+            results['close_reopen_checked'] = True
+        if args.wake_check or args.position_check:
             remote('lipc-set-prop com.lab126.powerd powerButton 1')
             try:
                 wait_for('test "$(lipc-get-prop com.lab126.powerd state)" = screenSaver')
@@ -165,7 +223,9 @@ def main():
             # Include the delayed firmware-banner cleanup, outside the timing interval.
             remote('sleep 3')
             results['wake_hash'] = remote('head -c 2157312 /dev/fb0 | sha256sum').split()[0]
-            assert results['wake_hash'] == results['page_hash'], 'Wake did not restore page'
+            assert results['wake_hash'] == lifecycle_hash, 'Wake did not restore page'
+            if args.position_check:
+                assert position() == saved
             remote(f'{probe} 1100 1000 post_wake_turn; sleep 1')
             checks = remote(f'cat {trace}').splitlines()
             wake_mark = next(float(s.split()[0]) for s in checks if s.endswith(' post_wake_turn'))
@@ -173,12 +233,24 @@ def main():
                        and int(s.split()[3], 16) & 0xffff == 0x462e and float(s.split()[0]) >= wake_mark]
             assert len(updates) == 1 and updates[0][5] == '0' and updates[0][-2:] == ['1272', '1696']
             results['post_wake_turn'] = True
+        if args.position_check:
+            # The last turn is followed immediately by normal termination.
+            # The quit path must finish its submitted save before exiting.
+            remote(f'{probe} 1100 1000 exit_turn; kill -TERM {pid}')
+            wait_for(f'test ! -e /proc/{pid}')
+            final = position()
+            assert final['page'] == saved['page'] + 2
+            results['saved_after_exit'] = final
+            results['exit_checked'] = True
         if args.memory_check:
             results.update(memory=samples, screen_hashes=hashes)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2) + '\n')
         print(args.output, flush=True)
     finally:
+        if args.failure_check:
+            remote(f'for f in {state}/books/*.json; do '
+                   f'test ! -d "$f.tmp" || rmdir "$f.tmp"; done')
         if pid:
             remote(f'test "$(readlink /proc/{pid}/exe)" != {APP}/bin/{args.variant}/verso '
                    f'|| kill -TERM {pid}')

@@ -704,6 +704,7 @@ mod tests {
 
         // An actual filesystem failure is visible, blocks close/exit, and
         // survives sleep until recovery. Retrying saves the latest display.
+        *cx.toast = None;
         let backup = root.with_extension("backup");
         std::fs::rename(&root, &backup)?;
         std::fs::write(&root, b"blocked directory")?;
