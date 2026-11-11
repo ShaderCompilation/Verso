@@ -39,6 +39,7 @@ impl Worker {
             .name("verso-library".into())
             .spawn(move || {
                 let shared = thread_shared;
+                let startup = Instant::now();
                 let mut index = store.library();
                 let cancelled = || shared.0.lock().unwrap().stop;
                 let publish = |snapshot| {
@@ -165,6 +166,7 @@ impl Worker {
                     }
                     log::info!("library identities complete in {:?}", identity_started.elapsed());
                     publish(Snapshot { index: index.clone(), scanning: false, working: false, errors });
+                    log::info!("startup stage: background complete elapsed_us={}", startup.elapsed().as_micros());
                 }
             })
             .expect("start library thread");
@@ -282,6 +284,11 @@ pub fn scan_roots(
     }
     paths.sort();
     paths.dedup();
+    log::info!(
+        "startup stage: filesystem enumeration paths={} elapsed_us={}",
+        paths.len(),
+        started.elapsed().as_micros()
+    );
     let old: HashMap<_, _> = previous.books.iter().map(|b| (&b.path, b)).collect();
     let found: HashSet<_> = paths.iter().cloned().collect();
     let mut books = Vec::new();

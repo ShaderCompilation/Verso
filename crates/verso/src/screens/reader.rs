@@ -45,6 +45,7 @@ pub struct Reader {
     persistence: Writer,
     save_error: Option<String>,
     error: Option<String>,
+    opened_at: Option<Instant>,
 }
 enum Overlay {
     None,
@@ -93,6 +94,7 @@ impl Reader {
             save_pending: false,
             save_error: None,
             error: None,
+            opened_at: Some(Instant::now()),
         }
     }
     pub fn failed_open(&self) -> bool {
@@ -442,6 +444,11 @@ impl Screen for Reader {
         }
     }
     fn after_present(&mut self) {
+        if self.shown.is_some()
+            && let Some(started) = self.opened_at.take()
+        {
+            log::info!("startup stage: book first page requested elapsed_us={}", started.elapsed().as_micros());
+        }
         self.save();
     }
     fn on_sleep(&mut self) {

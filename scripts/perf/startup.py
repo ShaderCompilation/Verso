@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Isolated Home/library startup measurements; launches only through Verso's launcher.
+
+Copies the real index/state/covers, never writes the user's real data. Output
+contains numeric timings/accounting and anonymous trace records, not book names.
+See docs/research/home-startup.md for measurement boundaries and cold-cache limits.
+"""
+import argparse
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import time
+
+APP = '/mnt/us/verso/startup-check'
+Q = shlex.quote
+
+
+def remote(command, data=None):
+    return subprocess.run(['ssh', '-o', 'ConnectTimeout=5', 'kindle', command],
+                          input=data, capture_output=True, check=True, timeout=55).stdout.decode().strip()
+
+
+def upload(path, data):
+    remote('cat > ' + Q(path), data)
+
+
+def wait(command, seconds=300):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        if remote(command + ' && echo yes || true') == 'yes':
+            return
+        time.sleep(.1)
+    raise RuntimeError('Timed out: ' + command)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('variant')
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('--large', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--runs', type=int, default=2)
+    parser.add_argument('--fixture', choices=['real', 'large'])
+    parser.add_argument('--mode', choices=['startup', 'immediate-open'])
+    parser.add_argument('--installed', action='store_true', help='Reuse the variant executable already installed by an earlier run')
+    args = parser.parse_args()
+    assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
+    repo = Path(__file__).resolve().parents[2]
+    remote(f'mkdir -p {APP}/bin/{Q(args.variant)}')
+    if not args.installed:
+        upload(f'{APP}/bin/{args.variant}/verso', args.binary.read_bytes())
+    remote(f'chmod 755 {APP}/bin/{Q(args.variant)}/verso; '
+           f'cp /mnt/us/verso/persistence-check/bin/probe {APP}/bin/probe; '
+           f'cp /mnt/us/verso/persistence-check/bin/probe.so {APP}/bin/probe.so')
+    launcher = (repo / 'dist/kindle/verso/verso.sh').read_text().replace('APP_DIR="/mnt/us/verso"', f'APP_DIR="{APP}"')
+    launcher = launcher.replace('/tmp/verso-launcher', '/tmp/verso-startup-launcher')
+    upload(APP + '/launcher.sh', launcher.encode())
+    results = json.loads(args.output.read_text()) if args.output.exists() else []
+    for fixture, mode in [('real', 'startup'), ('large', 'startup'), ('real', 'immediate-open')]:
+        if (args.fixture and args.fixture != fixture) or (args.mode and args.mode != mode):
+            continue
+        for number in range(args.runs):
+            assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
+            run = f'{args.variant}-{fixture}-{mode}-{time.time_ns()}'
+            state = APP + '/' + run + '.state'
+            trace = APP + '/' + run + '.trace'
+            remote(f'mkdir -p {state}; cp -r /mnt/us/verso/data/. {state}/')
+            if fixture == 'large':
+                upload(state + '/library.json', (args.large / 'library.json').read_bytes())
+                upload(state + '/settings.json', (args.large / 'settings.json').read_bytes())
+            # A predictable source view; real reading positions/flags stay copied.
+            upload(state + '/library-navigation.json', b'{"tab":"all_books","all_page":0}')
+            wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
+                       'export RUST_LOG=info,verso=debug\n'
+                       f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
+            upload(APP + '/verso', wrapper.encode())
+            pid = None
+            result = dict(variant=args.variant, fixture=fixture, mode=mode, number=number,
+                          cache='warm OS cache; fresh copy of persisted app data', samples={})
+            try:
+                remote(f'chmod 755 {APP}/verso; : > {APP}/verso.log; '
+                       f'setsid sh {APP}/launcher.sh </dev/null >/dev/null 2>&1 &')
+                wait('pidof verso >/dev/null')
+                pid = remote('pidof verso')
+                assert remote(f'readlink /proc/{pid}/exe') == f'{APP}/bin/{args.variant}/verso'
+                wait(f'grep -q "first frame on screen" {APP}/verso.log')
+
+                def sample(label):
+                    records = remote(f'cat /proc/{pid}/stat /proc/{pid}/status /proc/{pid}/io')
+                    result['samples'][label] = dict(stat=records.splitlines()[0], status=records, io=records)
+
+                sample('first_frame')
+                probe = f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe tap {pid}'
+                if mode == 'immediate-open':
+                    # Prime both axes outside the UI, then tap the resume card.
+                    remote(f'{probe} 1 1 prime; {probe} 400 400 open')
+                    wait(f'grep -q "book first page requested" {APP}/verso.log')
+                    sample('reader')
+                else:
+                    wait(f'grep -q "startup stage: background complete" {APP}/verso.log')
+                    sample('background_complete')
+                    remote(f'{probe} 1 1 prime; {probe} 950 200 first_collections')
+                    remote('sleep 1')
+                    sample('first_collections')
+                # Keep content-bearing logs only in the isolated device directory.
+                lines = remote(f'cat {APP}/verso.log').splitlines()
+                result['timings'] = [line for line in lines if any(key in line for key in [
+                    'startup stage:', 'first frame on screen', 'library covers:', 'library scan:',
+                    'library identities complete'])]
+                result['trace'] = remote(f'cat {trace}')
+            finally:
+                if pid and remote(f'test -e /proc/{pid} && echo yes || true') == 'yes':
+                    remote(f'kill -TERM {pid}')
+                    wait(f'test ! -e /proc/{pid}')
+                wait('test ! -e /tmp/verso-startup-launcher.pid')
+                assert remote('ps | awk \'$5 == "awesome" {print $3}\'') != 'T'
+                result['clean_exit'] = True
+            # No process names, argv, kernel addresses or document paths in export.
+            for sample_set in result['samples'].values():
+                fields = sample_set.pop('stat').split(') ', 1)[1].split()
+                sample_set['cpu_ticks'] = int(fields[11]) + int(fields[12])
+                status = sample_set.pop('status')
+                sample_set.update({k: int(v) for k, v in re.findall(r'^(VmRSS|VmHWM):\s+(\d+) kB$', status, re.M)})
+                sample_set['io'] = dict((k, int(v)) for k, v in re.findall(r'^(\w+):\s+(\d+)$', sample_set['io'], re.M))
+            results.append(result)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(results, indent=2) + '\n')
+            print(f'{fixture} {mode} run {number + 1}: complete; Kindle UI restored', flush=True)
+
+
+if __name__ == '__main__':
+    main()

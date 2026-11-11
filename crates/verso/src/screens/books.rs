@@ -91,7 +91,13 @@ impl Books {
     fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
         let roots = store.library_folders();
         let index = store.library();
+        let started = std::time::Instant::now();
         let collections = Collections::from_index(&index, &roots);
+        log::info!(
+            "startup stage: collections books={} elapsed_us={}",
+            index.books.len(),
+            started.elapsed().as_micros()
+        );
         let navigation = store.navigation();
         let tabs = Segmented::texts(&["All books", "Collections"], usize::from(navigation.tab == Tab::Collections));
         let library = LibraryWorker::new(store.clone(), roots.clone(), worker.waker());
@@ -178,9 +184,17 @@ impl Books {
         }
     }
     fn refresh(&mut self, t: &Theme) {
+        let started = std::time::Instant::now();
+        let before = self.states.len();
         for b in &self.index.books {
             self.states.entry(b.id.clone()).or_insert_with(|| self.store.book(&b.id));
         }
+        log::debug!(
+            "startup stage: cached states reads={} elapsed_us={}",
+            self.states.len() - before,
+            started.elapsed().as_micros()
+        );
+        let started = std::time::Instant::now();
         let in_collections = self.search.is_none() && self.navigation.tab == Tab::Collections;
         self.folders =
             if in_collections { self.collections.children(self.navigation.folder.as_deref()) } else { Vec::new() };
@@ -272,6 +286,7 @@ impl Books {
             })
             .collect();
         self.thumbnails.retain(|(key, _, _), _| keys.contains(key));
+        log::debug!("startup stage: view books={} elapsed_us={}", self.books.len(), started.elapsed().as_micros());
     }
     fn prioritize(&self) {
         let mut ids: Vec<_> = self.continue_id.iter().cloned().collect();
@@ -307,6 +322,7 @@ impl Books {
             return;
         }
         if let Some(snapshot) = self.pending.take() {
+            let started = std::time::Instant::now();
             cx.redraw();
             for error in &snapshot.errors {
                 if !self.errors.contains(error) {
@@ -343,6 +359,11 @@ impl Books {
             if self.search.is_none() && (self.pager.page != page || old_folder != self.navigation.folder) {
                 cx.refresh(self.screen, RefreshMode::Full);
             }
+            log::info!(
+                "startup stage: snapshot application books={} elapsed_us={}",
+                self.index.books.len(),
+                started.elapsed().as_micros()
+            );
         }
     }
     fn toggle_search(&mut self, cx: &mut EventCx) {

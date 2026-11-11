@@ -172,7 +172,10 @@ fn run() -> Result<()> {
             log::debug!("after_present: {:?}", save_started.elapsed());
             log::debug!("presented {} update(s) in {:?}: {updates:?}", updates.len(), t.elapsed());
             if first_frame {
-                log::info!("first frame on screen {:?} after start", started.elapsed());
+                log::info!(
+                    "first frame on screen {:?} after start (display request returned; optical completion unmeasured)",
+                    started.elapsed()
+                );
                 first_frame = false;
             }
         }

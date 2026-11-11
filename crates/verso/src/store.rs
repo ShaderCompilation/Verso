@@ -93,7 +93,8 @@ impl Store {
         result
     }
     pub fn library(&self) -> LibraryIndex {
-        read::<LibraryIndex>(&self.root.join("library.json"))
+        let started = std::time::Instant::now();
+        let index = read::<LibraryIndex>(&self.root.join("library.json"))
             .filter(|index| index.version == LibraryIndex::VERSION)
             .map(|mut index| {
                 // Older desktop defaults included `crates/verso/../..`.
@@ -104,10 +105,24 @@ impl Store {
                 }
                 index
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        log::info!(
+            "startup stage: cached index books={} elapsed_us={}",
+            index.books.len(),
+            started.elapsed().as_micros()
+        );
+        index
     }
     pub fn save_library(&self, index: &LibraryIndex) -> Result<()> {
-        atomic(&self.root.join("library.json"), index)
+        let started = std::time::Instant::now();
+        let result = atomic(&self.root.join("library.json"), index);
+        log::info!(
+            "startup stage: index persistence books={} elapsed_us={} ok={}",
+            index.books.len(),
+            started.elapsed().as_micros(),
+            result.is_ok()
+        );
+        result
     }
     pub fn cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}.png"))
