@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/verso", "crates/fbink-sys"]
+members = ["crates/verso", "crates/fbink-sys", "crates/crengine-sys"]
 
 [workspace.package]
 version = "0.1.0"

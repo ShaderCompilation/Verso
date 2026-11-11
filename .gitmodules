@@ -1,3 +1,39 @@
 [submodule "third_party/FBInk"]
 	path = third_party/FBInk
 	url = https://github.com/NiLuJe/FBInk.git
+[submodule "third_party/crengine"]
+	path = third_party/crengine
+	url = https://github.com/koreader/crengine.git
+	shallow = true
+[submodule "third_party/freetype"]
+	path = third_party/freetype
+	url = https://github.com/freetype/freetype.git
+	shallow = true
+[submodule "third_party/harfbuzz"]
+	path = third_party/harfbuzz
+	url = https://github.com/harfbuzz/harfbuzz.git
+	shallow = true
+[submodule "third_party/libunibreak"]
+	path = third_party/libunibreak
+	url = https://github.com/adah1972/libunibreak.git
+	shallow = true
+[submodule "third_party/zlib"]
+	path = third_party/zlib
+	url = https://github.com/madler/zlib.git
+	shallow = true
+[submodule "third_party/libpng"]
+	path = third_party/libpng
+	url = https://github.com/pnggroup/libpng.git
+	shallow = true
+[submodule "third_party/libjpeg-turbo"]
+	path = third_party/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+	shallow = true
+[submodule "third_party/utf8proc"]
+	path = third_party/utf8proc
+	url = https://github.com/JuliaStrings/utf8proc.git
+	shallow = true
+[submodule "third_party/xxhash"]
+	path = third_party/xxhash
+	url = https://github.com/Cyan4973/xxHash.git
+	shallow = true
