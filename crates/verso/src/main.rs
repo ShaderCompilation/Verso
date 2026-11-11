@@ -14,6 +14,7 @@ mod app;
 mod document;
 mod geom;
 mod gfx;
+mod library;
 mod logging;
 mod platform;
 mod reader;

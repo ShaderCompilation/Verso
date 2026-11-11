@@ -92,7 +92,7 @@ pub trait Document {
 /// Where the engine finds its data and the books, per device.
 #[derive(Clone, Debug)]
 pub struct Paths {
-    /// Folder of test books for the Phase 2 spike.
+    /// Configured library folder.
     pub books: PathBuf,
     /// crengine's CSS files and `hyph/` patterns.
     pub engine_data: PathBuf,
@@ -110,7 +110,7 @@ impl Paths {
     pub fn for_device() -> Self {
         #[cfg(feature = "kindle")]
         let mut p = Self {
-            books: "/mnt/us/verso/testbooks".into(),
+            books: crate::store::Store::new().library_folder(),
             engine_data: "/mnt/us/verso/data/cre".into(),
             cache: Some("/mnt/us/verso/cache".into()),
             font_dirs: vec!["/mnt/us/verso/fonts".into(), "/usr/java/lib/fonts".into(), "/mnt/us/fonts".into()],
@@ -120,7 +120,7 @@ impl Paths {
         let mut p = {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             Self {
-                books: root.join("testbooks"),
+                books: crate::store::Store::new().library_folder(),
                 engine_data: root.join("third_party/crengine/cr3gui/data"),
                 cache: Some(std::env::temp_dir().join("verso-cache")),
                 font_dirs: vec![root.join("assets/fonts"), "/usr/share/fonts/liberation-serif-fonts".into()],

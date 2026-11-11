@@ -212,6 +212,7 @@ impl Reader {
             page: page.number,
             progress: page.progress,
             last_opened: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+            ..self.store.book(&self.id)
         };
         match self.store.save_book(&self.id, &state) {
             Ok(()) => self.save_pending = false,
