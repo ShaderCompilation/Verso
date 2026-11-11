@@ -142,16 +142,16 @@ impl Books {
         self.continue_id = library::continue_book(&self.books, &self.states).map(|b| b.id.clone());
         let y = t.top_bar + t.mm(2.0);
         self.continue_rect = if self.continue_id.is_some() {
-            Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(23.0))
+            Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(20.0))
         } else {
             Rect::new(t.margin, y, 0, 0)
         };
-        let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(4.0) } else { y };
-        self.header = Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.button_h);
+        let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(3.0) } else { y };
+        self.header = Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target);
         let sort_w = (self.header.w * 3 / 5).min(t.mm(51.0)).max(3 * t.target).min(self.header.w);
-        self.sort.place(Rect::new(self.header.right() - sort_w, y, sort_w, t.button_h));
+        self.sort.place(Rect::new(self.header.right() - sort_w, y, sort_w, t.target));
         self.status = Rect::new(t.margin, self.pager.rect().y - t.mm(6.0), self.screen.w - 2 * t.margin, t.mm(6.0));
-        let top = self.header.bottom() + t.mm(3.0);
+        let top = self.header.bottom() + t.mm(1.5);
         let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
         let rows = ((self.status.y - top) / t.mm(34.0)).clamp(1, 2) as usize;
         self.grid = Grid::new(self.books.len(), cols, rows);
@@ -212,6 +212,8 @@ impl Books {
         }
         let Some(book) = self.book(&id) else { return };
         let path = book.path.clone();
+        self.library.pause(true);
+        self.thumbnails.clear();
         let settings = self.store.settings();
         let saved = self.store.book(&id);
         self.generation += 1;
@@ -243,6 +245,7 @@ impl Books {
         });
     }
     fn returned(&mut self, cx: &mut EventCx) {
+        self.library.pause(false);
         if let Some(r) = self.reader.take() {
             self.generation = r.generation();
         }
@@ -532,7 +535,7 @@ impl Screen for Books {
         Action::None
     }
     fn busy(&self) -> bool {
-        self.working || self.reader.as_ref().is_some_and(Screen::busy)
+        self.reader.as_ref().map_or(self.working, Screen::busy)
     }
     fn deadline(&self) -> Option<std::time::Instant> {
         self.reader.as_ref().and_then(Screen::deadline)
@@ -626,7 +629,8 @@ impl Details {
         }
         self.sheet.draw(cx);
         if let Some(page) = self.pages.get(self.pager.page) {
-            cx.paragraph(page, cx.theme.body, self.text, HAlign::Left);
+            let height = cx.text.measure(page, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
+            cx.paragraph(page, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
         }
         self.pager.draw(cx);
     }

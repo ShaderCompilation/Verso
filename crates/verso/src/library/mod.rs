@@ -47,6 +47,8 @@ pub struct Book {
     pub id: String,
     pub legacy_id: String,
     pub fingerprint: String,
+    #[serde(default)]
+    pub fingerprint_attempted: bool,
     pub stamp: Stamp,
     pub metadata: Metadata,
     pub error: Option<String>,
@@ -159,6 +161,7 @@ pub(crate) mod selection_tests {
             id: id.to_string(),
             legacy_id: id.to_string(),
             fingerprint: id.to_string(),
+            fingerprint_attempted: true,
             stamp: Stamp { modified_secs: 10 + id as u64, ..Default::default() },
             metadata: Metadata { title: format!("Title {id}"), authors: String::new(), ..Default::default() },
             error: None,
@@ -232,6 +235,7 @@ mod identity_tests {
             id: String::new(),
             legacy_id: "legacy".into(),
             fingerprint: fingerprint.into(),
+            fingerprint_attempted: true,
             stamp: Stamp::default(),
             metadata: Metadata { identifier: "same-edition".into(), ..Default::default() },
             error: None,
@@ -251,6 +255,10 @@ mod identity_tests {
         let mut edited = vec![book("/a/title.epub", "new edition")];
         assign_ids(&mut edited, &original);
         assert_eq!(edited[0].id, "legacy");
+        let mut replacement = vec![book("/a/title.epub", "unrelated bytes")];
+        replacement[0].metadata.identifier = "unrelated book".into();
+        assign_ids(&mut replacement, &original);
+        assert_ne!(replacement[0].id, "legacy");
         let mut collisions = vec![book("/a/title.epub", "one"), book("/b/title.epub", "two")];
         assign_ids(&mut collisions, &[]);
         assert_ne!(collisions[0].id, collisions[1].id);

@@ -23,6 +23,7 @@ struct Shared {
     stop: bool,
     requested: bool,
     retry: bool,
+    paused: bool,
     priority: Vec<String>,
     latest: Option<Snapshot>,
 }
@@ -79,29 +80,28 @@ impl Worker {
                         errors.push(format!("Couldn't save library: {e}"));
                     }
                     publish(Snapshot { index: index.clone(), scanning: false, working: true, errors: errors.clone() });
-                    let mut pending: HashSet<_> =
+                    let covers_started = Instant::now();
+                    let mut pending: std::collections::BTreeSet<_> =
                         index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
+                    let id_indices: HashMap<_, _> =
+                        index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
                     let mut since_publish = Instant::now();
                     let mut completed = 0;
                     while !pending.is_empty() {
                         let next = {
-                            let state = shared.0.lock().unwrap();
+                            let mut state = shared.0.lock().unwrap();
+                            while state.paused && !state.stop && !state.requested {
+                                state = shared.1.wait(state).unwrap();
+                            }
                             if state.stop || state.requested {
                                 break;
                             }
-                            *pending
+                            state
+                                .priority
                                 .iter()
-                                .min_by_key(|&&i| {
-                                    (
-                                        state
-                                            .priority
-                                            .iter()
-                                            .position(|id| id == &index.books[i].id)
-                                            .unwrap_or(usize::MAX),
-                                        i,
-                                    )
-                                })
-                                .unwrap()
+                                .filter_map(|id| id_indices.get(id).copied())
+                                .find(|i| pending.contains(i))
+                                .unwrap_or_else(|| *pending.first().unwrap())
                         };
                         pending.remove(&next);
                         match covers::generate(&index.books[next], &store) {
@@ -129,18 +129,27 @@ impl Worker {
                             since_publish = Instant::now();
                         }
                     }
+                    log::info!("library covers: {completed} processed in {:?}", covers_started.elapsed());
+                    let identity_started = Instant::now();
                     // Fingerprinting new additions is deferred until metadata and covers
                     // are visible. Only possible moves need it before identity assignment.
                     for i in 0..index.books.len() {
                         {
-                            let state = shared.0.lock().unwrap();
+                            let mut state = shared.0.lock().unwrap();
+                            while state.paused && !state.stop && !state.requested {
+                                state = shared.1.wait(state).unwrap();
+                            }
                             if state.stop || state.requested {
                                 break;
                             }
                         }
-                        if index.books[i].available && index.books[i].fingerprint.is_empty() {
+                        if index.books[i].available
+                            && index.books[i].fingerprint.is_empty()
+                            && !index.books[i].fingerprint_attempted
+                        {
                             index.books[i].fingerprint =
                                 fingerprint(&index.books[i].path, &cancelled).unwrap_or_default();
+                            index.books[i].fingerprint_attempted = !cancelled();
                             if i % 64 == 0
                                 && let Err(e) = store.save_library(&index)
                             {
@@ -154,6 +163,7 @@ impl Worker {
                     if let Err(e) = store.save_library(&index) {
                         errors.push(format!("Couldn't save covers: {e}"));
                     }
+                    log::info!("library identities complete in {:?}", identity_started.elapsed());
                     publish(Snapshot { index: index.clone(), scanning: false, working: false, errors });
                 }
             })
@@ -164,6 +174,10 @@ impl Worker {
         let mut state = self.shared.0.lock().unwrap();
         state.requested = true;
         state.retry = true;
+        self.shared.1.notify_one();
+    }
+    pub fn pause(&self, paused: bool) {
+        self.shared.0.lock().unwrap().paused = paused;
         self.shared.1.notify_one();
     }
     pub fn prioritize(&self, ids: Vec<String>) {
@@ -299,6 +313,8 @@ pub fn scan_roots(
             continue;
         }
         let legacy_id = book_id(&path).unwrap_or_default();
+        let fingerprint_attempted =
+            if changed { cached.is_some() || possible_moves } else { cached.is_some_and(|b| b.fingerprint_attempted) };
         let fingerprint = if changed && (cached.is_some() || possible_moves) {
             fingerprint(&path, cancelled).unwrap_or_default()
         } else if changed {
@@ -328,6 +344,7 @@ pub fn scan_roots(
             id: String::new(),
             legacy_id,
             fingerprint,
+            fingerprint_attempted,
             stamp: file_stamp,
             error,
             cover: Cover::Pending,
@@ -490,6 +507,7 @@ mod tests {
         assert_eq!(full.metadata_reads, 70);
         assert_eq!(run(&root, &checkpoint.unwrap(), false).metadata_reads, 6);
         let worker = Worker::new(Store::at(root.join("state")), vec![root.clone()], Waker::new(|| {}));
+        worker.pause(true);
         for _ in 0..100 {
             worker.rescan();
         }

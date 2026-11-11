@@ -213,7 +213,10 @@ pub fn read(path: &Path) -> Result<Metadata> {
 /// rather than reading external files or allocating large intermediate surfaces.
 pub fn validate_svg(bytes: &[u8]) -> Result<()> {
     fn validate(node: &Node) -> Result<()> {
-        ensure!(!matches!(node.name.as_str(), "image" | "filter" | "foreignObject"), "unsupported SVG resource");
+        ensure!(
+            !matches!(node.name.as_str(), "image" | "filter" | "foreignObject" | "text"),
+            "unsupported SVG resource"
+        );
         for (key, value) in &node.attrs {
             if key == "href" {
                 ensure!(value.starts_with('#'), "external SVG resource");
