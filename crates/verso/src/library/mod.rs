@@ -86,8 +86,18 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
         *fingerprints.entry(b.fingerprint.clone()).or_insert(0) += 1;
     }
     let mut used: HashSet<String> = previous.iter().map(|b| b.id.clone()).collect();
+    let mut previous_paths = HashMap::new();
+    let mut previous_fingerprints = HashMap::new();
+    let previous_legacy: HashSet<_> = previous.iter().map(|b| &b.legacy_id).collect();
+    for old in previous {
+        previous_paths.entry(&old.path).or_insert(old);
+        if !old.fingerprint.is_empty() {
+            // Only an unambiguous content match may transfer an identity.
+            previous_fingerprints.entry(&old.fingerprint).and_modify(|entry| *entry = None).or_insert(Some(old));
+        }
+    }
     for b in books {
-        if let Some(old) = previous.iter().find(|old| old.path == b.path)
+        if let Some(old) = previous_paths.get(&b.path)
             && ((!b.fingerprint.is_empty() && b.fingerprint == old.fingerprint)
                 || (b.fingerprint.is_empty() && old.fingerprint.is_empty() && b.stamp == old.stamp)
                 || (!b.metadata.identifier.is_empty() && b.metadata.identifier == old.metadata.identifier))
@@ -95,13 +105,13 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
             b.id = old.id.clone();
             continue;
         }
-        let matches: Vec<_> =
-            previous.iter().filter(|old| !b.fingerprint.is_empty() && old.fingerprint == b.fingerprint).collect();
-        if matches.len() == 1 && fingerprints.get(&b.fingerprint) == Some(&1) {
-            b.id = matches[0].id.clone();
+        if let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
+            && fingerprints.get(&b.fingerprint) == Some(&1)
+        {
+            b.id = old.id.clone();
         } else if legacy_counts.get(&b.legacy_id) == Some(&1)
             && !used.contains(&b.legacy_id)
-            && !previous.iter().any(|old| old.legacy_id == b.legacy_id)
+            && !previous_legacy.contains(&b.legacy_id)
         {
             b.id = b.legacy_id.clone();
         } else {

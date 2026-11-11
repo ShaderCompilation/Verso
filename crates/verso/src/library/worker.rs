@@ -355,13 +355,18 @@ pub fn scan_roots(
     if cancelled() {
         return None;
     }
-    // Retain tombstones, and leave inaccessible subtrees visible.
+    // Retain tombstones, and leave inaccessible subtrees visible. Path lookups
+    // must stay linear overall for large cached collections, including on exit.
+    let mut present: HashSet<_> = books.iter().map(|b| b.path.clone()).collect();
     for cached in &previous.books {
+        if cancelled() {
+            return None;
+        }
         if !found.contains(&cached.path) || uncertain.iter().any(|p| cached.path.starts_with(p)) {
             let mut b = cached.clone();
             b.available = roots.iter().any(|root| cached.path.starts_with(root))
                 && uncertain.iter().any(|p| cached.path.starts_with(p));
-            if !books.iter().any(|entry| entry.path == b.path) {
+            if present.insert(b.path.clone()) {
                 books.push(b);
             }
         }
@@ -494,6 +499,37 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[test]
+    fn large_offline_index_retains_identities_and_cancels_before_publishing() {
+        use std::cell::Cell;
+        let root = std::env::temp_dir().join(format!("verso-offline-search-{}", std::process::id()));
+        let previous = LibraryIndex {
+            books: (0..10_000)
+                .map(|i| {
+                    let mut b = crate::library::selection_tests::book(i);
+                    b.path = root.join(format!("Group{}/Book{i}.epub", i % 20));
+                    b
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let scanned = scan_roots(std::slice::from_ref(&root), &previous, false, &|| false, |_| {}).unwrap();
+        assert_eq!(scanned.metadata_reads, 0);
+        assert_eq!(scanned.index.books.len(), previous.books.len());
+        for (new, old) in scanned.index.books.iter().zip(&previous.books) {
+            assert!(new.available);
+            assert_eq!(new.id, old.id);
+        }
+        let checks = Cell::new(0);
+        let published = Cell::new(false);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 20
+        };
+        assert!(scan_roots(&[root], &previous, false, &cancelled, |_| published.set(true)).is_none());
+        assert!(!published.get(), "a cancelled retained-index rebuild must not publish a checkpoint");
+    }
+
     #[test]
     fn checkpoints_can_resume_and_worker_stops_without_consuming_results() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-scan-worker-{}", std::process::id()));
