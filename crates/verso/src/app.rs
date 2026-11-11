@@ -72,6 +72,11 @@ impl App {
 
     /// Refreshes the whole display in the next frame (first frame, wake).
     pub fn refresh_all(&mut self, mode: RefreshMode) {
+        if mode == RefreshMode::Full {
+            // A full refresh also satisfies queued layout refreshes and press cleanup.
+            self.forced.clear();
+            self.fast_debt.clear();
+        }
         self.forced.push(Update { rect: self.canvas.bounds(), mode });
         self.needs_redraw = true;
     }
@@ -257,8 +262,9 @@ mod tests {
             self.ticks.set(self.ticks.get() + 1);
             Action::None
         }
-        fn on_background(&mut self, _: &mut EventCx) {
+        fn on_background(&mut self, cx: &mut EventCx) {
             self.backgrounds.set(self.backgrounds.get() + 1);
+            cx.refresh(cx.screen, RefreshMode::Full);
         }
     }
     #[test]
@@ -278,6 +284,8 @@ mod tests {
         app.on_tick(Instant::now());
         assert_eq!(ticks.get(), 1);
         assert_eq!(backgrounds.get(), 1);
-        assert!(!app.frame().is_empty());
+        let updates = app.frame();
+        assert_eq!(updates.len(), 1, "wake and layout completion share one full refresh");
+        assert_eq!(updates[0].mode, RefreshMode::Full);
     }
 }
