@@ -138,11 +138,17 @@ impl App {
 
     /// The next time `on_tick` should run, if any.
     pub fn deadline(&self) -> Option<Instant> {
+        if self.asleep {
+            return None;
+        }
         let screen = self.stack.last().and_then(|s| s.deadline());
         [screen, self.toast.as_ref().map(|t| t.until)].into_iter().flatten().min()
     }
 
     pub fn on_tick(&mut self, now: Instant) {
+        if self.asleep {
+            return;
+        }
         if self.toast.as_ref().is_some_and(|t| now >= t.until) {
             self.toast = None;
             self.needs_redraw = true;
@@ -227,5 +233,51 @@ impl App {
             }
             Action::Exit => self.exit = true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    struct TimedScreen {
+        ticks: Rc<Cell<usize>>,
+        backgrounds: Rc<Cell<usize>>,
+        due: Instant,
+    }
+    impl Screen for TimedScreen {
+        fn draw(&mut self, _: &mut DrawCx) {}
+        fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+            Action::None
+        }
+        fn deadline(&self) -> Option<Instant> {
+            Some(self.due)
+        }
+        fn on_tick(&mut self, _: &mut EventCx) -> Action {
+            self.ticks.set(self.ticks.get() + 1);
+            Action::None
+        }
+        fn on_background(&mut self, _: &mut EventCx) {
+            self.backgrounds.set(self.backgrounds.get() + 1);
+        }
+    }
+    #[test]
+    fn sleep_suspends_timers_and_worker_results_until_wake() {
+        let ticks = Rc::new(Cell::new(0));
+        let backgrounds = Rc::new(Cell::new(0));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let screen = TimedScreen { ticks: ticks.clone(), backgrounds: backgrounds.clone(), due: Instant::now() };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(screen));
+        app.on_sleep();
+        assert!(app.deadline().is_none());
+        app.on_tick(Instant::now());
+        app.on_background();
+        assert_eq!(ticks.get(), 0);
+        assert_eq!(backgrounds.get(), 0);
+        app.on_wake();
+        app.on_tick(Instant::now());
+        assert_eq!(ticks.get(), 1);
+        assert_eq!(backgrounds.get(), 1);
+        assert!(!app.frame().is_empty());
     }
 }

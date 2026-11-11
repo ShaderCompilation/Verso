@@ -384,6 +384,8 @@ impl Screen for Reader {
     }
     fn on_sleep(&mut self) {
         self.save();
+        // Dropping the controls cancels held steppers and slider drags.
+        self.overlay = Overlay::None;
     }
     fn on_quit(&mut self) {
         self.save();
