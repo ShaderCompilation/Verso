@@ -2172,6 +2172,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cosmic-text",
+ "crengine-sys",
  "env_logger",
  "fbink-sys",
  "libc",
