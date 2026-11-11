@@ -40,15 +40,41 @@ pub struct FrameDiff {
     width: i32,
     height: i32,
     prev: Vec<u8>,
+    /// A known full-screen grayscale presentation. Expand only when a later
+    /// UI frame needs tile comparison, never on consecutive page turns.
+    prev_gray: Option<Vec<u8>>,
 }
 
 impl FrameDiff {
     pub fn new(canvas: &Canvas) -> Self {
-        Self { width: canvas.width() as i32, height: canvas.height() as i32, prev: canvas.data().to_vec() }
+        Self {
+            width: canvas.width() as i32,
+            height: canvas.height() as i32,
+            prev: canvas.data().to_vec(),
+            prev_gray: None,
+        }
+    }
+
+    /// Synchronizes the baseline after a known full-screen update, without
+    /// comparing tiles. The snapshot includes the footer and any overlays.
+    pub fn commit_full(&mut self, canvas: &Canvas) {
+        if let Some(gray) = canvas.gray_data() {
+            let previous = self.prev_gray.get_or_insert_with(Vec::new);
+            previous.clear();
+            previous.extend_from_slice(gray);
+        } else {
+            self.prev_gray = None;
+            self.prev.copy_from_slice(&canvas.data());
+        }
     }
 
     /// Compares `canvas` with the last committed frame.
-    pub fn changed(&self, canvas: &Canvas) -> Tiles {
+    pub fn changed(&mut self, canvas: &Canvas) -> Tiles {
+        if let Some(gray) = self.prev_gray.take() {
+            for (px, g) in self.prev.as_chunks_mut::<4>().0.iter_mut().zip(gray) {
+                *px = [g, g, g, 255];
+            }
+        }
         let cur = canvas.data();
         let (cols, rows) = ((self.width + TILE - 1) / TILE, (self.height + TILE - 1) / TILE);
         let mut dirty = vec![false; (cols * rows) as usize];
@@ -194,6 +220,31 @@ mod tests {
     const W: u32 = 160;
     const H: u32 = 96;
 
+    #[test]
+    fn bypassed_pages_synchronize_the_baseline_before_overlay_comparison() {
+        let (mut canvas, mut diff) = setup();
+        for value in [17, 42] {
+            canvas.set_gray(&vec![value; (W * H) as usize]);
+            canvas.fill_rect(Rect::new(0, 80, W as i32, 16), 255);
+            diff.commit_full(&canvas);
+        }
+        canvas.materialize();
+        assert!(!diff.changed(&canvas).any());
+        canvas.fill_rect(Rect::new(20, 20, 3, 3), 0);
+        let tiles = diff.changed(&canvas);
+        assert_eq!(plan(&tiles, bounds(), &[], Ui, &[]), vec![Update { rect: Rect::new(16, 16, 16, 16), mode: Ui }]);
+        diff.commit(&canvas, &tiles);
+        canvas.set_gray(&vec![42; (W * H) as usize]);
+        canvas.fill_rect(Rect::new(0, 80, W as i32, 16), 255);
+        canvas.materialize();
+        assert_eq!(
+            plan(&diff.changed(&canvas), bounds(), &[], Ui, &[]),
+            vec![Update { rect: Rect::new(16, 16, 16, 16), mode: Ui }]
+        );
+        diff.commit_full(&canvas);
+        assert!(!diff.changed(&canvas).any());
+    }
+
     fn setup() -> (Canvas, FrameDiff) {
         let canvas = Canvas::new(W, H);
         let diff = FrameDiff::new(&canvas);
@@ -206,7 +257,7 @@ mod tests {
 
     #[test]
     fn nothing_changed_means_no_updates() {
-        let (canvas, diff) = setup();
+        let (canvas, mut diff) = setup();
         let tiles = diff.changed(&canvas);
         assert!(!tiles.any());
         assert!(plan(&tiles, bounds(), &[], Ui, &[]).is_empty());
@@ -214,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_change_becomes_one_tile_aligned_rect() {
-        let (mut canvas, diff) = setup();
+        let (mut canvas, mut diff) = setup();
         canvas.fill_rect(Rect::new(20, 20, 30, 5), 0);
         let tiles = diff.changed(&canvas);
         let updates = plan(&tiles, bounds(), &[], Ui, &[]);
@@ -236,7 +287,7 @@ mod tests {
     fn single_pixels_mark_their_tile_even_at_ragged_edges() {
         // 70 × 37 doesn't divide into 16 px tiles: the last column and row are partial.
         let mut canvas = Canvas::new(70, 37);
-        let diff = FrameDiff::new(&canvas);
+        let mut diff = FrameDiff::new(&canvas);
         let dots = [(0, 0), (15, 15), (16, 0), (69, 36), (33, 20), (64, 33)];
         for &(x, y) in &dots {
             canvas.fill_rect(Rect::new(x, y, 1, 1), 0);
@@ -253,7 +304,7 @@ mod tests {
 
     #[test]
     fn separate_changes_stay_separate() {
-        let (mut canvas, diff) = setup();
+        let (mut canvas, mut diff) = setup();
         canvas.fill_rect(Rect::new(0, 0, 4, 4), 0);
         canvas.fill_rect(Rect::new(100, 60, 4, 4), 0);
         let updates = plan(&diff.changed(&canvas), bounds(), &[], Ui, &[]);
@@ -262,7 +313,7 @@ mod tests {
 
     #[test]
     fn hints_set_the_mode_and_split_the_area() {
-        let (mut canvas, diff) = setup();
+        let (mut canvas, mut diff) = setup();
         // One changed band across the screen; a button on its left half hints Fast.
         canvas.fill_rect(Rect::new(0, 0, W as i32, 10), 0);
         let hints = [Update { rect: Rect::new(0, 0, 64, 16), mode: Fast }];
@@ -279,7 +330,7 @@ mod tests {
 
     #[test]
     fn the_strongest_hint_wins() {
-        let (mut canvas, diff) = setup();
+        let (mut canvas, mut diff) = setup();
         canvas.fill_rect(Rect::new(0, 0, 8, 8), 0);
         let hints = [Update { rect: Rect::new(0, 0, 8, 8), mode: Fast }, Update { rect: bounds(), mode: Page }];
         assert_eq!(plan(&diff.changed(&canvas), bounds(), &hints, Ui, &[])[0].mode, Page);
@@ -287,7 +338,7 @@ mod tests {
 
     #[test]
     fn forced_refreshes_are_sent_and_cover_weaker_changes() {
-        let (mut canvas, diff) = setup();
+        let (mut canvas, mut diff) = setup();
         canvas.fill_rect(Rect::new(0, 0, 8, 8), 0);
         let forced = [Update { rect: bounds(), mode: Full }];
         assert_eq!(plan(&diff.changed(&canvas), bounds(), &[], Ui, &forced), forced.to_vec());
@@ -301,7 +352,7 @@ mod tests {
     fn rects_are_clipped_to_the_screen() {
         // 100 px tall: the last tile row is only partly on screen.
         let mut canvas = Canvas::new(40, 100);
-        let diff = FrameDiff::new(&canvas);
+        let mut diff = FrameDiff::new(&canvas);
         canvas.fill_rect(Rect::new(0, 98, 2, 2), 0);
         let updates = plan(&diff.changed(&canvas), Rect::new(0, 0, 40, 100), &[], Ui, &[]);
         assert_eq!(updates, vec![Update { rect: Rect::new(0, 96, 16, 4), mode: Ui }]);
@@ -309,7 +360,7 @@ mod tests {
 
     #[test]
     fn an_l_shape_merges_into_its_bounding_box() {
-        let (mut canvas, diff) = setup();
+        let (mut canvas, mut diff) = setup();
         canvas.fill_rect(Rect::new(0, 0, 64, 16), 0);
         canvas.fill_rect(Rect::new(0, 16, 16, 32), 0);
         let updates = plan(&diff.changed(&canvas), bounds(), &[], Ui, &[]);

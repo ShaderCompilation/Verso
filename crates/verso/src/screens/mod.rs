@@ -32,6 +32,11 @@ pub enum Action {
 }
 
 pub trait Screen {
+    /// True when drawing replaces every pixel, so the app can skip its clear.
+    fn fills_canvas(&self) -> bool {
+        false
+    }
+
     /// Draws the whole screen. Called whenever anything may have changed;
     /// only what actually changed reaches the display.
     fn draw(&mut self, cx: &mut DrawCx);

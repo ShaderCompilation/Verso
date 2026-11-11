@@ -1,14 +1,17 @@
 //! The in-memory drawing surface. Everything is drawn here first; the platform
 //! then copies the changed parts to the screen.
 
+use std::borrow::Cow;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::geom::Rect;
 
-/// An RGBA canvas the size of the screen. We only draw in shades of gray, but
-/// tiny-skia, resvg and cosmic-text all work in RGBA, so that's what we keep.
+/// A screen-sized drawing surface. UI drawing uses RGBA for tiny-skia and
+/// resvg; cached pages and their footer can stay in 8-bit grayscale.
 pub struct Canvas {
     pixmap: Pixmap,
+    gray: Vec<u8>,
+    gray_active: bool,
 }
 
 impl Canvas {
@@ -16,7 +19,7 @@ impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         let mut pixmap = Pixmap::new(width, height).expect("canvas size must be non-zero");
         pixmap.fill(tiny_skia::Color::WHITE);
-        Self { pixmap }
+        Self { pixmap, gray: Vec::new(), gray_active: false }
     }
 
     pub fn width(&self) -> u32 {
@@ -33,16 +36,53 @@ impl Canvas {
 
     /// Fills the whole canvas.
     pub fn fill(&mut self, gray: u8) {
+        self.gray_active = false;
         self.pixmap.pixels_mut().fill(gray_pixel(gray));
     }
 
-    /// The raw RGBA bytes, row by row.
-    pub fn data(&self) -> &[u8] {
-        self.pixmap.data()
+    /// Replaces the whole canvas with a cached grayscale page. Footer fills
+    /// and glyph masks can be composed without expanding it to RGBA.
+    pub fn set_gray(&mut self, pixels: &[u8]) {
+        assert_eq!(pixels.len(), self.width() as usize * self.height() as usize);
+        self.gray.clear();
+        self.gray.extend_from_slice(pixels);
+        self.gray_active = true;
+    }
+
+    pub fn gray_data(&self) -> Option<&[u8]> {
+        self.gray_active.then_some(&self.gray)
+    }
+
+    /// The raw RGBA bytes, row by row. Grayscale frames expand only when an
+    /// RGBA consumer needs them; presentation uses `copy_gray` directly.
+    pub fn data(&self) -> Cow<'_, [u8]> {
+        if self.gray_active {
+            Cow::Owned(self.gray.iter().flat_map(|&g| [g, g, g, 255]).collect())
+        } else {
+            Cow::Borrowed(self.pixmap.data())
+        }
+    }
+
+    /// Switches back to the UI drawing surface, preserving the page underneath.
+    pub fn materialize(&mut self) {
+        if self.gray_active {
+            for (px, &g) in self.pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&self.gray) {
+                *px = [g, g, g, 255];
+            }
+            self.gray_active = false;
+        }
     }
 
     pub fn fill_rect(&mut self, rect: Rect, gray: u8) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
+        if self.gray_active {
+            let width = self.width() as usize;
+            for y in r.y..r.bottom() {
+                let row = y as usize * width;
+                self.gray[row + r.x as usize..row + r.right() as usize].fill(gray);
+            }
+            return;
+        }
         let px = gray_pixel(gray);
         let width = self.width() as usize;
         let data = self.pixmap.pixels_mut();
@@ -53,6 +93,7 @@ impl Canvas {
     }
 
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
+        self.materialize();
         if let Some(path) = rounded_rect_path(rect, radius) {
             self.pixmap.fill_path(&path, &paint(gray), FillRule::Winding, Transform::identity(), None);
         }
@@ -60,6 +101,7 @@ impl Canvas {
 
     /// Strokes the outline *inside* `rect`, so it never spills outside it.
     pub fn stroke_rounded_rect(&mut self, rect: Rect, radius: f32, width: f32, gray: u8) {
+        self.materialize();
         let half = width / 2.0;
         let inner = tiny_skia::Rect::from_xywh(
             rect.x as f32 + half,
@@ -74,6 +116,7 @@ impl Canvas {
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, gray: u8) {
+        self.materialize();
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             self.pixmap.fill_path(&path, &paint(gray), FillRule::Winding, Transform::identity(), None);
         }
@@ -81,6 +124,7 @@ impl Canvas {
 
     /// Strokes a circle *inside* radius `r`.
     pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, gray: u8) {
+        self.materialize();
         if let Some(path) = PathBuilder::from_circle(cx, cy, r - width / 2.0) {
             let stroke = Stroke { width, ..Stroke::default() };
             self.pixmap.stroke_path(&path, &paint(gray), &stroke, Transform::identity(), None);
@@ -90,7 +134,8 @@ impl Canvas {
     /// Saves the canvas as a PNG (used for screenshots).
     #[cfg(feature = "desktop")]
     pub fn save_png(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        self.pixmap.save_png(path)?;
+        let pixels = self.data();
+        tiny_skia::PixmapRef::from_bytes(&pixels, self.width(), self.height()).unwrap().save_png(path)?;
         Ok(())
     }
 
@@ -102,6 +147,17 @@ impl Canvas {
         let Some(clip) = clip.intersect(&self.bounds()) else { return };
         let Some(area) = Rect::new(x, y, w as i32, h as i32).intersect(&clip) else { return };
         let width = self.width() as usize;
+        if self.gray_active {
+            for py in area.y..area.bottom() {
+                let mrow = (py - y) as usize * w as usize;
+                for px in area.x..area.right() {
+                    let a = mask[mrow + (px - x) as usize] as u32;
+                    let out = &mut self.gray[py as usize * width + px as usize];
+                    *out = ((*out as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
+                }
+            }
+            return;
+        }
         let data = self.pixmap.data_mut();
         for py in area.y..area.bottom() {
             let mrow = (py - y) as usize * w as usize;
@@ -122,6 +178,7 @@ impl Canvas {
     /// Copies an 8-bit grayscale image (`stride` bytes per row) onto the
     /// canvas, with its top-left corner at the top-left of `rect`.
     pub fn blit_gray(&mut self, rect: Rect, src: &[u8], stride: usize) {
+        self.materialize();
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         let width = self.width() as usize;
         let data = self.pixmap.data_mut();
@@ -141,6 +198,14 @@ impl Canvas {
     pub fn copy_gray(&self, rect: Rect, dst: &mut [u8], stride: usize) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         let width = self.width() as usize;
+        if self.gray_active {
+            for y in r.y..r.bottom() {
+                let s = y as usize * width + r.x as usize;
+                let d = y as usize * stride + r.x as usize;
+                dst[d..d + r.w as usize].copy_from_slice(&self.gray[s..s + r.w as usize]);
+            }
+            return;
+        }
         let src = self.pixmap.data();
         for y in r.y..r.bottom() {
             let s = (y as usize * width + r.x as usize) * 4;
@@ -208,6 +273,36 @@ fn rounded_path(r: tiny_skia::Rect, radius: f32) -> Option<tiny_skia::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grayscale_composition_matches_rgba_and_preserves_stride_and_clipping() {
+        let mut gray = Canvas::new(19, 23);
+        let mut rgba = Canvas::new(19, 23);
+        let page: Vec<_> = (0..19 * 23).map(|i| (i % 256) as u8).collect();
+        gray.set_gray(&page);
+        rgba.blit_gray(rgba.bounds(), &page, 19);
+        for c in [&mut gray, &mut rgba] {
+            c.fill_rect(Rect::new(-3, 19, 25, 8), 255);
+            c.blend_mask(-2, 17, 4, 2, &[0, 25, 127, 255, 255, 128, 1, 0], 51, c.bounds());
+        }
+        assert!(gray.gray_data().is_some());
+        let mut a = vec![77; 24 * 23];
+        let mut b = a.clone();
+        let region = Rect::new(-1, 15, 22, 20);
+        gray.copy_gray(region, &mut a, 24);
+        rgba.copy_gray(region, &mut b, 24);
+        assert_eq!(a, b);
+        assert_eq!(gray.data(), rgba.data());
+        // Rounded UI drawing must materialize the correct underlying page.
+        gray.fill_rounded_rect(Rect::new(1, 2, 15, 10), 3.0, 119);
+        rgba.fill_rounded_rect(Rect::new(1, 2, 15, 10), 3.0, 119);
+        assert!(gray.gray_data().is_none());
+        assert_eq!(gray.data(), rgba.data());
+        gray.set_gray(&page);
+        assert_eq!(gray.gray_data(), Some(page.as_slice()), "restoring the page removes overlays");
+        gray.fill(255);
+        assert_eq!(gray.data(), Canvas::new(19, 23).data());
+    }
 
     #[test]
     fn grays_survive_conversion() {

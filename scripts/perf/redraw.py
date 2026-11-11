@@ -44,6 +44,8 @@ def main():
     parser.add_argument('--probe', type=Path, required=True)
     parser.add_argument('--preload', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--wake-check', action='store_true',
+                        help='After timing, check real sleep/wake restoration and the next turn')
     args = parser.parse_args()
     assert re.fullmatch(r'[a-z0-9-]+', args.variant)
     ready()
@@ -120,6 +122,25 @@ def main():
                f'head -c 2157312 /dev/fb0 | sha256sum > {APP}/{run}.restored.hash')
         results['restored_hash'] = remote(f'cat {APP}/{run}.restored.hash').split()[0]
         assert results['page_hash'] == results['restored_hash'], 'Menu did not restore page'
+        if args.wake_check:
+            remote('lipc-set-prop com.lab126.powerd powerButton 1')
+            try:
+                wait_for('test "$(lipc-get-prop com.lab126.powerd state)" = screenSaver')
+            finally:
+                if remote('lipc-get-prop com.lab126.powerd state') != 'active':
+                    remote('lipc-set-prop com.lab126.powerd powerButton 1')
+            wait_for('test "$(lipc-get-prop com.lab126.powerd state)" = active')
+            # Include the delayed firmware-banner cleanup, outside the timing interval.
+            remote('sleep 3')
+            results['wake_hash'] = remote('head -c 2157312 /dev/fb0 | sha256sum').split()[0]
+            assert results['wake_hash'] == results['page_hash'], 'Wake did not restore page'
+            remote(f'{probe} 1100 1000 post_wake_turn; sleep 1')
+            checks = remote(f'cat {trace}').splitlines()
+            wake_mark = next(float(s.split()[0]) for s in checks if s.endswith(' post_wake_turn'))
+            updates = [s.split() for s in checks if ' IOCTL ' in s
+                       and int(s.split()[3], 16) & 0xffff == 0x462e and float(s.split()[0]) >= wake_mark]
+            assert len(updates) == 1 and updates[0][5] == '0' and updates[0][-2:] == ['1272', '1696']
+            results['post_wake_turn'] = True
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2) + '\n')
         print(args.output, flush=True)

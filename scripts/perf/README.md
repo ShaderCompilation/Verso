@@ -31,6 +31,14 @@ Use a sufficiently long book; the script seeks to the same slider position befor
 each run. It retains per-run state/logs on-device for diagnosis. Local JSON holds
 numeric traces, frame timings, touch positions, CPU records and hashes only.
 
+For the cached-page presentation comparison, use baseline `e6aa996` and the
+optimized binary with no logging changes. Repeat before-1, after-1, before-2,
+after-2 with the same book/probes and analyze all four JSON files together.
+Add `--wake-check` to an optimized run to verify real sleep/wake, delayed banner
+cleanup, the restored framebuffer hash and a successful first turn after wake.
+These checks happen after the measured interval and menu restoration. The flag
+uses powerd's power-button property and returns the device to its awake state.
+
 The 2026-11-11 baseline is `56d9aff` plus only the `App::frame` trace enhancement
 that appends the number of updates; apply that logging change to both builds.
 Both use `RUST_LOG=info,verso=debug,verso::app=trace` and the same ioctl observer.

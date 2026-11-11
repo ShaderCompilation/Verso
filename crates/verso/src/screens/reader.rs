@@ -243,10 +243,14 @@ impl Reader {
     }
 }
 impl Screen for Reader {
+    fn fills_canvas(&self) -> bool {
+        self.shown.is_some()
+    }
+
     fn draw(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
         if let Some(page) = &self.shown {
-            cx.canvas.blit_gray(self.screen, &page.pixels, self.screen.w as usize);
+            cx.canvas.set_gray(&page.pixels);
             if self.settings.footer {
                 let r =
                     Rect::new(t.mm(7.0), self.screen.bottom() - t.mm(9.0), self.screen.w - 2 * t.mm(7.0), t.mm(6.0));
@@ -418,6 +422,76 @@ impl Screen for Reader {
 mod tests {
     use super::*;
     use crate::store::BookState;
+
+    #[test]
+    fn grayscale_pages_restore_after_menus_usb_and_wake_with_or_without_footer() {
+        use crate::{
+            app::App,
+            geom::Point,
+            platform::{DeviceInfo, Update},
+        };
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let screen = Rect::new(0, 0, 600, 800);
+        let root = std::env::temp_dir().join(format!("verso-gray-reader-{}", std::process::id()));
+        for footer in [false, true] {
+            let page = |number| {
+                Arc::new(Page {
+                    generation: 1,
+                    number,
+                    pixels: (0..600 * 800).map(|i| ((i + number * 31) % 256) as u8).collect(),
+                    position: Position(format!("page-{number}")),
+                    progress: 2500,
+                    images: false,
+                })
+            };
+            let mut reader = Reader::new(
+                screen,
+                Rc::new(Worker::stub()),
+                Store::at(root.clone()),
+                "book".into(),
+                1,
+                Settings { footer, ..Settings::default() },
+                Vec::new(),
+                Position::default(),
+            );
+            reader.shown = Some(page(0));
+            reader.cache.insert(page(1), 0);
+            reader.pages = 3;
+            reader.laying_out = false;
+            let mut app = App::new(&info, Theme::for_dpi(150), Box::new(reader));
+            app.refresh_all(RefreshMode::Page);
+            assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Page }]);
+            assert!(app.canvas().gray_data().is_some());
+            let first = app.canvas().data().into_owned();
+            for _ in 0..2 {
+                app.on_gesture(Gesture::Down(Point::new(300, 400)));
+                app.on_gesture(Gesture::Tap(Point::new(300, 400)));
+                assert!(!app.frame().is_empty());
+            }
+            assert_eq!(&*app.canvas().data(), first);
+            // The next cached turn must bypass comparison even after an overlay.
+            app.on_gesture(Gesture::Tap(Point::new(550, 400)));
+            assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Page }]);
+            assert!(app.canvas().gray_data().is_some());
+            let second = app.canvas().data().into_owned();
+            assert_ne!(first, second);
+            app.on_usb(true);
+            assert!(!app.frame().is_empty());
+            app.on_usb(false);
+            assert!(!app.frame().is_empty());
+            assert_eq!(&*app.canvas().data(), second);
+            app.on_sleep();
+            assert!(app.frame().is_empty());
+            app.on_wake();
+            assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Full }]);
+            assert_eq!(&*app.canvas().data(), second);
+            app.on_tick(Instant::now() + Duration::from_secs(2));
+            assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 719, 600, 81), mode: RefreshMode::Ui }]);
+            assert_eq!(&*app.canvas().data(), second);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cache_replies_and_bare_touches_do_not_invalidate_but_pages_and_controls_do() {
         use crate::geom::Point;

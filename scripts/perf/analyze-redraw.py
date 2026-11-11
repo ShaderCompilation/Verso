@@ -27,6 +27,14 @@ def summarize(path):
     sends = [s for s in trace if s[1] == 'IOCTL' and int(s[3], 16) & 0xffff == 0x462e
              and start <= float(s[0]) < end]
     assert len(marks) == len(sends) == 24
+    flashes = [s for s in sends if s[8] == '1']
+    waits = [s for s in trace if s[1] == 'IOCTL' and int(s[3], 16) & 0xffff == 0x462f
+             and start <= float(s[0]) < end]
+    for flash in flashes:
+        completed = next((w for w in waits if w[6] == flash[6] and float(w[0]) >= float(flash[4])), None)
+        assert completed is not None and completed[5] == '0', 'Flash lacks successful completion wait'
+        following = next((s for s in sends if float(s[0]) > float(flash[0])), None)
+        assert following is None or float(completed[4]) < float(following[0]), 'Update overtook a flash'
     events = []
     for mark, send in zip(marks, sends):
         assert send[5] == '0' and send[-2:] == ['1272', '1696']
@@ -50,7 +58,9 @@ def summarize(path):
               'cpu_ms_per_turn': round(process_cpu * 1000 / 24, 3),
               'request_median_ms': round(statistics.median(timings), 3),
               'request_p95_ms': round(sorted(timings)[math.ceil(.95 * len(timings)) - 1], 3),
-              'page_hash': r['page_hash'], 'restored_hash': r['restored_hash']}
+              'page_hash': r['page_hash'], 'restored_hash': r['restored_hash'],
+              'flashes': len(flashes), 'completion_waits': len(waits),
+              'wake_hash': r.get('wake_hash', ''), 'post_wake_turn': r.get('post_wake_turn', '')}
     return result, events
 
 

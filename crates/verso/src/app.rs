@@ -96,7 +96,9 @@ impl App {
         }
         self.needs_redraw = false;
         let started = Instant::now();
-        self.canvas.fill(PAPER);
+        if !self.stack.last().is_some_and(|s| s.fills_canvas()) {
+            self.canvas.fill(PAPER);
+        }
         let mut hints = Vec::new();
         {
             let mut cx = DrawCx::new(&mut self.canvas, &mut self.text, &mut self.icons, &self.theme, &mut hints);
@@ -113,13 +115,26 @@ impl App {
         }
         let drawn = started.elapsed();
 
-        let tiles = self.diff.changed(&self.canvas);
         let mut forced = std::mem::take(&mut self.forced);
         if !self.touch_down {
             forced.extend(self.fast_debt.drain(..).map(|rect| Update { rect, mode: RefreshMode::Ui }));
         }
-        let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
-        self.diff.commit(&self.canvas, &tiles);
+        // A known full-screen refresh already covers all changed pixels. Keep
+        // its strongest mode (including wake/periodic flashes) and synchronize
+        // the baseline without expanding grayscale pages or comparing tiles.
+        let full_mode = forced.iter().filter(|u| u.rect == self.canvas.bounds()).map(|u| u.mode).max();
+        let updates = if let Some(mode) =
+            full_mode.filter(|&mode| mode >= RefreshMode::Ui && hints.iter().chain(&forced).all(|u| u.mode <= mode))
+        {
+            self.diff.commit_full(&self.canvas);
+            vec![Update { rect: self.canvas.bounds(), mode }]
+        } else {
+            self.canvas.materialize();
+            let tiles = self.diff.changed(&self.canvas);
+            let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
+            self.diff.commit(&self.canvas, &tiles);
+            updates
+        };
         for u in updates.iter().filter(|u| u.mode == RefreshMode::Fast) {
             if !self.fast_debt.iter().any(|d| d.union(&u.rect) == *d) {
                 self.fast_debt.push(u.rect);
@@ -397,6 +412,21 @@ mod tests {
             }),
         )
     }
+    #[test]
+    fn full_updates_keep_flash_strength_and_do_not_swallow_stronger_local_updates() {
+        let mut app = book_app(false);
+        let bounds = app.canvas.bounds();
+        app.refresh_all(RefreshMode::Page);
+        app.forced.push(Update { rect: bounds, mode: RefreshMode::Full });
+        app.forced.push(Update { rect: Rect::new(0, 0, 16, 16), mode: RefreshMode::Ui });
+        assert_eq!(app.frame(), vec![Update { rect: bounds, mode: RefreshMode::Full }]);
+        assert!(!app.diff.changed(&app.canvas).any());
+        app.refresh_all(RefreshMode::Page);
+        let local = Update { rect: Rect::new(0, 0, 16, 16), mode: RefreshMode::Full };
+        app.forced.push(local);
+        assert_eq!(app.frame(), vec![Update { rect: bounds, mode: RefreshMode::Page }, local]);
+    }
+
     #[test]
     fn unchanged_gestures_and_background_wakeups_do_not_draw() {
         let mut app = book_app(false);
