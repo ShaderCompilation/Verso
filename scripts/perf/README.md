@@ -170,3 +170,46 @@ If injected coordinates repeat across fresh evdev sessions, prime both axes
 with a harmless corner contact before the first scripted action: the input
 subsystem can omit unchanged ABS values. Send touches only while Verso holds the
 touchscreen. Always check launcher cleanup and restored Kindle UI after a run.
+
+## Buffer-memory comparison
+
+Use the same runner with `--memory-check` to sample process `smaps` and `status`
+in five settled states outside the timed turns: library, reader after seek,
+reader after 24 turns, menu, and restored page. It takes three consecutive
+snapshots per state. Repeat independent launches; consecutive snapshots are not
+independent repetitions. The analyzer exports `memory.csv` with RSS, PSS,
+private resident memory, swap, approximate status RSS/high-water, virtual size,
+and screen hashes, alongside `runs.csv`, `events.csv` and numeric setup-frame
+`setup.csv` timings. Values labelled `kib` are Linux's `kB` units (1024 bytes).
+
+```sh
+python3 scripts/perf/redraw.py before /tmp/before/verso \
+  --book /mnt/us/verso/testbooks/BOOK.epub --probe /tmp/probe \
+  --preload /tmp/probe.so --memory-check --output /tmp/buffers/before-1.json
+```
+
+The 2026-11-11 baseline is `bf1d3b1`, comparison-only stage `c25ce36`, and final
+canvas `fcf0c51`. Run order: before-1, comparison-1, before-2, after-1,
+comparison-2, after-2; add `--wake-check` to after-1. Analyze all six JSON files
+together with `analyze-redraw.py`. No extra logging changes are needed. Memory
+figures describe the controlled one-book library and reader workload; they are
+not full-library or long-session measurements. The analyzer requires reader
+hashes to match globally. If library/menu status text varies, each observed
+hash must match at least two distinct builds; inspect those matches rather than
+assuming that arbitrary UI differences are harmless.
+
+Simulator verification (Pillow required for decoded-pixel comparison):
+
+```sh
+python3 scripts/perf/capture-buffers.py /tmp/before-desktop \
+  --output /tmp/buffers/screens-before
+python3 scripts/perf/capture-buffers.py target/debug/verso \
+  --output /tmp/buffers/screens-after --compare /tmp/buffers/screens-before
+```
+
+Use fresh output directories. This uses only original project EPUB fixtures,
+never production state. It records decoded grayscale SHA-256, changed pixel
+count and maximum difference for 13 scenes in `screens.csv`; PNG container bytes
+can differ with the grayscale encoder. See the
+[buffer-memory report](../../docs/research/buffer-memory.md) for results and the
+distinction between payload allocation and measured process memory.

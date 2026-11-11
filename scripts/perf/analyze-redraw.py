@@ -69,18 +69,49 @@ def main():
     parser.add_argument('inputs', type=Path, nargs='+')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    runs, events = [], []
+    runs, events, memory, setup = [], [], [], []
     for path in args.inputs:
         result, turns = summarize(path)
         runs.append(result)
         events.extend(turns)
+        raw = json.loads(path.read_text())
+        pattern = r'frame: drawn in ([\d.]+)(ms|µs|ns|s), diffed in ([\d.]+)(ms|µs|ns|s), (\d+) update'
+        for i, frame in enumerate(re.findall(pattern, raw.get('setup_frames', ''))):
+            draw, diff = duration(frame[0], frame[1]), duration(frame[2], frame[3])
+            setup.append({'run': path.stem, 'variant': raw['variant'], 'frame': i + 1,
+                          'draw_ms': round(draw, 4), 'diff_ms': round(diff, 4),
+                          'total_ms': round(draw + diff, 4), 'updates': int(frame[4])})
+        for screen, samples in raw.get('memory', {}).items():
+            for i, sample in enumerate(samples):
+                memory.append({'run': path.stem, 'variant': raw['variant'],
+                               'screen': screen, 'sample': i + 1,
+                               'rss_kib': sample['Rss'], 'pss_kib': sample['Pss'],
+                               'private_kib': sample['Private_Clean'] + sample['Private_Dirty'],
+                               'swap_kib': sample['Swap'], 'status_rss_kib': sample['VmRSS'],
+                               'status_hwm_kib': sample['VmHWM'], 'virtual_kib': sample['VmSize'],
+                               'screen_hash': raw['screen_hashes'][screen]})
     assert len({r['page_hash'] for r in runs}) == 1, 'Different final pages'
     assert all(r['page_hash'] == r['restored_hash'] for r in runs)
     # Matched waveforms establish identical full-flash cadence as well as pages.
     patterns = [[(e['waveform'], e['mode']) for e in events if e['run'] == r['run']] for r in runs]
     assert all(p == patterns[0] for p in patterns)
     args.output.mkdir(parents=True, exist_ok=True)
-    for name, rows in [('runs', runs), ('events', events)]:
+    for screen in {s['screen'] for s in memory}:
+        hashes = {}
+        for sample in (s for s in memory if s['screen'] == screen):
+            hashes.setdefault(sample['screen_hash'], set()).add(sample['variant'])
+        if screen in ('library', 'menu') and len(hashes) > 1:
+            # Battery text can change between runs. Every observed status-screen
+            # image must still match exactly in at least two distinct builds.
+            assert all(len(variants) >= 2 for variants in hashes.values()), f'Unmatched {screen} pixels'
+        else:
+            assert len(hashes) == 1, f'Different {screen} pixels'
+    outputs = [('runs', runs), ('events', events)]
+    if memory:
+        outputs.append(('memory', memory))
+    if setup:
+        outputs.append(('setup', setup))
+    for name, rows in outputs:
         with (args.output / (name + '.csv')).open('w') as out:
             writer = csv.DictWriter(out, fieldnames=list(rows[0]), lineterminator='\n')
             writer.writeheader()

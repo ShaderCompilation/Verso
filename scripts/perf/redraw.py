@@ -36,6 +36,22 @@ def ready():
                   'pidof reader.lua || true') == 'active', 'Wake Kindle and close readers first'
 
 
+def memory(pid):
+    """Read process accounting; smaps sums also work without smaps_rollup."""
+    status = remote(f'cat /proc/{pid}/status')
+    values = {key: int(value) for key, value in
+              re.findall(r'^(VmRSS|VmHWM|VmSize):\s+(\d+) kB$', status, re.M)}
+    totals = remote(f"awk '/^(Rss|Pss|Private_Clean|Private_Dirty|Swap):/ "
+                    f"{{sum[$1]+=$2}} END {{for (k in sum) print k, sum[k]}}' /proc/{pid}/smaps")
+    values.update({key.rstrip(':'): int(value) for key, value in
+                   (line.split() for line in totals.splitlines())})
+    return values
+
+
+def framebuffer_hash():
+    return remote('head -c 2157312 /dev/fb0 | sha256sum').split()[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('variant')
@@ -46,6 +62,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--wake-check', action='store_true',
                         help='After timing, check real sleep/wake restoration and the next turn')
+    parser.add_argument('--memory-check', action='store_true',
+                        help='Sample smaps/status in library, reader and menu outside timed turns')
     args = parser.parse_args()
     assert re.fullmatch(r'[a-z0-9-]+', args.variant)
     ready()
@@ -80,6 +98,14 @@ def main():
         pid = remote('pidof verso')
         assert remote(f'readlink /proc/{pid}/exe') == f'{APP}/bin/{args.variant}/verso'
         wait_for(f'grep -q "first frame on screen" {APP}/verso.log')
+        samples, hashes = {}, {}
+        def sample(label):
+            if args.memory_check:
+                samples[label] = [memory(pid) for _ in range(3)]
+                hashes[label] = framebuffer_hash()
+
+        remote('sleep 2')
+        sample('library')
         probe = f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe tap {pid}'
         # Prime axes: evdev can omit unchanged ABS values between sessions.
         remote(f'{probe} 1 1 prime; sleep 2; {probe} 200 550 open; sleep 5')
@@ -87,6 +113,7 @@ def main():
         remote(
                f'{probe} 636 848 seek_menu; sleep 1; {probe} 338 1164 seek; sleep 2; '
                f'{probe} 636 848 seek_close; sleep 2')
+        sample('reader_start')
         remote(f'cp {APP}/verso.log {APP}/{run}.setup.log; : > {APP}/verso.log; '
                f'cat /proc/{pid}/stat > {APP}/{run}.start.stat; '
                f'for t in /proc/{pid}/task/*; do cat "$t/stat"; done > {APP}/{run}.start.tasks; '
@@ -101,8 +128,10 @@ def main():
         # Keep private logs on-device. Export numeric frame/gesture data only.
         frames = remote(f'grep -E "frame: drawn|Down\\(|Tap\\(|presented [0-9]+ update" {APP}/verso.log')
         results = {'variant': args.variant, 'run': run, 'frames': frames,
+                   'setup_frames': remote(f'grep "frame: drawn" {APP}/{run}.setup.log'),
                    'trace': remote(f'cat {trace}'),
                    'page_hash': remote(f'cat {APP}/{run}.page.hash').split()[0]}
+        sample('reader_end')
         marks = [float(line.split()[0]) for line in results['trace'].splitlines()
                  if re.search(r' MARK \d+ turn_\d+$', line)]
         sends = [line.split() for line in results['trace'].splitlines() if ' IOCTL ' in line
@@ -118,8 +147,11 @@ def main():
             results[label + '_tasks'] = remote(f'cat {APP}/{run}.{label}.tasks')
         remote(f'cp {APP}/verso.log {APP}/{run}.log')
         # Menu feedback and restoration (outside timed interval).
-        remote(f'{probe} 636 848 menu_open; sleep 1; {probe} 636 848 menu_close; sleep 1; '
+        remote(f'{probe} 636 848 menu_open; sleep 1')
+        sample('menu')
+        remote(f'{probe} 636 848 menu_close; sleep 1; '
                f'head -c 2157312 /dev/fb0 | sha256sum > {APP}/{run}.restored.hash')
+        sample('restored')
         results['restored_hash'] = remote(f'cat {APP}/{run}.restored.hash').split()[0]
         assert results['page_hash'] == results['restored_hash'], 'Menu did not restore page'
         if args.wake_check:
@@ -141,6 +173,8 @@ def main():
                        and int(s.split()[3], 16) & 0xffff == 0x462e and float(s.split()[0]) >= wake_mark]
             assert len(updates) == 1 and updates[0][5] == '0' and updates[0][-2:] == ['1272', '1696']
             results['post_wake_turn'] = True
+        if args.memory_check:
+            results.update(memory=samples, screen_hashes=hashes)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2) + '\n')
         print(args.output, flush=True)
