@@ -21,8 +21,8 @@ use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
-    Button, ButtonKind, Grid, GridEvent, IconButton, Keyboard, MenuEvent, Pager, PopupMenu, Segmented, Sheet,
-    TextField, TopBar,
+    Button, ButtonKind, Grid, GridEvent, IconButton, Keyboard, MenuEvent, Pager, PagerEvent, PopupMenu, Segmented,
+    Sheet, Slider, SliderEvent, TextField, TopBar,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -101,6 +101,7 @@ pub struct Books {
     status: Rect,
     menu: Option<(String, PopupMenu)>,
     details: Option<Details>,
+    jump: Option<PageJump>,
     touching: bool,
     pending: Option<Snapshot>,
     scanning: bool,
@@ -147,6 +148,7 @@ impl Books {
         let mut settings_action = IconButton::new(Icon::Settings);
         settings_action.place_at(Point::new(search_action.rect().x - t.target / 2, t.top_bar / 2), t);
         let mut pager = Pager::new(1);
+        pager.jump = true;
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
         let sort = Segmented::texts(
             &["Recent", "Title", "Author"],
@@ -194,6 +196,7 @@ impl Books {
             status: Rect::default(),
             menu: None,
             details: None,
+            jump: None,
             touching: false,
             pending: None,
             scanning: true,
@@ -313,7 +316,7 @@ impl Books {
         self.status = Rect::new(t.margin, self.pager.rect().y - t.mm(6.0), self.screen.w - 2 * t.margin, t.mm(6.0));
         let top = self.header.bottom() + t.mm(1.5);
         let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
-        let rows = ((self.status.y - top) / t.mm(34.0)).clamp(1, 2) as usize;
+        let rows = ((self.status.y - top) / t.mm(32.0)).clamp(1, 2) as usize;
         self.grid = Grid::new(self.folders.len() + self.books.len(), cols, rows);
         self.grid.place(
             Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (self.status.y - top).max(t.target)),
@@ -404,6 +407,30 @@ impl Books {
             cx.toast(format!("Couldn't save library navigation: {e}"), None);
         }
     }
+    /// Shows another page of the browsing grid: arrows, swipes and the page jump.
+    fn go_to_page(&mut self, page: usize, cx: &mut EventCx) {
+        self.pager.set(page, self.pager.pages);
+        self.grid.page = self.pager.page;
+        self.thumbnails.clear();
+        self.prioritize();
+        self.save_navigation(cx);
+        cx.refresh(self.screen, RefreshMode::Full);
+    }
+    /// What the jump sheet shows for `page`: the first folder or book on it,
+    /// by the name the current sort uses.
+    fn page_start(&self, page: usize) -> String {
+        let i = page * self.grid.paging().per_page;
+        if let Some(path) = self.folders.get(i) {
+            return collections::name(path);
+        }
+        self.grid_book(i).map_or_else(String::new, |b| {
+            if self.selected_sort() == Sort::Author && !b.metadata.authors.trim().is_empty() {
+                b.metadata.authors.clone()
+            } else {
+                b.metadata.title.clone()
+            }
+        })
+    }
     fn navigate(&mut self, folder: Option<PathBuf>, cx: &mut EventCx) {
         let started = std::time::Instant::now();
         self.home_active = false;
@@ -418,7 +445,12 @@ impl Books {
         log::info!("collection switch {:?}: prepared in {:?}", self.navigation.folder, started.elapsed());
     }
     fn apply_pending(&mut self, cx: &mut EventCx) {
-        if self.touching || self.menu.is_some() || self.details.is_some() || self.reader.is_some() {
+        if self.touching
+            || self.menu.is_some()
+            || self.details.is_some()
+            || self.jump.is_some()
+            || self.reader.is_some()
+        {
             return;
         }
         if let Some(home) = self.pending_home.take()
@@ -919,6 +951,10 @@ impl Screen for Books {
         if let Some((_, menu)) = &self.menu {
             menu.draw(cx);
         }
+        if let Some(jump) = &self.jump {
+            let start = self.page_start(jump.page());
+            jump.draw(cx, self.pager.pages, &start);
+        }
         if let Some(details) = &mut self.details {
             details.draw(cx);
         }
@@ -962,6 +998,15 @@ impl Screen for Books {
                     MenuEvent::Chosen(3) => self.mark(&id, false, cx),
                     _ => {}
                 }
+            }
+        } else if let Some(jump) = &mut self.jump {
+            match jump.on_gesture(&g) {
+                Some(JumpEvent::Close) => self.jump = None,
+                Some(JumpEvent::Go(page)) => {
+                    self.jump = None;
+                    self.go_to_page(page, cx);
+                }
+                None => {}
             }
         } else if self.search.as_ref().is_some_and(|s| s.keyboard.visible) {
             let input = self.search.as_mut().and_then(|s| s.keyboard.on_gesture(&g, cx.theme));
@@ -1069,19 +1114,18 @@ impl Screen for Books {
                 self.save_navigation(cx);
                 cx.refresh(self.screen, RefreshMode::Full);
             }
-            let old_page = self.pager.page;
             if !self.is_home() {
-                self.pager.on_gesture(&g);
+                let old_page = self.pager.page;
+                if self.pager.on_gesture(&g) == Some(PagerEvent::Jump) {
+                    self.jump = Some(PageJump::new(cx.theme, self.screen, self.pager.page, self.pager.pages));
+                    return Action::None;
+                }
                 if let Gesture::Swipe { dir, .. } = g {
                     self.pager.on_swipe(dir);
                 }
-                self.grid.page = self.pager.page;
-            }
-            if old_page != self.pager.page {
-                self.thumbnails.clear();
-                self.prioritize();
-                self.save_navigation(cx);
-                cx.refresh(self.screen, RefreshMode::Full);
+                if old_page != self.pager.page {
+                    self.go_to_page(self.pager.page, cx);
+                }
             }
             let mut selected = None;
             if let Some(event) = self.grid.on_gesture(&g) {
@@ -1136,7 +1180,7 @@ impl Screen for Books {
             return false;
         }
         // Entry overlays retain ownership until their touch is released.
-        if self.menu.is_some() || self.details.is_some() || self.touching {
+        if self.menu.is_some() || self.details.is_some() || self.jump.is_some() || self.touching {
             return true;
         }
         if !self.search.as_ref().is_some_and(|s| s.field.focused) {
@@ -1326,6 +1370,50 @@ impl Details {
             cx.refresh(self.sheet.rect(), RefreshMode::Full);
         }
         false
+    }
+}
+
+/// "Go to page": a slider over the browsing pages. Releasing it jumps there.
+struct PageJump {
+    sheet: Sheet,
+    slider: Slider,
+    label: Rect,
+    start: Rect,
+}
+enum JumpEvent {
+    Close,
+    Go(usize),
+}
+impl PageJump {
+    fn new(t: &Theme, screen: Rect, page: usize, pages: usize) -> Self {
+        let sheet = Sheet::open("Go to page", t.mm(42.0), screen, t);
+        let c = sheet.content(t);
+        let label = Rect::new(c.x, c.y + t.mm(1.0), c.w, t.mm(8.0));
+        let start = Rect::new(c.x, label.bottom(), c.w, t.mm(6.0));
+        let mut slider = Slider::new(0.0, pages.saturating_sub(1) as f32, 1.0, page as f32);
+        slider.place(Rect::new(c.x, start.bottom() + t.mm(5.0), c.w, t.mm(6.0)), t);
+        Self { sheet, slider, label, start }
+    }
+    fn page(&self) -> usize {
+        self.slider.value as usize
+    }
+    fn draw(&self, cx: &mut DrawCx, pages: usize, start: &str) {
+        let t = cx.theme;
+        self.sheet.draw(cx);
+        cx.line(&format!("Page {} of {pages}", self.page() + 1), t.title, self.label, HAlign::Left);
+        if !start.is_empty() {
+            cx.line(&format!("Starts with {start}"), t.body.gray(INK2), self.start, HAlign::Left);
+        }
+        self.slider.draw(cx);
+    }
+    fn on_gesture(&mut self, g: &Gesture) -> Option<JumpEvent> {
+        if self.sheet.on_gesture(g) {
+            return Some(JumpEvent::Close);
+        }
+        match self.slider.on_gesture(g) {
+            Some(SliderEvent::Released(v)) => Some(JumpEvent::Go(v as usize)),
+            _ => None,
+        }
     }
 }
 
@@ -1561,6 +1649,53 @@ mod tests {
         assert_eq!(books.grid.cells().len(), 8);
         assert_eq!(books.pager.pages, 3);
         assert!(books.header.y < t.top_bar + t.target + t.mm(6.0), "the header follows the tabs directly");
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn page_jump_moves_browsing_and_search_pages_and_defers_updates() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("page-jump")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.navigation.tab = Tab::AllBooks;
+        books.refresh(&t);
+        assert_eq!(books.pager.pages, 3);
+        let counter = books.pager.rect().center();
+        let last = |books: &Books| {
+            let r = books.jump.as_ref().unwrap().slider.rect();
+            Point::new(r.right() - 1, r.center().y)
+        };
+        with_cx(&t, screen, |cx| {
+            // Tapping above the sheet closes it without moving.
+            tap(&mut books, counter, cx);
+            assert!(books.jump.is_some());
+            assert_eq!(books.page_start(2), books.books[16].metadata.title);
+            books.pending = Some(Snapshot { index: books.index.clone(), ..Default::default() });
+            books.apply_pending(cx);
+            assert!(books.pending.is_some(), "library updates wait for the sheet");
+            tap(&mut books, Point::new(600, 400), cx);
+            assert!(books.jump.is_none());
+            assert_eq!(books.pager.page, 0);
+            // Releasing the slider jumps and saves the page.
+            tap(&mut books, counter, cx);
+            let p = last(&books);
+            tap(&mut books, p, cx);
+            assert!(books.jump.is_none());
+            assert_eq!((books.pager.page, books.grid.page), (2, 2));
+            assert_eq!(store.navigation().page(), 2);
+            // Search results keep their own page.
+            books.toggle_search(cx);
+            books.search.as_mut().unwrap().keyboard.visible = false;
+            books.pager.page = 0;
+            books.refresh(cx.theme);
+            assert_eq!(books.pager.pages, 3);
+            tap(&mut books, counter, cx);
+            let p = last(&books);
+            tap(&mut books, p, cx);
+            assert_eq!(books.search.as_ref().unwrap().page, 2);
+        });
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())

@@ -19,7 +19,7 @@ pub mod top_bar;
 pub use button::{Button, ButtonKind, IconButton};
 pub use grid::{Grid, GridEvent};
 pub use list::{List, ListEvent, Row};
-pub use pager::Pager;
+pub use pager::{Pager, PagerEvent};
 pub use popup_menu::{MenuEvent, PopupMenu};
 pub use segmented::{Segment, Segmented};
 pub use sheet::Sheet;

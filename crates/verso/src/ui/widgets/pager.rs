@@ -1,17 +1,31 @@
 //! ‹ "1 of 6" › — moves between pages of content. Swiping left or right on
-//! the content does the same; screens pass swipes to `on_swipe`.
+//! the content does the same; screens pass swipes to `on_swipe`. Screens that
+//! set `jump` also get a `Jump` event when the "1 of 6" counter is tapped.
 
 use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon};
+use crate::platform::RefreshMode;
 use crate::ui::gesture::{Direction, Gesture};
-use crate::ui::theme::{INK2, Theme};
-use crate::ui::widget::DrawCx;
+use crate::ui::theme::{INK, INK2, PAPER, Theme};
+use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::button::IconButton;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagerEvent {
+    /// An arrow moved to this page.
+    Changed(usize),
+    /// The counter was tapped: the screen may offer a page picker.
+    Jump,
+}
 
 pub struct Pager {
     pub page: usize,
     pub pages: usize,
+    /// The counter is tappable and reports `Jump`.
+    pub jump: bool,
     rect: Rect,
+    counter: Rect,
+    counter_press: Press,
     prev: IconButton,
     next: IconButton,
 }
@@ -21,7 +35,10 @@ impl Pager {
         Self {
             page: 0,
             pages: pages.max(1),
+            jump: false,
             rect: Rect::default(),
+            counter: Rect::default(),
+            counter_press: Press::default(),
             prev: IconButton::new(Icon::ChevronLeft),
             next: IconButton::new(Icon::ChevronRight),
         }
@@ -32,6 +49,9 @@ impl Pager {
         let cy = rect.center().y;
         self.prev.place_at(Point::new(rect.x + theme.target / 2, cy), theme);
         self.next.place_at(Point::new(rect.right() - theme.target / 2, cy), theme);
+        let w = theme.mm(32.0).min(rect.w - 2 * theme.target).max(0);
+        let h = theme.target.min(rect.h.max(theme.target));
+        self.counter = Rect::new(rect.center().x - w / 2, cy - h / 2, w, h);
     }
 
     pub fn rect(&self) -> Rect {
@@ -43,14 +63,17 @@ impl Pager {
         self.page = page.min(self.pages - 1);
     }
 
-    /// Returns the new page when it changed.
-    pub fn on_gesture(&mut self, g: &Gesture) -> Option<usize> {
+    /// Reports a page change from the arrows, or a tap on the counter.
+    pub fn on_gesture(&mut self, g: &Gesture) -> Option<PagerEvent> {
         self.sync();
         if self.prev.on_gesture(g) {
-            return self.go(-1);
+            return self.go(-1).map(PagerEvent::Changed);
         }
         if self.next.on_gesture(g) {
-            return self.go(1);
+            return self.go(1).map(PagerEvent::Changed);
+        }
+        if self.jump && self.pages > 1 && self.counter_press.on_gesture(g, self.counter) == Some(PressEvent::Tap) {
+            return Some(PagerEvent::Jump);
         }
         None
     }
@@ -84,7 +107,14 @@ impl Pager {
         self.prev.draw(cx);
         self.next.draw(cx);
         let label = format!("{} of {}", self.page + 1, self.pages);
-        cx.line(&label, cx.theme.small.gray(INK2), self.rect, HAlign::Center);
+        let t = cx.theme;
+        if self.jump && self.counter_press.is_down() {
+            cx.canvas.fill_rounded_rect(self.counter, t.radius, INK);
+            cx.line(&label, t.small.gray(PAPER), self.rect, HAlign::Center);
+            cx.hint(self.counter, RefreshMode::Fast);
+        } else {
+            cx.line(&label, t.small.gray(INK2), self.rect, HAlign::Center);
+        }
     }
 }
 
@@ -99,15 +129,34 @@ mod tests {
         p.place(Rect::new(0, 1500, 1272, 120), &theme);
         let next = Point::new(1272 - 20, 1560);
         p.on_gesture(&Gesture::Down(next));
-        assert_eq!(p.on_gesture(&Gesture::Tap(next)), Some(1));
+        assert_eq!(p.on_gesture(&Gesture::Tap(next)), Some(PagerEvent::Changed(1)));
         assert_eq!(p.on_swipe(Direction::Left), Some(2));
         assert_eq!(p.on_swipe(Direction::Left), None, "already on the last page");
         assert_eq!(p.on_swipe(Direction::Up), None);
         assert_eq!(p.on_swipe(Direction::Right), Some(1));
         let prev = Point::new(20, 1560);
         p.on_gesture(&Gesture::Down(prev));
-        assert_eq!(p.on_gesture(&Gesture::Tap(prev)), Some(0));
+        assert_eq!(p.on_gesture(&Gesture::Tap(prev)), Some(PagerEvent::Changed(0)));
         p.on_gesture(&Gesture::Down(prev));
         assert_eq!(p.on_gesture(&Gesture::Tap(prev)), None, "disabled on the first page");
+    }
+
+    #[test]
+    fn counter_tap_asks_for_a_jump_only_when_enabled_with_pages() {
+        let theme = Theme::for_dpi(300);
+        let mut p = Pager::new(3);
+        p.place(Rect::new(0, 1500, 1272, 120), &theme);
+        let counter = Point::new(636, 1560);
+        p.on_gesture(&Gesture::Down(counter));
+        assert_eq!(p.on_gesture(&Gesture::Tap(counter)), None, "screens opt in");
+        p.jump = true;
+        p.on_gesture(&Gesture::Down(counter));
+        assert_eq!(p.on_gesture(&Gesture::Tap(counter)), Some(PagerEvent::Jump));
+        p.on_gesture(&Gesture::Down(counter));
+        p.on_gesture(&Gesture::Move(Point::new(636, 1400)));
+        assert_eq!(p.on_gesture(&Gesture::Tap(counter)), None, "a drag away is not a tap");
+        p.set(0, 1);
+        p.on_gesture(&Gesture::Down(counter));
+        assert_eq!(p.on_gesture(&Gesture::Tap(counter)), None, "nothing to jump to");
     }
 }
