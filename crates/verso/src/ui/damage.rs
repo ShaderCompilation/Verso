@@ -40,65 +40,61 @@ pub struct FrameDiff {
     width: i32,
     height: i32,
     prev: Vec<u8>,
-    /// A known full-screen grayscale presentation. Expand only when a later
-    /// UI frame needs tile comparison, never on consecutive page turns.
-    prev_gray: Option<Vec<u8>>,
 }
 
 impl FrameDiff {
     pub fn new(canvas: &Canvas) -> Self {
-        Self {
+        let mut diff = Self {
             width: canvas.width() as i32,
             height: canvas.height() as i32,
-            prev: canvas.data().to_vec(),
-            prev_gray: None,
-        }
+            prev: vec![0; canvas.width() as usize * canvas.height() as usize],
+        };
+        diff.commit_full(canvas);
+        diff
     }
 
     /// Synchronizes the baseline after a known full-screen update, without
-    /// comparing tiles. The snapshot includes the footer and any overlays.
+    /// comparing tiles. Store exactly the grayscale pixels sent to the panel.
     pub fn commit_full(&mut self, canvas: &Canvas) {
-        if let Some(gray) = canvas.gray_data() {
-            let previous = self.prev_gray.get_or_insert_with(Vec::new);
-            previous.clear();
-            previous.extend_from_slice(gray);
-        } else {
-            self.prev_gray = None;
-            self.prev.copy_from_slice(&canvas.data());
-        }
+        canvas.copy_gray(canvas.bounds(), &mut self.prev, self.width as usize);
     }
 
     /// Compares `canvas` with the last committed frame.
     pub fn changed(&mut self, canvas: &Canvas) -> Tiles {
-        if let Some(gray) = self.prev_gray.take() {
-            for (px, g) in self.prev.as_chunks_mut::<4>().0.iter_mut().zip(gray) {
-                *px = [g, g, g, 255];
-            }
-        }
-        let cur = canvas.data();
+        let gray = canvas.gray_data();
+        let rgba = gray.is_none().then(|| canvas.data());
+        let stride = self.width as usize;
+        // UI conversion needs only one row, never another screen-sized frame.
+        let mut converted = if rgba.is_some() { vec![0; stride] } else { Vec::new() };
         let (cols, rows) = ((self.width + TILE - 1) / TILE, (self.height + TILE - 1) / TILE);
         let mut dirty = vec![false; (cols * rows) as usize];
-        let stride = self.width as usize * 4;
-        // Most frames change a small area, so compare whole bands of rows and
-        // whole lines first (big, fast comparisons) and only look at single
-        // tiles where something changed. On the Kindle this took the diff from
-        // ~65 ms to ~30 ms per frame (the rest is reading two 8.6 MB frames).
         for (row, tiles) in dirty.chunks_mut(cols as usize).enumerate() {
             let y0 = row * TILE as usize;
             let y1 = (y0 + TILE as usize).min(self.height as usize);
             let band = y0 * stride..y1 * stride;
-            if cur[band.clone()] == self.prev[band] {
+            if gray.is_some_and(|cur| cur[band.clone()] == self.prev[band]) {
                 continue;
             }
             for y in y0..y1 {
                 let line = y * stride..(y + 1) * stride;
-                let (a, b) = (&cur[line.clone()], &self.prev[line]);
+                let a = if let Some(gray) = gray {
+                    &gray[line.clone()]
+                } else {
+                    let rgba = rgba.as_ref().unwrap();
+                    for (out, px) in
+                        converted.iter_mut().zip(rgba[y * stride * 4..(y + 1) * stride * 4].as_chunks::<4>().0)
+                    {
+                        *out = crate::gfx::luma(px[0], px[1], px[2]);
+                    }
+                    &converted
+                };
+                let b = &self.prev[line];
                 if a == b {
                     continue;
                 }
                 for (col, d) in tiles.iter_mut().enumerate().filter(|(_, d)| !**d) {
-                    let x0 = col * TILE as usize * 4;
-                    let x1 = (x0 + TILE as usize * 4).min(stride);
+                    let x0 = col * TILE as usize;
+                    let x1 = (x0 + TILE as usize).min(stride);
                     *d = a[x0..x1] != b[x0..x1];
                 }
             }
@@ -108,18 +104,10 @@ impl FrameDiff {
 
     /// Remembers the changed tiles of `canvas` as what's now on screen.
     pub fn commit(&mut self, canvas: &Canvas, tiles: &Tiles) {
-        let cur = canvas.data();
-        let stride = self.width as usize * 4;
         for row in 0..tiles.rows {
             for col in 0..tiles.cols {
-                if !tiles.dirty[(row * tiles.cols + col) as usize] {
-                    continue;
-                }
-                let x0 = (col * TILE) as usize * 4;
-                let x1 = ((col * TILE + TILE).min(self.width)) as usize * 4;
-                for y in row * TILE..(row * TILE + TILE).min(self.height) {
-                    let off = y as usize * stride;
-                    self.prev[off + x0..off + x1].copy_from_slice(&cur[off + x0..off + x1]);
+                if tiles.dirty[(row * tiles.cols + col) as usize] {
+                    canvas.copy_gray(tiles.tile_rect(col, row), &mut self.prev, self.width as usize);
                 }
             }
         }
