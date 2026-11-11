@@ -431,6 +431,7 @@ impl Books {
         }
         let Some(book) = self.book(&id) else { return };
         let path = book.path.clone();
+        self.store.select_home_book(book);
         self.save_navigation(cx);
         self.library.pause(true);
         self.thumbnails.clear();
@@ -466,6 +467,9 @@ impl Books {
     }
     fn returned(&mut self, cx: &mut EventCx) {
         self.library.pause(false);
+        if self.store.home_summary().is_none_or(|summary| !summary.complete) {
+            self.library.refresh_home();
+        }
         if let Some(r) = self.reader.take() {
             self.generation = r.generation();
         }
@@ -497,6 +501,9 @@ impl Books {
         self.grid.on_gesture(&Gesture::Cancel(anchor));
     }
     fn mark(&mut self, id: &str, finished: bool, cx: &mut EventCx) {
+        if let Some(book) = self.book(id) {
+            self.store.select_home_book(book);
+        }
         let mut state = self.store.book(id);
         if finished {
             state.finished = true;
@@ -506,6 +513,7 @@ impl Books {
         match self.store.save_book(id, &state) {
             Ok(()) => {
                 self.states.insert(id.to_owned(), state);
+                self.library.refresh_home();
                 self.refresh(cx.theme);
                 cx.toast(if finished { "Marked finished" } else { "Removed from continue reading" }, None);
             }
@@ -994,6 +1002,9 @@ impl Screen for Books {
         self.reader.as_mut().map_or(Action::None, |r| r.on_tick(cx))
     }
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Some(home) = self.library.take_home() {
+            log::debug!("Home summary ready: resume={} recents={}", home.resume().is_some(), home.recents(4).len());
+        }
         if let Some(r) = &mut self.reader {
             r.on_background(cx);
         }

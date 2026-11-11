@@ -1,4 +1,5 @@
 //! Small, versioned JSON records. Rename replaces a complete file atomically.
+mod home;
 pub mod position;
 use crate::document::{Position, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};
@@ -51,6 +52,7 @@ pub struct BookState {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    selected_home: std::sync::Arc<std::sync::Mutex<Option<crate::library::Book>>>,
 }
 impl Store {
     pub fn new() -> Self {
@@ -67,7 +69,7 @@ impl Store {
                     .join("verso")
             }
         });
-        Self { root }
+        Self { root, selected_home: Default::default() }
     }
     pub fn settings(&self) -> Settings {
         let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
@@ -90,6 +92,13 @@ impl Store {
         let started = std::time::Instant::now();
         let result = atomic(&self.book_path(id), s);
         log::debug!("position write: {:?}, ok={}", started.elapsed(), result.is_ok());
+        if result.is_ok()
+            && let Err(error) = self.update_home_after_save(id, s)
+        {
+            // A rebuildable display cache must never make a durable position
+            // look failed, cause an old position to replay, or erase book state.
+            log::warn!("updating Home summary: {error:#}");
+        }
         result
     }
     pub fn library(&self) -> LibraryIndex {
@@ -132,7 +141,7 @@ impl Store {
     }
     #[cfg(test)]
     pub fn at(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, selected_home: Default::default() }
     }
     fn book_path(&self, id: &str) -> PathBuf {
         self.root.join("books").join(format!("{id}.json"))
@@ -256,7 +265,7 @@ mod tests {
     fn records_survive_interrupted_writes_and_moves() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-store-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
-        let store = Store { root: root.join("data") };
+        let store = Store::at(root.join("data"));
         let s = BookState {
             position: Position("/body/p[5]/text().23".into()),
             page: 6,

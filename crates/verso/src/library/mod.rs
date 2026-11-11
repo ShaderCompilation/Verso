@@ -3,6 +3,7 @@
 pub mod collections;
 pub mod covers;
 pub mod epub;
+pub mod home;
 pub mod search;
 pub mod worker;
 
@@ -25,7 +26,7 @@ pub struct Stamp {
     pub modified_nanos: u32,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Metadata {
     pub identifier: String,
@@ -43,7 +44,7 @@ pub enum Cover {
     Unavailable(String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Book {
     pub path: PathBuf,
     pub id: String,
@@ -60,7 +61,7 @@ pub struct Book {
     pub metadata_pending: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryIndex {
     pub version: u32,
     pub books: Vec<Book>,

@@ -1,4 +1,5 @@
 //! One coalescing library worker. A single replaceable snapshot bounds pending results.
+use super::home::Summary;
 use super::{Book, Cover, LibraryIndex, Metadata, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
 use crate::store::{Store, book_id};
@@ -26,6 +27,8 @@ struct Shared {
     paused: bool,
     priority: Vec<String>,
     latest: Option<Snapshot>,
+    home_requested: bool,
+    latest_home: Option<Summary>,
 }
 pub struct Worker {
     shared: Arc<(Mutex<Shared>, Condvar)>,
@@ -48,18 +51,38 @@ impl Worker {
                         waker.wake();
                     }
                 };
+                let publish_home = |summary: Summary| {
+                    shared.0.lock().unwrap().latest_home = Some(summary);
+                    waker.wake();
+                };
+                let rebuild_home = |index: &LibraryIndex| match store.rebuild_home_summary(index) {
+                    Ok(summary) => publish_home(summary),
+                    Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
+                };
+                if store.home_summary().is_none_or(|summary| !summary.complete) {
+                    rebuild_home(&index);
+                }
                 loop {
-                    let retry = {
+                    let (retry, scan_requested, home_requested) = {
                         let mut state = shared.0.lock().unwrap();
-                        while !state.stop && !state.requested {
+                        while !state.stop && !state.requested && !state.home_requested {
                             state = shared.1.wait(state).unwrap();
                         }
                         if state.stop {
                             break;
                         }
-                        state.requested = false;
-                        std::mem::take(&mut state.retry)
+                        (
+                            std::mem::take(&mut state.retry),
+                            std::mem::take(&mut state.requested),
+                            std::mem::take(&mut state.home_requested),
+                        )
                     };
+                    if home_requested {
+                        rebuild_home(&index);
+                    }
+                    if !scan_requested {
+                        continue;
+                    }
                     let mut errors = Vec::new();
                     let result = scan_roots(&roots, &index, retry, &cancelled, |checkpoint| {
                         let mut snapshot = Snapshot {
@@ -75,7 +98,11 @@ impl Worker {
                     });
                     let Some(scan) = result else { break };
                     log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
+                    let changed = index != scan.index;
                     index = scan.index;
+                    if changed {
+                        rebuild_home(&index);
+                    }
                     errors.extend(scan.errors);
                     if let Err(e) = store.save_library(&index) {
                         errors.push(format!("Couldn't save library: {e}"));
@@ -89,6 +116,13 @@ impl Worker {
                     let mut since_publish = Instant::now();
                     let mut completed = 0;
                     while !pending.is_empty() {
+                        let refresh_home = {
+                            let mut state = shared.0.lock().unwrap();
+                            std::mem::take(&mut state.home_requested)
+                        };
+                        if refresh_home {
+                            rebuild_home(&index);
+                        }
                         let next = {
                             let mut state = shared.0.lock().unwrap();
                             while state.paused && !state.stop && !state.requested {
@@ -165,6 +199,11 @@ impl Worker {
                         errors.push(format!("Couldn't save covers: {e}"));
                     }
                     log::info!("library identities complete in {:?}", identity_started.elapsed());
+                    match store.refresh_home_metadata(&index) {
+                        Ok(Some(summary)) => publish_home(summary),
+                        Ok(None) => rebuild_home(&index),
+                        Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
+                    }
                     publish(Snapshot { index: index.clone(), scanning: false, working: false, errors });
                     log::info!("startup stage: background complete elapsed_us={}", startup.elapsed().as_micros());
                 }
@@ -177,6 +216,15 @@ impl Worker {
         state.requested = true;
         state.retry = true;
         self.shared.1.notify_one();
+    }
+    /// Recompute resume selection after finished/hidden flags change without a
+    /// filesystem rescan. Authoritative book records stay on the save path.
+    pub fn refresh_home(&self) {
+        self.shared.0.lock().unwrap().home_requested = true;
+        self.shared.1.notify_one();
+    }
+    pub fn take_home(&self) -> Option<Summary> {
+        self.shared.0.lock().unwrap().latest_home.take()
     }
     pub fn pause(&self, paused: bool) {
         self.shared.0.lock().unwrap().paused = paused;
