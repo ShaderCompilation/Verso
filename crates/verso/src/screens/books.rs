@@ -117,7 +117,15 @@ impl Books {
     }
     fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
         let roots = store.library_folders();
-        let home = store.home_summary().unwrap_or_default();
+        let started = std::time::Instant::now();
+        let home = store.home_summary();
+        log::info!(
+            "startup stage: Home summary books={} valid={} elapsed_us={}",
+            home.as_ref().map_or(0, |summary| summary.books.len()),
+            home.is_some(),
+            started.elapsed().as_micros()
+        );
+        let home = home.unwrap_or_default();
         let navigation = store.navigation();
         let tabs = Segmented::texts(&["Home", "Collections", "All books"], 0);
         let library = LibraryWorker::new(store.clone(), roots.clone(), worker.waker());

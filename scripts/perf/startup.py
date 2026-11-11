@@ -45,6 +45,10 @@ def main():
     parser.add_argument('--fixture', choices=['real', 'large'])
     parser.add_argument('--mode', choices=['startup', 'immediate-open'])
     parser.add_argument('--installed', action='store_true', help='Reuse the variant executable already installed by an earlier run')
+    parser.add_argument('--collections-tap', default='950,200',
+                        help='Collections tab position (baseline 950,200; three-tab Home 636,230)')
+    parser.add_argument('--summary', choices=['copied', 'missing', 'seeded'], default='copied',
+                        help='Home summary: as copied, removed (migration), or the saved real-library seed')
     args = parser.parse_args()
     assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
     repo = Path(__file__).resolve().parents[2]
@@ -72,12 +76,17 @@ def main():
                 upload(state + '/settings.json', (args.large / 'settings.json').read_bytes())
             # A predictable source view; real reading positions/flags stay copied.
             upload(state + '/library-navigation.json', b'{"tab":"all_books","all_page":0}')
+            if args.summary == 'missing':
+                remote(f'rm -f {state}/home.json')
+            elif args.summary == 'seeded':
+                # A complete summary produced by an earlier real-library migration run.
+                remote(f'cp {APP}/seed-home.json {state}/home.json')
             wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
                        'export RUST_LOG=info,verso=debug\n'
                        f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
             upload(APP + '/verso', wrapper.encode())
             pid = None
-            result = dict(variant=args.variant, fixture=fixture, mode=mode, number=number,
+            result = dict(variant=args.variant, fixture=fixture, mode=mode, number=number, summary=args.summary,
                           cache='warm OS cache; fresh copy of persisted app data', samples={})
             try:
                 remote(f'chmod 755 {APP}/verso; : > {APP}/verso.log; '
@@ -101,7 +110,7 @@ def main():
                 else:
                     wait(f'grep -q "startup stage: background complete" {APP}/verso.log')
                     sample('background_complete')
-                    remote(f'{probe} 1 1 prime; {probe} 950 200 first_collections')
+                    remote(f'{probe} 1 1 prime; {probe} {args.collections_tap.replace(",", " ")} first_collections')
                     remote('sleep 1')
                     sample('first_collections')
                 # Keep content-bearing logs only in the isolated device directory.
@@ -110,6 +119,8 @@ def main():
                     'startup stage:', 'first frame on screen', 'library covers:', 'library scan:',
                     'library identities complete'])]
                 result['trace'] = remote(f'cat {trace}')
+                if fixture == 'real' and mode == 'startup' and args.summary == 'missing':
+                    remote(f'grep -q {Q('"complete":true')} {state}/home.json && cp {state}/home.json {APP}/seed-home.json')
             finally:
                 if pid and remote(f'test -e /proc/{pid} && echo yes || true') == 'yes':
                     remote(f'kill -TERM {pid}')
