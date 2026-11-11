@@ -272,3 +272,21 @@ pub(crate) mod tests {
         Ok(())
     }
 }
+
+/// Self-contained vector covers only. Resource references and filters fall back
+/// rather than reading external files or allocating large intermediate surfaces.
+pub fn validate_svg(bytes: &[u8]) -> Result<()> {
+    fn validate(node: &Node) -> Result<()> {
+        ensure!(!matches!(node.name.as_str(), "image" | "filter" | "foreignObject"), "unsupported SVG resource");
+        for (key, value) in &node.attrs {
+            if key == "href" {
+                ensure!(value.starts_with('#'), "external SVG resource");
+            }
+        }
+        for child in &node.children {
+            validate(child)?;
+        }
+        Ok(())
+    }
+    validate(&xml(bytes)?)
+}

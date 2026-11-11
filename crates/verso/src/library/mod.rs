@@ -1,6 +1,7 @@
 //! The library index is independent of the reading engine.
 #![allow(dead_code)] // Consumed by the worker and screen in the following Phase 5 steps.
 
+pub mod covers;
 pub mod epub;
 pub mod worker;
 
@@ -36,7 +37,7 @@ pub enum Cover {
     #[default]
     Pending,
     Ready(String),
-    Unavailable,
+    Unavailable(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

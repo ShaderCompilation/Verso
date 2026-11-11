@@ -116,11 +116,14 @@ fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     }
 }
 pub(crate) fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    atomic_bytes(path, &serde_json::to_vec(value)?)
+}
+pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("record has no parent directory")?;
     std::fs::create_dir_all(parent)?;
     let tmp = path.with_extension("json.tmp");
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&serde_json::to_vec(value)?)?;
+    f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     // The FAT/FUSE filesystem on the Kindle may not support directory fsync.

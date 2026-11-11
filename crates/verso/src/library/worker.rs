@@ -1,5 +1,5 @@
 //! One coalescing library worker. A single replaceable snapshot bounds pending results.
-use super::{Book, Cover, LibraryIndex, Metadata, Stamp, assign_ids, epub};
+use super::{Book, Cover, LibraryIndex, Metadata, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
 use crate::store::{Store, book_id};
 use anyhow::Result;
@@ -76,6 +76,63 @@ impl Worker {
                     errors.extend(scan.errors);
                     if let Err(e) = store.save_library(&index) {
                         errors.push(format!("Couldn't save library: {e}"));
+                    }
+                    publish(Snapshot { index: index.clone(), scanning: false, working: true, errors: errors.clone() });
+                    let mut pending: HashSet<_> =
+                        index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
+                    let mut since_publish = Instant::now();
+                    let mut completed = 0;
+                    while !pending.is_empty() {
+                        let next = {
+                            let state = shared.0.lock().unwrap();
+                            if state.stop || state.requested {
+                                break;
+                            }
+                            *pending
+                                .iter()
+                                .min_by_key(|&&i| {
+                                    (
+                                        state
+                                            .priority
+                                            .iter()
+                                            .position(|id| id == &index.books[i].id)
+                                            .unwrap_or(usize::MAX),
+                                        i,
+                                    )
+                                })
+                                .unwrap()
+                        };
+                        pending.remove(&next);
+                        match covers::generate(&index.books[next], &store) {
+                            Ok(cover) => index.books[next].cover = cover,
+                            Err(e) => {
+                                if errors.len() < 32 {
+                                    errors.push(format!("Couldn't cache cover: {e}"));
+                                }
+                            }
+                        }
+                        completed += 1;
+                        if completed % 64 == 0
+                            && let Err(e) = store.save_library(&index)
+                            && errors.len() < 32
+                        {
+                            errors.push(format!("Couldn't save covers: {e}"));
+                        }
+                        if completed % 4 == 0 || since_publish.elapsed().as_millis() >= 100 {
+                            publish(Snapshot {
+                                index: index.clone(),
+                                scanning: false,
+                                working: true,
+                                errors: errors.clone(),
+                            });
+                            since_publish = Instant::now();
+                        }
+                    }
+                    if cancelled() {
+                        break;
+                    }
+                    if let Err(e) = store.save_library(&index) {
+                        errors.push(format!("Couldn't save covers: {e}"));
                     }
                     publish(Snapshot { index: index.clone(), scanning: false, working: false, errors });
                 }
