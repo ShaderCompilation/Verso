@@ -42,6 +42,7 @@ impl Screen for SystemSettings {
         );
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        cx.redraw();
         if self.top.on_gesture(&g) {
             return Action::Pop;
         }
@@ -87,7 +88,8 @@ impl Screen for UsbPrompt {
         self.exit.draw(cx);
         self.stay.draw(cx);
     }
-    fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+    fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        cx.redraw();
         if self.exit.on_gesture(&g) {
             Action::Exit
         } else if self.stay.on_gesture(&g) || self.sheet.on_gesture(&g) {

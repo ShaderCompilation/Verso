@@ -103,6 +103,9 @@ impl Reader {
                 self.toc = toc;
                 self.pages = pages.max(1);
                 self.target = current.min(self.pages - 1);
+                if matches!(self.overlay, Overlay::Menu(_) | Overlay::Contents(_)) {
+                    cx.redraw();
+                }
             }
             Reply::Page(page) if page.generation == self.cache.generation => {
                 self.cache.insert(page.clone(), self.target);
@@ -282,6 +285,11 @@ impl Screen for Reader {
         }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        if !matches!(self.overlay, Overlay::None) {
+            // Overlay handlers can change pressed state or slider position
+            // without returning an action. Keep immediate control feedback.
+            cx.redraw();
+        }
         match &mut self.overlay {
             Overlay::Menu(menu) => match menu.on_gesture(&g) {
                 Some(MenuEvent::Books) => {
@@ -350,6 +358,7 @@ impl Screen for Reader {
                     Gesture::Tap(p) => match reader::tap_zone(self.screen, p) {
                         Zone::Menu => {
                             self.menu(cx);
+                            cx.redraw();
                             return Action::None;
                         }
                         Zone::Back => -1,
@@ -410,6 +419,79 @@ mod tests {
     use super::*;
     use crate::store::BookState;
     #[test]
+    fn cache_replies_and_bare_touches_do_not_invalidate_but_pages_and_controls_do() {
+        use crate::geom::Point;
+        let theme = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut r = Reader::new(
+            screen,
+            Rc::new(Worker::stub()),
+            Store::at(std::env::temp_dir().join("verso-redraw-test-unused")),
+            "book".into(),
+            1,
+            Settings::default(),
+            Vec::new(),
+            Position::default(),
+        );
+        let mut cx = EventCx {
+            theme: &theme,
+            screen,
+            now: Instant::now(),
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut None,
+            forced: &mut Vec::new(),
+            needs_redraw: &mut false,
+        };
+        let page = |generation, number| {
+            Reply::Page(Arc::new(Page {
+                generation,
+                number,
+                pixels: Vec::new(),
+                position: Position(format!("page-{number}")),
+                progress: 2500,
+                images: false,
+            }))
+        };
+        r.receive(
+            Reply::Opened { generation: 1, metadata: Metadata::default(), toc: Vec::new(), pages: 10, current: 0 },
+            &mut cx,
+        );
+        assert!(!*cx.needs_redraw);
+        r.receive(page(1, 0), &mut cx);
+        assert!(*cx.needs_redraw);
+        *cx.needs_redraw = false;
+        cx.forced.clear();
+        for reply in [page(1, 0), page(1, 1), page(0, 2)] {
+            r.receive(reply, &mut cx);
+            assert!(!*cx.needs_redraw);
+            assert!(cx.forced.is_empty());
+        }
+        assert!(r.cache.get(1).is_some());
+        let p = Point::new(1100, 1000);
+        for g in [Gesture::Down(p), Gesture::Move(p), Gesture::Cancel(p)] {
+            r.on_gesture(g, &mut cx);
+            assert!(!*cx.needs_redraw);
+        }
+        // A cached turn updates both page and footer and keeps the refresh policy.
+        r.on_gesture(Gesture::Tap(p), &mut cx);
+        assert!(*cx.needs_redraw);
+        assert_eq!(r.shown.as_ref().unwrap().number, 1);
+        assert_eq!(cx.forced.len(), 1);
+        *cx.needs_redraw = false;
+        r.on_gesture(Gesture::Tap(Point::new(636, 848)), &mut cx);
+        assert!(*cx.needs_redraw);
+        let slider = match &r.overlay {
+            Overlay::Menu(menu) => menu.progress.rect(),
+            _ => panic!("menu did not open"),
+        };
+        for g in [Gesture::Down(slider.center()), Gesture::Move(Point::new(slider.right(), slider.center().y))] {
+            *cx.needs_redraw = false;
+            r.on_gesture(g, &mut cx);
+            assert!(*cx.needs_redraw, "slider must update before release");
+        }
+    }
+    #[test]
     fn failed_opens_keep_state_successful_presentation_clears_flags_and_saves_preserve_later_flags()
     -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("verso-reader-library-{}", std::process::id()));
@@ -446,6 +528,7 @@ mod tests {
             light_request: &mut request,
             toast: &mut toast,
             forced: &mut forced,
+            needs_redraw: &mut false,
         };
         r.receive(Reply::Error { generation: 1, message: "failed open".into() }, &mut cx);
         r.after_present();

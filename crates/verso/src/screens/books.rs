@@ -307,6 +307,7 @@ impl Books {
             return;
         }
         if let Some(snapshot) = self.pending.take() {
+            cx.redraw();
             for error in &snapshot.errors {
                 if !self.errors.contains(error) {
                     log::warn!("{error}");
@@ -769,6 +770,9 @@ impl Screen for Books {
             }
             return Action::None;
         }
+        // Library controls own their press/capture state, including gestures
+        // that return no action. Reader gestures invalidate independently.
+        cx.redraw();
         if let Some(details) = &mut self.details {
             if details.on_gesture(&g, cx) {
                 self.details = None;
@@ -970,6 +974,9 @@ impl Screen for Books {
     }
     fn on_background(&mut self, cx: &mut EventCx) {
         if let Some(snapshot) = self.library.take() {
+            if self.reader.is_none() {
+                cx.redraw(); // Scan/cover status can change before applying the index.
+            }
             self.scanning = snapshot.scanning;
             self.working = snapshot.working;
             self.pending = Some(snapshot);
@@ -1139,6 +1146,7 @@ mod tests {
             light_request: &mut None,
             toast: &mut None,
             forced: &mut Vec::new(),
+            needs_redraw: &mut false,
         });
     }
     fn tap(books: &mut Books, p: Point, cx: &mut EventCx) {
@@ -1540,6 +1548,7 @@ mod tests {
             light_request: &mut light_request,
             toast: &mut toast,
             forced: &mut forced,
+            needs_redraw: &mut false,
         };
         books.on_gesture(Gesture::Down(point), &mut cx);
         books.pending =

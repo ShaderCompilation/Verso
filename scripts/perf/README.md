@@ -4,6 +4,43 @@ Sources used for the [2026-11-11 comparison](../../docs/research/performance.md)
 These are measurement components, not a deploy command. Running a reader still
 requires the launcher and device-readiness checks in `AGENTS.md`.
 
+## Redraw comparison
+
+`redraw.py` runs 24 text turns through the existing launcher with isolated state
+under `/mnt/us/verso/redraw-check`. It never replaces the installed binary or
+normal settings. Supply the before/after ARM binaries, a book already on-device,
+and both probes built below. Run from the repository root with the Kindle awake
+and other readers closed. This script injects touches while Verso owns input,
+and checks launcher/UI restoration even if measurement validation fails.
+
+```sh
+python3 scripts/perf/redraw.py before /tmp/before/verso \
+  --book /mnt/us/verso/testbooks/BOOK.epub --probe /tmp/probe \
+  --preload /tmp/probe.so --output /tmp/redraw/before-1.json
+python3 scripts/perf/redraw.py after /tmp/after/verso \
+  --book /mnt/us/verso/testbooks/BOOK.epub --probe /tmp/probe \
+  --preload /tmp/probe.so --output /tmp/redraw/after-1.json
+python3 scripts/perf/analyze-redraw.py /tmp/redraw/before-1.json \
+  /tmp/redraw/after-1.json --output /tmp/redraw/results
+```
+
+Coordinates assume our 1272 × 1696 Paperwhite and current layout. Every tap must
+produce one successful full-screen update. Comparison rejects different final
+page hashes or waveform sequences. Menu close must restore the same framebuffer.
+Use a sufficiently long book; the script seeks to the same slider position before
+each run. It retains per-run state/logs on-device for diagnosis. Local JSON holds
+numeric traces, frame timings, touch positions, CPU records and hashes only.
+
+The 2026-11-11 baseline is `56d9aff` plus only the `App::frame` trace enhancement
+that appends the number of updates; apply that logging change to both builds.
+Both use `RUST_LOG=info,verso=debug,verso::app=trace` and the same ioctl observer.
+CPU snapshots surround only the controlled turn interval, including prefetch,
+presentation and saving. Thread/process CPU uses the device's previously measured
+100 Hz accounting. The analyzer uses nearest-rank p95. Draw/diff totals measure
+elapsed time inside `App::frame`, including scheduling; they are not CPU time.
+Request latency starts at injected touch release and ends at SEND_UPDATE; it is
+not optical response. See [results](../../docs/research/redraw-optimization.md).
+
 ## Build
 
 ```sh

@@ -36,6 +36,8 @@ pub trait Screen {
     /// only what actually changed reaches the display.
     fn draw(&mut self, cx: &mut DrawCx);
 
+    /// Request `cx.redraw()` for visual changes, including pressed controls.
+    /// Stack actions, toasts and explicit refreshes invalidate automatically.
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action;
 
     /// True if a focused field or its text-entry overlay consumed the input.
@@ -67,7 +69,8 @@ pub trait Screen {
         Action::None
     }
 
-    /// A worker has new results. Return true if the screen needs drawing.
+    /// A worker has new results. Request `cx.redraw()` only for visual changes;
+    /// consuming cache-only or stale results does not invalidate the screen.
     fn on_background(&mut self, _cx: &mut EventCx) {}
     /// Called after pixels reach the platform, before waiting for input.
     fn after_present(&mut self) {}
@@ -94,17 +97,25 @@ pub struct EventCx<'a> {
     pub light_request: &'a mut Option<Frontlight>,
     pub(crate) toast: &'a mut Option<Toast>,
     pub(crate) forced: &'a mut Vec<Update>,
+    pub(crate) needs_redraw: &'a mut bool,
 }
 
 impl EventCx<'_> {
+    /// Invalidate the screen after changing its visible state.
+    pub fn redraw(&mut self) {
+        *self.needs_redraw = true;
+    }
+
     /// Shows a short message at the bottom of the screen.
     pub fn toast(&mut self, text: impl Into<String>, icon: Option<Icon>) {
         *self.toast = Some(Toast::new(text, icon, self.now));
+        self.redraw();
     }
 
     /// Refreshes `rect` with `mode` in the next frame, even if nothing changed
     /// there (e.g. a full flash to clear ghosting).
     pub fn refresh(&mut self, rect: Rect, mode: RefreshMode) {
         self.forced.push(Update { rect, mode });
+        self.redraw();
     }
 }

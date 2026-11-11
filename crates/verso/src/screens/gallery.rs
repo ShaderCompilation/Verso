@@ -374,6 +374,7 @@ impl Screen for Gallery {
     }
 
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        cx.redraw();
         if let Some(sheet) = &mut self.sheet {
             if sheet.on_gesture(&g, cx) {
                 self.sheet = None;

@@ -125,7 +125,11 @@ impl App {
                 self.fast_debt.push(u.rect);
             }
         }
-        log::trace!("frame: drawn in {drawn:?}, diffed in {:?}", started.elapsed() - drawn);
+        log::trace!(
+            "frame: drawn in {drawn:?}, diffed in {:?}, {} update(s)",
+            started.elapsed() - drawn,
+            updates.len()
+        );
         updates
     }
 
@@ -138,8 +142,10 @@ impl App {
             self.toast_touch = self.toast.is_some() && self.toast_rect.contains(g.pos());
         } else if g.ends_touch() {
             self.touch_down = false;
+            // Fast pressed/drag feedback needs a grayscale cleanup even when
+            // the release itself changes no pixels.
+            self.needs_redraw |= !self.fast_debt.is_empty();
         }
-        self.needs_redraw = true;
         if let Some(mut prompt) = self.usb_prompt.take() {
             let mut action = Action::None;
             self.with_screen(|_, cx| {
@@ -148,7 +154,7 @@ impl App {
             });
             match action {
                 Action::Exit => self.exit = true,
-                Action::Pop => {}
+                Action::Pop => self.needs_redraw = true,
                 _ => self.usb_prompt = Some(prompt),
             }
             return;
@@ -159,6 +165,7 @@ impl App {
                 self.toast_touch = false;
                 if matches!(g, Gesture::Tap(_)) {
                     self.toast = None;
+                    self.needs_redraw = true;
                 }
             }
             return;
@@ -234,7 +241,6 @@ impl App {
         if self.asleep {
             return;
         }
-        self.needs_redraw = true;
         self.with_screen(|screen, cx| {
             screen.on_background(cx);
             Action::None
@@ -325,12 +331,17 @@ impl App {
             light_request: &mut self.light_request,
             toast: &mut self.toast,
             forced: &mut self.forced,
+            needs_redraw: &mut self.needs_redraw,
         };
         let action = f(screen.as_mut(), &mut cx);
         match action {
             Action::None => {}
-            Action::Push(screen) => self.stack.push(screen),
+            Action::Push(screen) => {
+                self.stack.push(screen);
+                self.needs_redraw = true;
+            }
             Action::Pop => {
+                self.needs_redraw = true;
                 self.stack.pop();
                 if self.stack.is_empty() {
                     self.exit = true;
@@ -385,6 +396,102 @@ mod tests {
                 cover,
             }),
         )
+    }
+    #[test]
+    fn unchanged_gestures_and_background_wakeups_do_not_draw() {
+        let mut app = book_app(false);
+        app.frame();
+        let p = crate::geom::Point::new(500, 400);
+        for g in [Gesture::Down(p), Gesture::Move(p), Gesture::Cancel(p), Gesture::Tap(p)] {
+            app.on_gesture(g);
+            assert!(!app.needs_redraw);
+            assert!(app.frame().is_empty());
+        }
+        app.on_background();
+        assert!(!app.needs_redraw);
+        app.with_screen(|_, cx| {
+            cx.redraw();
+            Action::None
+        });
+        assert!(app.needs_redraw);
+        app.frame();
+        app.with_screen(|_, cx| {
+            cx.refresh(Rect::new(0, 0, 20, 20), RefreshMode::Ui);
+            Action::None
+        });
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 20, 20), mode: RefreshMode::Ui }]);
+    }
+    #[test]
+    fn touch_release_cleans_fast_debt_without_a_screen_change() {
+        let mut app = book_app(false);
+        app.frame();
+        let p = crate::geom::Point::new(300, 400);
+        let rect = Rect::new(0, 0, 20, 20);
+        app.on_gesture(Gesture::Down(p));
+        app.fast_debt.push(rect);
+        app.on_gesture(Gesture::Move(p));
+        assert!(app.frame().is_empty());
+        app.on_gesture(Gesture::End(p));
+        assert_eq!(app.frame(), vec![Update { rect, mode: RefreshMode::Ui }]);
+        assert!(app.fast_debt.is_empty());
+    }
+    #[test]
+    fn toasts_invalidate_on_show_dismiss_and_expiry() {
+        let mut app = book_app(false);
+        app.frame();
+        let show = |app: &mut App| {
+            app.with_screen(|_, cx| {
+                cx.toast("Saved", None);
+                Action::None
+            });
+            assert!(!app.frame().is_empty());
+        };
+        show(&mut app);
+        let p = app.toast_rect.center();
+        app.on_gesture(Gesture::Down(p));
+        assert!(!app.needs_redraw);
+        app.on_gesture(Gesture::Tap(p));
+        assert!(app.toast.is_none());
+        assert!(!app.frame().is_empty());
+        show(&mut app);
+        app.on_tick(app.toast.as_ref().unwrap().until);
+        assert!(app.toast.is_none());
+        assert!(!app.frame().is_empty());
+    }
+    #[test]
+    fn usb_controls_keep_immediate_press_and_cancel_feedback() {
+        let mut app = book_app(false);
+        app.frame();
+        app.on_usb(true);
+        app.frame();
+        let p = crate::geom::Point::new(300, 800 - app.theme.mm(12.0) + app.theme.button_h / 2);
+        app.on_gesture(Gesture::Down(p));
+        assert!(app.frame().iter().any(|u| u.mode == RefreshMode::Fast));
+        app.on_gesture(Gesture::Cancel(p));
+        assert!(app.frame().iter().any(|u| u.mode == RefreshMode::Ui));
+        assert!(app.usb_prompt.is_some());
+        app.on_gesture(Gesture::Down(p));
+        app.frame();
+        app.on_gesture(Gesture::Tap(p));
+        assert!(!app.frame().is_empty());
+        assert!(app.usb_prompt.is_none());
+    }
+    #[test]
+    fn stack_changes_invalidate_without_a_screen_request() {
+        let mut app = book_app(false);
+        app.frame();
+        app.with_screen(|_, _| {
+            Action::Push(Box::new(TimedScreen {
+                ticks: Rc::new(Cell::new(0)),
+                backgrounds: Rc::new(Cell::new(0)),
+                due: Instant::now() + Duration::from_secs(60),
+            }))
+        });
+        assert!(app.needs_redraw);
+        assert!(!app.frame().is_empty());
+        app.with_screen(|_, _| Action::Pop);
+        assert!(app.needs_redraw);
+        assert!(!app.frame().is_empty());
     }
     #[test]
     fn covers_do_not_replace_the_awake_frame_and_native_is_a_safe_fallback() {
