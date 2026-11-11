@@ -162,7 +162,9 @@ impl Platform for Kindle {
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
-            if QUIT.load(Ordering::Relaxed) {
+            // A failed persistence barrier can refuse this exit. Consume the
+            // request once so input remains usable and the user can retry.
+            if QUIT.swap(false, Ordering::Relaxed) {
                 return Ok(Some(Event::Quit));
             }
             if let Ok(e) = self.power_rx.try_recv() {

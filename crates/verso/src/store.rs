@@ -1,4 +1,5 @@
 //! Small, versioned JSON records. Rename replaces a complete file atomically.
+pub mod position;
 use crate::document::{Position, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 use crate::library::{LibraryIndex, Sort};
@@ -86,7 +87,10 @@ impl Store {
         read(&self.book_path(id)).unwrap_or_default()
     }
     pub fn save_book(&self, id: &str, s: &BookState) -> Result<()> {
-        atomic(&self.book_path(id), s)
+        let started = std::time::Instant::now();
+        let result = atomic(&self.book_path(id), s);
+        log::debug!("position write: {:?}, ok={}", started.elapsed(), result.is_ok());
+        result
     }
     pub fn library(&self) -> LibraryIndex {
         read::<LibraryIndex>(&self.root.join("library.json"))

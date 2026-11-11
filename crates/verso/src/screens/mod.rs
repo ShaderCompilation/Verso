@@ -80,8 +80,9 @@ pub trait Screen {
     /// Called after pixels reach the platform, before waiting for input.
     fn after_present(&mut self) {}
     /// Save before a normal shutdown.
-    fn on_quit(&mut self) {
+    fn on_quit(&mut self) -> anyhow::Result<()> {
         self.on_sleep();
+        Ok(())
     }
 
     /// The device is going to sleep.

@@ -11,7 +11,10 @@ use crate::screens::contents::{Contents, ContentsEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
 use crate::screens::{Action, EventCx, Screen};
-use crate::store::{Settings, Store};
+use crate::store::{
+    Settings, Store,
+    position::{Presented, Writer},
+};
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK2, PAPER, Theme};
 use crate::ui::widget::DrawCx;
@@ -39,7 +42,8 @@ pub struct Reader {
     anchor: Position,
     turn_pending: bool,
     save_pending: bool,
-    fresh_open: bool,
+    persistence: Writer,
+    save_error: Option<String>,
     error: Option<String>,
 }
 enum Overlay {
@@ -68,6 +72,7 @@ impl Reader {
         cache.reset(generation);
         Self {
             screen,
+            persistence: Writer::new(store.clone(), id.clone(), worker.waker()),
             worker,
             store,
             id,
@@ -86,7 +91,7 @@ impl Reader {
             anchor,
             turn_pending: false,
             save_pending: false,
-            fresh_open: true,
+            save_error: None,
             error: None,
         }
     }
@@ -218,28 +223,35 @@ impl Reader {
         let Some(page) = &self.shown else {
             return;
         };
-        let mut state = self.store.book(&self.id);
-        state.presented(
-            page.position.clone(),
-            page.number,
-            page.progress,
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
-            self.fresh_open,
-        );
-        match self.store.save_book(&self.id, &state) {
-            Ok(()) => {
-                self.save_pending = false;
-                self.fresh_open = false;
-            }
+        let position = Presented {
+            position: page.position.clone(),
+            page: page.number,
+            progress: page.progress,
+            at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+        };
+        match self.persistence.save(position) {
+            Ok(()) => self.save_pending = false,
             Err(e) => {
-                log::error!("saving position: {e:#}");
-                self.error = Some("Couldn't save your place".into());
+                self.save_error = Some(format!("{e:#}"));
+                self.worker.waker().wake();
             }
         }
     }
-    pub fn close(&mut self) {
-        self.save();
+    fn flush_position(&mut self) -> anyhow::Result<()> {
+        // Only after_present may submit a position. A page received immediately
+        // before sleep/close may not have reached the display yet.
+        let result = self.persistence.flush();
+        self.persistence.drain().for_each(drop);
+        self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
+        if let Err(e) = &result {
+            log::error!("completing position saves: {e:#}");
+        }
+        result.map_err(|e| anyhow::anyhow!("Couldn't save your place: {e:#}"))
+    }
+    pub fn close(&mut self) -> anyhow::Result<()> {
+        self.flush_position()?;
         self.worker.send(Command::Close);
+        Ok(())
     }
 }
 impl Screen for Reader {
@@ -279,9 +291,12 @@ impl Screen for Reader {
             Overlay::Fonts(fonts) => fonts.draw(cx),
             Overlay::Contents(contents) => contents.draw(cx),
         }
-        if self.laying_out || self.layout_at.is_some() || self.error.is_some() {
-            let message =
-                self.error.as_deref().unwrap_or(if self.shown.is_some() { "Laying out…" } else { "Opening book…" });
+        if self.laying_out || self.layout_at.is_some() || self.error.is_some() || self.save_error.is_some() {
+            let message = self
+                .error
+                .as_deref()
+                .or(self.save_error.as_ref().map(|_| "Couldn't save your place"))
+                .unwrap_or(if self.shown.is_some() { "Laying out…" } else { "Opening book…" });
             let width = self.screen.w - 2 * t.margin;
             let r = Rect::new(t.margin, t.mm(16.0), width, t.mm(10.0));
             cx.fill(r, PAPER);
@@ -297,8 +312,13 @@ impl Screen for Reader {
         match &mut self.overlay {
             Overlay::Menu(menu) => match menu.on_gesture(&g) {
                 Some(MenuEvent::Books) => {
-                    self.close();
-                    return Action::Pop;
+                    return match self.close() {
+                        Ok(()) => Action::Pop,
+                        Err(e) => {
+                            cx.toast(e.to_string(), None);
+                            Action::None
+                        }
+                    };
                 }
                 Some(MenuEvent::Close) => self.overlay = Overlay::None,
                 Some(MenuEvent::Contents) => {
@@ -405,16 +425,32 @@ impl Screen for Reader {
         }
         Action::None
     }
+    fn on_background(&mut self, cx: &mut EventCx) {
+        let had_error = self.save_error.is_some();
+        for result in self.persistence.drain() {
+            self.save_error = result.err().map(|e| format!("{e:#}"));
+            if self.save_error.is_some() {
+                // Report even a failure followed by a successful later save
+                // in this same batch of worker replies.
+                cx.toast("Couldn't save your place", None);
+            }
+        }
+        if self.save_error.is_some() {
+            cx.toast("Couldn't save your place", None);
+        } else if had_error {
+            cx.redraw();
+        }
+    }
     fn after_present(&mut self) {
         self.save();
     }
     fn on_sleep(&mut self) {
-        self.save();
+        let _ = self.flush_position();
         // Dropping the controls cancels held steppers and slider drags.
         self.overlay = Overlay::None;
     }
-    fn on_quit(&mut self) {
-        self.save();
+    fn on_quit(&mut self) -> anyhow::Result<()> {
+        self.flush_position()
     }
 }
 
@@ -471,6 +507,7 @@ mod tests {
             // The next cached turn must bypass comparison even after an overlay.
             app.on_gesture(Gesture::Tap(Point::new(550, 400)));
             assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Page }]);
+            app.after_present();
             let second = app.canvas().gray_data().to_vec();
             assert_ne!(first, second);
             app.on_usb(true);
@@ -625,6 +662,7 @@ mod tests {
         // A render reply alone must not overwrite the old place before presentation.
         assert_eq!(store.book("book").position.0, "old");
         r.after_present();
+        r.flush_position()?;
         let mut state = store.book("book");
         assert!(!state.finished && !state.hidden_from_continue);
         assert!(state.last_opened > 10);
@@ -633,8 +671,59 @@ mod tests {
         r.target = 1;
         r.receive(Reply::Page(page(1)), &mut cx);
         r.after_present();
+        r.flush_position()?;
         assert!(store.book("book").hidden_from_continue);
         assert_eq!(store.book("book").position.0, "page-1");
+        // Cached neighbours, stale generations and an undisplayed target must
+        // not replace the last submitted position at any lifecycle barrier.
+        r.receive(Reply::Page(page(2)), &mut cx);
+        let mut stale = (*page(0)).clone();
+        stale.generation = 0;
+        r.receive(Reply::Page(Arc::new(stale)), &mut cx);
+        r.target = 3;
+        r.receive(Reply::Page(page(3)), &mut cx);
+        r.on_sleep();
+        assert_eq!(store.book("book").page, 1);
+        r.on_quit()?;
+        assert_eq!(store.book("book").page, 1);
+        r.close()?;
+        assert_eq!(store.book("book").page, 1);
+        r.after_present();
+        r.on_sleep();
+        assert_eq!(store.book("book").page, 3);
+        r.target = 4;
+        r.receive(Reply::Page(page(4)), &mut cx);
+        r.after_present();
+        r.on_quit()?;
+        assert_eq!(store.book("book").page, 4);
+        r.target = 5;
+        r.receive(Reply::Page(page(5)), &mut cx);
+        r.after_present();
+        r.close()?;
+        assert_eq!(store.book("book").page, 5);
+
+        // An actual filesystem failure is visible, blocks close/exit, and
+        // survives sleep until recovery. Retrying saves the latest display.
+        let backup = root.with_extension("backup");
+        std::fs::rename(&root, &backup)?;
+        std::fs::write(&root, b"blocked directory")?;
+        r.target = 6;
+        r.receive(Reply::Page(page(6)), &mut cx);
+        r.after_present();
+        assert!(r.persistence.flush().is_err());
+        r.on_background(&mut cx);
+        assert!(cx.toast.is_some());
+        assert!(r.save_error.is_some());
+        assert!(r.close().is_err());
+        assert!(r.on_quit().is_err());
+        r.on_sleep();
+        assert!(r.save_error.is_some());
+        std::fs::remove_file(&root)?;
+        std::fs::rename(&backup, &root)?;
+        r.close()?;
+        assert!(r.save_error.is_none());
+        assert_eq!(store.book("book").page, 6);
+        drop(r);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

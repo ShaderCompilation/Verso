@@ -973,6 +973,9 @@ impl Screen for Books {
         self.reader.as_mut().map_or(Action::None, |r| r.on_tick(cx))
     }
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Some(r) = &mut self.reader {
+            r.on_background(cx);
+        }
         if let Some(snapshot) = self.library.take() {
             if self.reader.is_none() {
                 cx.redraw(); // Scan/cover status can change before applying the index.
@@ -1041,10 +1044,11 @@ impl Screen for Books {
             }
         }
     }
-    fn on_quit(&mut self) {
+    fn on_quit(&mut self) -> anyhow::Result<()> {
         if let Some(r) = &mut self.reader {
-            r.on_quit();
+            r.on_quit()?;
         }
+        Ok(())
     }
 }
 

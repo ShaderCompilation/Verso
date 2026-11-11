@@ -265,10 +265,19 @@ impl App {
             s.after_present();
         }
     }
-    pub fn on_quit(&mut self) {
+    /// Refuse a normal exit if durable saves failed, so the error remains
+    /// visible and the reader can retry rather than silently losing its place.
+    pub fn on_quit(&mut self) -> bool {
         for s in &mut self.stack {
-            s.on_quit();
+            if let Err(e) = s.on_quit() {
+                log::error!("exit: {e:#}");
+                self.toast = Some(Toast::new(e.to_string(), None, Instant::now()));
+                self.exit = false;
+                self.needs_redraw = true;
+                return false;
+            }
         }
+        true
     }
     pub fn light_request(&mut self) -> Option<Frontlight> {
         self.light_request.take()
@@ -372,6 +381,29 @@ impl App {
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+    #[test]
+    fn failed_exit_keeps_the_app_and_error_visible_for_retry() {
+        struct FailsOnce(bool);
+        impl Screen for FailsOnce {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn on_quit(&mut self) -> anyhow::Result<()> {
+                anyhow::ensure!(std::mem::replace(&mut self.0, true), "Couldn't save your place");
+                Ok(())
+            }
+        }
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(FailsOnce(false)));
+        app.frame();
+        app.exit = true;
+        assert!(!app.on_quit());
+        assert!(!app.wants_exit());
+        assert!(app.toast.is_some());
+        assert!(!app.frame().is_empty());
+        assert!(app.on_quit());
+    }
     struct BookScreen {
         touches: Rc<Cell<usize>>,
         backgrounds: Rc<Cell<usize>>,

@@ -167,20 +167,22 @@ fn run() -> Result<()> {
         if !updates.is_empty() {
             let t = Instant::now();
             platform.present(app.canvas(), &updates)?;
+            let save_started = Instant::now();
             app.after_present();
+            log::debug!("after_present: {:?}", save_started.elapsed());
             log::debug!("presented {} update(s) in {:?}: {updates:?}", updates.len(), t.elapsed());
             if first_frame {
                 log::info!("first frame on screen {:?} after start", started.elapsed());
                 first_frame = false;
             }
         }
-        if quit {
-            log::info!("quit requested");
-            break;
-        }
-        if app.wants_exit() {
-            log::info!("exit requested");
-            break;
+        if quit || app.wants_exit() {
+            if app.on_quit() {
+                log::info!("exit requested");
+                break;
+            }
+            quit = false;
+            continue;
         }
         if app.has_pending_work() {
             // Its "please wait" frame is on screen now; do the slow part.
@@ -261,7 +263,6 @@ fn run() -> Result<()> {
         app.on_tick(now);
     }
 
-    app.on_quit();
     platform.wait_for_complete()?;
     log::info!("bye");
     Ok(())
