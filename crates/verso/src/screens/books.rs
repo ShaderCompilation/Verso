@@ -1507,6 +1507,44 @@ mod tests {
     }
 
     #[test]
+    fn failed_open_from_home_returns_home_and_leaves_history_unchanged() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-failed-open")?;
+        let index = store.library();
+        for (i, b) in index.books.iter().take(3).enumerate() {
+            store.save_book(
+                &b.id,
+                &BookState {
+                    position: crate::document::Position("exact".into()),
+                    last_opened: i as u64 + 1,
+                    ..Default::default()
+                },
+            )?;
+        }
+        store.rebuild_home_summary(&index)?;
+        let before = std::fs::read(root.join("home.json"))?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        assert_eq!(books.continue_id.as_deref(), Some("2"));
+        with_cx(&t, screen, |cx| {
+            // Open the oldest recent book, then fail before any page is shown.
+            books.open("0".into(), cx);
+            let reader = books.reader.as_mut().unwrap();
+            reader.receive(Reply::Error { generation: books.generation, message: "fixture open failure".into() }, cx);
+            assert!(reader.failed_open());
+            books.returned(cx);
+            assert!(books.is_home() && books.reader.is_none());
+            assert_eq!(books.home.resume().unwrap().book.id, "2", "a failed open never becomes the resume book");
+            assert!(!books.browsing_ready);
+        });
+        assert_eq!(std::fs::read(root.join("home.json"))?, before, "a failed open adds no history");
+        assert_eq!(store.book("0").last_opened, 1);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn sleep_cover_follows_the_last_book_when_search_or_collections_hide_continue() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("sleep-cover")?;
         let t = Theme::for_dpi(300);

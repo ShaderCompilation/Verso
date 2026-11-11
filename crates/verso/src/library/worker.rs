@@ -885,16 +885,38 @@ mod tests {
         let book = index.books[0].clone();
         let Cover::Ready(key) = book.cover.clone() else { panic!("fixture cover missing") };
         drop(worker);
+        // An older installation with a reading record but no Home summary is
+        // migrated on the worker without changing the authoritative record.
+        let reading = crate::store::BookState {
+            position: crate::document::Position("exact anchor".into()),
+            progress: 2500,
+            last_opened: 5,
+            ..Default::default()
+        };
+        store.save_book(&book.id, &reading)?;
+        let _ = std::fs::remove_file(root.join("state/home.json"));
+        let record = std::fs::read(root.join("state/books").join(format!("{}.json", book.id)))?;
+        let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
+        finished(&worker);
+        let migrated = worker.take_home().expect("a missing summary is rebuilt and published");
+        assert!(migrated.complete && migrated.resume().is_some_and(|e| e.book.id == book.id));
+        assert_eq!(store.home_summary(), Some(migrated));
+        assert_eq!(std::fs::read(root.join("state/books").join(format!("{}.json", book.id)))?, record);
+        drop(worker);
         // A corrupt, current cache file is reused by the unchanged pass without
         // decoding. The pass publishes no index and writes no library file, but
         // still delivers completion and errors (here an unreadable extra folder).
         std::fs::write(store.cover_path(&key), b"corrupt")?;
         let library_file = root.join("state/library.json");
         let written = std::fs::metadata(&library_file)?.modified()?;
+        let home_file = root.join("state/home.json");
+        let home_written = std::fs::metadata(&home_file)?.modified()?;
         let roots = vec![books.clone(), root.join("missing")];
         let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
         let (content, status) = finished(&worker);
         assert!(content.is_none(), "an unchanged pass publishes no index");
+        assert!(worker.take_home().is_none(), "a complete summary is not rebuilt");
+        assert_eq!(std::fs::metadata(&home_file)?.modified()?, home_written, "nor rewritten");
         assert!(!status.scanning && status.errors.iter().any(|e| e.contains("missing")));
         assert_eq!(std::fs::metadata(&library_file)?.modified()?, written, "an unchanged pass saves nothing");
         assert_eq!(store.library().books[0].cover, Cover::Ready(key.clone()));
@@ -909,6 +931,17 @@ mod tests {
         assert!(worker.take_repaired().is_empty(), "a key is repaired at most once per session");
         assert!(worker.take().is_none(), "an unchanged repair publishes no index");
         assert_eq!(std::fs::metadata(&library_file)?.modified()?, written);
+        drop(worker);
+        // A changed book file gets a new cover key; the stale thumbnail is not reused.
+        let file = std::fs::File::options().write(true).open(books.join("book.epub"))?;
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))?;
+        drop(file);
+        let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
+        let changed = finished(&worker).0.expect("a changed book publishes the index");
+        let Cover::Ready(new_key) = changed.books[0].cover.clone() else { panic!("changed cover missing") };
+        assert_ne!(new_key, key);
+        assert!(covers::load(&store.cover_path(&new_key)).is_ok());
+        assert_eq!(store.book(&book.id).position, reading.position, "changed files keep reading state");
         drop(worker);
         // New and removed files are still discovered and published.
         std::fs::copy(
