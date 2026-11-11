@@ -24,11 +24,33 @@ use crate::ui::widgets::{
     Button, ButtonKind, Grid, GridEvent, IconButton, Keyboard, MenuEvent, Pager, PopupMenu, Segmented, Sheet,
     TextField, TopBar,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-type ImageCache = HashMap<(String, i32, i32), image::GrayImage>;
+/// Decoded covers for the visible view only. A cache file that fails to load is
+/// not retried on every redraw: the title cover is shown and the library worker
+/// is asked once to repair it. A repair reply allows one more load.
+#[derive(Default)]
+struct Thumbnails {
+    images: HashMap<(String, i32, i32), image::GrayImage>,
+    /// (book id, cover key) pairs that failed to load.
+    failed: HashSet<(String, String)>,
+    /// Book ids to send to the library worker after drawing.
+    requests: Vec<String>,
+}
+impl Thumbnails {
+    const LIMIT: usize = 18;
+    fn retain(&mut self, keys: &HashSet<String>) {
+        self.images.retain(|(key, _, _), _| keys.contains(key));
+    }
+    fn clear(&mut self) {
+        self.images.clear();
+    }
+    fn repaired(&mut self, ids: &[String]) {
+        self.failed.retain(|(id, _)| !ids.contains(id));
+    }
+}
 struct SearchSession {
     field: TextField,
     folded: String,
@@ -84,7 +106,7 @@ pub struct Books {
     scanning: bool,
     working: bool,
     errors: Vec<String>,
-    thumbnails: ImageCache,
+    thumbnails: Thumbnails,
     reader: Option<Reader>,
     generation: u64,
     engine_error: Option<String>,
@@ -169,7 +191,7 @@ impl Books {
             scanning: true,
             working: true,
             errors: Vec::new(),
-            thumbnails: HashMap::new(),
+            thumbnails: Thumbnails::default(),
             reader: None,
             generation: 0,
             engine_error: None,
@@ -305,7 +327,7 @@ impl Books {
         }
         self.prioritize();
         // Only the visible grid plus continue card retain decoded images.
-        let keys: std::collections::HashSet<_> = self
+        let keys: HashSet<_> = self
             .grid
             .cells()
             .iter()
@@ -316,7 +338,7 @@ impl Books {
                 _ => None,
             })
             .collect();
-        self.thumbnails.retain(|(key, _, _), _| keys.contains(key));
+        self.thumbnails.retain(&keys);
         log::debug!("startup stage: view books={} elapsed_us={}", self.books.len(), started.elapsed().as_micros());
     }
     fn refresh_home(&mut self, t: &Theme) {
@@ -349,16 +371,16 @@ impl Books {
             0,
         );
         self.prioritize();
-        let keys: std::collections::HashSet<_> = self
+        let keys: HashSet<_> = self
             .home
             .books
             .iter()
             .filter_map(|e| match &e.book.cover {
-                Cover::Ready(key) => Some(key),
+                Cover::Ready(key) => Some(key.clone()),
                 _ => None,
             })
             .collect();
-        self.thumbnails.retain(|(key, _, _), _| keys.contains(key));
+        self.thumbnails.retain(&keys);
     }
     fn prioritize(&self) {
         let mut ids: Vec<_> = self.continue_id.iter().cloned().collect();
@@ -650,19 +672,33 @@ fn path_tail(text: &mut crate::gfx::TextRenderer, path: &str, style: crate::gfx:
     }
     format!("…{}", &path[chars[low]..])
 }
-fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &mut ImageCache) {
+fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &mut Thumbnails) {
     if let Cover::Ready(key) = &book.cover {
         let cache_key = (key.clone(), rect.w, rect.h);
-        if !cache.contains_key(&cache_key)
-            && let Ok(image) = covers::load(&store.cover_path(key))
-            && cache.len() < 18
-        {
-            cache.insert(
-                cache_key.clone(),
-                image::imageops::resize(&image, rect.w as u32, rect.h as u32, image::imageops::FilterType::Triangle),
-            );
+        let failure = (book.id.clone(), key.clone());
+        if !cache.images.contains_key(&cache_key) && !cache.failed.contains(&failure) {
+            match covers::load(&store.cover_path(key)) {
+                Ok(image) => {
+                    // Refresh retains only visible keys; this only guards the bound.
+                    if cache.images.len() >= Thumbnails::LIMIT {
+                        cache.images.clear();
+                    }
+                    let image = image::imageops::resize(
+                        &image,
+                        rect.w as u32,
+                        rect.h as u32,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    cache.images.insert(cache_key.clone(), image);
+                }
+                Err(e) => {
+                    log::warn!("cover cache for {} failed to load: {e:#}", book.id);
+                    cache.failed.insert(failure);
+                    cache.requests.push(book.id.clone());
+                }
+            }
         }
-        if let Some(image) = cache.get(&cache_key) {
+        if let Some(image) = cache.images.get(&cache_key) {
             cx.canvas.blit_gray(rect, image.as_raw(), image.width() as usize);
             return;
         }
@@ -898,6 +934,9 @@ impl Screen for Books {
         if let Some(details) = &mut self.details {
             details.draw(cx);
         }
+        if !self.thumbnails.requests.is_empty() {
+            self.library.repair(std::mem::take(&mut self.thumbnails.requests));
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         if matches!(g, Gesture::Down(_)) {
@@ -1131,6 +1170,14 @@ impl Screen for Books {
     fn on_background(&mut self, cx: &mut EventCx) {
         if let Some(home) = self.library.take_home() {
             self.pending_home = Some(self.store.home_summary().unwrap_or(home));
+        }
+        let repaired = self.library.take_repaired();
+        if !repaired.is_empty() {
+            // Pixels change in place; no item moves beneath a touch or overlay.
+            self.thumbnails.repaired(&repaired);
+            if self.reader.is_none() {
+                cx.redraw();
+            }
         }
         self.apply_pending(cx);
         if let Some(r) = &mut self.reader {
@@ -1672,7 +1719,7 @@ mod tests {
             let id = books.grid_book(books.grid.cells()[0].0).unwrap().id.clone();
             books.open(id.clone(), cx);
             assert!(books.reader.is_some());
-            assert!(books.thumbnails.is_empty());
+            assert!(books.thumbnails.images.is_empty());
             let saved = BookState {
                 position: crate::document::Position("same-anchor".into()),
                 progress: 4321,
@@ -1781,12 +1828,57 @@ mod tests {
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
             let visible: std::collections::HashSet<_> =
                 books.grid.cells().iter().map(|(i, _)| books.grid_book(*i).unwrap().id.clone()).collect();
-            assert_eq!(books.thumbnails.len(), visible.len());
-            assert!(books.thumbnails.keys().all(|(key, _, _)| visible.contains(key)));
+            assert_eq!(books.thumbnails.images.len(), visible.len());
+            assert!(books.thumbnails.images.keys().all(|(key, _, _)| visible.contains(key)));
         }
         books.navigation.folder = None;
         books.refresh(&t);
-        assert!(books.thumbnails.is_empty(), "folder-only pages retain no decoded covers");
+        assert!(books.thumbnails.images.is_empty(), "folder-only pages retain no decoded covers");
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn failed_home_cover_shows_title_requests_one_repair_and_retries_after_reply() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("cover-repair")?;
+        let mut index = store.library();
+        std::fs::create_dir_all(store.cover_path("0").parent().unwrap())?;
+        for (i, b) in index.books.iter_mut().take(3).enumerate() {
+            image::GrayImage::from_pixel(288, 432, image::Luma([128])).save(store.cover_path(&b.id))?;
+            b.cover = Cover::Ready(b.id.clone());
+            store.save_book(
+                &b.id,
+                &BookState {
+                    position: crate::document::Position("anchor".into()),
+                    last_opened: i as u64 + 1,
+                    ..Default::default()
+                },
+            )?;
+        }
+        store.rebuild_home_summary(&index)?;
+        std::fs::write(store.cover_path("1"), b"corrupt")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        assert!(books.is_home());
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        let mut draw = |books: &mut Books| {
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+        };
+        draw(&mut books);
+        assert_eq!(books.thumbnails.images.len(), 2, "only Home's visible covers are decoded");
+        assert!(books.thumbnails.failed.contains(&("1".into(), "1".into())));
+        assert!(books.thumbnails.requests.is_empty(), "the repair request is sent after drawing");
+        books.thumbnails.failed.insert(("2".into(), "missing".into()));
+        draw(&mut books);
+        assert!(books.thumbnails.requests.is_empty() && books.thumbnails.failed.len() == 2, "no reload loop");
+        image::GrayImage::from_pixel(288, 432, image::Luma([128])).save(store.cover_path("1"))?;
+        books.thumbnails.repaired(&["1".into()]);
+        draw(&mut books);
+        assert_eq!(books.thumbnails.images.len(), 3);
+        assert_eq!(books.thumbnails.failed.len(), 1);
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())

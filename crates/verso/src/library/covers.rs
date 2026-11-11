@@ -93,8 +93,22 @@ pub fn sleep_cover(book: &Book, width: u32, height: u32) -> Result<GrayImage> {
     Ok(gray)
 }
 
+/// Reuses a current cache file after a size check, without decoding it. The key
+/// includes the source stamp, so a changed book never matches an old entry.
+/// Visible-load failures go through [`repair`], which decodes the file.
 /// Cache I/O failures are surfaced; absent/unsupported source art is a normal fallback.
 pub fn generate(book: &Book, store: &Store) -> Result<Cover> {
+    let key = key(book);
+    if matches!(&book.cover, Cover::Ready(old) if old == &key && cached(&store.cover_path(&key))) {
+        return Ok(book.cover.clone());
+    }
+    repair(book, store)
+}
+fn cached(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0 && m.len() <= CACHE_LIMIT)
+}
+/// Decodes the cached thumbnail and regenerates it from the source when invalid.
+pub fn repair(book: &Book, store: &Store) -> Result<Cover> {
     let key = key(book);
     if matches!(&book.cover, Cover::Unavailable(old) if old == &key) {
         return Ok(book.cover.clone());
@@ -143,7 +157,12 @@ mod tests {
             book.cover = Cover::Ready(k.clone());
             std::fs::write(store.cover_path(&k), b"broken")?;
             assert_eq!(generate(&book, &store)?, Cover::Ready(k.clone()));
+            assert!(load(&store.cover_path(&k)).is_err(), "unchanged confirmations do not decode");
+            assert_eq!(repair(&book, &store)?, Cover::Ready(k.clone()));
             assert!(load(&store.cover_path(&k)).is_ok());
+            std::fs::write(store.cover_path(&k), b"")?;
+            assert_eq!(generate(&book, &store)?, Cover::Ready(k.clone()));
+            assert!(load(&store.cover_path(&k)).is_ok(), "empty files are regenerated");
             std::fs::remove_file(store.cover_path(&k))?;
             assert_eq!(generate(&book, &store)?, Cover::Ready(k.clone()));
             book.stamp.modified_nanos += 1;

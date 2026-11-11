@@ -29,7 +29,11 @@ struct Shared {
     latest: Option<Snapshot>,
     home_requested: bool,
     latest_home: Option<Summary>,
+    /// Book ids whose visible thumbnail failed to load, and those since repaired.
+    repairs: Vec<String>,
+    repaired: Vec<String>,
 }
+const REPAIR_LIMIT: usize = 32;
 pub struct Worker {
     shared: Arc<(Mutex<Shared>, Condvar)>,
     join: Option<JoinHandle<()>>,
@@ -59,13 +63,30 @@ impl Worker {
                     Ok(summary) => publish_home(summary),
                     Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
                 };
+                // Each cover key is repaired at most once per session; repeated
+                // failures keep the title cover instead of looping.
+                let mut attempted = HashSet::new();
+                let mut repair_requested = |index: &mut LibraryIndex, errors: &mut Vec<String>| {
+                    let ids = std::mem::take(&mut shared.0.lock().unwrap().repairs);
+                    let repaired = repair_covers(index, &ids, &store, &mut attempted, errors);
+                    if !repaired.is_empty() {
+                        shared.0.lock().unwrap().repaired.extend(repaired.iter().map(|&i| index.books[i].id.clone()));
+                        waker.wake();
+                    }
+                    repaired
+                };
                 if store.home_summary().is_none_or(|summary| !summary.complete) {
                     rebuild_home(&index);
                 }
+                let mut last_errors = Vec::new();
                 loop {
-                    let (retry, scan_requested, home_requested) = {
+                    let (retry, scan_requested, home_requested, repairs) = {
                         let mut state = shared.0.lock().unwrap();
-                        while !state.stop && !state.requested && !state.home_requested {
+                        while !state.stop
+                            && !state.requested
+                            && !state.home_requested
+                            && (state.paused || state.repairs.is_empty())
+                        {
                             state = shared.1.wait(state).unwrap();
                         }
                         if state.stop {
@@ -75,12 +96,34 @@ impl Worker {
                             std::mem::take(&mut state.retry),
                             std::mem::take(&mut state.requested),
                             std::mem::take(&mut state.home_requested),
+                            !state.paused && !state.repairs.is_empty(),
                         )
                     };
                     if home_requested {
                         rebuild_home(&index);
                     }
                     if !scan_requested {
+                        // Outside a pass, repairs are published as confirmed changes.
+                        if repairs {
+                            let before = index.clone();
+                            repair_requested(&mut index, &mut last_errors);
+                            if index != before {
+                                if let Err(e) = store.save_library(&index) {
+                                    last_errors.push(format!("Couldn't save covers: {e}"));
+                                }
+                                match store.refresh_home_metadata(&index) {
+                                    Ok(Some(summary)) => publish_home(summary),
+                                    Ok(None) => rebuild_home(&index),
+                                    Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
+                                }
+                                publish(Snapshot {
+                                    index: index.clone(),
+                                    scanning: false,
+                                    working: false,
+                                    errors: last_errors.clone(),
+                                });
+                            }
+                        }
                         continue;
                     }
                     let mut errors = Vec::new();
@@ -123,6 +166,9 @@ impl Worker {
                         if refresh_home {
                             rebuild_home(&index);
                         }
+                        for i in repair_requested(&mut index, &mut errors) {
+                            pending.remove(&i);
+                        }
                         let next = {
                             let mut state = shared.0.lock().unwrap();
                             while state.paused && !state.stop && !state.requested {
@@ -130,6 +176,9 @@ impl Worker {
                             }
                             if state.stop || state.requested {
                                 break;
+                            }
+                            if !state.repairs.is_empty() {
+                                continue;
                             }
                             state
                                 .priority
@@ -204,6 +253,7 @@ impl Worker {
                         Ok(None) => rebuild_home(&index),
                         Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
                     }
+                    last_errors = errors.clone();
                     publish(Snapshot { index: index.clone(), scanning: false, working: false, errors });
                     log::info!("startup stage: background complete elapsed_us={}", startup.elapsed().as_micros());
                 }
@@ -236,6 +286,20 @@ impl Worker {
     pub fn take(&self) -> Option<Snapshot> {
         self.shared.0.lock().unwrap().latest.take()
     }
+    /// Request regeneration of thumbnails whose cache failed to load on screen.
+    pub fn repair(&self, ids: impl IntoIterator<Item = String>) {
+        let mut state = self.shared.0.lock().unwrap();
+        for id in ids {
+            if state.repairs.len() < REPAIR_LIMIT && !state.repairs.contains(&id) {
+                state.repairs.push(id);
+            }
+        }
+        self.shared.1.notify_one();
+    }
+    /// Ids of repaired thumbnails; their visible load can be retried once.
+    pub fn take_repaired(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared.0.lock().unwrap().repaired)
+    }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -245,6 +309,34 @@ impl Drop for Worker {
             let _ = join.join();
         }
     }
+}
+
+/// Returns the indices processed. Unknown, unavailable and already attempted
+/// books are skipped without a reply, so a persistent failure cannot loop.
+fn repair_covers(
+    index: &mut LibraryIndex,
+    ids: &[String],
+    store: &Store,
+    attempted: &mut HashSet<String>,
+    errors: &mut Vec<String>,
+) -> Vec<usize> {
+    let mut repaired = Vec::new();
+    for id in ids {
+        let Some(i) = index.books.iter().position(|b| &b.id == id && b.available) else { continue };
+        if !attempted.insert(covers::key(&index.books[i])) {
+            continue;
+        }
+        match covers::repair(&index.books[i], store) {
+            Ok(cover) => index.books[i].cover = cover,
+            Err(e) => {
+                if errors.len() < 32 {
+                    errors.push(format!("Couldn't cache cover: {e}"));
+                }
+            }
+        }
+        repaired.push(i);
+    }
+    repaired
 }
 
 pub struct Scan {
@@ -583,6 +675,59 @@ mod tests {
         };
         assert!(scan_roots(&[root], &previous, false, &cancelled, |_| published.set(true)).is_none());
         assert!(!published.get(), "a cancelled retained-index rebuild must not publish a checkpoint");
+    }
+
+    #[test]
+    fn unchanged_covers_skip_decoding_and_visible_failures_repair_once() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-cover-repair-{}", std::process::id()));
+        let books = root.join("books");
+        std::fs::create_dir_all(&books)?;
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub"),
+            books.join("book.epub"),
+        )?;
+        let store = Store::at(root.join("state"));
+        fn wait(mut done: impl FnMut() -> bool) {
+            let started = Instant::now();
+            while !done() {
+                assert!(started.elapsed().as_secs() < 20, "worker timed out");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let finished = |worker: &Worker| {
+            let mut last = None;
+            wait(|| {
+                if let Some(snapshot) = worker.take() {
+                    let done = !snapshot.working;
+                    last = Some(snapshot);
+                    return done;
+                }
+                false
+            });
+            last.unwrap().index
+        };
+        let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
+        let index = finished(&worker);
+        let book = index.books[0].clone();
+        let Cover::Ready(key) = book.cover.clone() else { panic!("fixture cover missing") };
+        drop(worker);
+        // A corrupt, current cache file is reused by the unchanged pass without decoding.
+        std::fs::write(store.cover_path(&key), b"corrupt")?;
+        let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
+        assert_eq!(finished(&worker).books[0].cover, Cover::Ready(key.clone()));
+        assert!(covers::load(&store.cover_path(&key)).is_err());
+        // A visible-load failure regenerates it once, outside a pass.
+        worker.repair(["unknown".to_owned(), book.id.clone()]);
+        wait(|| !worker.take_repaired().is_empty());
+        assert!(covers::load(&store.cover_path(&key)).is_ok());
+        std::fs::write(store.cover_path(&key), b"corrupt")?;
+        worker.repair([book.id.clone()]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(worker.take_repaired().is_empty(), "a key is repaired at most once per session");
+        assert!(worker.take().is_none(), "an unchanged repair publishes no index");
+        drop(worker);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
