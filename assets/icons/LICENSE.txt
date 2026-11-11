@@ -1,5 +1,5 @@
-Icons in this folder come from Lucide (https://lucide.dev), lightly adapted
-(stroke colour set to black). They are used under the ISC License:
+Icons in this folder come from Lucide 1.71.0 (https://lucide.dev), lightly adapted
+(stroke colour set to black, whitespace removed). They are used under the ISC License:
 
 ISC License
 
