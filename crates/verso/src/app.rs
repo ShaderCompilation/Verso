@@ -129,7 +129,6 @@ impl App {
             self.diff.commit_full(&self.canvas);
             vec![Update { rect: self.canvas.bounds(), mode }]
         } else {
-            self.canvas.materialize();
             let tiles = self.diff.changed(&self.canvas);
             let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
@@ -529,11 +528,11 @@ mod tests {
         app.frame();
         app.on_sleep();
         assert!(app.draw_sleep_cover(crate::store::SleepScreen::Cover));
-        assert_eq!(&app.canvas.data()[..4], &[119, 119, 119, 255]);
+        assert_eq!(app.canvas.gray_data()[0], 119);
         assert!(app.frame().is_empty());
         app.on_wake();
         assert_eq!(app.frame(), vec![Update { rect: app.canvas.bounds(), mode: RefreshMode::Full }]);
-        assert_eq!(&app.canvas.data()[..4], &[51, 51, 51, 255]);
+        assert_eq!(app.canvas.gray_data()[0], 51);
         assert!(!app.draw_sleep_cover(crate::store::SleepScreen::Amazon));
         assert!(!book_app(false).draw_sleep_cover(crate::store::SleepScreen::Cover));
     }

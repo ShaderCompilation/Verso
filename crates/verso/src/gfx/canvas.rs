@@ -1,107 +1,68 @@
-//! The in-memory drawing surface. Everything is drawn here first; the platform
-//! then copies the changed parts to the screen.
+//! An opaque 8-bit grayscale drawing surface, shared by both backends.
 
-use std::borrow::Cow;
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 
 use crate::geom::Rect;
 
-/// A screen-sized drawing surface. UI drawing uses RGBA for tiny-skia and
-/// resvg; cached pages and their footer can stay in 8-bit grayscale.
+// Straight parts of rounded rectangles use short reusable RGBA bands.
+// Curved caps stay intact to preserve the rasterizer's edge coverage.
+const SHAPE_ROWS: usize = 64;
+
 pub struct Canvas {
-    pixmap: Pixmap,
+    width: u32,
+    height: u32,
     gray: Vec<u8>,
-    gray_active: bool,
+    shape_rgba: Vec<u8>,
 }
 
 impl Canvas {
     /// A white canvas.
     pub fn new(width: u32, height: u32) -> Self {
-        let mut pixmap = Pixmap::new(width, height).expect("canvas size must be non-zero");
-        pixmap.fill(tiny_skia::Color::WHITE);
-        Self { pixmap, gray: Vec::new(), gray_active: false }
+        assert!(width > 0 && height > 0, "canvas size must be non-zero");
+        let len = (width as usize).checked_mul(height as usize).expect("canvas size overflow");
+        Self { width, height, gray: vec![255; len], shape_rgba: Vec::new() }
     }
 
     pub fn width(&self) -> u32 {
-        self.pixmap.width()
+        self.width
     }
-
     pub fn height(&self) -> u32 {
-        self.pixmap.height()
+        self.height
     }
 
     pub fn bounds(&self) -> Rect {
-        Rect::new(0, 0, self.width() as i32, self.height() as i32)
+        Rect::new(0, 0, self.width as i32, self.height as i32)
     }
 
-    /// Fills the whole canvas.
     pub fn fill(&mut self, gray: u8) {
-        self.gray_active = false;
-        self.pixmap.pixels_mut().fill(gray_pixel(gray));
+        self.gray.fill(gray);
     }
 
-    /// Replaces the whole canvas with a cached grayscale page. Footer fills
-    /// and glyph masks can be composed without expanding it to RGBA.
+    /// Replaces the whole canvas with a cached grayscale page.
     pub fn set_gray(&mut self, pixels: &[u8]) {
-        assert_eq!(pixels.len(), self.width() as usize * self.height() as usize);
-        self.gray.clear();
-        self.gray.extend_from_slice(pixels);
-        self.gray_active = true;
+        self.gray.copy_from_slice(pixels);
     }
 
-    pub fn gray_data(&self) -> Option<&[u8]> {
-        self.gray_active.then_some(&self.gray)
-    }
-
-    /// The raw RGBA bytes, row by row. Grayscale frames expand only when an
-    /// RGBA consumer needs them; presentation uses `copy_gray` directly.
-    pub fn data(&self) -> Cow<'_, [u8]> {
-        if self.gray_active {
-            Cow::Owned(self.gray.iter().flat_map(|&g| [g, g, g, 255]).collect())
-        } else {
-            Cow::Borrowed(self.pixmap.data())
-        }
-    }
-
-    /// Switches back to the UI drawing surface, preserving the page underneath.
-    pub fn materialize(&mut self) {
-        if self.gray_active {
-            for (px, &g) in self.pixmap.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&self.gray) {
-                *px = [g, g, g, 255];
-            }
-            self.gray_active = false;
-        }
+    pub fn gray_data(&self) -> &[u8] {
+        &self.gray
     }
 
     pub fn fill_rect(&mut self, rect: Rect, gray: u8) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        if self.gray_active {
-            let width = self.width() as usize;
-            for y in r.y..r.bottom() {
-                let row = y as usize * width;
-                self.gray[row + r.x as usize..row + r.right() as usize].fill(gray);
-            }
-            return;
-        }
-        let px = gray_pixel(gray);
-        let width = self.width() as usize;
-        let data = self.pixmap.pixels_mut();
         for y in r.y..r.bottom() {
-            let row = y as usize * width;
-            data[row + r.x as usize..row + r.right() as usize].fill(px);
+            let row = y as usize * self.width as usize;
+            self.gray[row + r.x as usize..row + r.right() as usize].fill(gray);
         }
     }
 
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
-        self.materialize();
         if let Some(path) = rounded_rect_path(rect, radius) {
-            self.pixmap.fill_path(&path, &paint(gray), FillRule::Winding, Transform::identity(), None);
+            self.draw_path(&path, None, gray, Some(radius));
         }
     }
 
     /// Strokes the outline *inside* `rect`, so it never spills outside it.
     pub fn stroke_rounded_rect(&mut self, rect: Rect, radius: f32, width: f32, gray: u8) {
-        self.materialize();
         let half = width / 2.0;
         let inner = tiny_skia::Rect::from_xywh(
             rect.x as f32 + half,
@@ -110,55 +71,99 @@ impl Canvas {
             rect.h as f32 - width,
         );
         if let Some(path) = inner.and_then(|r| rounded_path(r, (radius - half).max(0.0))) {
-            let stroke = Stroke { width, ..Stroke::default() };
-            self.pixmap.stroke_path(&path, &paint(gray), &stroke, Transform::identity(), None);
+            self.draw_path(&path, Some(&Stroke { width, ..Stroke::default() }), gray, None);
         }
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, gray: u8) {
-        self.materialize();
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
-            self.pixmap.fill_path(&path, &paint(gray), FillRule::Winding, Transform::identity(), None);
+            self.draw_path(&path, None, gray, None);
         }
     }
 
     /// Strokes a circle *inside* radius `r`.
     pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, gray: u8) {
-        self.materialize();
         if let Some(path) = PathBuilder::from_circle(cx, cy, r - width / 2.0) {
-            let stroke = Stroke { width, ..Stroke::default() };
-            self.pixmap.stroke_path(&path, &paint(gray), &stroke, Transform::identity(), None);
+            self.draw_path(&path, Some(&Stroke { width, ..Stroke::default() }), gray, None);
         }
     }
 
-    /// Saves the canvas as a PNG (used for screenshots).
-    #[cfg(feature = "desktop")]
-    pub fn save_png(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let pixels = self.data();
-        tiny_skia::PixmapRef::from_bytes(&pixels, self.width(), self.height()).unwrap().save_png(path)?;
-        Ok(())
+    /// Seed shape-sized RGBA surfaces with the opaque destination before using
+    /// the existing rasterizer, preserving antialiasing and blend rounding.
+    fn draw_path(&mut self, path: &Path, stroke: Option<&Stroke>, gray: u8, corner_radius: Option<f32>) {
+        let b = path.bounds();
+        let outset = stroke.map_or(1.0, |s| s.width / 2.0 + 1.0);
+        let x = (b.left() - outset).floor() as i32;
+        let y = (b.top() - outset).floor() as i32;
+        let bounds = Rect::new(x, y, (b.right() + outset).ceil() as i32 - x, (b.bottom() + outset).ceil() as i32 - y);
+        let Some(area) = bounds.intersect(&self.bounds()) else { return };
+        let band_width = area.w as usize;
+        // Never split a curve across surfaces: clipping the middle of a curve
+        // changes tiny-skia's subdivision and can change edge coverage. Rounded
+        // fills have two curved caps and a straight middle. Circles and strokes
+        // stay in a single shape-sized surface: shifting a stroked cap to a
+        // separate surface can also change edge coverage through rounding.
+        let (mut top_end, bottom_start) = if let Some(radius) = corner_radius {
+            let radius = radius.max(0.0).min(b.width() / 2.0).min(b.height() / 2.0);
+            ((b.top() + radius + outset + 2.0).ceil() as i32, (b.bottom() - radius - outset - 2.0).floor() as i32)
+        } else {
+            (area.bottom(), area.bottom())
+        };
+        if top_end >= bottom_start {
+            top_end = area.bottom();
+        }
+        let paint = paint(gray);
+        let mut top = area.y;
+        while top < area.bottom() {
+            let end = if top < top_end {
+                top_end
+            } else if top < bottom_start {
+                (top + SHAPE_ROWS as i32).min(bottom_start)
+            } else {
+                area.bottom()
+            }
+            .min(area.bottom());
+            let height = (end - top) as usize;
+            let size = band_width * height * 4;
+            if size > self.shape_rgba.capacity() {
+                self.shape_rgba.reserve_exact(size - self.shape_rgba.len());
+            }
+            self.shape_rgba.resize(size, 0);
+            let pixels = &mut self.shape_rgba[..band_width * height * 4];
+            for (row, dst) in pixels.chunks_exact_mut(band_width * 4).enumerate() {
+                let offset = (top as usize + row) * self.width as usize + area.x as usize;
+                for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&self.gray[offset..offset + band_width]) {
+                    *px = [g, g, g, 255];
+                }
+            }
+            let mut surface = PixmapMut::from_bytes(pixels, band_width as u32, height as u32).unwrap();
+            let transform = Transform::from_translate(-area.x as f32, -top as f32);
+            if let Some(stroke) = stroke {
+                surface.stroke_path(path, &paint, stroke, transform, None);
+            } else {
+                surface.fill_path(path, &paint, FillRule::Winding, transform, None);
+            }
+            for (row, src) in pixels.chunks_exact(band_width * 4).enumerate() {
+                let offset = (top as usize + row) * self.width as usize + area.x as usize;
+                for (out, px) in self.gray[offset..offset + band_width].iter_mut().zip(src.as_chunks::<4>().0) {
+                    *out = px[0];
+                }
+            }
+            top = end;
+        }
+        // Large outline surfaces are temporary. Retain only a small scratch
+        // allocation between shapes/frames, including during cached page turns.
+        if self.shape_rgba.capacity() > self.width as usize * SHAPE_ROWS * 4 {
+            self.shape_rgba = Vec::new();
+        }
     }
 
     /// Blends a single-channel coverage mask (0 = none, 255 = full) onto the
-    /// canvas in the given gray. Used for glyphs and icons. `x`/`y` is where the
-    /// mask's top-left corner goes; anything outside `clip` is skipped.
-    #[allow(clippy::too_many_arguments)] // mask geometry, colour and clipping are independent
+    /// canvas in the given gray. Used for glyphs and icons.
+    #[allow(clippy::too_many_arguments)]
     pub fn blend_mask(&mut self, x: i32, y: i32, w: u32, h: u32, mask: &[u8], gray: u8, clip: Rect) {
         let Some(clip) = clip.intersect(&self.bounds()) else { return };
         let Some(area) = Rect::new(x, y, w as i32, h as i32).intersect(&clip) else { return };
-        let width = self.width() as usize;
-        if self.gray_active {
-            for py in area.y..area.bottom() {
-                let mrow = (py - y) as usize * w as usize;
-                for px in area.x..area.right() {
-                    let a = mask[mrow + (px - x) as usize] as u32;
-                    let out = &mut self.gray[py as usize * width + px as usize];
-                    *out = ((*out as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
-                }
-            }
-            return;
-        }
-        let data = self.pixmap.data_mut();
         for py in area.y..area.bottom() {
             let mrow = (py - y) as usize * w as usize;
             for px in area.x..area.right() {
@@ -166,11 +171,8 @@ impl Canvas {
                 if a == 0 {
                     continue;
                 }
-                let i = (py as usize * width + px as usize) * 4;
-                // The canvas is always opaque, so a plain lerp per channel works.
-                for c in &mut data[i..i + 3] {
-                    *c = ((*c as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
-                }
+                let out = &mut self.gray[py as usize * self.width as usize + px as usize];
+                *out = ((*out as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
             }
         }
     }
@@ -178,42 +180,21 @@ impl Canvas {
     /// Copies an 8-bit grayscale image (`stride` bytes per row) onto the
     /// canvas, with its top-left corner at the top-left of `rect`.
     pub fn blit_gray(&mut self, rect: Rect, src: &[u8], stride: usize) {
-        self.materialize();
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        let width = self.width() as usize;
-        let data = self.pixmap.data_mut();
         for y in r.y..r.bottom() {
             let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
-            let d = (y as usize * width + r.x as usize) * 4;
-            for (px, &g) in
-                data[d..d + r.w as usize * 4].as_chunks_mut::<4>().0.iter_mut().zip(&src[s..s + r.w as usize])
-            {
-                px.copy_from_slice(&[g, g, g, 255]);
-            }
+            let d = y as usize * self.width as usize + r.x as usize;
+            self.gray[d..d + r.w as usize].copy_from_slice(&src[s..s + r.w as usize]);
         }
     }
 
-    /// Copies `rect` into an 8-bit grayscale buffer laid out like the screen
-    /// (`stride` bytes per row). Both backends present through this.
+    /// Copies `rect` into a screen-layout grayscale buffer, preserving padding.
     pub fn copy_gray(&self, rect: Rect, dst: &mut [u8], stride: usize) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        let width = self.width() as usize;
-        if self.gray_active {
-            for y in r.y..r.bottom() {
-                let s = y as usize * width + r.x as usize;
-                let d = y as usize * stride + r.x as usize;
-                dst[d..d + r.w as usize].copy_from_slice(&self.gray[s..s + r.w as usize]);
-            }
-            return;
-        }
-        let src = self.pixmap.data();
         for y in r.y..r.bottom() {
-            let s = (y as usize * width + r.x as usize) * 4;
+            let s = y as usize * self.width as usize + r.x as usize;
             let d = y as usize * stride + r.x as usize;
-            let src_row = &src[s..s + r.w as usize * 4];
-            for (out, px) in dst[d..d + r.w as usize].iter_mut().zip(src_row.as_chunks::<4>().0.iter()) {
-                *out = luma(px[0], px[1], px[2]);
-            }
+            dst[d..d + r.w as usize].copy_from_slice(&self.gray[s..s + r.w as usize]);
         }
     }
 }
@@ -221,19 +202,13 @@ impl Canvas {
 /// Saves an 8-bit grayscale image as a PNG.
 #[cfg(feature = "desktop")]
 pub fn save_gray_png(path: &std::path::Path, width: u32, height: u32, gray: &[u8]) -> anyhow::Result<()> {
-    let mut canvas = Canvas::new(width, height);
-    canvas.blit_gray(canvas.bounds(), gray, width as usize);
-    canvas.save_png(path)
+    image::save_buffer(path, gray, width, height, image::ColorType::L8)?;
+    Ok(())
 }
 
-/// Perceptual brightness of an (opaque) RGB pixel. The weights add up to 256,
-/// so pure grays map to themselves.
+/// Perceptual brightness of an (opaque) RGB pixel. Grays map to themselves.
 pub fn luma(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 77 + g as u32 * 150 + b as u32 * 29) >> 8) as u8
-}
-
-fn gray_pixel(gray: u8) -> tiny_skia::PremultipliedColorU8 {
-    tiny_skia::PremultipliedColorU8::from_rgba(gray, gray, gray, 255).unwrap()
 }
 
 fn paint(gray: u8) -> Paint<'static> {
@@ -275,33 +250,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grayscale_composition_matches_rgba_and_preserves_stride_and_clipping() {
-        let mut gray = Canvas::new(19, 23);
-        let mut rgba = Canvas::new(19, 23);
-        let page: Vec<_> = (0..19 * 23).map(|i| (i % 256) as u8).collect();
-        gray.set_gray(&page);
-        rgba.blit_gray(rgba.bounds(), &page, 19);
-        for c in [&mut gray, &mut rgba] {
-            c.fill_rect(Rect::new(-3, 19, 25, 8), 255);
-            c.blend_mask(-2, 17, 4, 2, &[0, 25, 127, 255, 255, 128, 1, 0], 51, c.bounds());
+    fn bounded_shapes_match_the_full_rgba_rasterizer() {
+        let (w, h) = (371, 289);
+        let mut canvas = Canvas::new(w, h);
+        let page: Vec<_> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        canvas.set_gray(&page);
+        let mut rgba = tiny_skia::Pixmap::new(w, h).unwrap();
+        for (px, &g) in rgba.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&page) {
+            *px = [g, g, g, 255];
         }
-        assert!(gray.gray_data().is_some());
-        let mut a = vec![77; 24 * 23];
-        let mut b = a.clone();
-        let region = Rect::new(-1, 15, 22, 20);
-        gray.copy_gray(region, &mut a, 24);
-        rgba.copy_gray(region, &mut b, 24);
-        assert_eq!(a, b);
-        assert_eq!(gray.data(), rgba.data());
-        // Rounded UI drawing must materialize the correct underlying page.
-        gray.fill_rounded_rect(Rect::new(1, 2, 15, 10), 3.0, 119);
-        rgba.fill_rounded_rect(Rect::new(1, 2, 15, 10), 3.0, 119);
-        assert!(gray.gray_data().is_none());
-        assert_eq!(gray.data(), rgba.data());
-        gray.set_gray(&page);
-        assert_eq!(gray.gray_data(), Some(page.as_slice()), "restoring the page removes overlays");
-        gray.fill(255);
-        assert_eq!(gray.data(), Canvas::new(19, 23).data());
+        let paths = [
+            (rounded_rect_path(Rect::new(5, 3, 360, 280), 17.3).unwrap(), Some(17.3)),
+            (rounded_rect_path(Rect::new(-11, -9, 150, 180), 9.8).unwrap(), Some(9.8)),
+            (rounded_rect_path(Rect::new(325, 229, 92, 103), 16.0).unwrap(), Some(16.0)),
+            (rounded_rect_path(Rect::new(29, 51, 300, 56), 28.0).unwrap(), Some(28.0)),
+            (rounded_rect_path(Rect::new(7, 113, 23, 150), 11.5).unwrap(), Some(11.5)),
+            (PathBuilder::from_circle(187.25, 137.75, 103.6).unwrap(), None),
+            (PathBuilder::from_circle(-1.5, 280.5, 28.75).unwrap(), None),
+        ];
+        for (i, (path, radius)) in paths.iter().enumerate() {
+            for width in [None, Some(0.75), Some(1.0), Some(3.5), Some(9.0)] {
+                let stroke = width.map(|width| Stroke { width, ..Stroke::default() });
+                let gray = (i * 47) as u8;
+                canvas.draw_path(path, stroke.as_ref(), gray, radius.filter(|_| stroke.is_none()));
+                if let Some(stroke) = &stroke {
+                    rgba.stroke_path(path, &paint(gray), stroke, Transform::identity(), None);
+                } else {
+                    rgba.fill_path(path, &paint(gray), FillRule::Winding, Transform::identity(), None);
+                }
+                let expected: Vec<_> = rgba.pixels().iter().map(|p| p.red()).collect();
+                let mismatches: Vec<_> =
+                    canvas.gray.iter().zip(&expected).enumerate().filter(|(_, (a, b))| a != b).take(5).collect();
+                assert!(mismatches.is_empty(), "path {i}, stroke {width:?}: {mismatches:?}");
+            }
+        }
+        assert_eq!(canvas.gray.len(), (w * h) as usize);
+        let mut screen = Canvas::new(1272, 1696);
+        screen.fill_rounded_rect(screen.bounds(), 12.0, 51);
+        screen.stroke_rounded_rect(screen.bounds(), 12.0, 3.0, 0);
+        assert!(screen.shape_rgba.capacity() <= 1272 * SHAPE_ROWS * 4);
+        canvas.set_gray(&page);
+        assert_eq!(canvas.gray_data(), page, "restoring a page removes all shapes");
+    }
+
+    #[test]
+    fn grayscale_masks_preserve_coverage_rounding_and_clipping() {
+        let mut canvas = Canvas::new(260, 2);
+        canvas.fill(119);
+        let mask: Vec<u8> = (0..=255).collect();
+        canvas.blend_mask(2, 0, 256, 1, &mask, 51, canvas.bounds());
+        assert_eq!(&canvas.gray[..4], &[119, 119, 119, 119]);
+        assert_eq!(canvas.gray[2 + 127], 85);
+        assert_eq!(&canvas.gray[257..260], &[51, 119, 119]);
+        assert!(canvas.gray[260..].iter().all(|&g| g == 119));
+        let mut out = vec![77; 264 * 2];
+        canvas.copy_gray(Rect::new(-2, 0, 265, 2), &mut out, 264);
+        assert_eq!(&out[..260], &canvas.gray[..260]);
+        assert_eq!(&out[260..264], &[77; 4]);
     }
 
     #[test]

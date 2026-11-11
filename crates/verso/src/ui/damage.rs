@@ -61,33 +61,20 @@ impl FrameDiff {
 
     /// Compares `canvas` with the last committed frame.
     pub fn changed(&mut self, canvas: &Canvas) -> Tiles {
-        let gray = canvas.gray_data();
-        let rgba = gray.is_none().then(|| canvas.data());
+        let cur = canvas.gray_data();
         let stride = self.width as usize;
-        // UI conversion needs only one row, never another screen-sized frame.
-        let mut converted = if rgba.is_some() { vec![0; stride] } else { Vec::new() };
         let (cols, rows) = ((self.width + TILE - 1) / TILE, (self.height + TILE - 1) / TILE);
         let mut dirty = vec![false; (cols * rows) as usize];
         for (row, tiles) in dirty.chunks_mut(cols as usize).enumerate() {
             let y0 = row * TILE as usize;
             let y1 = (y0 + TILE as usize).min(self.height as usize);
             let band = y0 * stride..y1 * stride;
-            if gray.is_some_and(|cur| cur[band.clone()] == self.prev[band]) {
+            if cur[band.clone()] == self.prev[band] {
                 continue;
             }
             for y in y0..y1 {
                 let line = y * stride..(y + 1) * stride;
-                let a = if let Some(gray) = gray {
-                    &gray[line.clone()]
-                } else {
-                    let rgba = rgba.as_ref().unwrap();
-                    for (out, px) in
-                        converted.iter_mut().zip(rgba[y * stride * 4..(y + 1) * stride * 4].as_chunks::<4>().0)
-                    {
-                        *out = crate::gfx::luma(px[0], px[1], px[2]);
-                    }
-                    &converted
-                };
+                let a = &cur[line.clone()];
                 let b = &self.prev[line];
                 if a == b {
                     continue;
@@ -216,7 +203,6 @@ mod tests {
             canvas.fill_rect(Rect::new(0, 80, W as i32, 16), 255);
             diff.commit_full(&canvas);
         }
-        canvas.materialize();
         assert!(!diff.changed(&canvas).any());
         canvas.fill_rect(Rect::new(20, 20, 3, 3), 0);
         let tiles = diff.changed(&canvas);
@@ -224,7 +210,6 @@ mod tests {
         diff.commit(&canvas, &tiles);
         canvas.set_gray(&vec![42; (W * H) as usize]);
         canvas.fill_rect(Rect::new(0, 80, W as i32, 16), 255);
-        canvas.materialize();
         assert_eq!(
             plan(&diff.changed(&canvas), bounds(), &[], Ui, &[]),
             vec![Update { rect: Rect::new(16, 16, 16, 16), mode: Ui }]

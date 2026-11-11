@@ -461,33 +461,31 @@ mod tests {
             let mut app = App::new(&info, Theme::for_dpi(150), Box::new(reader));
             app.refresh_all(RefreshMode::Page);
             assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Page }]);
-            assert!(app.canvas().gray_data().is_some());
-            let first = app.canvas().data().into_owned();
+            let first = app.canvas().gray_data().to_vec();
             for _ in 0..2 {
                 app.on_gesture(Gesture::Down(Point::new(300, 400)));
                 app.on_gesture(Gesture::Tap(Point::new(300, 400)));
                 assert!(!app.frame().is_empty());
             }
-            assert_eq!(&*app.canvas().data(), first);
+            assert_eq!(app.canvas().gray_data(), first);
             // The next cached turn must bypass comparison even after an overlay.
             app.on_gesture(Gesture::Tap(Point::new(550, 400)));
             assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Page }]);
-            assert!(app.canvas().gray_data().is_some());
-            let second = app.canvas().data().into_owned();
+            let second = app.canvas().gray_data().to_vec();
             assert_ne!(first, second);
             app.on_usb(true);
             assert!(!app.frame().is_empty());
             app.on_usb(false);
             assert!(!app.frame().is_empty());
-            assert_eq!(&*app.canvas().data(), second);
+            assert_eq!(app.canvas().gray_data(), second);
             app.on_sleep();
             assert!(app.frame().is_empty());
             app.on_wake();
             assert_eq!(app.frame(), vec![Update { rect: screen, mode: RefreshMode::Full }]);
-            assert_eq!(&*app.canvas().data(), second);
+            assert_eq!(app.canvas().gray_data(), second);
             app.on_tick(Instant::now() + Duration::from_secs(2));
             assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 719, 600, 81), mode: RefreshMode::Ui }]);
-            assert_eq!(&*app.canvas().data(), second);
+            assert_eq!(app.canvas().gray_data(), second);
         }
         std::fs::remove_dir_all(root).unwrap();
     }
