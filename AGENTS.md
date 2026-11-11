@@ -14,6 +14,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 
 - **Commit when you finish an independent piece of work**: an implementation step, a plan phase item, a full feature, a docs update. Don't wait to be asked, and don't pile unrelated changes into one commit.
 - Only commit work that builds (`cargo build`, and `cargo kindle-build` if you touched Kindle-only code). Run tests if there are any for the code you changed.
+- Before any commit check that there are no linter errors - `cargo clippy`, and the code is properly formatted - `cargo fmt`
 - Write short, clear commit messages: a one-line summary, then a few lines on what and why if needed.
 - Never push, force-push, rewrite history, or change the `third_party/FBInk` submodule pointer without asking.
 
