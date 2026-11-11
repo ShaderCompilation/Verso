@@ -81,7 +81,7 @@ def main():
     if args.csv:
         events = [event for result in results.values() for event in result["events"]]
         with args.csv.open("w", newline="") as output:
-            writer = csv.DictWriter(output, fieldnames=["run", "action", "ms_to_request", "waveform", "update_mode", "width", "height"])
+            writer = csv.DictWriter(output, fieldnames=["run", "action", "ms_to_request", "waveform", "update_mode", "width", "height"], lineterminator="\n")
             writer.writeheader()
             writer.writerows(events)
     print(json.dumps(results, indent=2))
