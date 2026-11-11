@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowId};
 
-use super::{DeviceInfo, Event, Frontlight, Platform, RefreshMode, Touch, TouchPhase, Update, Waker};
+use super::{DeviceInfo, Event, Frontlight, Platform, RefreshMode, TextInput, Touch, TouchPhase, Update, Waker};
 use crate::geom::{Point, Rect};
 use crate::gfx::{Canvas, save_gray_png};
 
@@ -70,6 +70,16 @@ impl Platform for Desktop {
         Waker::new(move || {
             let _ = proxy.send_event(());
         })
+    }
+    fn unhandled_text_input(&mut self, input: &TextInput, repeat: bool) {
+        if repeat {
+            return;
+        }
+        match input {
+            TextInput::Insert(text) => self.sim.key(&Key::Character(text.as_str().into())),
+            TextInput::Dismiss => self.sim.key(&Key::Named(NamedKey::Escape)),
+            _ => {}
+        }
     }
     fn frontlight(&mut self) -> Option<Frontlight> {
         Some(self.light)
@@ -193,6 +203,7 @@ impl Sim {
         let size = LogicalSize::new(self.width as f64 * self.start_scale, self.height as f64 * self.start_scale);
         let attrs = Window::default_attributes().with_title("Verso simulator").with_inner_size(size);
         let window = Rc::new(el.create_window(attrs)?);
+        window.set_ime_allowed(true);
         let context = softbuffer::Context::new(window.clone()).map_err(|e| anyhow!("softbuffer: {e}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone()).map_err(|e| anyhow!("softbuffer: {e}"))?;
         self.window = Some(window);
@@ -373,8 +384,24 @@ impl ApplicationHandler for Sim {
                     _ => {}
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
-                self.key(&event.logical_key)
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.events.push_back(Event::TextInput { input: TextInput::Insert(text), repeat: false });
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let input = match event.logical_key {
+                    Key::Named(NamedKey::Backspace) => Some(TextInput::Backspace),
+                    Key::Named(NamedKey::Delete) => Some(TextInput::Delete),
+                    Key::Named(NamedKey::ArrowLeft) => Some(TextInput::Left),
+                    Key::Named(NamedKey::ArrowRight) => Some(TextInput::Right),
+                    Key::Named(NamedKey::Home) => Some(TextInput::Home),
+                    Key::Named(NamedKey::End) => Some(TextInput::End),
+                    Key::Named(NamedKey::Enter) => Some(TextInput::Submit),
+                    Key::Named(NamedKey::Escape) => Some(TextInput::Dismiss),
+                    _ => event.text.map(|text| TextInput::Insert(text.to_string())),
+                };
+                if let Some(input) = input {
+                    self.events.push_back(Event::TextInput { input, repeat: event.repeat });
+                }
             }
             _ => {}
         }

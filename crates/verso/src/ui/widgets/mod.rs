@@ -3,6 +3,7 @@
 
 pub mod button;
 pub mod grid;
+pub mod keyboard;
 pub mod list;
 pub mod pager;
 pub mod popup_menu;
@@ -10,6 +11,7 @@ pub mod segmented;
 pub mod sheet;
 pub mod slider;
 pub mod stepper;
+pub mod text_field;
 pub mod toast;
 pub mod toggle;
 pub mod top_bar;
@@ -26,3 +28,6 @@ pub use stepper::{SideLabel, Step, Stepper};
 pub use toast::Toast;
 pub use toggle::Toggle;
 pub use top_bar::TopBar;
+
+pub use keyboard::Keyboard;
+pub use text_field::TextField;

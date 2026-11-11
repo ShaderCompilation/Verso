@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-use crate::platform::{DeviceInfo, Frontlight, RefreshMode, Update};
+use crate::platform::{DeviceInfo, Frontlight, RefreshMode, TextInput, Update};
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::Gesture;
@@ -139,6 +139,19 @@ impl App {
             return;
         }
         self.with_screen(|screen, cx| screen.on_gesture(g, cx));
+    }
+
+    pub fn on_text_input(&mut self, input: &TextInput) -> bool {
+        if self.asleep {
+            return false;
+        }
+        let mut consumed = false;
+        self.with_screen(|screen, cx| {
+            consumed = screen.on_text_input(input, cx);
+            Action::None
+        });
+        self.needs_redraw |= consumed;
+        consumed
     }
 
     /// The next time `on_tick` should run, if any.

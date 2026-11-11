@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{Frontlight, RefreshMode, Update};
+use crate::platform::{Frontlight, RefreshMode, TextInput, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -36,6 +36,11 @@ pub trait Screen {
     fn draw(&mut self, cx: &mut DrawCx);
 
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action;
+
+    /// True if a focused field or its text-entry overlay consumed the input.
+    fn on_text_input(&mut self, _input: &TextInput, _cx: &mut EventCx) -> bool {
+        false
+    }
 
     /// When `on_tick` wants to be called (timers, e.g. a held stepper).
     fn deadline(&self) -> Option<Instant> {

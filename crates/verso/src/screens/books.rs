@@ -9,9 +9,10 @@ use crate::library::{
     self, Book, Cover, LibraryIndex, Sort,
     collections::{self, Collections, Navigation, Tab},
     covers,
+    search::{self, Scope, SearchCache},
     worker::{Snapshot, Worker as LibraryWorker},
 };
-use crate::platform::RefreshMode;
+use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{BookState, Store};
@@ -19,13 +20,27 @@ use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
-    Button, ButtonKind, Grid, GridEvent, IconButton, MenuEvent, Pager, PopupMenu, Segmented, Sheet, TopBar,
+    Button, ButtonKind, Grid, GridEvent, IconButton, Keyboard, MenuEvent, Pager, PopupMenu, Segmented, Sheet,
+    TextField, TopBar,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 type ImageCache = HashMap<(String, i32, i32), image::GrayImage>;
+struct SearchSession {
+    field: TextField,
+    folded: String,
+    scope: Scope,
+    collection: Option<PathBuf>,
+    page: usize,
+    cache: SearchCache,
+    all: Button,
+    current: Button,
+    context: Rect,
+    keyboard: Keyboard,
+}
+
 pub struct Books {
     screen: Rect,
     worker: Rc<Worker>,
@@ -45,6 +60,8 @@ pub struct Books {
     fonts: Vec<FontFace>,
     top: TopBar,
     exit: IconButton,
+    search_action: IconButton,
+    search: Option<SearchSession>,
     rescan: Button,
     sort: Segmented,
     grid: Grid,
@@ -90,6 +107,8 @@ impl Books {
             Rect::new(exit.rect().x - rescan_w - t.mm(2.0), (t.top_bar - t.button_h) / 2, rescan_w, t.button_h),
             t,
         );
+        let mut search_action = IconButton::new(Icon::Search);
+        search_action.place_at(Point::new(rescan.rect().x - t.mm(2.0) - t.target / 2, t.top_bar / 2), t);
         let mut pager = Pager::new(1);
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
         let sort = Segmented::texts(
@@ -120,6 +139,8 @@ impl Books {
             fonts,
             top,
             exit,
+            search_action,
+            search: None,
             rescan,
             sort,
             grid: Grid::new(0, 4, 2),
@@ -156,7 +177,7 @@ impl Books {
         for b in &self.index.books {
             self.states.entry(b.id.clone()).or_insert_with(|| self.store.book(&b.id));
         }
-        let in_collections = self.navigation.tab == Tab::Collections;
+        let in_collections = self.search.is_none() && self.navigation.tab == Tab::Collections;
         self.folders =
             if in_collections { self.collections.children(self.navigation.folder.as_deref()) } else { Vec::new() };
         let folder = self.navigation.folder.as_ref().and_then(|p| self.collections.folders.get(p));
@@ -166,17 +187,37 @@ impl Books {
             .iter()
             .filter(|b| {
                 b.available
-                    && (!in_collections || folder.is_some_and(|f| f.books.contains(&collections::normalize(&b.path))))
+                    && if let Some(search) = &self.search {
+                        search.cache.matches(b, &search.folded, &search.scope)
+                    } else {
+                        !in_collections || folder.is_some_and(|f| f.books.contains(&collections::normalize(&b.path)))
+                    }
             })
             .cloned()
             .collect();
         let sort = self.selected_sort();
         library::sort_books(&mut self.books, &self.states, sort);
-        self.continue_id =
-            if in_collections { None } else { library::continue_book(&self.books, &self.states).map(|b| b.id.clone()) };
+        self.continue_id = if in_collections || self.search.is_some() {
+            None
+        } else {
+            library::continue_book(&self.books, &self.states).map(|b| b.id.clone())
+        };
         let y = t.top_bar + t.mm(2.0);
         self.tabs.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
-        let y = y + t.target + t.mm(3.0);
+        let y = if let Some(search) = &mut self.search {
+            search.field.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
+            let scope_y = y + t.target + t.mm(2.0);
+            let w = (self.screen.w - 2 * t.margin - t.mm(2.0)) / 2;
+            search.all.place(Rect::new(t.margin, scope_y, w, t.target), t);
+            search.current.place(Rect::new(t.margin + w + t.mm(2.0), scope_y, w, t.target), t);
+            search.all.kind = if search.scope == Scope::All { ButtonKind::Primary } else { ButtonKind::Secondary };
+            search.current.kind = if search.scope == Scope::All { ButtonKind::Secondary } else { ButtonKind::Primary };
+            search.context =
+                Rect::new(t.margin, scope_y + t.target + t.mm(1.0), self.screen.w - 2 * t.margin, t.mm(6.0));
+            search.context.bottom() + t.mm(2.0)
+        } else {
+            y + t.target + t.mm(3.0)
+        };
         self.path_rect = if in_collections {
             self.back.place_at(Point::new(t.margin + t.target / 2, y + t.target / 2), t);
             Rect::new(
@@ -210,6 +251,9 @@ impl Books {
         );
         self.pager.set(self.pager.page, self.grid.paging().pages());
         self.grid.page = self.pager.page;
+        if let Some(search) = &mut self.search {
+            search.page = self.pager.page;
+        }
         self.prioritize();
         // Only the visible grid plus continue card retain decoded images.
         let keys: std::collections::HashSet<_> = self
@@ -234,6 +278,10 @@ impl Books {
         i.checked_sub(self.folders.len()).and_then(|i| self.books.get(i))
     }
     fn save_navigation(&mut self, cx: &mut EventCx) {
+        if let Some(search) = &mut self.search {
+            search.page = self.pager.page;
+            return;
+        }
         self.navigation.set_page(self.pager.page);
         if let Err(e) = self.store.save_navigation(&self.navigation) {
             cx.toast(format!("Couldn't save library navigation: {e}"), None);
@@ -264,6 +312,9 @@ impl Books {
             self.errors = snapshot.errors;
             self.index = snapshot.index;
             self.collections = Collections::from_index(&self.index, &self.roots);
+            if let Some(search) = &mut self.search {
+                search.cache.sync(&self.index);
+            }
             let old_navigation = self.navigation.clone();
             let old_folder = self.navigation.folder.clone();
             // Initial metadata checkpoints may not yet contain the saved folder.
@@ -272,19 +323,78 @@ impl Books {
                 self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
             }
             let page = self.pager.page;
-            self.pager.page = self.navigation.page();
+            self.pager.page = self.search.as_ref().map_or_else(|| self.navigation.page(), |s| s.page);
             self.refresh(cx.theme);
             if !snapshot.scanning {
-                self.navigation.set_page(self.pager.page);
-                if old_navigation != self.navigation {
-                    self.save_navigation(cx);
+                if self.search.is_none() {
+                    self.navigation.set_page(self.pager.page);
+                }
+                if old_navigation != self.navigation
+                    && let Err(e) = self.store.save_navigation(&self.navigation)
+                {
+                    cx.toast(format!("Couldn't save library navigation: {e}"), None);
                 }
             }
-            if self.pager.page != page || old_folder != self.navigation.folder {
+            if self.search.is_none() && (self.pager.page != page || old_folder != self.navigation.folder) {
                 cx.refresh(self.screen, RefreshMode::Full);
             }
         }
     }
+    fn toggle_search(&mut self, cx: &mut EventCx) {
+        if self.search.take().is_some() {
+            self.search_action.icon = Icon::Search;
+            self.top.title = "Library".into();
+            self.pager.page = self.navigation.page();
+            self.refresh(cx.theme);
+            self.save_navigation(cx);
+        } else {
+            self.save_navigation(cx);
+            let mut cache = SearchCache::default();
+            let started = std::time::Instant::now();
+            cache.sync(&self.index);
+            log::info!("search cache: {} books in {:?}", self.index.books.len(), started.elapsed());
+            let collection =
+                (self.navigation.tab == Tab::Collections).then(|| self.navigation.folder.clone()).flatten();
+            let mut current = Button::new("This collection", ButtonKind::Secondary);
+            current.enabled = collection.is_some();
+            let mut keyboard = Keyboard::default();
+            keyboard.visible = true;
+            keyboard.place(self.screen, cx.theme);
+            let mut field = TextField::default();
+            field.focused = true;
+            self.search = Some(SearchSession {
+                field,
+                folded: String::new(),
+                scope: Scope::All,
+                collection,
+                page: 0,
+                cache,
+                all: Button::new("All books", ButtonKind::Primary),
+                current,
+                context: Rect::default(),
+                keyboard,
+            });
+            self.search_action.icon = Icon::Close;
+            self.top.title = "Search".into();
+            self.pager.page = 0;
+            self.refresh(cx.theme);
+        }
+    }
+
+    fn edit_search(&mut self, input: &TextInput, cx: &mut EventCx) {
+        let Some(search) = &mut self.search else { return };
+        if matches!(input, TextInput::Submit | TextInput::Dismiss) {
+            search.keyboard.visible = false;
+            search.field.focused = false;
+        } else if search.field.edit(input) {
+            let started = std::time::Instant::now();
+            search.folded = search::fold(search.field.value().trim());
+            self.pager.page = 0;
+            self.refresh(cx.theme);
+            log::debug!("search query: {} matches prepared in {:?}", self.books.len(), started.elapsed());
+        }
+    }
+
     fn book(&self, id: &str) -> Option<&Book> {
         self.books.iter().find(|b| b.id == id)
     }
@@ -448,8 +558,27 @@ impl Screen for Books {
         self.top.draw(cx);
         self.rescan.draw(cx);
         self.exit.draw(cx);
-        self.tabs.draw(cx);
-        if self.navigation.tab == Tab::Collections {
+        self.search_action.draw(cx);
+        if let Some(search) = &mut self.search {
+            search.field.draw(cx);
+            search.all.draw(cx);
+            search.current.draw(cx);
+            let context = match &search.scope {
+                Scope::All => {
+                    if search.collection.is_some() {
+                        "All books · every library folder".into()
+                    } else {
+                        "All books · choose a collection to narrow scope".into()
+                    }
+                }
+                Scope::Collection(folder) => format!("Collection · {} (including subfolders)", folder.display()),
+            };
+            let context = path_tail(cx.text, &context, t.caption, search.context.w);
+            cx.line(&context, t.caption.gray(INK2), search.context, HAlign::Left);
+        } else {
+            self.tabs.draw(cx);
+        }
+        if self.search.is_none() && self.navigation.tab == Tab::Collections {
             if self.navigation.folder.is_some() {
                 self.back.draw(cx);
             }
@@ -502,7 +631,9 @@ impl Screen for Books {
             cx.hline(r.bottom() + t.mm(2.0), r.x, r.right(), t.hairline, LINE);
         }
         cx.line(
-            &if self.navigation.tab == Tab::AllBooks {
+            &if self.search.is_some() {
+                format!("{} results", self.books.len())
+            } else if self.navigation.tab == Tab::AllBooks {
                 format!("All books  {}", self.books.len())
             } else {
                 format!("{} · {}", counted(self.folders.len(), "folder"), counted(self.books.len(), "book"))
@@ -575,7 +706,13 @@ impl Screen for Books {
             );
         }
         if self.books.is_empty() && self.folders.is_empty() {
-            let message = if self.scanning {
+            let message = if let Some(search) = &self.search {
+                if search.folded.is_empty() {
+                    "No books in this scope.".into()
+                } else {
+                    "No matching books. Try another title, author or filename.".into()
+                }
+            } else if self.scanning {
                 format!(
                     "Finding books in {}…",
                     self.roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" • ")
@@ -602,6 +739,9 @@ impl Screen for Books {
         });
         cx.line(message, t.caption.gray(INK2), self.status, HAlign::Left);
         self.pager.draw(cx);
+        if let Some(search) = &self.search {
+            search.keyboard.draw(cx);
+        }
         if let Some((_, menu)) = &self.menu {
             menu.draw(cx);
         }
@@ -643,11 +783,45 @@ impl Screen for Books {
                     _ => {}
                 }
             }
+        } else if self.search.as_ref().is_some_and(|s| s.keyboard.visible) {
+            let input = self.search.as_mut().and_then(|s| s.keyboard.on_gesture(&g, cx.theme));
+            if let Some(input) = input {
+                self.edit_search(&input, cx);
+            }
         } else {
+            if self.search_action.on_gesture(&g) {
+                self.toggle_search(cx);
+                self.apply_pending(cx);
+                return Action::None;
+            }
+            if let Some(search) = &mut self.search {
+                if search.field.on_gesture(&g) {
+                    search.keyboard.visible = true;
+                    search.field.focused = true;
+                    self.apply_pending(cx);
+                    return Action::None;
+                }
+                let scope = if search.all.on_gesture(&g) {
+                    Some(Scope::All)
+                } else if search.current.on_gesture(&g) {
+                    search.collection.clone().map(Scope::Collection)
+                } else {
+                    None
+                };
+                if let Some(scope) = scope {
+                    search.scope = scope;
+                    self.pager.page = 0;
+                    self.refresh(cx.theme);
+                    self.apply_pending(cx);
+                    return Action::None;
+                }
+            }
             if self.exit.on_gesture(&g) {
                 return Action::Pop;
             }
-            if let Some(selected) = self.tabs.on_gesture(&g) {
+            if self.search.is_none()
+                && let Some(selected) = self.tabs.on_gesture(&g)
+            {
                 self.navigation.set_page(self.pager.page);
                 self.navigation.tab = if selected == 0 { Tab::AllBooks } else { Tab::Collections };
                 self.pager.page = self.navigation.page();
@@ -658,7 +832,7 @@ impl Screen for Books {
                 self.apply_pending(cx);
                 return Action::None;
             }
-            if self.navigation.tab == Tab::Collections {
+            if self.search.is_none() && self.navigation.tab == Tab::Collections {
                 if self.navigation.folder.is_some() && self.back.on_gesture(&g) {
                     let parent = self
                         .navigation
@@ -755,6 +929,21 @@ impl Screen for Books {
         }
         self.apply_pending(cx);
         Action::None
+    }
+    fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
+        if self.reader.is_some() || self.search.is_none() {
+            return false;
+        }
+        // Entry overlays retain ownership until their touch is released.
+        if self.menu.is_some() || self.details.is_some() || self.touching {
+            return true;
+        }
+        if !self.search.as_ref().is_some_and(|s| s.field.focused) {
+            return false;
+        }
+        self.edit_search(input, cx);
+        self.apply_pending(cx);
+        true
     }
     fn busy(&self) -> bool {
         self.reader.as_ref().map_or(self.working, Screen::busy)
@@ -923,7 +1112,11 @@ mod tests {
         books.on_gesture(Gesture::Tap(p), cx);
     }
     fn collection_fixture(label: &str) -> anyhow::Result<(Store, PathBuf)> {
-        let root = std::env::temp_dir().join(format!("verso-collections-{label}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "verso-collections-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
         let store = Store::at(root.clone());
         let mut settings = store.settings();
         settings.library_folders = Some(vec!["/books".into(), "/books/Fiction".into(), "/other/books".into()]);
@@ -944,6 +1137,165 @@ mod tests {
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
     }
+    #[test]
+    fn search_preserves_scope_query_result_page_and_underlying_navigation() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("search-return")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::Collections;
+            books.tabs.selected = 1;
+            books.navigate(Some("/books/Fiction".into()), cx);
+            let before = books.navigation.clone();
+            books.toggle_search(cx);
+            assert_eq!(books.search.as_ref().unwrap().scope, Scope::All);
+            assert_eq!(books.books.len(), 22);
+            assert!(books.on_text_input(&TextInput::Insert("Title".into()), cx));
+            assert!(books.on_text_input(&TextInput::Submit, cx));
+            let current = books.search.as_ref().unwrap().current.rect().center();
+            tap(&mut books, current, cx);
+            assert_eq!(books.books.len(), 20, "collection search includes nested books");
+            assert!(books.folders.is_empty());
+            let next = books.pager.rect().split_right(t.target).0.center();
+            tap(&mut books, next, cx);
+            assert_eq!(books.pager.page, 1);
+            let id = books.grid_book(books.grid.cells()[0].0).unwrap().id.clone();
+            books.open(id.clone(), cx);
+            store
+                .save_book(
+                    &id,
+                    &BookState {
+                        progress: 4321,
+                        position: crate::document::Position("anchor".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            books.returned(cx);
+            assert_eq!(books.pager.page, 1);
+            let search = books.search.as_ref().unwrap();
+            assert_eq!(search.field.value(), "Title");
+            assert_eq!(search.scope, Scope::Collection("/books/Fiction".into()));
+            assert_eq!(books.states[&id].progress, 4321);
+            assert_eq!(store.navigation(), before, "search paging never overwrites library navigation");
+            books.open(id, cx);
+            let reader = books.reader.as_mut().unwrap();
+            reader.receive(Reply::Error { generation: books.generation, message: "fixture open failure".into() }, cx);
+            assert!(reader.failed_open());
+            books.returned(cx);
+            assert_eq!(books.pager.page, 1, "failed opens preserve the search too");
+            books.toggle_search(cx);
+            assert_eq!(books.navigation, before);
+            assert_eq!(books.pager.page, before.page());
+            assert_eq!(books.folders, [PathBuf::from("/books/Fiction/Nested")]);
+            // A folder remembered in the other tab is not the current collection.
+            books.navigation.tab = Tab::AllBooks;
+            books.pager.page = 1;
+            books.refresh(&t);
+            books.toggle_search(cx);
+            assert!(!books.search.as_ref().unwrap().current.enabled);
+            books.toggle_search(cx);
+            assert_eq!(books.pager.page, 1);
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_snapshots_capture_touches_update_matches_and_never_broaden_missing_scope() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("search-scan")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::Collections;
+            books.navigate(Some("/books/Fiction".into()), cx);
+            books.toggle_search(cx);
+            books.edit_search(&TextInput::Insert("Needle".into()), cx);
+            assert!(books.books.is_empty());
+            let mut index = books.index.clone();
+            index.books[0].metadata.title = "NEEDLE".into();
+            books.pending = Some(Snapshot { index: index.clone(), ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.books.len(), 1, "an open keyboard does not block updates");
+            books.edit_search(&TextInput::Clear, cx);
+            assert_eq!(books.books.len(), 22);
+            books.edit_search(&TextInput::Submit, cx);
+            let current = books.search.as_ref().unwrap().current.rect().center();
+            tap(&mut books, current, cx);
+            books.pager.page = 2;
+            books.save_navigation(cx);
+            let p = books.grid.cells()[0].1.center();
+            books.on_gesture(Gesture::Down(p), cx);
+            index.books.retain(|b| b.id == "0");
+            books.pending = Some(Snapshot { index, ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.books.len(), 20);
+            books.on_gesture(Gesture::Cancel(p), cx);
+            assert_eq!(books.books.len(), 1);
+            assert_eq!(books.pager.page, 0);
+            // Menus and sheets retain the old identity until dismissed.
+            books.open_menu("0".into(), p, &t);
+            books.pending = Some(Snapshot::default());
+            books.apply_pending(cx);
+            assert!(books.pending.is_some());
+            books.menu = None;
+            books.details = Some(Details::from_text(&t, screen, "Details", "body".into()));
+            books.apply_pending(cx);
+            assert!(books.pending.is_some());
+            books.details = None;
+            books.apply_pending(cx);
+            assert!(books.books.is_empty());
+            assert_eq!(books.search.as_ref().unwrap().scope, Scope::Collection("/books/Fiction".into()));
+            assert!(books.navigation.folder.is_none());
+            books.toggle_search(cx);
+            assert!(books.navigation.folder.is_none());
+            assert_eq!(books.navigation.tab, Tab::Collections);
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn typing_uses_local_updates_and_keyboard_dismissal_consumes_the_touch() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("search-refresh")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        with_cx(&t, screen, |cx| {
+            books.toggle_search(cx);
+            let search_button = books.search_action.rect().center();
+            tap(&mut books, search_button, cx);
+            assert!(books.search.is_some(), "outside tap only dismisses the keyboard");
+            assert!(!books.search.as_ref().unwrap().keyboard.visible);
+            books.search.as_mut().unwrap().field.focused = true;
+            books.search.as_mut().unwrap().keyboard.visible = true;
+        });
+        let info = crate::platform::DeviceInfo { name: "test".into(), width: 1272, height: 1696, dpi: 300 };
+        let mut app = crate::app::App::new(&info, t.clone(), Box::new(books));
+        app.frame();
+        for text in ["q", "s", "p", "v", "ГРЕЦИЯ"] {
+            assert!(app.on_text_input(&TextInput::Insert(text.into())));
+            assert!(!app.wants_exit());
+            let updates = app.frame();
+            assert!(!updates.is_empty());
+            assert!(updates.iter().all(|u| u.mode != RefreshMode::Full && u.rect.y >= t.top_bar));
+        }
+        assert!(app.on_text_input(&TextInput::Clear));
+        assert!(app.frame().iter().all(|u| u.mode != RefreshMode::Full));
+        assert!(app.on_text_input(&TextInput::Submit));
+        app.frame();
+        assert!(!app.on_text_input(&TextInput::Insert("q".into())), "unfocused input can reach simulator shortcuts");
+        app.on_sleep();
+        assert!(!app.on_text_input(&TextInput::Insert("x".into())));
+        drop(app);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn collections_share_state_and_restore_tab_folder_pages_after_reader_and_restart() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("resume")?;

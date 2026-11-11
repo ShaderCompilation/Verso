@@ -3,6 +3,7 @@
 pub mod collections;
 pub mod covers;
 pub mod epub;
+pub mod search;
 pub mod worker;
 
 use serde::{Deserialize, Serialize};

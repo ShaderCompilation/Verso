@@ -28,7 +28,7 @@ use anyhow::{Context, Result, bail};
 
 use app::App;
 use geom::Point;
-use platform::{Event, RefreshMode, ScriptStep};
+use platform::{Event, RefreshMode, ScriptStep, TextInput};
 use screens::Screen;
 use ui::gesture::{GestureConfig, GestureDetector};
 
@@ -69,6 +69,25 @@ fn parse_args() -> Result<Options> {
         match arg.as_str() {
             "--screen" => opts.screen = Some(args.next().context("--screen needs a name")?),
             "--screenshot" => opts.screenshot = Some(args.next().context("--screenshot needs a file name")?.into()),
+            "--text" => {
+                opts.script.push(ScriptStep::Text(TextInput::Insert(args.next().context("--text needs text")?)))
+            }
+            "--edit" => {
+                let key = args.next().context("--edit needs a command")?;
+                let input = match key.as_str() {
+                    "backspace" => TextInput::Backspace,
+                    "delete" => TextInput::Delete,
+                    "left" => TextInput::Left,
+                    "right" => TextInput::Right,
+                    "home" => TextInput::Home,
+                    "end" => TextInput::End,
+                    "clear" => TextInput::Clear,
+                    "submit" => TextInput::Submit,
+                    "dismiss" => TextInput::Dismiss,
+                    _ => bail!("unknown edit command {key:?}"),
+                };
+                opts.script.push(ScriptStep::Text(input));
+            }
             "--tap" => {
                 let v = numbers(args.next(), 2, "--tap")?;
                 opts.script.push(ScriptStep::Tap(Point::new(v[0], v[1])));
@@ -108,6 +127,10 @@ fn start_screen(
 }
 
 fn run() -> Result<()> {
+    if std::env::var("VERSO_SEARCH_BENCH").as_deref() == Ok("1") {
+        println!("{}", library::search::benchmark(&store::Store::new().library()));
+        return Ok(());
+    }
     log::info!("Verso {} starting", env!("CARGO_PKG_VERSION"));
     let started = Instant::now();
     let opts = if cfg!(feature = "desktop") { parse_args()? } else { Options::default() };
@@ -170,6 +193,11 @@ fn run() -> Result<()> {
             match platform.next_event(timeout)? {
                 None => break,
                 Some(Event::Background) => app.on_background(),
+                Some(Event::TextInput { input, repeat }) => {
+                    if !app.on_text_input(&input) {
+                        platform.unhandled_text_input(&input, repeat);
+                    }
+                }
                 Some(Event::Touch(t)) => {
                     log::trace!("{t:?}");
                     if let Some(g) = gestures.on_touch(&t) {

@@ -63,11 +63,15 @@ pub struct Touch {
     pub time: Instant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 // The Kindle backend only produces Sleep/Wake once power events land (Phase 6).
 #[cfg_attr(feature = "kindle", allow(dead_code))]
 pub enum Event {
     Touch(Touch),
+    TextInput {
+        input: TextInput,
+        repeat: bool,
+    },
     Background,
     /// The device is going to sleep: save state, stop drawing.
     Sleep,
@@ -75,6 +79,21 @@ pub enum Event {
     Wake,
     /// Leave the app (window closed, or a signal on the device).
     Quit,
+}
+
+/// Single-line entry commands shared by hardware and touch keyboards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextInput {
+    Insert(String),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Clear,
+    Submit,
+    Dismiss,
 }
 
 /// A thread-safe way to interrupt a platform's blocking event wait.
@@ -99,6 +118,8 @@ pub struct Frontlight {
 pub trait Platform {
     fn waker(&self) -> Waker;
     fn set_busy(&mut self, _busy: bool) {}
+    /// Simulator shortcuts run only after the focused screen declines entry.
+    fn unhandled_text_input(&mut self, _input: &TextInput, _repeat: bool) {}
     fn frontlight(&mut self) -> Option<Frontlight> {
         None
     }
@@ -120,9 +141,10 @@ pub trait Platform {
 }
 
 /// A scripted touch, for screenshots without a window.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "kindle", allow(dead_code))] // screenshots are simulator-only
 pub enum ScriptStep {
+    Text(TextInput),
     Tap(Point),
     LongPress(Point),
     /// Finger down, never lifted (to capture pressed states).
