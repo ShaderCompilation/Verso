@@ -1,23 +1,39 @@
-//! One coalescing library worker. A single replaceable snapshot bounds pending results.
+//! One coalescing library worker. Progress/errors and index content are published
+//! separately: status is small and always delivered, while an index is cloned,
+//! published and saved only after its content actually changed.
 use super::home::Summary;
 use super::{Book, Cover, LibraryIndex, Metadata, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
 use crate::store::{Store, book_id};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
-#[derive(Clone, Default)]
-pub struct Snapshot {
-    pub index: LibraryIndex,
+/// Scan and cover progress plus errors. Carries no index and is delivered even
+/// when the library content is unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
     pub scanning: bool,
     pub working: bool,
     pub errors: Vec<String>,
+}
+impl Default for Status {
+    /// Matches the UI's initial state: a launch always starts with a pass.
+    fn default() -> Self {
+        Self { scanning: true, working: true, errors: Vec::new() }
+    }
+}
+/// A changed library index. `partial` marks a scan checkpoint whose metadata or
+/// folders may still be incomplete.
+#[derive(Clone, Default)]
+pub struct Snapshot {
+    pub index: LibraryIndex,
+    pub partial: bool,
 }
 #[derive(Default)]
 struct Shared {
@@ -27,6 +43,7 @@ struct Shared {
     paused: bool,
     priority: Vec<String>,
     latest: Option<Snapshot>,
+    status: Option<Status>,
     home_requested: bool,
     latest_home: Option<Summary>,
     /// Book ids whose visible thumbnail failed to load, and those since repaired.
@@ -34,6 +51,338 @@ struct Shared {
     repaired: Vec<String>,
 }
 const REPAIR_LIMIT: usize = 32;
+const ERROR_LIMIT: usize = 32;
+/// Real cover changes are batched into one index publication per interval.
+const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
+/// Changed books between index checkpoints, so an interrupted pass keeps progress.
+const SAVE_EVERY: usize = 64;
+
+fn push_error(errors: &mut Vec<String>, error: String) {
+    if errors.len() < ERROR_LIMIT {
+        errors.push(error);
+    }
+}
+
+/// The worker thread's side of the shared state.
+struct Channel {
+    shared: Arc<(Mutex<Shared>, Condvar)>,
+    waker: Waker,
+}
+impl Channel {
+    fn lock(&self) -> MutexGuard<'_, Shared> {
+        self.shared.0.lock().unwrap()
+    }
+    fn wait<'a>(&self, state: MutexGuard<'a, Shared>) -> MutexGuard<'a, Shared> {
+        self.shared.1.wait(state).unwrap()
+    }
+    fn stopped(&self) -> bool {
+        self.lock().stop
+    }
+    /// Scan and fingerprint reads block while a book is open; true on shutdown.
+    fn yield_point(&self) -> bool {
+        let mut state = self.lock();
+        while state.paused && !state.stop {
+            state = self.wait(state);
+        }
+        state.stop
+    }
+    /// Cover and identity work also stop for a new scan request.
+    fn interrupted(&self) -> bool {
+        let mut state = self.lock();
+        while state.paused && !state.stop && !state.requested {
+            state = self.wait(state);
+        }
+        state.stop || state.requested
+    }
+    fn content(&self, snapshot: Snapshot) {
+        // A replaced, unconsumed publication already has a pending wake.
+        if self.lock().latest.replace(snapshot).is_none() {
+            self.waker.wake();
+        }
+    }
+    fn status(&self, status: Status) {
+        if self.lock().status.replace(status).is_none() {
+            self.waker.wake();
+        }
+    }
+    fn home(&self, summary: Summary) {
+        self.lock().latest_home = Some(summary);
+        self.waker.wake();
+    }
+    fn take_home_request(&self) -> bool {
+        std::mem::take(&mut self.lock().home_requested)
+    }
+}
+
+enum Next {
+    Interrupted,
+    Repairs,
+    Cover(usize),
+}
+
+struct Background {
+    channel: Channel,
+    store: Store,
+    roots: Vec<PathBuf>,
+    index: LibraryIndex,
+    /// Content changes not yet delivered to the UI / written to `library.json`.
+    unpublished: bool,
+    unsaved: bool,
+    /// Displayed metadata or covers changed since the Home summary was refreshed.
+    home_stale: bool,
+    /// The last status sent to the UI; identical updates are not resent.
+    status: Status,
+    last_errors: Vec<String>,
+    /// Each cover key is repaired at most once per session; repeated failures
+    /// keep the title cover instead of looping.
+    attempted: HashSet<String>,
+    startup: Instant,
+}
+impl Background {
+    fn run(mut self) {
+        if self.store.home_summary().is_none_or(|summary| !summary.complete) {
+            self.rebuild_home();
+        }
+        loop {
+            let (retry, scan, home, repairs) = {
+                let mut state = self.channel.lock();
+                while !state.stop
+                    && !state.requested
+                    && !state.home_requested
+                    && (state.paused || state.repairs.is_empty())
+                {
+                    state = self.channel.wait(state);
+                }
+                if state.stop {
+                    break;
+                }
+                (
+                    std::mem::take(&mut state.retry),
+                    std::mem::take(&mut state.requested),
+                    std::mem::take(&mut state.home_requested),
+                    !state.paused && !state.repairs.is_empty(),
+                )
+            };
+            if home {
+                self.rebuild_home();
+            }
+            if scan {
+                if !self.pass(retry) {
+                    break;
+                }
+            } else if repairs {
+                // Outside a pass, only an actual cover change is saved and published.
+                let mut errors = self.last_errors.clone();
+                if self.repair_requested(&mut errors).1 {
+                    self.save(&mut errors, "covers");
+                    self.refresh_home_metadata();
+                    self.publish();
+                }
+                self.set_status(false, false, &errors);
+                self.last_errors = errors;
+            }
+        }
+    }
+
+    /// One scan, cover and identity pass. Returns false on shutdown.
+    fn pass(&mut self, retry: bool) -> bool {
+        let mut errors = Vec::new();
+        self.set_status(true, true, &errors);
+        let mut checkpointed = false;
+        let result = {
+            let (channel, store) = (&self.channel, &self.store);
+            // Checkpoints happen only when the scan found new files to read.
+            scan_roots(&self.roots, &self.index, retry, &|| channel.yield_point(), |checkpoint| {
+                if let Err(e) = store.save_library(checkpoint) {
+                    push_error(&mut errors, format!("Couldn't save library: {e}"));
+                }
+                channel.content(Snapshot { index: checkpoint.clone(), partial: true });
+                checkpointed = true;
+            })
+        };
+        let Some(scan) = result else { return false };
+        log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
+        errors.extend(scan.errors);
+        if checkpointed || self.index != scan.index {
+            self.index = scan.index;
+            self.unsaved = true;
+            self.unpublished = true;
+            self.home_stale = false;
+            self.rebuild_home();
+        }
+        self.save(&mut errors, "library");
+        self.publish();
+        self.set_status(false, true, &errors);
+
+        let covers_started = Instant::now();
+        let mut pending: BTreeSet<_> =
+            self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
+        let id_indices: HashMap<_, _> = self.index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
+        let mut since_publish = Instant::now();
+        let (mut confirmed, mut changed, mut unsaved) = (0, 0, 0);
+        let mut interrupted = false;
+        while !pending.is_empty() {
+            if self.channel.take_home_request() {
+                self.rebuild_home();
+            }
+            let (repaired, repair_changed) = self.repair_requested(&mut errors);
+            for i in repaired {
+                pending.remove(&i);
+            }
+            if repair_changed {
+                self.changed();
+                unsaved += 1;
+            }
+            let next = match self.next_cover(&pending, &id_indices) {
+                Next::Interrupted => {
+                    interrupted = true;
+                    break;
+                }
+                Next::Repairs => continue,
+                Next::Cover(i) => i,
+            };
+            pending.remove(&next);
+            match covers::generate(&self.index.books[next], &self.store) {
+                Ok(cover) if cover != self.index.books[next].cover => {
+                    self.index.books[next].cover = cover;
+                    self.changed();
+                    changed += 1;
+                    unsaved += 1;
+                }
+                Ok(_) => confirmed += 1,
+                Err(e) => push_error(&mut errors, format!("Couldn't cache cover: {e}")),
+            }
+            if unsaved >= SAVE_EVERY {
+                self.save(&mut errors, "covers");
+                unsaved = 0;
+            }
+            if self.unpublished && since_publish.elapsed() >= PUBLISH_INTERVAL {
+                self.publish();
+                since_publish = Instant::now();
+            }
+            self.set_status(false, true, &errors);
+        }
+        log::info!("library covers: {confirmed} confirmed, {changed} changed in {:?}", covers_started.elapsed());
+
+        let identity_started = Instant::now();
+        // Fingerprinting new additions is deferred until metadata and covers are
+        // visible. Only possible moves need it before identity assignment. Identity
+        // is persisted but not displayed, so it changes no UI publication.
+        let mut fingerprinted = 0;
+        for i in 0..self.index.books.len() {
+            if interrupted || self.channel.interrupted() {
+                interrupted = true;
+                break;
+            }
+            let book = &self.index.books[i];
+            if book.available && book.fingerprint.is_empty() && !book.fingerprint_attempted {
+                let channel = &self.channel;
+                let value = fingerprint(&book.path, &|| channel.yield_point()).unwrap_or_default();
+                let book = &mut self.index.books[i];
+                book.fingerprint = value;
+                book.fingerprint_attempted = !self.channel.stopped();
+                self.unsaved = true;
+                fingerprinted += 1;
+                if fingerprinted % SAVE_EVERY == 0 {
+                    self.save(&mut errors, "library identity");
+                }
+            }
+        }
+        if self.channel.stopped() {
+            return false;
+        }
+        if interrupted {
+            // A new scan follows at once; it saves and finishes this pass's work.
+            self.publish();
+            self.set_status(false, true, &errors);
+            return true;
+        }
+        log::info!("library identities: {fingerprinted} fingerprinted in {:?}", identity_started.elapsed());
+        self.save(&mut errors, "library");
+        if std::mem::take(&mut self.home_stale) {
+            self.refresh_home_metadata();
+        }
+        self.publish();
+        self.set_status(false, false, &errors);
+        self.last_errors = errors;
+        log::info!("startup stage: background complete elapsed_us={}", self.startup.elapsed().as_micros());
+        true
+    }
+
+    fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>) -> Next {
+        let mut state = self.channel.lock();
+        while state.paused && !state.stop && !state.requested {
+            state = self.channel.wait(state);
+        }
+        if state.stop || state.requested {
+            return Next::Interrupted;
+        }
+        if !state.repairs.is_empty() {
+            return Next::Repairs;
+        }
+        let visible = state.priority.iter().filter_map(|id| id_indices.get(id).copied()).find(|i| pending.contains(i));
+        Next::Cover(visible.unwrap_or_else(|| *pending.first().unwrap()))
+    }
+
+    /// Records a displayed content change.
+    fn changed(&mut self) {
+        self.unsaved = true;
+        self.unpublished = true;
+        self.home_stale = true;
+    }
+    fn publish(&mut self) {
+        if std::mem::take(&mut self.unpublished) {
+            self.channel.content(Snapshot { index: self.index.clone(), partial: false });
+        }
+    }
+    fn save(&mut self, errors: &mut Vec<String>, what: &str) {
+        if !self.unsaved {
+            return;
+        }
+        match self.store.save_library(&self.index) {
+            Ok(()) => self.unsaved = false,
+            Err(e) => push_error(errors, format!("Couldn't save {what}: {e}")),
+        }
+    }
+    fn set_status(&mut self, scanning: bool, working: bool, errors: &[String]) {
+        if self.status.scanning == scanning && self.status.working == working && self.status.errors == errors {
+            return;
+        }
+        self.status = Status { scanning, working, errors: errors.to_vec() };
+        self.channel.status(self.status.clone());
+    }
+
+    fn rebuild_home(&self) {
+        let channel = &self.channel;
+        match self.store.rebuild_home_summary_until(&self.index, &|| channel.stopped()) {
+            Ok(summary) => channel.home(summary),
+            Err(_) if channel.stopped() => {}
+            Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
+        }
+    }
+    fn refresh_home_metadata(&self) {
+        match self.store.refresh_home_metadata(&self.index) {
+            Ok(Some(summary)) => self.channel.home(summary),
+            Ok(None) => self.rebuild_home(),
+            Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
+        }
+    }
+
+    /// Returns the books processed and whether any cover changed.
+    fn repair_requested(&mut self, errors: &mut Vec<String>) -> (Vec<usize>, bool) {
+        let ids = std::mem::take(&mut self.channel.lock().repairs);
+        if ids.is_empty() {
+            return (Vec::new(), false);
+        }
+        let (repaired, changed) = repair_covers(&mut self.index, &ids, &self.store, &mut self.attempted, errors);
+        if !repaired.is_empty() {
+            self.channel.lock().repaired.extend(repaired.iter().map(|&i| self.index.books[i].id.clone()));
+            self.channel.waker.wake();
+        }
+        (repaired, changed)
+    }
+}
+
 pub struct Worker {
     shared: Arc<(Mutex<Shared>, Condvar)>,
     join: Option<JoinHandle<()>>,
@@ -41,222 +390,26 @@ pub struct Worker {
 impl Worker {
     pub fn new(store: Store, roots: Vec<PathBuf>, waker: Waker) -> Self {
         let shared = Arc::new((Mutex::new(Shared { requested: true, ..Shared::default() }), Condvar::new()));
-        let thread_shared = shared.clone();
+        let channel = Channel { shared: shared.clone(), waker };
         let join = std::thread::Builder::new()
             .name("verso-library".into())
             .spawn(move || {
-                let shared = thread_shared;
                 let startup = Instant::now();
-                let mut index = store.library();
-                let cancelled = || shared.0.lock().unwrap().stop;
-                let publish = |snapshot| {
-                    let wake = shared.0.lock().unwrap().latest.replace(snapshot).is_none();
-                    if wake {
-                        waker.wake();
-                    }
-                };
-                let publish_home = |summary: Summary| {
-                    shared.0.lock().unwrap().latest_home = Some(summary);
-                    waker.wake();
-                };
-                let rebuild_home = |index: &LibraryIndex| match store.rebuild_home_summary(index) {
-                    Ok(summary) => publish_home(summary),
-                    Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
-                };
-                // Each cover key is repaired at most once per session; repeated
-                // failures keep the title cover instead of looping.
-                let mut attempted = HashSet::new();
-                let mut repair_requested = |index: &mut LibraryIndex, errors: &mut Vec<String>| {
-                    let ids = std::mem::take(&mut shared.0.lock().unwrap().repairs);
-                    let repaired = repair_covers(index, &ids, &store, &mut attempted, errors);
-                    if !repaired.is_empty() {
-                        shared.0.lock().unwrap().repaired.extend(repaired.iter().map(|&i| index.books[i].id.clone()));
-                        waker.wake();
-                    }
-                    repaired
-                };
-                if store.home_summary().is_none_or(|summary| !summary.complete) {
-                    rebuild_home(&index);
+                let index = store.library();
+                Background {
+                    channel,
+                    store,
+                    roots,
+                    index,
+                    unpublished: false,
+                    unsaved: false,
+                    home_stale: false,
+                    status: Status::default(),
+                    last_errors: Vec::new(),
+                    attempted: HashSet::new(),
+                    startup,
                 }
-                let mut last_errors = Vec::new();
-                loop {
-                    let (retry, scan_requested, home_requested, repairs) = {
-                        let mut state = shared.0.lock().unwrap();
-                        while !state.stop
-                            && !state.requested
-                            && !state.home_requested
-                            && (state.paused || state.repairs.is_empty())
-                        {
-                            state = shared.1.wait(state).unwrap();
-                        }
-                        if state.stop {
-                            break;
-                        }
-                        (
-                            std::mem::take(&mut state.retry),
-                            std::mem::take(&mut state.requested),
-                            std::mem::take(&mut state.home_requested),
-                            !state.paused && !state.repairs.is_empty(),
-                        )
-                    };
-                    if home_requested {
-                        rebuild_home(&index);
-                    }
-                    if !scan_requested {
-                        // Outside a pass, repairs are published as confirmed changes.
-                        if repairs {
-                            let before = index.clone();
-                            repair_requested(&mut index, &mut last_errors);
-                            if index != before {
-                                if let Err(e) = store.save_library(&index) {
-                                    last_errors.push(format!("Couldn't save covers: {e}"));
-                                }
-                                match store.refresh_home_metadata(&index) {
-                                    Ok(Some(summary)) => publish_home(summary),
-                                    Ok(None) => rebuild_home(&index),
-                                    Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
-                                }
-                                publish(Snapshot {
-                                    index: index.clone(),
-                                    scanning: false,
-                                    working: false,
-                                    errors: last_errors.clone(),
-                                });
-                            }
-                        }
-                        continue;
-                    }
-                    let mut errors = Vec::new();
-                    let result = scan_roots(&roots, &index, retry, &cancelled, |checkpoint| {
-                        let mut snapshot = Snapshot {
-                            index: checkpoint.clone(),
-                            scanning: true,
-                            working: true,
-                            errors: errors.clone(),
-                        };
-                        if let Err(e) = store.save_library(checkpoint) {
-                            snapshot.errors.push(format!("Couldn't save library: {e}"));
-                        }
-                        publish(snapshot);
-                    });
-                    let Some(scan) = result else { break };
-                    log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
-                    let changed = index != scan.index;
-                    index = scan.index;
-                    if changed {
-                        rebuild_home(&index);
-                    }
-                    errors.extend(scan.errors);
-                    if let Err(e) = store.save_library(&index) {
-                        errors.push(format!("Couldn't save library: {e}"));
-                    }
-                    publish(Snapshot { index: index.clone(), scanning: false, working: true, errors: errors.clone() });
-                    let covers_started = Instant::now();
-                    let mut pending: std::collections::BTreeSet<_> =
-                        index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
-                    let id_indices: HashMap<_, _> =
-                        index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
-                    let mut since_publish = Instant::now();
-                    let mut completed = 0;
-                    while !pending.is_empty() {
-                        let refresh_home = {
-                            let mut state = shared.0.lock().unwrap();
-                            std::mem::take(&mut state.home_requested)
-                        };
-                        if refresh_home {
-                            rebuild_home(&index);
-                        }
-                        for i in repair_requested(&mut index, &mut errors) {
-                            pending.remove(&i);
-                        }
-                        let next = {
-                            let mut state = shared.0.lock().unwrap();
-                            while state.paused && !state.stop && !state.requested {
-                                state = shared.1.wait(state).unwrap();
-                            }
-                            if state.stop || state.requested {
-                                break;
-                            }
-                            if !state.repairs.is_empty() {
-                                continue;
-                            }
-                            state
-                                .priority
-                                .iter()
-                                .filter_map(|id| id_indices.get(id).copied())
-                                .find(|i| pending.contains(i))
-                                .unwrap_or_else(|| *pending.first().unwrap())
-                        };
-                        pending.remove(&next);
-                        match covers::generate(&index.books[next], &store) {
-                            Ok(cover) => index.books[next].cover = cover,
-                            Err(e) => {
-                                if errors.len() < 32 {
-                                    errors.push(format!("Couldn't cache cover: {e}"));
-                                }
-                            }
-                        }
-                        completed += 1;
-                        if completed % 64 == 0
-                            && let Err(e) = store.save_library(&index)
-                            && errors.len() < 32
-                        {
-                            errors.push(format!("Couldn't save covers: {e}"));
-                        }
-                        if completed % 4 == 0 || since_publish.elapsed().as_millis() >= 100 {
-                            publish(Snapshot {
-                                index: index.clone(),
-                                scanning: false,
-                                working: true,
-                                errors: errors.clone(),
-                            });
-                            since_publish = Instant::now();
-                        }
-                    }
-                    log::info!("library covers: {completed} processed in {:?}", covers_started.elapsed());
-                    let identity_started = Instant::now();
-                    // Fingerprinting new additions is deferred until metadata and covers
-                    // are visible. Only possible moves need it before identity assignment.
-                    for i in 0..index.books.len() {
-                        {
-                            let mut state = shared.0.lock().unwrap();
-                            while state.paused && !state.stop && !state.requested {
-                                state = shared.1.wait(state).unwrap();
-                            }
-                            if state.stop || state.requested {
-                                break;
-                            }
-                        }
-                        if index.books[i].available
-                            && index.books[i].fingerprint.is_empty()
-                            && !index.books[i].fingerprint_attempted
-                        {
-                            index.books[i].fingerprint =
-                                fingerprint(&index.books[i].path, &cancelled).unwrap_or_default();
-                            index.books[i].fingerprint_attempted = !cancelled();
-                            if i % 64 == 0
-                                && let Err(e) = store.save_library(&index)
-                            {
-                                errors.push(format!("Couldn't save library identity: {e}"));
-                            }
-                        }
-                    }
-                    if cancelled() {
-                        break;
-                    }
-                    if let Err(e) = store.save_library(&index) {
-                        errors.push(format!("Couldn't save covers: {e}"));
-                    }
-                    log::info!("library identities complete in {:?}", identity_started.elapsed());
-                    match store.refresh_home_metadata(&index) {
-                        Ok(Some(summary)) => publish_home(summary),
-                        Ok(None) => rebuild_home(&index),
-                        Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
-                    }
-                    last_errors = errors.clone();
-                    publish(Snapshot { index: index.clone(), scanning: false, working: false, errors });
-                    log::info!("startup stage: background complete elapsed_us={}", startup.elapsed().as_micros());
-                }
+                .run()
             })
             .expect("start library thread");
         Self { shared, join: Some(join) }
@@ -276,6 +429,8 @@ impl Worker {
     pub fn take_home(&self) -> Option<Summary> {
         self.shared.0.lock().unwrap().latest_home.take()
     }
+    /// While paused (a book is opening or open), scan, cover and identity work
+    /// stops at its next check: between files, covers or 64 KiB fingerprint reads.
     pub fn pause(&self, paused: bool) {
         self.shared.0.lock().unwrap().paused = paused;
         self.shared.1.notify_one();
@@ -283,8 +438,13 @@ impl Worker {
     pub fn prioritize(&self, ids: Vec<String>) {
         self.shared.0.lock().unwrap().priority = ids.into_iter().take(32).collect();
     }
+    /// The newest changed index, if any.
     pub fn take(&self) -> Option<Snapshot> {
         self.shared.0.lock().unwrap().latest.take()
+    }
+    /// The newest scan/cover status and errors, if they changed.
+    pub fn take_status(&self) -> Option<Status> {
+        self.shared.0.lock().unwrap().status.take()
     }
     /// Request regeneration of thumbnails whose cache failed to load on screen.
     pub fn repair(&self, ids: impl IntoIterator<Item = String>) {
@@ -311,32 +471,34 @@ impl Drop for Worker {
     }
 }
 
-/// Returns the indices processed. Unknown, unavailable and already attempted
-/// books are skipped without a reply, so a persistent failure cannot loop.
+/// Returns the indices processed and whether a cover changed. Unknown,
+/// unavailable and already attempted books are skipped without a reply, so a
+/// persistent failure cannot loop.
 fn repair_covers(
     index: &mut LibraryIndex,
     ids: &[String],
     store: &Store,
     attempted: &mut HashSet<String>,
     errors: &mut Vec<String>,
-) -> Vec<usize> {
+) -> (Vec<usize>, bool) {
     let mut repaired = Vec::new();
+    let mut changed = false;
     for id in ids {
         let Some(i) = index.books.iter().position(|b| &b.id == id && b.available) else { continue };
         if !attempted.insert(covers::key(&index.books[i])) {
             continue;
         }
         match covers::repair(&index.books[i], store) {
-            Ok(cover) => index.books[i].cover = cover,
-            Err(e) => {
-                if errors.len() < 32 {
-                    errors.push(format!("Couldn't cache cover: {e}"));
-                }
+            Ok(cover) if cover != index.books[i].cover => {
+                index.books[i].cover = cover;
+                changed = true;
             }
+            Ok(_) => {}
+            Err(e) => push_error(errors, format!("Couldn't cache cover: {e}")),
         }
         repaired.push(i);
     }
-    repaired
+    (repaired, changed)
 }
 
 pub struct Scan {
@@ -523,7 +685,11 @@ pub fn scan_roots(
     let available_ids: HashSet<_> = books.iter().filter(|b| b.available).map(|b| b.id.clone()).collect();
     books.retain(|b| b.available || !available_ids.contains(&b.id));
     let mut index = LibraryIndex { books, ..LibraryIndex::default() };
-    checkpoint(&index);
+    // New books appear with filename titles before their metadata is read. An
+    // unchanged or edit-only scan has nothing to show early.
+    if !dirty.is_empty() {
+        checkpoint(&index);
+    }
     for i in 0..index.books.len() {
         if cancelled() {
             return None;
@@ -694,27 +860,44 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
+        // Returns the last changed index (if any) and the final status.
         let finished = |worker: &Worker| {
-            let mut last = None;
+            let (mut content, mut status) = (None, None);
             wait(|| {
                 if let Some(snapshot) = worker.take() {
-                    let done = !snapshot.working;
-                    last = Some(snapshot);
+                    content = Some(snapshot.index);
+                }
+                if let Some(next) = worker.take_status() {
+                    let done = !next.working;
+                    status = Some(next);
                     return done;
                 }
                 false
             });
-            last.unwrap().index
+            // Content published just before the final status is already queued.
+            if let Some(snapshot) = worker.take() {
+                content = Some(snapshot.index);
+            }
+            (content, status.unwrap())
         };
         let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
-        let index = finished(&worker);
+        let index = finished(&worker).0.expect("a new library publishes its index");
         let book = index.books[0].clone();
         let Cover::Ready(key) = book.cover.clone() else { panic!("fixture cover missing") };
         drop(worker);
-        // A corrupt, current cache file is reused by the unchanged pass without decoding.
+        // A corrupt, current cache file is reused by the unchanged pass without
+        // decoding. The pass publishes no index and writes no library file, but
+        // still delivers completion and errors (here an unreadable extra folder).
         std::fs::write(store.cover_path(&key), b"corrupt")?;
-        let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
-        assert_eq!(finished(&worker).books[0].cover, Cover::Ready(key.clone()));
+        let library_file = root.join("state/library.json");
+        let written = std::fs::metadata(&library_file)?.modified()?;
+        let roots = vec![books.clone(), root.join("missing")];
+        let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
+        let (content, status) = finished(&worker);
+        assert!(content.is_none(), "an unchanged pass publishes no index");
+        assert!(!status.scanning && status.errors.iter().any(|e| e.contains("missing")));
+        assert_eq!(std::fs::metadata(&library_file)?.modified()?, written, "an unchanged pass saves nothing");
+        assert_eq!(store.library().books[0].cover, Cover::Ready(key.clone()));
         assert!(covers::load(&store.cover_path(&key)).is_err());
         // A visible-load failure regenerates it once, outside a pass.
         worker.repair(["unknown".to_owned(), book.id.clone()]);
@@ -725,6 +908,22 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(worker.take_repaired().is_empty(), "a key is repaired at most once per session");
         assert!(worker.take().is_none(), "an unchanged repair publishes no index");
+        assert_eq!(std::fs::metadata(&library_file)?.modified()?, written);
+        drop(worker);
+        // New and removed files are still discovered and published.
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library2.epub"),
+            books.join("added.epub"),
+        )?;
+        let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
+        let added = finished(&worker).0.expect("an added book publishes the index");
+        assert_eq!(added.books.iter().filter(|b| b.available).count(), 2);
+        assert_eq!(store.library(), added);
+        drop(worker);
+        std::fs::remove_file(books.join("added.epub"))?;
+        let worker = Worker::new(store.clone(), roots, Waker::new(|| {}));
+        let removed = finished(&worker).0.expect("a removed book publishes the index");
+        assert_eq!(removed.books.iter().filter(|b| b.available).count(), 1);
         drop(worker);
         std::fs::remove_dir_all(root)?;
         Ok(())

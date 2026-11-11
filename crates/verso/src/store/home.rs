@@ -32,10 +32,17 @@ impl Store {
 
     /// Library-worker operation, including migration of older installations.
     /// Reads existing records but never modifies any of them.
-    pub fn rebuild_home_summary(&self, index: &LibraryIndex) -> Result<Summary> {
+    /// Stops between records when `cancelled` returns true (shutdown). A
+    /// cancelled rebuild writes nothing.
+    pub fn rebuild_home_summary_until(&self, index: &LibraryIndex, cancelled: &dyn Fn() -> bool) -> Result<Summary> {
         let started = std::time::Instant::now();
         let _guard = SUMMARY_WRITE.lock().unwrap();
-        let mut summary = Summary::select(index.books.iter().map(|book| Entry::new(book, &self.book(&book.id))));
+        let stopped = std::cell::Cell::new(false);
+        let mut summary = Summary::select(index.books.iter().map_while(|book| {
+            stopped.set(cancelled());
+            (!stopped.get()).then(|| Entry::new(book, &self.book(&book.id)))
+        }));
+        ensure!(!stopped.get(), "Home rebuild cancelled");
         summary.complete = true;
         self.persist_home(&summary)?;
         log::info!(
@@ -44,6 +51,10 @@ impl Store {
             started.elapsed().as_micros()
         );
         Ok(summary)
+    }
+    #[cfg(test)]
+    pub fn rebuild_home_summary(&self, index: &LibraryIndex) -> Result<Summary> {
+        self.rebuild_home_summary_until(index, &|| false)
     }
 
     /// Confirmed cover/metadata changes need only update the bounded selection.

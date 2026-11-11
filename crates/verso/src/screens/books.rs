@@ -216,7 +216,7 @@ impl Books {
             return;
         }
         let snapshot = self.pending.take();
-        let complete = snapshot.as_ref().is_none_or(|s| !s.scanning);
+        let complete = snapshot.as_ref().is_none_or(|s| !s.partial);
         self.index = snapshot.map_or_else(|| self.store.library(), |s| s.index);
         let started = std::time::Instant::now();
         self.collections = Collections::from_index(&self.index, &self.roots);
@@ -437,13 +437,6 @@ impl Books {
         if let Some(snapshot) = self.pending.take() {
             let started = std::time::Instant::now();
             cx.redraw();
-            for error in &snapshot.errors {
-                if !self.errors.contains(error) {
-                    log::warn!("{error}");
-                    cx.toast(error.clone(), None);
-                }
-            }
-            self.errors = snapshot.errors;
             self.index = snapshot.index;
             self.collections = Collections::from_index(&self.index, &self.roots);
             if let Some(search) = &mut self.search {
@@ -452,14 +445,14 @@ impl Books {
             let old_navigation = self.navigation.clone();
             let old_folder = self.navigation.folder.clone();
             // Initial metadata checkpoints may not yet contain the saved folder.
-            if !snapshot.scanning {
+            if !snapshot.partial {
                 self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
                 self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
             }
             let page = self.pager.page;
             self.pager.page = self.search.as_ref().map_or_else(|| self.navigation.page(), |s| s.page);
             self.refresh(cx.theme);
-            if !snapshot.scanning {
+            if !snapshot.partial {
                 if self.search.is_none() {
                     self.navigation.set_page(self.pager.page);
                 }
@@ -1183,19 +1176,23 @@ impl Screen for Books {
         if let Some(r) = &mut self.reader {
             r.on_background(cx);
         }
-        if let Some(snapshot) = self.library.take() {
+        // Status only redraws the status line; it never touches the index.
+        if let Some(status) = self.library.take_status() {
             if self.reader.is_none() {
-                cx.redraw(); // Scan/cover status can change before applying the index.
+                cx.redraw();
             }
-            self.scanning = snapshot.scanning;
-            self.working = snapshot.working;
-            for error in &snapshot.errors {
+            self.scanning = status.scanning;
+            self.working = status.working;
+            for error in &status.errors {
                 if !self.errors.contains(error) {
                     log::warn!("{error}");
                     cx.toast(error.clone(), None);
                 }
             }
-            self.errors = snapshot.errors.clone();
+            self.errors = status.errors;
+        }
+        // Only changed content arrives here; it waits for touches and overlays.
+        if let Some(snapshot) = self.library.take() {
             self.pending = Some(snapshot);
             self.apply_pending(cx);
         }
@@ -1767,7 +1764,7 @@ mod tests {
             books.pager.page = 2;
             books.save_navigation(cx);
             let old = books.index.clone();
-            books.pending = Some(Snapshot { scanning: true, ..Default::default() });
+            books.pending = Some(Snapshot { partial: true, ..Default::default() });
             books.apply_pending(cx);
             assert_eq!(books.navigation.folder, Some("/books/Fiction/Nested".into()));
             assert_eq!(store.navigation().page(), 2, "incomplete checkpoints cannot erase saved pages");
