@@ -35,6 +35,57 @@ def wait(command, seconds=300):
     raise RuntimeError('Timed out: ' + command)
 
 
+def fb_hash(rows=1696):
+    return remote(f'head -c {1272 * rows} /dev/fb0 | sha256sum').split()[0]
+
+
+def sleep_wake():
+    """Real sleep and wake through powerd's power button; always returns awake."""
+    remote('lipc-set-prop com.lab126.powerd powerButton 1')
+    try:
+        wait('test "$(lipc-get-prop com.lab126.powerd state)" = screenSaver', 30)
+    finally:
+        if remote('lipc-get-prop com.lab126.powerd state') != 'active':
+            remote('lipc-set-prop com.lab126.powerd powerButton 1')
+    wait('test "$(lipc-get-prop com.lab126.powerd state)" = active', 30)
+    remote('sleep 3')  # Includes the delayed firmware-banner cleanup.
+
+
+def lifecycle(probe, state, pid):
+    """Home and reader sleep/wake, exact reopen, close back to Home and exit."""
+    checks = {}
+    wait(f'grep -q "startup stage: background complete" {APP}/verso.log')
+    remote('sleep 2')
+    home, header = fb_hash(), fb_hash(300)
+    sleep_wake()
+    checks['home_wake_restored'] = fb_hash() == home
+    summary = json.loads(remote(f'cat {state}/home.json'))
+    book = next(e['book']['id'] for e in summary['books'] if e['status']['has_position']
+                and not e['status']['finished'] and not e['status']['hidden_from_continue'] and e['book']['available'])
+    record = f'{state}/books/{book}.json'
+    before = json.loads(remote(f'cat {record}'))
+    remote(f'{probe} 1 1 prime; {probe} 400 400 open')
+    wait(f'grep -q "book first page requested" {APP}/verso.log')
+    remote('sleep 2')
+    opened = json.loads(remote(f'cat {record}'))
+    checks['exact_resume'] = (opened['position'], opened['page']) == (before['position'], before['page'])
+    page = fb_hash()
+    sleep_wake()
+    checks['reader_wake_restored'] = fb_hash() == page
+    remote(f'{probe} 1100 1000 turn; sleep 2')
+    turned = json.loads(remote(f'cat {record}'))
+    checks['turn_saved'] = turned['page'] == before['page'] + 1
+    remote(f'{probe} 636 848 menu; sleep 1; {probe} 65 70 close; sleep 2')
+    checks['closed_to_home'] = fb_hash(300) == header
+    resume = json.loads(remote(f'cat {state}/home.json'))['books'][0]
+    checks['home_updated'] = resume['book']['id'] == book and resume['status']['progress'] == turned['progress']
+    remote(f'kill -TERM {pid}')
+    wait(f'test ! -e /proc/{pid}')
+    checks['position_after_exit'] = json.loads(remote(f'cat {record}'))['position'] == turned['position']
+    assert all(checks.values()), checks
+    return checks
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('variant')
@@ -43,7 +94,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--runs', type=int, default=2)
     parser.add_argument('--fixture', choices=['real', 'large'])
-    parser.add_argument('--mode', choices=['startup', 'immediate-open'])
+    parser.add_argument('--mode', choices=['startup', 'immediate-open', 'lifecycle'])
     parser.add_argument('--installed', action='store_true', help='Reuse the variant executable already installed by an earlier run')
     parser.add_argument('--collections-tap', default='950,200',
                         help='Collections tab position (baseline 950,200; three-tab Home 636,230)')
@@ -62,8 +113,11 @@ def main():
     launcher = launcher.replace('/tmp/verso-launcher', '/tmp/verso-startup-launcher')
     upload(APP + '/launcher.sh', launcher.encode())
     results = json.loads(args.output.read_text()) if args.output.exists() else []
-    for fixture, mode in [('real', 'startup'), ('large', 'startup'), ('real', 'immediate-open')]:
-        if (args.fixture and args.fixture != fixture) or (args.mode and args.mode != mode):
+    combos = [('real', 'startup'), ('large', 'startup'), ('real', 'immediate-open'), ('real', 'lifecycle')]
+    for fixture, mode in combos:
+        # Lifecycle checks sleep the device, so they run only when requested.
+        if (args.fixture and args.fixture != fixture) or (args.mode and args.mode != mode) \
+                or (mode == 'lifecycle' and args.mode != mode):
             continue
         for number in range(args.runs):
             assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
@@ -107,6 +161,8 @@ def main():
                     remote(f'{probe} 1 1 prime; {probe} 400 400 open')
                     wait(f'grep -q "book first page requested" {APP}/verso.log')
                     sample('reader')
+                elif mode == 'lifecycle':
+                    result['lifecycle'] = lifecycle(probe, state, pid)
                 else:
                     wait(f'grep -q "startup stage: background complete" {APP}/verso.log')
                     sample('background_complete')

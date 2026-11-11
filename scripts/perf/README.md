@@ -260,3 +260,25 @@ successful writes per timed run, and reports the persistence thread's CPU.
 Compare normal and rapid groups separately; process CPU includes the worker.
 Memory snapshots from one launch per build are diagnostic, not independent
 memory repetitions. See the [persistence report](../../docs/research/position-persistence.md).
+
+## Home startup comparison
+
+`startup.py` measures Home/library startup, the first Collections visit and an
+immediate resume-card open through an isolated launcher copy under
+`/mnt/us/verso/startup-check`, using copies of the real data. `--summary
+missing` measures the one-time Home migration and saves the rebuilt summary as
+the seed; `--summary seeded` uses that seed for warm launches. Use
+`--collections-tap 636,230` for the three-tab Home layout (950,200 for the
+pre-Home baseline). `--mode lifecycle` runs real sleep/wake on Home and in the
+reader, exact reopen, close to Home and exit; it returns the device to awake.
+`--large` needs a fixture whose cover keys match the app's key formula; see the
+[report](../../docs/research/home-startup.md#method-and-boundaries).
+
+```sh
+python3 scripts/perf/startup.py after /tmp/after/verso --large /tmp/large \
+  --output docs/research/home-startup-2026-11-11/after.json \
+  --collections-tap 636,230 --fixture real --mode startup --summary missing --runs 1
+python3 scripts/perf/startup.py after /tmp/after/verso --large /tmp/large --installed \
+  --output docs/research/home-startup-2026-11-11/after.json \
+  --collections-tap 636,230 --summary seeded --mode lifecycle --runs 1
+```
