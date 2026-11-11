@@ -73,6 +73,10 @@ fn parse_args() -> Result<Options> {
                 let v = numbers(args.next(), 2, "--tap")?;
                 opts.script.push(ScriptStep::Tap(Point::new(v[0], v[1])));
             }
+            "--long-press" => {
+                let v = numbers(args.next(), 2, "--long-press")?;
+                opts.script.push(ScriptStep::LongPress(Point::new(v[0], v[1])));
+            }
             "--press" => {
                 let v = numbers(args.next(), 2, "--press")?;
                 opts.script.push(ScriptStep::Press(Point::new(v[0], v[1])));
@@ -96,10 +100,10 @@ fn start_screen(
     rect: geom::Rect,
     worker: std::rc::Rc<document::thread::Worker>,
 ) -> Result<Box<dyn Screen>> {
-    Ok(match name.unwrap_or("books") {
+    Ok(match name.unwrap_or("library") {
         "gallery" => Box::new(screens::gallery::Gallery::new(theme, rect, worker)),
-        "books" | "reader" => Box::new(screens::books::Books::new(theme, rect, worker)),
-        other => bail!("unknown screen {other:?}; try books or gallery"),
+        "library" | "books" | "reader" => Box::new(screens::books::Books::new(theme, rect, worker)),
+        other => bail!("unknown screen {other:?}; try library or gallery"),
     })
 }
 

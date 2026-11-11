@@ -31,7 +31,7 @@ pub struct Worker {
     join: Option<JoinHandle<()>>,
 }
 impl Worker {
-    pub fn new(store: Store, root: PathBuf, waker: Waker) -> Self {
+    pub fn new(store: Store, roots: Vec<PathBuf>, waker: Waker) -> Self {
         let shared = Arc::new((Mutex::new(Shared { requested: true, ..Shared::default() }), Condvar::new()));
         let thread_shared = shared.clone();
         let join = std::thread::Builder::new()
@@ -59,7 +59,7 @@ impl Worker {
                         std::mem::take(&mut state.retry)
                     };
                     let mut errors = Vec::new();
-                    let result = scan(&root, &index, retry, &cancelled, |checkpoint| {
+                    let result = scan_roots(&roots, &index, retry, &cancelled, |checkpoint| {
                         let mut snapshot = Snapshot {
                             index: checkpoint.clone(),
                             scanning: true,
@@ -72,6 +72,7 @@ impl Worker {
                         publish(snapshot);
                     });
                     let Some(scan) = result else { break };
+                    log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
                     index = scan.index;
                     errors.extend(scan.errors);
                     if let Err(e) = store.save_library(&index) {
@@ -126,6 +127,25 @@ impl Worker {
                                 errors: errors.clone(),
                             });
                             since_publish = Instant::now();
+                        }
+                    }
+                    // Fingerprinting new additions is deferred until metadata and covers
+                    // are visible. Only possible moves need it before identity assignment.
+                    for i in 0..index.books.len() {
+                        {
+                            let state = shared.0.lock().unwrap();
+                            if state.stop || state.requested {
+                                break;
+                            }
+                        }
+                        if index.books[i].available && index.books[i].fingerprint.is_empty() {
+                            index.books[i].fingerprint =
+                                fingerprint(&index.books[i].path, &cancelled).unwrap_or_default();
+                            if i % 64 == 0
+                                && let Err(e) = store.save_library(&index)
+                            {
+                                errors.push(format!("Couldn't save library identity: {e}"));
+                            }
                         }
                     }
                     if cancelled() {
@@ -232,8 +252,8 @@ fn enumerate(
     }
 }
 
-pub fn scan(
-    root: &Path,
+pub fn scan_roots(
+    roots: &[PathBuf],
     previous: &LibraryIndex,
     retry: bool,
     cancelled: &impl Fn() -> bool,
@@ -243,12 +263,17 @@ pub fn scan(
     let mut paths = Vec::new();
     let mut uncertain = Vec::new();
     let mut errors = Vec::new();
-    enumerate(root, cancelled, &mut paths, &mut uncertain, &mut errors);
+    for root in roots {
+        enumerate(root, cancelled, &mut paths, &mut uncertain, &mut errors);
+    }
     paths.sort();
+    paths.dedup();
     let old: HashMap<_, _> = previous.books.iter().map(|b| (&b.path, b)).collect();
     let found: HashSet<_> = paths.iter().cloned().collect();
     let mut books = Vec::new();
     let mut dirty = HashSet::new();
+    let mut reads = 0;
+    let possible_moves = previous.books.iter().any(|b| !found.contains(&b.path));
     for path in paths {
         if cancelled() {
             return None;
@@ -274,26 +299,40 @@ pub fn scan(
             continue;
         }
         let legacy_id = book_id(&path).unwrap_or_default();
-        let fingerprint = if changed {
+        let fingerprint = if changed && (cached.is_some() || possible_moves) {
             fingerprint(&path, cancelled).unwrap_or_default()
+        } else if changed {
+            String::new()
         } else {
             cached.map_or(String::new(), |b| b.fingerprint.clone())
         };
-        dirty.insert(path.clone());
+        let mut metadata = Metadata {
+            title: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+            ..Metadata::default()
+        };
+        let mut metadata_pending = true;
+        let mut error = None;
+        if changed && cached.is_some() {
+            reads += 1;
+            match epub::read(&path) {
+                Ok(parsed) => metadata = parsed,
+                Err(e) => error = Some(format!("{e:#}")),
+            }
+            metadata_pending = false;
+        } else {
+            dirty.insert(path.clone());
+        }
         books.push(Book {
-            metadata: Metadata {
-                title: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
-                ..Metadata::default()
-            },
+            metadata,
             path,
             id: String::new(),
             legacy_id,
             fingerprint,
             stamp: file_stamp,
-            error: None,
+            error,
             cover: Cover::Pending,
             available: true,
-            metadata_pending: true,
+            metadata_pending,
         });
     }
     if cancelled() {
@@ -303,7 +342,8 @@ pub fn scan(
     for cached in &previous.books {
         if !found.contains(&cached.path) || uncertain.iter().any(|p| cached.path.starts_with(p)) {
             let mut b = cached.clone();
-            b.available = cached.path.starts_with(root) && uncertain.iter().any(|p| cached.path.starts_with(p));
+            b.available = roots.iter().any(|root| cached.path.starts_with(root))
+                && uncertain.iter().any(|p| cached.path.starts_with(p));
             if !books.iter().any(|entry| entry.path == b.path) {
                 books.push(b);
             }
@@ -314,7 +354,6 @@ pub fn scan(
     let available_ids: HashSet<_> = books.iter().filter(|b| b.available).map(|b| b.id.clone()).collect();
     books.retain(|b| b.available || !available_ids.contains(&b.id));
     let mut index = LibraryIndex { books, ..LibraryIndex::default() };
-    let mut reads = 0;
     checkpoint(&index);
     for i in 0..index.books.len() {
         if cancelled() {
@@ -343,18 +382,60 @@ pub fn scan(
 }
 
 #[cfg(test)]
+pub fn scan(
+    root: &Path,
+    previous: &LibraryIndex,
+    retry: bool,
+    cancelled: &impl Fn() -> bool,
+    checkpoint: impl FnMut(&LibraryIndex),
+) -> Option<Scan> {
+    scan_roots(&[root.to_owned()], previous, retry, cancelled, checkpoint)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::library::epub::tests::fixture;
+    #[test]
+    fn multiple_folders_spaces_overlaps_and_partial_failure() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-multi-folders-{}", std::process::id()));
+        let documents = root.join("documents");
+        let library = root.join("My Library");
+        std::fs::create_dir_all(&documents)?;
+        std::fs::create_dir_all(&library)?;
+        fixture(&documents.join("same.epub"), "<package/>", &[])?;
+        fixture(&library.join("same.epub"), "<package/>", &[])?;
+        let roots = vec![root.clone(), documents, library.clone()];
+        let first = scan_roots(&roots, &Default::default(), false, &|| false, |_| {}).unwrap();
+        assert_eq!(first.index.books.len(), 2);
+        assert_ne!(first.index.books[0].id, first.index.books[1].id);
+        std::fs::rename(&library, root.join("offline"))?;
+        // Enumerate only the original roots: the inaccessible one retains its entry.
+        let next = scan_roots(&roots[1..], &first.index, false, &|| false, |_| {}).unwrap();
+        assert_eq!(next.index.books.iter().filter(|b| b.available).count(), 2);
+        assert!(!next.errors.is_empty());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     fn run(root: &Path, old: &LibraryIndex, retry: bool) -> Scan {
-        scan(root, old, retry, &|| false, |_| {}).unwrap()
+        let mut result = scan(root, old, retry, &|| false, |_| {}).unwrap();
+        for book in &mut result.index.books {
+            if book.available && book.fingerprint.is_empty() {
+                book.fingerprint = fingerprint(&book.path, &|| false).unwrap_or_default();
+            }
+        }
+        result
     }
     #[test]
     fn incremental_discovery_failures_moves_and_missing_subtrees() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-scan-{}", std::process::id()));
         std::fs::create_dir_all(root.join("nested"))?;
         let a = root.join("nested/one.EPUB");
-        fixture(&a, "<package/>", &[])?;
+        fixture(
+            &a,
+            r#"<package unique-identifier="id"><metadata><identifier id="id">one</identifier></metadata></package>"#,
+            &[],
+        )?;
         std::fs::write(root.join("bad.epub"), b"broken")?;
         let initial = run(&root, &LibraryIndex::default(), false);
         assert_eq!(initial.metadata_reads, 2);
@@ -370,7 +451,11 @@ mod tests {
         assert_eq!(moved.metadata_reads, 1);
         assert_eq!(moved.index.books.iter().find(|b| b.path == moved_path).unwrap().id, id);
         assert!(!moved.index.books.iter().any(|b| b.path == a));
-        fixture(&moved_path, "<package><metadata><title>Edited</title></metadata></package>", &[])?;
+        fixture(
+            &moved_path,
+            r#"<package unique-identifier="id"><metadata><identifier id="id">one</identifier><title>Edited</title></metadata></package>"#,
+            &[],
+        )?;
         let changed = run(&root, &moved.index, false);
         assert_eq!(changed.metadata_reads, 1);
         assert_eq!(changed.index.books.iter().find(|b| b.path == moved_path).unwrap().id, id);
@@ -404,7 +489,7 @@ mod tests {
             scan(&root, &LibraryIndex::default(), false, &|| false, |index| checkpoint = Some(index.clone())).unwrap();
         assert_eq!(full.metadata_reads, 70);
         assert_eq!(run(&root, &checkpoint.unwrap(), false).metadata_reads, 6);
-        let worker = Worker::new(Store::at(root.join("state")), root.clone(), Waker::new(|| {}));
+        let worker = Worker::new(Store::at(root.join("state")), vec![root.clone()], Waker::new(|| {}));
         for _ in 0..100 {
             worker.rescan();
         }

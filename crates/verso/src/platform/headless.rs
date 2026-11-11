@@ -37,6 +37,7 @@ impl Headless {
         // nothing counts as a double tap or a long-press by accident.
         let mut t = Instant::now();
         let mut events = VecDeque::new();
+        events.push_back(None); // Wait for initial library discovery before playing touches.
         let touch = |events: &mut VecDeque<_>, phase, pos, at: Instant| {
             events.push_back(Some(Event::Touch(Touch { id: 0, phase, pos, time: at })))
         };
@@ -46,6 +47,12 @@ impl Headless {
                 ScriptStep::Tap(p) => {
                     touch(&mut events, TouchPhase::Down, p, t);
                     touch(&mut events, TouchPhase::Up, p, t + Duration::from_millis(60));
+                }
+                ScriptStep::LongPress(p) => {
+                    let held_at = Instant::now() - Duration::from_secs(1);
+                    touch(&mut events, TouchPhase::Down, p, held_at);
+                    events.push_back(None); // Let the gesture timer fire before lifting.
+                    touch(&mut events, TouchPhase::Up, p, held_at + Duration::from_millis(650));
                 }
                 ScriptStep::Press(p) => touch(&mut events, TouchPhase::Down, p, t),
                 ScriptStep::Swipe(a, b) => {
@@ -111,7 +118,7 @@ impl Platform for Headless {
             if self.busy {
                 anyhow::ensure!(
                     self.barrier_since.elapsed() < Duration::from_secs(90),
-                    "screenshot timed out waiting for book work"
+                    "screenshot timed out waiting for background work"
                 );
                 let wait = timeout.unwrap_or(Duration::from_millis(50)).min(Duration::from_millis(50));
                 return Ok(self.wake_rx.recv_timeout(wait).ok().map(|()| Event::Background));

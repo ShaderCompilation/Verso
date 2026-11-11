@@ -21,6 +21,7 @@ pub struct PopupMenu {
     press: Press,
     /// A touch started outside the card.
     outside: bool,
+    enabled: Vec<bool>,
 }
 
 impl PopupMenu {
@@ -36,7 +37,14 @@ impl PopupMenu {
         } else {
             (anchor.y - theme.mm(2.0) - h).max(theme.margin)
         };
-        Self { items, rect: Rect::new(x, y, w, h), pressed: None, press: Press::default(), outside: false }
+        let enabled = vec![true; items.len()];
+        Self { items, rect: Rect::new(x, y, w, h), pressed: None, press: Press::default(), outside: false, enabled }
+    }
+
+    pub fn set_enabled(&mut self, item: usize, enabled: bool) {
+        if let Some(value) = self.enabled.get_mut(item) {
+            *value = enabled;
+        }
     }
 
     pub fn rect(&self) -> Rect {
@@ -68,6 +76,12 @@ impl PopupMenu {
             return g.ends_touch().then_some(MenuEvent::Dismissed);
         }
         let i = self.pressed?;
+        if !self.enabled[i] {
+            if g.ends_touch() {
+                self.pressed = None;
+            }
+            return None;
+        }
         let event = match self.press.on_gesture(g, rects[i]) {
             Some(PressEvent::Tap | PressEvent::LongPressEnd) => Some(MenuEvent::Chosen(i)),
             _ => None,
@@ -86,7 +100,9 @@ impl PopupMenu {
         cx.canvas.stroke_rounded_rect(r, t.radius_sheet, t.border as f32, INK);
         let n = self.items.len();
         for (k, (item, ir)) in self.items.iter().zip(self.item_rects(t)).enumerate() {
-            let fg = if self.pressed == Some(k) && self.press.is_down() {
+            let fg = if !self.enabled[k] {
+                crate::ui::theme::INK3
+            } else if self.pressed == Some(k) && self.press.is_down() {
                 // Follow the card's rounded corners on the first and last item.
                 cx.canvas.fill_rounded_rect(ir, t.radius_sheet - t.border as f32, INK);
                 if k > 0 {

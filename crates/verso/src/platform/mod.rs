@@ -124,6 +124,7 @@ pub trait Platform {
 #[cfg_attr(feature = "kindle", allow(dead_code))] // screenshots are simulator-only
 pub enum ScriptStep {
     Tap(Point),
+    LongPress(Point),
     /// Finger down, never lifted (to capture pressed states).
     Press(Point),
     Swipe(Point, Point),

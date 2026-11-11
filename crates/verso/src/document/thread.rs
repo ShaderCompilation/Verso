@@ -31,6 +31,7 @@ pub enum Reply {
     Error { generation: u64, message: String },
 }
 pub struct Worker {
+    waker: Waker,
     tx: mpsc::Sender<Command>,
     rx: RefCell<mpsc::Receiver<Reply>>,
     join: Option<JoinHandle<()>>,
@@ -40,12 +41,13 @@ impl Worker {
     pub fn new(paths: Paths, dpi: u32, waker: Waker) -> Self {
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
+        let thread_waker = waker.clone();
         let join = std::thread::Builder::new()
             .name("verso-book".into())
             .spawn(move || {
                 let send = |r| {
                     let _ = results.send(r);
-                    waker.wake();
+                    thread_waker.wake();
                 };
                 let engine = CreEngine::new(paths, dpi);
                 let engine = match engine {
@@ -132,7 +134,16 @@ impl Worker {
                 }
             })
             .expect("start book thread");
-        Self { tx, rx: RefCell::new(rx), join: Some(join), fonts: RefCell::new(Vec::new()) }
+        Self { waker, tx, rx: RefCell::new(rx), join: Some(join), fonts: RefCell::new(Vec::new()) }
+    }
+    #[cfg(test)]
+    pub fn stub() -> Self {
+        let (tx, _) = mpsc::channel();
+        let (_, rx) = mpsc::channel();
+        Self { waker: Waker::new(|| {}), tx, rx: RefCell::new(rx), join: None, fonts: RefCell::new(Vec::new()) }
+    }
+    pub fn waker(&self) -> Waker {
+        self.waker.clone()
     }
     pub fn send(&self, c: Command) {
         if self.tx.send(c).is_err() {

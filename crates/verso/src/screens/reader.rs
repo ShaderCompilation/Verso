@@ -11,7 +11,7 @@ use crate::screens::contents::{Contents, ContentsEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
 use crate::screens::{Action, EventCx, Screen};
-use crate::store::{BookState, Settings, Store};
+use crate::store::{Settings, Store};
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK2, PAPER, Theme};
 use crate::ui::widget::DrawCx;
@@ -39,6 +39,7 @@ pub struct Reader {
     anchor: Position,
     turn_pending: bool,
     save_pending: bool,
+    fresh_open: bool,
     error: Option<String>,
 }
 enum Overlay {
@@ -82,8 +83,12 @@ impl Reader {
             anchor,
             turn_pending: false,
             save_pending: false,
+            fresh_open: true,
             error: None,
         }
+    }
+    pub fn failed_open(&self) -> bool {
+        self.error.is_some() && self.shown.is_none()
     }
     pub fn generation(&self) -> u64 {
         self.cache.generation
@@ -207,15 +212,19 @@ impl Reader {
         let Some(page) = &self.shown else {
             return;
         };
-        let state = BookState {
-            position: page.position.clone(),
-            page: page.number,
-            progress: page.progress,
-            last_opened: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
-            ..self.store.book(&self.id)
-        };
+        let mut state = self.store.book(&self.id);
+        state.presented(
+            page.position.clone(),
+            page.number,
+            page.progress,
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+            self.fresh_open,
+        );
         match self.store.save_book(&self.id, &state) {
-            Ok(()) => self.save_pending = false,
+            Ok(()) => {
+                self.save_pending = false;
+                self.fresh_open = false;
+            }
             Err(e) => {
                 log::error!("saving position: {e:#}");
                 self.error = Some("Couldn't save your place".into());
@@ -390,5 +399,85 @@ impl Screen for Reader {
     }
     fn on_quit(&mut self) {
         self.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::BookState;
+    #[test]
+    fn failed_opens_keep_state_successful_presentation_clears_flags_and_saves_preserve_later_flags()
+    -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-reader-library-{}", std::process::id()));
+        let store = Store::at(root.clone());
+        let saved = BookState {
+            position: Position("old".into()),
+            finished: true,
+            hidden_from_continue: true,
+            last_opened: 10,
+            ..Default::default()
+        };
+        store.save_book("book", &saved)?;
+        let screen = Rect::new(0, 0, 20, 20);
+        let mut r = Reader::new(
+            screen,
+            Rc::new(Worker::stub()),
+            store.clone(),
+            "book".into(),
+            1,
+            store.settings(),
+            Vec::new(),
+            saved.position,
+        );
+        let theme = Theme::for_dpi(300);
+        let mut light = None;
+        let mut request = None;
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut cx = EventCx {
+            theme: &theme,
+            screen,
+            now: Instant::now(),
+            frontlight: &mut light,
+            light_request: &mut request,
+            toast: &mut toast,
+            forced: &mut forced,
+        };
+        r.receive(Reply::Error { generation: 1, message: "failed open".into() }, &mut cx);
+        r.after_present();
+        assert!(r.failed_open());
+        assert!(store.book("book").finished && store.book("book").hidden_from_continue);
+        assert_eq!(store.book("book").last_opened, 10);
+        let page = |number| {
+            Arc::new(Page {
+                generation: 1,
+                number,
+                pixels: vec![255; 400],
+                position: Position(format!("page-{number}")),
+                progress: 2500,
+                images: false,
+            })
+        };
+        r.receive(
+            Reply::Opened { generation: 1, metadata: Metadata::default(), toc: Vec::new(), pages: 10, current: 0 },
+            &mut cx,
+        );
+        r.receive(Reply::Page(page(0)), &mut cx);
+        // A render reply alone must not overwrite the old place before presentation.
+        assert_eq!(store.book("book").position.0, "old");
+        r.after_present();
+        let mut state = store.book("book");
+        assert!(!state.finished && !state.hidden_from_continue);
+        assert!(state.last_opened > 10);
+        state.hidden_from_continue = true;
+        store.save_book("book", &state)?;
+        r.target = 1;
+        r.receive(Reply::Page(page(1)), &mut cx);
+        r.after_present();
+        assert!(store.book("book").hidden_from_continue);
+        assert_eq!(store.book("book").position.0, "page-1");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

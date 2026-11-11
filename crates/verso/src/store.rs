@@ -11,12 +11,20 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub typography: Typography,
     pub footer: bool,
-    pub library_folder: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_folder: Option<PathBuf>, // Legacy single-folder setting.
+    pub library_folders: Option<Vec<PathBuf>>,
     pub library_sort: Sort,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { typography: Typography::default(), footer: true, library_folder: None, library_sort: Sort::Recent }
+        Self {
+            typography: Typography::default(),
+            footer: true,
+            library_folder: None,
+            library_folders: None,
+            library_sort: Sort::Recent,
+        }
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -33,7 +41,6 @@ pub struct BookState {
 pub struct Store {
     root: PathBuf,
 }
-#[allow(dead_code)] // Library worker is wired in the next Phase 5 steps.
 impl Store {
     pub fn new() -> Self {
         let root = std::env::var_os("VERSO_DATA").map(PathBuf::from).unwrap_or_else(|| {
@@ -76,11 +83,8 @@ impl Store {
     pub fn cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}.png"))
     }
-    pub fn library_folder(&self) -> PathBuf {
-        std::env::var_os("VERSO_BOOKS")
-            .map(PathBuf::from)
-            .or_else(|| self.settings().library_folder)
-            .unwrap_or_else(default_library_folder)
+    pub fn library_folders(&self) -> Vec<PathBuf> {
+        folder_paths(self.settings(), std::env::var_os("VERSO_BOOKS"))
     }
     #[cfg(test)]
     pub fn at(root: PathBuf) -> Self {
@@ -134,9 +138,65 @@ pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+pub fn default_library_folders() -> Vec<PathBuf> {
+    #[cfg(feature = "kindle")]
+    {
+        vec![PathBuf::from("/mnt/us/documents"), PathBuf::from("/mnt/us/My Library")]
+    }
+    #[cfg(feature = "desktop")]
+    {
+        vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testbooks")]
+    }
+}
+
+impl BookState {
+    pub fn presented(&mut self, position: Position, page: usize, progress: u32, now: u64, fresh_open: bool) {
+        self.position = position;
+        self.page = page;
+        self.progress = progress;
+        self.last_opened = now;
+        if fresh_open {
+            self.finished = false;
+            self.hidden_from_continue = false;
+        }
+    }
+}
+
+fn folder_paths(settings: Settings, override_folders: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let folders = override_folders
+        .map(|value| std::env::split_paths(&value).collect())
+        .or(settings.library_folders)
+        .or_else(|| settings.library_folder.map(|p| vec![p]))
+        .unwrap_or_else(default_library_folders);
+    let mut resolved = Vec::new();
+    for folder in folders {
+        let folder =
+            if folder.is_relative() { std::env::current_dir().unwrap_or_default().join(folder) } else { folder };
+        if !resolved.contains(&folder) {
+            resolved.push(folder);
+        }
+    }
+    resolved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_lists_preserve_spaces_and_override_legacy_settings() {
+        let mut settings = Settings { library_folder: Some("/old".into()), ..Default::default() };
+        assert_eq!(folder_paths(settings.clone(), None), vec![PathBuf::from("/old")]);
+        settings.library_folders =
+            Some(vec!["/mnt/us/documents".into(), "/mnt/us/My Library".into(), "/mnt/us/My Library".into()]);
+        assert_eq!(
+            folder_paths(settings.clone(), None),
+            vec![PathBuf::from("/mnt/us/documents"), PathBuf::from("/mnt/us/My Library")]
+        );
+        assert_eq!(
+            folder_paths(settings, Some("/override one:/override two".into())),
+            vec![PathBuf::from("/override one"), PathBuf::from("/override two")]
+        );
+    }
     #[test]
     fn records_survive_interrupted_writes_and_moves() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-store-{}", std::process::id()));
@@ -166,16 +226,5 @@ mod tests {
         assert_ne!(id, book_id(&b)?);
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }
-}
-
-pub fn default_library_folder() -> PathBuf {
-    #[cfg(feature = "kindle")]
-    {
-        PathBuf::from("/mnt/us/documents")
-    }
-    #[cfg(feature = "desktop")]
-    {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testbooks")
     }
 }

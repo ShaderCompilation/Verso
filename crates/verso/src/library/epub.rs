@@ -1,6 +1,6 @@
 //! Bounded, in-memory EPUB package inspection. Never invokes crengine or extracts files.
 use super::Metadata;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use quick_xml::{Reader, events::Event};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -69,7 +69,9 @@ fn xml(bytes: &[u8]) -> Result<Node> {
             Event::End(_) => {
                 ensure!(stack.len() > 1, "unexpected XML end");
                 let node = stack.pop().unwrap();
-                stack.last_mut().unwrap().text.push_str(&node.text);
+                if matches!(stack.last().unwrap().name.as_str(), "title" | "creator" | "language" | "identifier") {
+                    stack.last_mut().unwrap().text.push_str(&node.text);
+                }
                 stack.last_mut().unwrap().children.push(node);
             }
             Event::Text(e) => {
@@ -83,7 +85,7 @@ fn xml(bytes: &[u8]) -> Result<Node> {
                 let replacement = quick_xml::escape::unescape(&format!("&{value};"))?.into_owned();
                 stack.last_mut().unwrap().text.push_str(&replacement);
             }
-            Event::DocType(_) => bail!("EPUB XML document types are unsupported"),
+            Event::DocType(e) => ensure!(!e.as_ref().contains(&b'['), "EPUB XML entity declarations are unsupported"),
             Event::Eof => break,
             _ => {}
         }
@@ -156,6 +158,10 @@ pub fn read(path: &Path) -> Result<Metadata> {
     let mut result = Metadata::default();
     let mut cover_id = "";
     if let Some(meta) = package.find("metadata") {
+        let identifier = package.attr("unique-identifier");
+        if !identifier.is_empty() {
+            result.identifier = text(meta.all("identifier").find(|n| n.attr("id") == identifier));
+        }
         result.title = text(meta.find("title"));
         result.authors =
             meta.all("creator").map(|n| text(Some(n))).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
@@ -203,6 +209,24 @@ pub fn read(path: &Path) -> Result<Metadata> {
     Ok(result)
 }
 
+/// Self-contained vector covers only. Resource references and filters fall back
+/// rather than reading external files or allocating large intermediate surfaces.
+pub fn validate_svg(bytes: &[u8]) -> Result<()> {
+    fn validate(node: &Node) -> Result<()> {
+        ensure!(!matches!(node.name.as_str(), "image" | "filter" | "foreignObject"), "unsupported SVG resource");
+        for (key, value) in &node.attrs {
+            if key == "href" {
+                ensure!(value.starts_with('#'), "external SVG resource");
+            }
+        }
+        for child in &node.children {
+            validate(child)?;
+        }
+        Ok(())
+    }
+    validate(&xml(bytes)?)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -241,7 +265,7 @@ pub(crate) mod tests {
         fixture(
             &path,
             r#"<package><guide><reference type="cover" href="cover.xhtml"/></guide></package>"#,
-            &[("OPS/cover.xhtml", br#"<html><body><img src="../cover.png"/></body></html>"#), ("cover.png", b"png")],
+            &[("OPS/cover.xhtml", br#"<!DOCTYPE html PUBLIC 'example' 'https://example.invalid/test.dtd'><html><body><img src="../cover.png"/></body></html>"#), ("cover.png", b"png")],
         )?;
         assert_eq!(read(&path)?.cover.as_deref(), Some("cover.png"));
         fixture(&path, "<package/>", &[])?;
@@ -259,7 +283,8 @@ pub(crate) mod tests {
         assert!(resolve("OPS/book.opf", "https://example.com/a.png").is_err());
         assert!(resolve("", "%2fetc/passwd").is_err());
         assert_eq!(resolve("OPS/book.opf", "../a%20b.png#fragment")?, "a b.png");
-        assert!(xml(b"<!DOCTYPE package><package/>").is_err());
+        assert!(xml(b"<!DOCTYPE package [<!ENTITY x 'boom'>]><package/>").is_err());
+        assert!(xml(b"<!DOCTYPE html PUBLIC 'example' 'https://example.invalid/test.dtd'><html/>").is_ok());
         assert!(xml("<a>".repeat(70).as_bytes()).is_err());
         let mut data = std::io::Cursor::new(Vec::new());
         {
@@ -271,22 +296,4 @@ pub(crate) mod tests {
         assert!(entry(&mut ZipArchive::new(data)?, "huge", 1024).is_err());
         Ok(())
     }
-}
-
-/// Self-contained vector covers only. Resource references and filters fall back
-/// rather than reading external files or allocating large intermediate surfaces.
-pub fn validate_svg(bytes: &[u8]) -> Result<()> {
-    fn validate(node: &Node) -> Result<()> {
-        ensure!(!matches!(node.name.as_str(), "image" | "filter" | "foreignObject"), "unsupported SVG resource");
-        for (key, value) in &node.attrs {
-            if key == "href" {
-                ensure!(value.starts_with('#'), "external SVG resource");
-            }
-        }
-        for child in &node.children {
-            validate(child)?;
-        }
-        Ok(())
-    }
-    validate(&xml(bytes)?)
 }

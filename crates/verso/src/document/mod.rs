@@ -4,7 +4,7 @@
 mod crengine;
 pub mod thread;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -92,8 +92,6 @@ pub trait Document {
 /// Where the engine finds its data and the books, per device.
 #[derive(Clone, Debug)]
 pub struct Paths {
-    /// Configured library folder.
-    pub books: PathBuf,
     /// crengine's CSS files and `hyph/` patterns.
     pub engine_data: PathBuf,
     /// crengine's document cache (makes re-opening big books fast).
@@ -105,12 +103,11 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Device defaults, overridable with VERSO_BOOKS, VERSO_FONT_DIRS
+    /// Device defaults, overridable with VERSO_FONT_DIRS
     /// (colon-separated) and VERSO_FONT_FACE.
     pub fn for_device() -> Self {
         #[cfg(feature = "kindle")]
         let mut p = Self {
-            books: crate::store::Store::new().library_folder(),
             engine_data: "/mnt/us/verso/data/cre".into(),
             cache: Some("/mnt/us/verso/cache".into()),
             font_dirs: vec!["/mnt/us/verso/fonts".into(), "/usr/java/lib/fonts".into(), "/mnt/us/fonts".into()],
@@ -118,18 +115,14 @@ impl Paths {
         };
         #[cfg(feature = "desktop")]
         let mut p = {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             Self {
-                books: crate::store::Store::new().library_folder(),
                 engine_data: root.join("third_party/crengine/cr3gui/data"),
                 cache: Some(std::env::temp_dir().join("verso-cache")),
                 font_dirs: vec![root.join("assets/fonts"), "/usr/share/fonts/liberation-serif-fonts".into()],
                 font_face: "Literata".into(),
             }
         };
-        if let Some(v) = std::env::var_os("VERSO_BOOKS") {
-            p.books = v.into();
-        }
         if let Ok(v) = std::env::var("VERSO_FONT_DIRS") {
             p.font_dirs = v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
         }
@@ -138,19 +131,6 @@ impl Paths {
         }
         p
     }
-}
-
-/// EPUB files directly inside `dir`, sorted by name.
-pub fn list_books(dir: &Path) -> Vec<PathBuf> {
-    let mut books: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")))
-                .collect()
-        })
-        .unwrap_or_default();
-    books.sort();
-    books
 }
 
 #[cfg(all(test, feature = "desktop"))]
