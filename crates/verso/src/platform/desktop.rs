@@ -4,7 +4,8 @@
 //!   set by `VERSO_SIM_SCALE`, default 0.5). Screen size and density can be
 //!   changed with `VERSO_SIM_SIZE=1072x1448` and `VERSO_SIM_DPI=300`.
 //! - The left mouse button acts as a finger.
-//! - Keys: Q / Esc quit · S sleep/wake · V toggle refresh visualisation.
+//! - Keys: Q / Esc quit · S sleep/wake · V toggle refresh visualisation ·
+//!   P save a screenshot to `screenshots/`.
 //! - Like the real panel, `Fast` refreshes show only black and white.
 //! - With visualisation on, refreshed areas flash a colour for a moment:
 //!   red = Fast, blue = Ui, green = Page, orange = Full.
@@ -25,7 +26,7 @@ use winit::window::{Window, WindowId};
 
 use super::{DeviceInfo, Event, Platform, RefreshMode, Touch, TouchPhase, Update};
 use crate::geom::{Point, Rect};
-use crate::gfx::Canvas;
+use crate::gfx::{Canvas, save_gray_png};
 
 const FLASH_TIME: Duration = Duration::from_millis(350);
 const LETTERBOX: u32 = 0x20_20_20;
@@ -38,11 +39,7 @@ pub struct Desktop {
 
 impl Desktop {
     pub fn open() -> Result<Self> {
-        let (width, height) = match std::env::var("VERSO_SIM_SIZE") {
-            Ok(s) => parse_size(&s).with_context(|| format!("VERSO_SIM_SIZE={s:?}, expected e.g. 1272x1696"))?,
-            Err(_) => (1272, 1696),
-        };
-        let dpi = env_number("VERSO_SIM_DPI", 300.0)? as u32;
+        let (width, height, dpi) = sim_screen()?;
         let scale = env_number("VERSO_SIM_SCALE", 0.5)?;
         let info = DeviceInfo { name: "Simulator".into(), width, height, dpi };
 
@@ -61,7 +58,7 @@ impl Desktop {
                 return Err(anyhow!("window closed during startup"));
             }
         }
-        log::info!("simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation");
+        log::info!("simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot");
         Ok(Self { info, event_loop, sim })
     }
 }
@@ -73,6 +70,8 @@ impl Platform for Desktop {
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {
         let deadline = timeout.map(|t| Instant::now() + t);
+        // Even with a zero timeout, look at the window's events once.
+        let mut pumped = false;
         loop {
             if let Some(e) = self.sim.error.take() {
                 return Err(e);
@@ -89,9 +88,10 @@ impl Platform for Desktop {
             if self.sim.dirty {
                 self.sim.paint()?;
             }
-            if deadline.is_some_and(|d| now >= d) {
+            if pumped && deadline.is_some_and(|d| now >= d) {
                 return Ok(None);
             }
+            pumped = true;
             let wake = [deadline, self.sim.flash_until].into_iter().flatten().min();
             let wait = wake.map(|w| w.saturating_duration_since(now));
             if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(wait, &mut self.sim) {
@@ -277,6 +277,19 @@ impl Sim {
                 self.events.push_back(if self.asleep { Event::Sleep } else { Event::Wake });
                 self.dirty = true;
             }
+            Key::Character("p" | "P") => {
+                let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../screenshots");
+                let millis =
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                let path = dir.join(format!("verso-{millis}.png"));
+                let saved = std::fs::create_dir_all(&dir)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|_| save_gray_png(&path, self.width as u32, self.height as u32, &self.panel));
+                match saved {
+                    Ok(()) => log::info!("screenshot saved to {}", path.display()),
+                    Err(e) => log::error!("couldn't save a screenshot: {e:#}"),
+                }
+            }
             Key::Character("v" | "V") => {
                 self.visualize = !self.visualize;
                 log::info!("refresh visualisation {}", if self.visualize { "on" } else { "off" });
@@ -347,6 +360,17 @@ fn tint(mode: RefreshMode) -> (u32, u32, u32) {
         RefreshMode::Page => (40, 170, 80),
         RefreshMode::Full => (240, 150, 30),
     }
+}
+
+/// The simulated screen: width, height and dpi, from VERSO_SIM_SIZE and
+/// VERSO_SIM_DPI (default: the Kindle Paperwhite's 1272x1696 at 300 dpi).
+pub(super) fn sim_screen() -> Result<(u32, u32, u32)> {
+    let (width, height) = match std::env::var("VERSO_SIM_SIZE") {
+        Ok(s) => parse_size(&s).with_context(|| format!("VERSO_SIM_SIZE={s:?}, expected e.g. 1272x1696"))?,
+        Err(_) => (1272, 1696),
+    };
+    let dpi = env_number("VERSO_SIM_DPI", 300.0)? as u32;
+    Ok((width, height, dpi))
 }
 
 fn parse_size(s: &str) -> Option<(u32, u32)> {

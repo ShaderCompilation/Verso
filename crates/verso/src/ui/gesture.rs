@@ -1,7 +1,10 @@
-//! Turns raw touches into gestures: tap, long-press and swipe.
+//! Turns raw touches into gestures: tap, long-press, swipe and drag.
 //!
 //! Every touch produces `Down` first (so a button can show it's pressed right
-//! away), then exactly one of `Tap`, `LongPress`, `Swipe` or `Cancel`.
+//! away). Once the finger has moved further than a tap allows, each movement
+//! produces `Move` (for dragging a slider). The touch then ends with exactly
+//! one of `Tap`, `Swipe` or `Cancel`, or with `LongPress` while the finger is
+//! still down followed by `End` when it lifts.
 //! Only one finger is tracked; extra fingers are ignored until pinch is added.
 
 use std::time::{Duration, Instant};
@@ -20,15 +23,40 @@ pub enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gesture {
     Down(Point),
+    /// The finger moved (only sent once it's moved further than a tap allows).
+    Move(Point),
     Tap(Point),
+    /// The finger has been held still; it's still down. `End` follows.
     LongPress(Point),
     Swipe {
         dir: Direction,
         from: Point,
         to: Point,
     },
-    /// The touch ended without forming a gesture (e.g. a slow drag).
-    Cancel,
+    /// The touch ended without forming a gesture (e.g. a slow drag), here.
+    Cancel(Point),
+    /// The finger lifted after a long-press, here.
+    End(Point),
+}
+
+impl Gesture {
+    /// True for the last gesture of a touch.
+    pub fn ends_touch(&self) -> bool {
+        matches!(self, Gesture::Tap(_) | Gesture::Swipe { .. } | Gesture::Cancel(_) | Gesture::End(_))
+    }
+
+    /// Where the finger is (or was, when the touch ended).
+    pub fn pos(&self) -> Point {
+        match *self {
+            Gesture::Down(p)
+            | Gesture::Move(p)
+            | Gesture::Tap(p)
+            | Gesture::LongPress(p)
+            | Gesture::Cancel(p)
+            | Gesture::End(p) => p,
+            Gesture::Swipe { to, .. } => to,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,28 +96,27 @@ struct Contact {
 pub struct GestureDetector {
     cfg: GestureConfig,
     contact: Option<Contact>,
-    /// Set after a long-press fired: the rest of that touch is ignored.
-    swallow: Option<i32>,
+    /// Set after a long-press fired: that finger's lift becomes `End`.
+    held: Option<i32>,
 }
 
 impl GestureDetector {
     pub fn new(cfg: GestureConfig) -> Self {
-        Self { cfg, contact: None, swallow: None }
+        Self { cfg, contact: None, held: None }
     }
 
     /// Forgets any touch in progress (e.g. on sleep).
     pub fn reset(&mut self) {
         self.contact = None;
-        self.swallow = None;
+        self.held = None;
     }
 
     pub fn on_touch(&mut self, t: &Touch) -> Option<Gesture> {
         match t.phase {
             TouchPhase::Down => {
-                if self.contact.is_some() {
+                if self.contact.is_some() || self.held.is_some() {
                     return None; // a second finger
                 }
-                self.swallow = None;
                 self.contact =
                     Some(Contact { id: t.id, start: t.pos, start_time: t.time, last: t.pos, wandered: false });
                 Some(Gesture::Down(t.pos))
@@ -100,12 +127,12 @@ impl GestureDetector {
                 if c.start.distance(t.pos) > self.cfg.slop {
                     c.wandered = true;
                 }
-                None
+                c.wandered.then_some(Gesture::Move(t.pos))
             }
             TouchPhase::Up => {
-                if self.swallow == Some(t.id) {
-                    self.swallow = None;
-                    return None;
+                if self.held == Some(t.id) {
+                    self.held = None;
+                    return Some(Gesture::End(t.pos));
                 }
                 let c = self.contact.take_if(|c| c.id == t.id)?;
                 Some(self.classify(&c, t.pos, t.time))
@@ -120,7 +147,7 @@ impl GestureDetector {
             return None;
         }
         let c = self.contact.take()?;
-        self.swallow = Some(c.id);
+        self.held = Some(c.id);
         Some(Gesture::LongPress(c.start))
     }
 
@@ -146,7 +173,7 @@ impl GestureDetector {
             };
             return Gesture::Swipe { dir, from: c.start, to: end };
         }
-        Gesture::Cancel
+        Gesture::Cancel(end)
     }
 }
 
@@ -191,13 +218,15 @@ mod tests {
     }
 
     #[test]
-    fn long_press_fires_on_tick_and_swallows_release() {
+    fn long_press_fires_on_tick_then_ends_on_release() {
         let mut s = Script::new();
         s.touch(1, Down, 100, 100, 0);
         assert_eq!(s.g.next_deadline(), Some(s.at(500)));
         assert_eq!(s.g.on_tick(s.at(499)), None);
         assert_eq!(s.g.on_tick(s.at(500)), Some(Gesture::LongPress(Point::new(100, 100))));
-        assert_eq!(s.touch(1, Up, 100, 100, 900), None);
+        assert_eq!(s.touch(1, Move, 200, 100, 700), None, "moves after a long-press are ignored");
+        assert_eq!(s.touch(3, Down, 400, 400, 800), None, "so is another finger");
+        assert_eq!(s.touch(1, Up, 102, 100, 900), Some(Gesture::End(Point::new(102, 100))));
         // The next touch works normally again.
         s.touch(2, Down, 5, 5, 1000);
         assert_eq!(s.touch(2, Up, 5, 5, 1050), Some(Gesture::Tap(Point::new(5, 5))));
@@ -223,10 +252,18 @@ mod tests {
     fn moving_cancels_long_press_and_slow_drag_cancels() {
         let mut s = Script::new();
         s.touch(1, Down, 100, 100, 0);
-        s.touch(1, Move, 150, 100, 100);
+        assert_eq!(s.touch(1, Move, 110, 100, 50), None, "small moves aren't reported");
+        assert_eq!(s.touch(1, Move, 150, 100, 100), Some(Gesture::Move(Point::new(150, 100))));
+        assert_eq!(
+            s.touch(1, Move, 120, 100, 150),
+            Some(Gesture::Move(Point::new(120, 100))),
+            "even back near the start"
+        );
         assert_eq!(s.g.next_deadline(), None);
         assert_eq!(s.g.on_tick(s.at(2000)), None);
-        assert_eq!(s.touch(1, Up, 300, 100, 2000), Some(Gesture::Cancel));
+        let end = s.touch(1, Up, 300, 100, 2000);
+        assert_eq!(end, Some(Gesture::Cancel(Point::new(300, 100))));
+        assert!(end.unwrap().ends_touch());
     }
 
     #[test]

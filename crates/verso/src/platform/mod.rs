@@ -10,19 +10,21 @@ use crate::gfx::Canvas;
 
 #[cfg(feature = "desktop")]
 mod desktop;
+#[cfg(feature = "desktop")]
+mod headless;
 #[cfg(feature = "kindle")]
 mod kindle;
 
 /// How an area of the e-ink screen should be refreshed. The app states its
-/// intent; each backend picks the matching waveform.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// intent; each backend picks the matching waveform. Ordered from weakest to
+/// strongest: when areas overlap, the stronger mode wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RefreshMode {
     /// Fastest, black and white only, may leave slight ghosting. Button feedback.
     Fast,
     /// Clean grayscale without a flash. Menus and screen changes.
     Ui,
     /// Tuned for text. Page turns.
-    #[allow(dead_code)] // used by the reader (Phase 4)
     Page,
     /// Full flash that clears all ghosting. Images and after wake.
     Full,
@@ -86,6 +88,28 @@ pub trait Platform {
 
     /// Blocks until every refresh sent so far has finished on the panel.
     fn wait_for_complete(&mut self) -> Result<()>;
+}
+
+/// A scripted touch, for screenshots without a window.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "kindle", allow(dead_code))] // screenshots are simulator-only
+pub enum ScriptStep {
+    Tap(Point),
+    /// Finger down, never lifted (to capture pressed states).
+    Press(Point),
+    Swipe(Point, Point),
+}
+
+/// A platform without a window that plays `script`, saves what's on its
+/// "screen" to `path` as a PNG after every update, and then quits.
+pub fn open_headless(path: &std::path::Path, script: Vec<ScriptStep>) -> Result<Box<dyn Platform>> {
+    #[cfg(feature = "desktop")]
+    return Ok(Box::new(headless::Headless::new(path, script)?));
+    #[cfg(feature = "kindle")]
+    {
+        let _ = (path, script);
+        anyhow::bail!("screenshots only work in the simulator")
+    }
 }
 
 /// Opens the platform this binary was built for.

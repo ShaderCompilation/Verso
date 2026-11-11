@@ -31,6 +31,16 @@ impl Canvas {
         Rect::new(0, 0, self.width() as i32, self.height() as i32)
     }
 
+    /// Fills the whole canvas.
+    pub fn fill(&mut self, gray: u8) {
+        self.pixmap.pixels_mut().fill(gray_pixel(gray));
+    }
+
+    /// The raw RGBA bytes, row by row.
+    pub fn data(&self) -> &[u8] {
+        self.pixmap.data()
+    }
+
     pub fn fill_rect(&mut self, rect: Rect, gray: u8) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         let px = gray_pixel(gray);
@@ -61,6 +71,27 @@ impl Canvas {
             let stroke = Stroke { width, ..Stroke::default() };
             self.pixmap.stroke_path(&path, &paint(gray), &stroke, Transform::identity(), None);
         }
+    }
+
+    pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, gray: u8) {
+        if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+            self.pixmap.fill_path(&path, &paint(gray), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    /// Strokes a circle *inside* radius `r`.
+    pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, gray: u8) {
+        if let Some(path) = PathBuilder::from_circle(cx, cy, r - width / 2.0) {
+            let stroke = Stroke { width, ..Stroke::default() };
+            self.pixmap.stroke_path(&path, &paint(gray), &stroke, Transform::identity(), None);
+        }
+    }
+
+    /// Saves the canvas as a PNG (used for screenshots).
+    #[cfg(feature = "desktop")]
+    pub fn save_png(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.pixmap.save_png(path)?;
+        Ok(())
     }
 
     /// Blends a single-channel coverage mask (0 = none, 255 = full) onto the
@@ -117,6 +148,14 @@ impl Canvas {
             }
         }
     }
+}
+
+/// Saves an 8-bit grayscale image as a PNG.
+#[cfg(feature = "desktop")]
+pub fn save_gray_png(path: &std::path::Path, width: u32, height: u32, gray: &[u8]) -> anyhow::Result<()> {
+    let mut canvas = Canvas::new(width, height);
+    canvas.blit_gray(canvas.bounds(), gray, width as usize);
+    canvas.save_png(path)
 }
 
 /// Perceptual brightness of an (opaque) RGB pixel. The weights add up to 256,
@@ -192,6 +231,21 @@ mod tests {
         let mut out = vec![0u8; 12];
         c.copy_gray(c.bounds(), &mut out, 4);
         assert_eq!(out, [255, 255, 255, 255, 255, 10, 20, 30, 255, 40, 50, 60]);
+    }
+
+    #[test]
+    fn circles_are_drawn_where_asked() {
+        let mut c = Canvas::new(40, 40);
+        c.fill_circle(20.0, 20.0, 10.0, 0);
+        let mut out = vec![0u8; 1600];
+        c.copy_gray(c.bounds(), &mut out, 40);
+        assert_eq!(out[20 * 40 + 20], 0);
+        assert_eq!(out[20 * 40 + 35], 255);
+        c.fill(255);
+        c.stroke_circle(20.0, 20.0, 10.0, 2.0, 0);
+        c.copy_gray(c.bounds(), &mut out, 40);
+        assert_eq!(out[20 * 40 + 20], 255, "a stroked circle is hollow");
+        assert!(out[20 * 40 + 29] < 128, "the ring is just inside the radius");
     }
 
     #[test]

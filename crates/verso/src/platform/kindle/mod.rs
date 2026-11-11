@@ -60,15 +60,13 @@ impl Platform for Kindle {
             if let Some(e) = self.queue.pop_front() {
                 return Ok(Some(e));
             }
+            // Poll at least once, even when the deadline has passed (a zero
+            // timeout means "anything waiting?").
             let wait_ms = match deadline {
                 None => -1,
+                // Round up so we don't spin just short of the deadline.
                 Some(d) => {
-                    let now = Instant::now();
-                    if now >= d {
-                        return Ok(None);
-                    }
-                    // Round up so we don't spin just short of the deadline.
-                    (d - now).as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
+                    d.saturating_duration_since(Instant::now()).as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
                 }
             };
             let mut pfd = libc::pollfd { fd: self.touch.fd(), events: libc::POLLIN, revents: 0 };
@@ -86,6 +84,9 @@ impl Platform for Kindle {
                     bail!("the touchscreen stopped working (poll flags {:#x})", pfd.revents);
                 }
                 self.touch.read(&mut self.queue)?;
+            }
+            if self.queue.is_empty() && deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(None);
             }
         }
     }
