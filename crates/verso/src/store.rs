@@ -1,5 +1,6 @@
 //! Small, versioned JSON records. Rename replaces a complete file atomically.
 use crate::document::{Position, Typography};
+use crate::library::collections::{Navigation, distinct_roots, normalize};
 use crate::library::{LibraryIndex, Sort};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,12 @@ impl Store {
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
         atomic(&self.root.join("settings.json"), s)
     }
+    pub fn navigation(&self) -> Navigation {
+        read(&self.root.join("library-navigation.json")).unwrap_or_default()
+    }
+    pub fn save_navigation(&self, navigation: &Navigation) -> Result<()> {
+        atomic(&self.root.join("library-navigation.json"), navigation)
+    }
     pub fn book(&self, id: &str) -> BookState {
         read(&self.book_path(id)).unwrap_or_default()
     }
@@ -75,6 +82,15 @@ impl Store {
     pub fn library(&self) -> LibraryIndex {
         read::<LibraryIndex>(&self.root.join("library.json"))
             .filter(|index| index.version == LibraryIndex::VERSION)
+            .map(|mut index| {
+                // Older desktop defaults included `crates/verso/../..`.
+                // Normalize cached paths too, so a spelling change in the
+                // scan roots cannot be mistaken for a move/replacement.
+                for book in &mut index.books {
+                    book.path = normalize(&book.path);
+                }
+                index
+            })
             .unwrap_or_default()
     }
     pub fn save_library(&self, index: &LibraryIndex) -> Result<()> {
@@ -176,7 +192,7 @@ fn folder_paths(settings: Settings, override_folders: Option<std::ffi::OsString>
             resolved.push(folder);
         }
     }
-    resolved
+    distinct_roots(&resolved)
 }
 
 #[cfg(test)]

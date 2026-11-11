@@ -1,5 +1,6 @@
 //! The library index is independent of the reading engine.
 
+pub mod collections;
 pub mod covers;
 pub mod epub;
 pub mod worker;
@@ -218,6 +219,11 @@ mod tests {
         store.save_library(&LibraryIndex::default())?;
         std::fs::write(root.join("library.json.tmp"), b"interrupted")?;
         assert_eq!(store.library().version, LibraryIndex::VERSION);
+        let mut book = selection_tests::book(0);
+        book.path = "/library/nested/../book.epub".into();
+        store.save_library(&LibraryIndex { books: vec![book], ..Default::default() })?;
+        assert_eq!(store.library().books[0].path, std::path::Path::new("/library/book.epub"));
+        assert_eq!(store.library().books[0].id, "0", "root spelling changes preserve assigned identities");
         std::fs::write(root.join("library.json"), b"invalid")?;
         assert!(store.library().books.is_empty());
         assert!(store.book("legacy").finished);
