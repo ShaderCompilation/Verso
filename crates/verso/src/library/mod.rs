@@ -1,6 +1,8 @@
 //! The library index is independent of the reading engine.
 #![allow(dead_code)] // Consumed by the worker and screen in the following Phase 5 steps.
 
+pub mod epub;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
