@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub typography: Typography,
     pub footer: bool,
+    pub sleep_screen: SleepScreen,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library_folder: Option<PathBuf>, // Legacy single-folder setting.
     pub library_folders: Option<Vec<PathBuf>>,
@@ -22,11 +23,19 @@ impl Default for Settings {
         Self {
             typography: Typography::default(),
             footer: true,
+            sleep_screen: SleepScreen::Cover,
             library_folder: None,
             library_folders: None,
             library_sort: Sort::Recent,
         }
     }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepScreen {
+    #[default]
+    Cover,
+    Amazon,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -198,6 +207,17 @@ fn folder_paths(settings: Settings, override_folders: Option<std::ffi::OsString>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_settings_default_to_covers_and_amazon_round_trips() -> Result<()> {
+        let mut settings: Settings = serde_json::from_str(r#"{"footer":false}"#)?;
+        assert_eq!(settings.sleep_screen, SleepScreen::Cover);
+        assert!(!settings.footer);
+        settings.sleep_screen = SleepScreen::Amazon;
+        let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
+        assert_eq!(restored.sleep_screen, SleepScreen::Amazon);
+        assert!(!restored.footer);
+        Ok(())
+    }
     #[test]
     fn folder_lists_preserve_spaces_and_override_legacy_settings() {
         let mut settings = Settings { library_folder: Some("/old".into()), ..Default::default() };

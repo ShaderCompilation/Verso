@@ -1,11 +1,11 @@
 //! The app: owns the canvas and the screen stack, turns gestures and timers
 //! into redraws, and works out which parts of the display to refresh.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-use crate::platform::{DeviceInfo, Frontlight, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, DeviceInfo, Frontlight, RefreshMode, TextInput, Update};
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::Gesture;
@@ -36,6 +36,10 @@ pub struct App {
     exit: bool,
     pub frontlight: Option<Frontlight>,
     light_request: Option<Frontlight>,
+    pub battery: Option<Battery>,
+    usb_prompt: Option<Box<dyn Screen>>,
+    usb_connected: bool,
+    wake_cleanup: Option<Instant>,
 }
 
 impl App {
@@ -59,6 +63,10 @@ impl App {
             exit: false,
             frontlight: None,
             light_request: None,
+            battery: None,
+            usb_prompt: None,
+            usb_connected: false,
+            wake_cleanup: None,
         }
     }
 
@@ -92,8 +100,12 @@ impl App {
         let mut hints = Vec::new();
         {
             let mut cx = DrawCx::new(&mut self.canvas, &mut self.text, &mut self.icons, &self.theme, &mut hints);
+            cx.battery = self.battery;
             if let Some(screen) = self.stack.last_mut() {
                 screen.draw(&mut cx);
+            }
+            if let Some(prompt) = &mut self.usb_prompt {
+                prompt.draw(&mut cx);
             }
             if let Some(toast) = &self.toast {
                 self.toast_rect = toast.draw(&mut cx);
@@ -128,6 +140,19 @@ impl App {
             self.touch_down = false;
         }
         self.needs_redraw = true;
+        if let Some(mut prompt) = self.usb_prompt.take() {
+            let mut action = Action::None;
+            self.with_screen(|_, cx| {
+                action = prompt.on_gesture(g, cx);
+                Action::None
+            });
+            match action {
+                Action::Exit => self.exit = true,
+                Action::Pop => {}
+                _ => self.usb_prompt = Some(prompt),
+            }
+            return;
+        }
         if self.toast_touch {
             // Touches on the toast only dismiss it.
             if g.ends_touch() {
@@ -145,6 +170,13 @@ impl App {
         if self.asleep {
             return false;
         }
+        if self.usb_prompt.is_some() {
+            if matches!(input, TextInput::Dismiss) {
+                self.usb_prompt = None;
+                self.needs_redraw = true;
+            }
+            return true;
+        }
         let mut consumed = false;
         self.with_screen(|screen, cx| {
             consumed = screen.on_text_input(input, cx);
@@ -160,12 +192,20 @@ impl App {
             return None;
         }
         let screen = self.stack.last().and_then(|s| s.deadline());
-        [screen, self.toast.as_ref().map(|t| t.until)].into_iter().flatten().min()
+        [screen, self.toast.as_ref().map(|t| t.until), self.wake_cleanup].into_iter().flatten().min()
     }
 
     pub fn on_tick(&mut self, now: Instant) {
         if self.asleep {
             return;
+        }
+        if self.wake_cleanup.is_some_and(|due| now >= due) {
+            self.wake_cleanup = None;
+            let bounds = self.canvas.bounds();
+            let height = bounds.h.div_euclid(10) + 1;
+            self.forced
+                .push(Update { rect: Rect::new(0, bounds.bottom() - height, bounds.w, height), mode: RefreshMode::Ui });
+            self.needs_redraw = true;
         }
         if self.toast.as_ref().is_some_and(|t| now >= t.until) {
             self.toast = None;
@@ -182,7 +222,7 @@ impl App {
     }
 
     pub fn has_pending_work(&self) -> bool {
-        self.stack.last().is_some_and(|s| s.has_pending_work())
+        !self.asleep && self.stack.last().is_some_and(|s| s.has_pending_work())
     }
 
     pub fn run_pending_work(&mut self) {
@@ -215,17 +255,64 @@ impl App {
     }
 
     pub fn on_sleep(&mut self) {
-        if let Some(s) = self.stack.last_mut() {
+        // Cancel captures before dropping raw touch state, including overlays.
+        self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
+        for s in &mut self.stack {
             s.on_sleep();
         }
         self.asleep = true;
         self.touch_down = false;
+        self.wake_cleanup = None;
+    }
+
+    pub fn draw_sleep_cover(&mut self, preference: crate::store::SleepScreen) -> bool {
+        if preference == crate::store::SleepScreen::Amazon {
+            return false;
+        }
+        let cover = self.stack.iter().rev().find_map(|s| s.sleep_cover(self.canvas.width(), self.canvas.height()));
+        let Some(cover) = cover else { return false };
+        self.canvas.fill(PAPER);
+        self.canvas.blit_gray(self.canvas.bounds(), cover.as_raw(), cover.width() as usize);
+        true
+    }
+
+    pub fn set_battery(&mut self, battery: Option<Battery>) {
+        if self.battery != battery {
+            self.battery = battery;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Returns true when connection state changes, so the caller can discard
+    /// the raw gesture that may have started before this modal appeared/closed.
+    pub fn on_usb(&mut self, connected: bool) -> bool {
+        if connected == self.usb_connected {
+            return false;
+        }
+        self.usb_connected = connected;
+        if !self.asleep {
+            self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
+        }
+        self.usb_prompt = connected.then(|| {
+            Box::new(crate::screens::system::UsbPrompt::new(&self.theme, self.canvas.bounds())) as Box<dyn Screen>
+        });
+        self.needs_redraw = true;
+        true
+    }
+
+    pub fn schedule_wake_cleanup(&mut self) {
+        if !self.asleep {
+            self.wake_cleanup = Some(Instant::now() + Duration::from_millis(1500));
+        }
     }
 
     pub fn on_wake(&mut self) {
         self.asleep = false;
         self.on_background();
         self.refresh_all(RefreshMode::Full);
+        // Use a bounded cleanup on every wake; firmware hibernation detection is
+        // inconsistent on PW6, and this avoids reading Amazon's private state.
+        self.schedule_wake_cleanup();
     }
 
     fn with_screen(&mut self, f: impl FnOnce(&mut dyn Screen, &mut EventCx) -> Action) {
@@ -247,6 +334,8 @@ impl App {
                 self.stack.pop();
                 if self.stack.is_empty() {
                     self.exit = true;
+                } else {
+                    self.on_background();
                 }
             }
             Action::Exit => self.exit = true,
@@ -258,6 +347,121 @@ impl App {
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+    struct BookScreen {
+        touches: Rc<Cell<usize>>,
+        backgrounds: Rc<Cell<usize>>,
+        saves: Rc<Cell<usize>>,
+        cover: bool,
+    }
+    impl Screen for BookScreen {
+        fn draw(&mut self, cx: &mut DrawCx) {
+            cx.canvas.fill(51);
+        }
+        fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+            if matches!(g, Gesture::Tap(_)) {
+                self.touches.set(self.touches.get() + 1);
+            }
+            Action::None
+        }
+        fn on_background(&mut self, _: &mut EventCx) {
+            self.backgrounds.set(self.backgrounds.get() + 1);
+        }
+        fn after_present(&mut self) {
+            self.saves.set(self.saves.get() + 1);
+        }
+        fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
+            self.cover.then(|| image::GrayImage::from_pixel(width, height, image::Luma([119])))
+        }
+    }
+    fn book_app(cover: bool) -> App {
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        App::new(
+            &info,
+            Theme::for_dpi(150),
+            Box::new(BookScreen {
+                touches: Rc::new(Cell::new(0)),
+                backgrounds: Rc::new(Cell::new(0)),
+                saves: Rc::new(Cell::new(0)),
+                cover,
+            }),
+        )
+    }
+    #[test]
+    fn covers_do_not_replace_the_awake_frame_and_native_is_a_safe_fallback() {
+        let mut app = book_app(true);
+        app.frame();
+        app.on_sleep();
+        assert!(app.draw_sleep_cover(crate::store::SleepScreen::Cover));
+        assert_eq!(&app.canvas.data()[..4], &[119, 119, 119, 255]);
+        assert!(app.frame().is_empty());
+        app.on_wake();
+        assert_eq!(app.frame(), vec![Update { rect: app.canvas.bounds(), mode: RefreshMode::Full }]);
+        assert_eq!(&app.canvas.data()[..4], &[51, 51, 51, 255]);
+        assert!(!app.draw_sleep_cover(crate::store::SleepScreen::Amazon));
+        assert!(!book_app(false).draw_sleep_cover(crate::store::SleepScreen::Cover));
+    }
+    #[test]
+    fn late_wake_cleanup_rewrites_unchanged_pixels_and_cancels_on_resleep() {
+        let mut app = book_app(false);
+        app.frame();
+        app.on_sleep();
+        app.on_wake();
+        app.frame();
+        let due = app.wake_cleanup.unwrap();
+        app.on_tick(due);
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 719, 600, 81), mode: RefreshMode::Ui }]);
+        assert!(app.wake_cleanup.is_none());
+        app.on_sleep();
+        app.on_wake();
+        app.on_sleep();
+        app.schedule_wake_cleanup();
+        assert!(app.deadline().is_none());
+        assert!(app.wake_cleanup.is_none());
+    }
+    #[test]
+    fn usb_is_modal_but_keeps_worker_results_and_saves_running() {
+        let touches = Rc::new(Cell::new(0));
+        let backgrounds = Rc::new(Cell::new(0));
+        let saves = Rc::new(Cell::new(0));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let mut app = App::new(
+            &info,
+            Theme::for_dpi(150),
+            Box::new(BookScreen {
+                touches: touches.clone(),
+                backgrounds: backgrounds.clone(),
+                saves: saves.clone(),
+                cover: false,
+            }),
+        );
+        app.on_usb(true);
+        app.on_background();
+        app.frame();
+        app.after_present();
+        assert_eq!(backgrounds.get(), 1);
+        assert_eq!(saves.get(), 1);
+        let p = crate::geom::Point::new(300, 400);
+        app.on_gesture(Gesture::Down(p));
+        app.on_gesture(Gesture::Tap(p)); // outside the sheet: dismiss, no page turn
+        assert_eq!(touches.get(), 0);
+        assert!(app.usb_prompt.is_none());
+        app.on_usb(true); // duplicates must not reopen a dismissed prompt
+        assert!(app.usb_prompt.is_none());
+        app.on_usb(false);
+        app.on_sleep();
+        app.on_usb(true);
+        assert!(app.frame().is_empty());
+        app.on_wake();
+        assert!(app.usb_prompt.is_some());
+        app.on_usb(false);
+        assert!(app.usb_prompt.is_none());
+        app.on_usb(true);
+        let exit = crate::geom::Point::new(300, 800 - app.theme.mm(24.0) + app.theme.button_h / 2);
+        app.on_gesture(Gesture::Down(exit));
+        app.on_gesture(Gesture::Tap(exit));
+        assert!(app.wants_exit());
+        assert_eq!(touches.get(), 0);
+    }
     struct TimedScreen {
         ticks: Rc<Cell<usize>>,
         backgrounds: Rc<Cell<usize>>,

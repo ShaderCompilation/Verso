@@ -33,6 +33,7 @@ impl ReaderMenu {
     pub fn new(t: &Theme, screen: Rect, title: &str, page: usize, pages: usize, light: Option<Frontlight>) -> Self {
         let mut top = TopBar::new(title, true);
         top.serif = false;
+        top.show_battery = true;
         top.place(screen, t);
         let panel = screen.split_bottom(t.mm(61.0)).0;
         let m = t.margin;

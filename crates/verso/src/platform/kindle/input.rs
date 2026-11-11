@@ -91,6 +91,7 @@ pub struct Mapping {
 }
 
 pub struct TouchInput {
+    grabbed: bool,
     file: File,
     path: String,
     x_range: (i32, i32),
@@ -140,7 +141,8 @@ impl TouchInput {
                 bail!("can't grab {}: {}", path.display(), std::io::Error::last_os_error());
             }
             let empty = Slot { id: -1, reported_id: -1, ..Slot::default() };
-            return Ok(Self {
+            let mut input = Self {
+                grabbed: true,
                 file,
                 path: path.display().to_string(),
                 x_range: (x.minimum, x.maximum),
@@ -150,13 +152,56 @@ impl TouchInput {
                 slot: 0,
                 dropping: false,
                 buf: vec![InputEvent::default(); 64],
-            });
+            };
+            input.reset_contacts();
+            return Ok(input);
         }
         bail!("no multi-touch screen found in /dev/input")
     }
 
     pub fn fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+
+    pub fn grab(&mut self, grab: bool) -> Result<()> {
+        // Discard touches accumulated while Amazon owned the screensaver.
+        self.read(&mut VecDeque::new())?;
+        self.reset_contacts();
+        self.dropping = false;
+        if self.grabbed == grab {
+            return Ok(());
+        }
+        if unsafe { libc::ioctl(self.fd(), EVIOCGRAB as _, i32::from(grab)) } < 0 {
+            bail!("can't change touchscreen grab: {}", std::io::Error::last_os_error());
+        }
+        self.grabbed = grab;
+        Ok(())
+    }
+
+    fn reset_contacts(&mut self) {
+        // evdev suppresses unchanged coordinates, even across EVIOCGRAB. Keep
+        // the kernel's per-slot positions or the first tap after wake may have
+        // one axis at zero. Ignore already-held fingers until a new tracking id.
+        for code in [ABS_MT_POSITION_X, ABS_MT_POSITION_Y] {
+            let mut values = [0i32; MAX_SLOTS + 1];
+            values[0] = code as i32;
+            let request = ioc(IOC_READ, 0x0a, size_of_val(&values) as u32); // EVIOCGMTSLOTS
+            if unsafe { libc::ioctl(self.fd(), request as _, values.as_mut_ptr()) } >= 0 {
+                for (slot, value) in self.slots.iter_mut().zip(&values[1..]) {
+                    if code == ABS_MT_POSITION_X {
+                        slot.x = *value;
+                    } else {
+                        slot.y = *value;
+                    }
+                }
+            }
+        }
+        for slot in &mut self.slots {
+            slot.id = -1;
+            slot.reported_id = -1;
+            slot.changed = false;
+        }
+        self.slot = abs_info(self.fd(), ABS_MT_SLOT).map_or(0, |info| (info.value.max(0) as usize).min(MAX_SLOTS - 1));
     }
 
     /// Reads everything available (without blocking) and queues touch events.
@@ -198,8 +243,8 @@ impl TouchInput {
                         let pos = slot.reported;
                         out.push_back(touch(slot.reported_id, TouchPhase::Up, pos, now));
                     }
-                    *slot = Slot { id: -1, reported_id: -1, ..Slot::default() };
                 }
+                self.reset_contacts();
             }
             (EV_SYN, SYN_REPORT) => self.flush(now, out),
             _ if self.dropping => {}

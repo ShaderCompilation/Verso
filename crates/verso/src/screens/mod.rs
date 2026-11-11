@@ -7,6 +7,7 @@ pub mod contents;
 pub mod gallery;
 pub mod reader;
 pub mod reader_menu;
+pub mod system;
 pub mod text_sheet;
 
 use std::time::Instant;
@@ -77,6 +78,10 @@ pub trait Screen {
 
     /// The device is going to sleep.
     fn on_sleep(&mut self) {}
+    /// Bounded cover decoding; no art means the native screensaver is used.
+    fn sleep_cover(&self, _width: u32, _height: u32) -> Option<image::GrayImage> {
+        None
+    }
 }
 
 /// What a screen can use while handling an event.

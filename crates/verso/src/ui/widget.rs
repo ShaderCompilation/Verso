@@ -18,6 +18,7 @@ pub struct DrawCx<'a> {
     pub text: &'a mut TextRenderer,
     pub icons: &'a mut IconRenderer,
     pub theme: &'a Theme,
+    pub battery: Option<crate::platform::Battery>,
     hints: &'a mut Vec<Update>,
 }
 
@@ -29,7 +30,7 @@ impl<'a> DrawCx<'a> {
         theme: &'a Theme,
         hints: &'a mut Vec<Update>,
     ) -> Self {
-        Self { canvas, text, icons, theme, hints }
+        Self { canvas, text, icons, theme, hints, battery: None }
     }
 
     /// Asks for `mode` wherever `rect` changed in this frame (see `ui::damage`).
@@ -69,6 +70,13 @@ impl<'a> DrawCx<'a> {
     pub fn section_label(&mut self, text: &str, rect: Rect) {
         let style = self.theme.section;
         self.text.line(self.canvas, &text.to_uppercase(), style, rect, HAlign::Left);
+    }
+
+    pub fn battery(&mut self, rect: Rect) {
+        if let Some(battery) = self.battery {
+            let label = format!("{}%{}", battery.percent, if battery.charging { " · Charging" } else { "" });
+            self.line(&label, self.theme.caption, rect, HAlign::Right);
+        }
     }
 }
 

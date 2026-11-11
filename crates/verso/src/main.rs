@@ -147,6 +147,10 @@ fn run() -> Result<()> {
         std::rc::Rc::new(document::thread::Worker::new(document::Paths::for_device(), info.dpi, platform.waker()));
     let mut app = App::new(&info, theme.clone(), start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone())?);
     app.frontlight = platform.frontlight();
+    app.set_battery(platform.battery());
+    if let Some(connected) = platform.usb_connected() {
+        app.on_usb(connected);
+    }
     let mut gestures = GestureDetector::new(GestureConfig::for_dpi(info.dpi));
     app.refresh_all(RefreshMode::Full);
     let mut first_frame = true;
@@ -209,10 +213,37 @@ fn run() -> Result<()> {
                     log::info!("sleep");
                     gestures.reset();
                     app.on_sleep();
+                    let cover = app.draw_sleep_cover(store::Store::new().settings().sleep_screen);
+                    platform.prepare_sleep(cover)?;
+                    if cover {
+                        platform
+                            .present(app.canvas(), &[platform::Update { rect: bounds, mode: RefreshMode::Full }])?;
+                        platform.wait_for_complete()?;
+                    }
                 }
                 Some(Event::Wake) => {
                     log::info!("wake");
+                    platform.resume()?;
+                    gestures.reset();
+                    app.set_battery(platform.battery());
                     app.on_wake();
+                    if let Some(connected) = platform.usb_connected() {
+                        app.on_usb(connected);
+                    }
+                }
+                Some(Event::WakeRepaint) => app.schedule_wake_cleanup(),
+                Some(Event::PowerChanged) => {
+                    app.set_battery(platform.battery());
+                    if let Some(connected) = platform.usb_connected()
+                        && app.on_usb(connected)
+                    {
+                        gestures.reset();
+                    }
+                }
+                Some(Event::Usb(connected)) => {
+                    gestures.reset();
+                    app.set_battery(platform.battery());
+                    app.on_usb(platform.usb_connected().unwrap_or(connected));
                 }
                 Some(Event::Quit) => {
                     // Draw what's pending first (screenshots need the last frame).

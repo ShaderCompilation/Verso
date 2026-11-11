@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use super::{DeviceInfo, Event, Frontlight, Platform, Update, Waker};
+use super::{Battery, DeviceInfo, Event, Frontlight, Platform, Update, Waker};
 use crate::gfx::Canvas;
 use display::Display;
 use input::{Mapping, TouchInput};
@@ -28,8 +28,12 @@ pub struct Kindle {
     touch: TouchInput,
     queue: VecDeque<Event>,
     wake_fd: std::sync::Arc<std::os::fd::OwnedFd>,
-    _power: Option<PowerEvents>,
+    _power: PowerEvents,
     power_rx: std::sync::mpsc::Receiver<Event>,
+    battery_due: Instant,
+    sleeping: bool,
+    native_sleep: bool,
+    status: Option<(Instant, Option<super::power::Status>)>,
 }
 
 impl Kindle {
@@ -52,12 +56,88 @@ impl Kindle {
         }
         let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
         let (tx, power_rx) = std::sync::mpsc::channel();
-        let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()));
-        Ok(Self { info, display, touch, queue: VecDeque::new(), wake_fd, _power: power, power_rx })
+        let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()))?;
+        Ok(Self {
+            info,
+            display,
+            touch,
+            queue: VecDeque::new(),
+            wake_fd,
+            _power: power,
+            power_rx,
+            battery_due: Instant::now() + Duration::from_secs(60),
+            sleeping: false,
+            native_sleep: false,
+            status: None,
+        })
+    }
+
+    fn system_status(&mut self) -> Option<super::power::Status> {
+        // Battery and USB queries in one event share one short-lived snapshot,
+        // avoiding three lipc subprocesses before the first frame.
+        if let Some((at, status)) = self.status
+            && at.elapsed() < Duration::from_millis(100)
+        {
+            return status;
+        }
+        let status = std::process::Command::new("lipc-get-prop")
+            .args(["com.lab126.powerd", "battStateInfo"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| super::power::Status::parse(&out.stdout));
+        self.status = Some((Instant::now(), status));
+        status
+    }
+
+    fn system_event(&mut self, event: Event) -> Event {
+        if matches!(event, Event::PowerChanged | Event::Usb(_) | Event::Wake) {
+            self.status = None;
+        }
+        event
     }
 }
 
 impl Platform for Kindle {
+    fn battery(&mut self) -> Option<Battery> {
+        if let Some(battery) = self.system_status().and_then(|s| s.battery) {
+            return Some(battery);
+        }
+        let percent = property("battLevel")?;
+        let charging = property("isCharging")? != 0;
+        Some(Battery { percent: percent.clamp(0, 100) as u8, charging })
+    }
+
+    fn usb_connected(&mut self) -> Option<bool> {
+        // Unlike isCharging, this stays true for a full battery on a cable.
+        // usbState is an undocumented enum and does not mean "connected != 0".
+        self.system_status()?.usb
+    }
+
+    fn prepare_sleep(&mut self, cover: bool) -> Result<()> {
+        self.sleeping = true;
+        self.queue.clear();
+        if !cover && !self.native_sleep {
+            self.touch.grab(false)?;
+            launcher_handoff(true)?;
+            self.native_sleep = true;
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        if self.native_sleep {
+            launcher_handoff(false)?;
+            self.touch.grab(true)?;
+            self.native_sleep = false;
+        } else {
+            self.touch.grab(true)?;
+        }
+        self.queue.clear();
+        self.sleeping = false;
+        self.battery_due = Instant::now() + Duration::from_secs(60);
+        Ok(())
+    }
     fn waker(&self) -> Waker {
         fd_waker(self.wake_fd.clone())
     }
@@ -86,14 +166,23 @@ impl Platform for Kindle {
                 return Ok(Some(Event::Quit));
             }
             if let Ok(e) = self.power_rx.try_recv() {
-                return Ok(Some(e));
+                return Ok(Some(self.system_event(e)));
             }
             if let Some(e) = self.queue.pop_front() {
                 return Ok(Some(e));
             }
+            if !self.sleeping && Instant::now() >= self.battery_due {
+                self.battery_due = Instant::now() + Duration::from_secs(60);
+                return Ok(Some(self.system_event(Event::PowerChanged)));
+            }
             // Poll at least once, even when the deadline has passed (a zero
             // timeout means "anything waiting?").
-            let wait_ms = match deadline {
+            let poll_deadline = if self.sleeping {
+                deadline
+            } else {
+                Some(deadline.map_or(self.battery_due, |d| d.min(self.battery_due)))
+            };
+            let wait_ms = match poll_deadline {
                 None => -1,
                 // Round up so we don't spin just short of the deadline.
                 Some(d) => {
@@ -120,7 +209,8 @@ impl Platform for Kindle {
                     unsafe {
                         libc::read(self.wake_fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8);
                     }
-                    return Ok(Some(self.power_rx.try_recv().unwrap_or(Event::Background)));
+                    let event = self.power_rx.try_recv().unwrap_or(Event::Background);
+                    return Ok(Some(self.system_event(event)));
                 }
                 let pfd = &pfds[0];
                 if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
@@ -179,14 +269,15 @@ fn set_property(name: &str, value: u8) -> Result<()> {
 struct PowerEvents {
     child: std::process::Child,
     join: Option<std::thread::JoinHandle<()>>,
+    shutdown: std::sync::Arc<AtomicBool>,
 }
 impl PowerEvents {
-    fn start(tx: std::sync::mpsc::Sender<Event>, waker: Waker) -> Option<Self> {
+    fn start(tx: std::sync::mpsc::Sender<Event>, waker: Waker) -> Result<Self> {
         use std::io::BufRead;
         use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new("lipc-wait-event");
         command
-            .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver"])
+            .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,notCharging,battLevelChanged"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         let parent = std::process::id() as libc::pid_t;
@@ -203,35 +294,57 @@ impl PowerEvents {
                 Ok(())
             });
         }
-        let child = command.spawn();
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("power events unavailable: {e}");
-                return None;
-            }
-        };
-        let stdout = child.stdout.take()?;
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().expect("piped power events");
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let stopping = shutdown.clone();
         let join = std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                let e = if line.contains("goingToScreenSaver") {
-                    Event::Sleep
-                } else if line.contains("outOfScreenSaver") {
-                    Event::Wake
-                } else {
-                    continue;
-                };
+                log::debug!("powerd: {line}");
+                let Some(e) = super::power::parse(&line) else { continue };
                 if tx.send(e).is_err() {
                     break;
                 }
                 waker.wake();
             }
+            // Without power events we cannot safely own the display. Exit via
+            // the launcher rather than leave an unresponsive reader running.
+            if !stopping.load(Ordering::Relaxed) {
+                log::warn!("power event listener stopped; returning to Kindle UI");
+                let _ = tx.send(Event::Quit);
+                waker.wake();
+            }
         });
-        Some(Self { child, join: Some(join) })
+        Ok(Self { child, join: Some(join), shutdown })
     }
+}
+
+fn launcher_handoff(native: bool) -> Result<()> {
+    let pid: i32 = std::env::var("VERSO_LAUNCHER_PID")?.parse()?;
+    anyhow::ensure!(pid > 1 && unsafe { libc::getppid() } == pid, "invalid Verso launcher");
+    let ack = std::env::var("VERSO_SYSTEM_ACK")?;
+    anyhow::ensure!(ack == format!("/tmp/verso-system-{pid}"), "invalid launcher acknowledgement path");
+    match std::fs::remove_file(&ack) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    if unsafe { libc::kill(pid, if native { libc::SIGUSR1 } else { libc::SIGUSR2 }) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let expected = if native { "native" } else { "verso" };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if std::fs::read_to_string(&ack).is_ok_and(|s| s.trim() == expected) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    bail!("launcher did not acknowledge {expected} display ownership")
 }
 impl Drop for PowerEvents {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
         if let Some(j) = self.join.take() {

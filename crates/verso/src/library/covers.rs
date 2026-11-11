@@ -34,7 +34,7 @@ pub fn load(path: &Path) -> Result<GrayImage> {
     ensure!(image.width() == WIDTH && image.height() == HEIGHT, "invalid thumbnail size");
     Ok(image.into_luma8())
 }
-fn raster(bytes: &[u8]) -> Result<RgbaImage> {
+fn raster(bytes: &[u8], width: u32, height: u32) -> Result<RgbaImage> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     ensure!(
         matches!(reader.format(), Some(image::ImageFormat::Png | image::ImageFormat::Jpeg)),
@@ -44,10 +44,10 @@ fn raster(bytes: &[u8]) -> Result<RgbaImage> {
     ensure!(w > 0 && h > 0 && w <= 4096 && h <= 4096 && w as u64 * h as u64 <= 6_000_000, "cover dimensions too large");
     let mut reader = reader;
     reader.limits(limits(4096, 4096, 24 * 1024 * 1024));
-    let image = reader.decode()?.thumbnail(WIDTH, HEIGHT);
+    let image = reader.decode()?.thumbnail(width, height);
     Ok(image.to_rgba8())
 }
-fn svg(bytes: &[u8]) -> Result<RgbaImage> {
+fn svg(bytes: &[u8], width: u32, height: u32) -> Result<RgbaImage> {
     ensure!(bytes.len() as u64 <= epub::XML_LIMIT, "SVG cover too large");
     epub::validate_svg(bytes)?;
     let options = resvg::usvg::Options {
@@ -60,7 +60,7 @@ fn svg(bytes: &[u8]) -> Result<RgbaImage> {
     let tree = resvg::usvg::Tree::from_data(bytes, &options)?;
     let size = tree.size();
     ensure!(size.width() <= 4096.0 && size.height() <= 4096.0, "SVG dimensions too large");
-    let scale = (WIDTH as f32 / size.width()).min(HEIGHT as f32 / size.height());
+    let scale = (width as f32 / size.width()).min(height as f32 / size.height());
     let w = (size.width() * scale).round().max(1.0) as u32;
     let h = (size.height() * scale).round().max(1.0) as u32;
     let mut pixmap = tiny_skia::Pixmap::new(w, h).context("allocate SVG thumbnail")?;
@@ -73,18 +73,18 @@ fn svg(bytes: &[u8]) -> Result<RgbaImage> {
     }
     Ok(image)
 }
-fn thumbnail(book: &Book) -> Result<GrayImage> {
+pub fn sleep_cover(book: &Book, width: u32, height: u32) -> Result<GrayImage> {
     let cover = book.metadata.cover.as_ref().context("no cover")?;
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&book.path)?)?;
     let bytes = epub::entry(&mut zip, cover, epub::IMAGE_LIMIT)?;
     let image = if cover.rsplit('.').next().is_some_and(|s| s.eq_ignore_ascii_case("svg")) {
-        svg(&bytes)?
+        svg(&bytes, width, height)?
     } else {
-        raster(&bytes)?
+        raster(&bytes, width, height)?
     };
-    let mut gray = GrayImage::from_pixel(WIDTH, HEIGHT, image::Luma([255]));
-    let dx = (WIDTH - image.width()) / 2;
-    let dy = (HEIGHT - image.height()) / 2;
+    let mut gray = GrayImage::from_pixel(width, height, image::Luma([255]));
+    let dx = (width - image.width()) / 2;
+    let dy = (height - image.height()) / 2;
     for (x, y, p) in image.enumerate_pixels() {
         let a = p[3] as u32;
         let g = (luma(p[0], p[1], p[2]) as u32 * a + 255 * (255 - a) + 127) / 255;
@@ -103,7 +103,7 @@ pub fn generate(book: &Book, store: &Store) -> Result<Cover> {
     if load(&path).is_ok() {
         return Ok(Cover::Ready(key));
     }
-    let image = match thumbnail(book) {
+    let image = match sleep_cover(book, WIDTH, HEIGHT) {
         Ok(image) => image,
         Err(e) => {
             log::debug!("title cover for {}: {e:#}", book.path.display());
@@ -137,6 +137,9 @@ mod tests {
             let image = load(&store.cover_path(&k))?;
             assert_eq!(image.dimensions(), (WIDTH, HEIGHT));
             assert!(image.pixels().any(|p| p[0] < 200));
+            let sleep = sleep_cover(&book, 600, 800)?;
+            assert_eq!(sleep.dimensions(), (600, 800));
+            assert!(sleep.pixels().any(|p| p[0] < 200));
             book.cover = Cover::Ready(k.clone());
             std::fs::write(store.cover_path(&k), b"broken")?;
             assert_eq!(generate(&book, &store)?, Cover::Ready(k.clone()));
@@ -148,8 +151,11 @@ mod tests {
             book.metadata.cover = None;
             assert!(matches!(generate(&book, &store)?, Cover::Unavailable(_)));
         }
-        assert!(svg(br##"<svg xmlns="http://www.w3.org/2000/svg"><image href="/tmp/private.png"/></svg>"##).is_err());
-        assert!(raster(b"broken").is_err());
+        assert!(
+            svg(br##"<svg xmlns="http://www.w3.org/2000/svg"><image href="/tmp/private.png"/></svg>"##, WIDTH, HEIGHT)
+                .is_err()
+        );
+        assert!(raster(b"broken", WIDTH, HEIGHT).is_err());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -41,7 +41,7 @@ if pidof reader.lua >/dev/null 2>&1; then
     exit 1
 fi
 POWER_STATE="$(lipc-get-prop com.lab126.powerd state 2>/dev/null)"
-if [ -n "${POWER_STATE}" ] && [ "${POWER_STATE}" != "active" ]; then
+if [ "${POWER_STATE}" != "active" ]; then
     log "the Kindle isn't awake (power state: ${POWER_STATE}); not starting"
     exit 1
 fi
@@ -52,13 +52,30 @@ STATUS_STOPPED=no
 VOLUMD_STOPPED=no
 PILLOW_DISABLED=no
 VERSO_PID=""
+export VERSO_LAUNCHER_PID=$$
+export VERSO_SYSTEM_ACK="/tmp/verso-system-$$"
+
+# Only the launcher changes the UI's running state. Verso asks for a native
+# sleep screen with USR1 and takes the display back with USR2. Acknowledge only
+# after the handoff; a failed command makes Verso exit through normal recovery.
+native_sleep() {
+    if killall -CONT awesome 2>/dev/null; then
+        echo native >"${VERSO_SYSTEM_ACK}"
+        log "native sleep screen"
+    fi
+}
+verso_wake() {
+    if killall -STOP awesome 2>/dev/null; then
+        echo verso >"${VERSO_SYSTEM_ACK}"
+        log "display returned to Verso"
+    fi
+}
 
 restore() {
     # Nothing may interrupt this.
-    trap '' INT TERM HUP
+    trap '' INT TERM HUP USR1 USR2
     trap - EXIT
     log "restoring the Kindle UI"
-    [ "${VOLUMD_STOPPED}" = yes ] && killall -CONT volumd 2>/dev/null
     [ "${STATUS_STOPPED}" = yes ] && killall -CONT JunoStatusBarDriver 2>/dev/null
     [ "${AWESOME_STOPPED}" = yes ] && killall -CONT awesome 2>/dev/null
     # Put back what was on screen before, so there's no flash of our UI
@@ -70,10 +87,16 @@ restore() {
     [ "${PILLOW_DISABLED}" = yes ] && lipc-set-prop com.lab126.pillow disableEnablePillow enable
     lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home
     rm -f "${PIDFILE}"
+    rm -f "${VERSO_SYSTEM_ACK}"
     log "done"
+    # Last: a pending USB insertion may unmount /mnt/us immediately. Finish
+    # all app storage access before handing it back to volumd.
+    [ "${VOLUMD_STOPPED}" = yes ] && killall -CONT volumd 2>/dev/null
 }
 trap restore EXIT
 trap 'exit 1' INT TERM HUP
+trap native_sleep USR1
+trap verso_wake USR2
 
 # Pause the Kindle UI, the same way KOReader does on this firmware.
 # Each flag is set *before* acting, so an interruption can't skip its undo.

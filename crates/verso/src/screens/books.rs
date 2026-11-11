@@ -61,6 +61,7 @@ pub struct Books {
     top: TopBar,
     exit: IconButton,
     search_action: IconButton,
+    settings_action: IconButton,
     search: Option<SearchSession>,
     rescan: Button,
     sort: Segmented,
@@ -109,6 +110,8 @@ impl Books {
         );
         let mut search_action = IconButton::new(Icon::Search);
         search_action.place_at(Point::new(rescan.rect().x - t.mm(2.0) - t.target / 2, t.top_bar / 2), t);
+        let mut settings_action = IconButton::new(Icon::Settings);
+        settings_action.place_at(Point::new(search_action.rect().x - t.target / 2, t.top_bar / 2), t);
         let mut pager = Pager::new(1);
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
         let sort = Segmented::texts(
@@ -140,6 +143,7 @@ impl Books {
             top,
             exit,
             search_action,
+            settings_action,
             search: None,
             rescan,
             sort,
@@ -559,6 +563,7 @@ impl Screen for Books {
         self.rescan.draw(cx);
         self.exit.draw(cx);
         self.search_action.draw(cx);
+        self.settings_action.draw(cx);
         if let Some(search) = &mut self.search {
             search.field.draw(cx);
             search.all.draw(cx);
@@ -737,7 +742,9 @@ impl Screen for Books {
         } else {
             ""
         });
-        cx.line(message, t.caption.gray(INK2), self.status, HAlign::Left);
+        let battery_w = if cx.battery.is_some() { t.mm(32.0) } else { 0 };
+        cx.line(message, t.caption.gray(INK2), Rect { w: self.status.w - battery_w, ..self.status }, HAlign::Left);
+        cx.battery(self.status);
         self.pager.draw(cx);
         if let Some(search) = &self.search {
             search.keyboard.draw(cx);
@@ -789,6 +796,13 @@ impl Screen for Books {
                 self.edit_search(&input, cx);
             }
         } else {
+            if self.settings_action.on_gesture(&g) {
+                return Action::Push(Box::new(crate::screens::system::SystemSettings::new(
+                    cx.theme,
+                    self.screen,
+                    self.store.clone(),
+                )));
+            }
             if self.search_action.on_gesture(&g) {
                 self.toggle_search(cx);
                 self.apply_pending(cx);
@@ -1000,6 +1014,26 @@ impl Screen for Books {
             r.on_sleep();
         }
     }
+    fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
+        let book = if let Some(reader) = &self.reader {
+            self.index.books.iter().find(|b| b.id == reader.book_id() && b.available)?
+        } else {
+            // Search and Collections hide the continue-reading card, but keep
+            // the same most recently opened book as the sleep cover.
+            self.index
+                .books
+                .iter()
+                .filter(|b| b.available && self.states.get(&b.id).is_some_and(|s| s.last_opened > 0))
+                .max_by_key(|b| self.states.get(&b.id).map_or(0, |s| s.last_opened))?
+        };
+        match covers::sleep_cover(book, width, height) {
+            Ok(image) => Some(image),
+            Err(e) => {
+                log::debug!("sleep cover unavailable: {e:#}");
+                None
+            }
+        }
+    }
     fn on_quit(&mut self) {
         if let Some(r) = &mut self.reader {
             r.on_quit();
@@ -1136,6 +1170,29 @@ mod tests {
         books.push(other);
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
+    }
+    #[test]
+    fn sleep_cover_follows_the_last_book_when_search_or_collections_hide_continue() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("sleep-cover")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        let b = &mut books.index.books[0];
+        b.path = path.clone();
+        b.metadata = library::epub::read(&path)?;
+        let id = b.id.clone();
+        books.states.get_mut(&id).unwrap().last_opened = 10;
+        books.continue_id = None;
+        books.navigation.tab = Tab::Collections;
+        assert!(books.sleep_cover(600, 800).is_some());
+        with_cx(&t, screen, |cx| books.toggle_search(cx));
+        assert!(books.sleep_cover(600, 800).is_some());
+        books.index.books[0].available = false;
+        assert!(books.sleep_cover(600, 800).is_none());
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn search_preserves_scope_query_result_page_and_underlying_navigation() -> anyhow::Result<()> {

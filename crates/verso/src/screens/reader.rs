@@ -50,6 +50,9 @@ enum Overlay {
     Contents(Box<Contents>),
 }
 impl Reader {
+    pub fn book_id(&self) -> &str {
+        &self.id
+    }
     #[allow(clippy::too_many_arguments)] // screen services and the restored book state
     pub fn new(
         screen: Rect,

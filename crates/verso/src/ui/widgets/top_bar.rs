@@ -12,6 +12,7 @@ pub struct TopBar {
     /// Literata title (screen titles) or Inter SemiBold (book titles in menus).
     pub serif: bool,
     pub border: bool,
+    pub show_battery: bool,
     back: Option<IconButton>,
     rect: Rect,
 }
@@ -22,6 +23,7 @@ impl TopBar {
             title: title.into(),
             serif: true,
             border: true,
+            show_battery: false,
             back: back.then(|| IconButton::new(Icon::ArrowLeft)),
             rect: Rect::default(),
         }
@@ -57,8 +59,12 @@ impl TopBar {
             None => self.rect.x + t.margin,
         };
         let style = if self.serif { t.title } else { t.button };
-        let title = Rect::new(x, self.rect.y, self.rect.right() - t.margin - x, self.rect.h);
+        let battery_w = if self.show_battery && cx.battery.is_some() { t.mm(32.0) } else { 0 };
+        let title = Rect::new(x, self.rect.y, self.rect.right() - t.margin - x - battery_w, self.rect.h);
         cx.line(&self.title, style, title, HAlign::Left);
+        if self.show_battery {
+            cx.battery(self.rect.inset_xy(t.margin, 0));
+        }
         if self.border {
             cx.hline(self.rect.bottom(), self.rect.x, self.rect.right(), t.border, INK);
         }

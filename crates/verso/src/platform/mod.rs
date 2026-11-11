@@ -14,6 +14,8 @@ mod desktop;
 mod headless;
 #[cfg(feature = "kindle")]
 mod kindle;
+#[cfg(any(feature = "kindle", test))]
+mod power;
 
 /// How an area of the e-ink screen should be refreshed. The app states its
 /// intent; each backend picks the matching waveform. Ordered from weakest to
@@ -64,8 +66,7 @@ pub struct Touch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-// The Kindle backend only produces Sleep/Wake once power events land (Phase 6).
-#[cfg_attr(feature = "kindle", allow(dead_code))]
+#[allow(dead_code)] // System events are produced by the Kindle backend.
 pub enum Event {
     Touch(Touch),
     TextInput {
@@ -77,6 +78,10 @@ pub enum Event {
     Sleep,
     /// The device woke up: the screen may have been drawn over, redraw everything.
     Wake,
+    /// Late firmware drawing after suspend or screensaver exit.
+    WakeRepaint,
+    PowerChanged,
+    Usb(bool),
     /// Leave the app (window closed, or a signal on the device).
     Quit,
 }
@@ -115,9 +120,29 @@ pub struct Frontlight {
     pub warmth: Option<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Battery {
+    pub percent: u8,
+    pub charging: bool,
+}
+
 pub trait Platform {
     fn waker(&self) -> Waker;
     fn set_busy(&mut self, _busy: bool) {}
+    fn battery(&mut self) -> Option<Battery> {
+        None
+    }
+    fn usb_connected(&mut self) -> Option<bool> {
+        None
+    }
+    /// Hand off input/display for the native screensaver, or retain the display
+    /// for our cover. The launcher remains responsible for system UI ownership.
+    fn prepare_sleep(&mut self, _cover: bool) -> Result<()> {
+        Ok(())
+    }
+    fn resume(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// Simulator shortcuts run only after the focused screen declines entry.
     fn unhandled_text_input(&mut self, _input: &TextInput, _repeat: bool) {}
     fn frontlight(&mut self) -> Option<Frontlight> {
