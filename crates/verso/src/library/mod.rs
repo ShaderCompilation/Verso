@@ -149,18 +149,6 @@ pub fn sort_books(books: &mut [Book], states: &std::collections::HashMap<String,
         }
     });
 }
-pub fn continue_book<'a>(
-    books: &'a [Book],
-    states: &std::collections::HashMap<String, crate::store::BookState>,
-) -> Option<&'a Book> {
-    books
-        .iter()
-        .filter(|b| {
-            b.available
-                && states.get(&b.id).is_some_and(|s| !s.position.0.is_empty() && !s.finished && !s.hidden_from_continue)
-        })
-        .max_by_key(|b| (states[&b.id].last_opened, &b.id))
-}
 
 #[cfg(test)]
 pub(crate) mod selection_tests {
@@ -184,14 +172,14 @@ pub(crate) mod selection_tests {
         }
     }
     #[test]
-    fn deterministic_sorting_and_continue_flags() {
+    fn deterministic_sorting() {
         let mut books: Vec<_> = (0..4).map(book).collect();
         books[0].metadata.title = "beta".into();
         books[1].metadata.title = "Alpha".into();
         books[2].metadata.title = "alpha".into();
         books[1].metadata.authors = "Zed".into();
         books[2].metadata.authors = "ann".into();
-        let mut states = HashMap::from([(
+        let states = HashMap::from([(
             "0".into(),
             BookState { position: Position("saved".into()), last_opened: 30, ..Default::default() },
         )]);
@@ -201,15 +189,6 @@ pub(crate) mod selection_tests {
         assert_eq!(books.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["2", "1", "0", "3"]);
         sort_books(&mut books, &states, Sort::Author);
         assert_eq!(books.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["2", "1", "0", "3"]);
-        assert_eq!(continue_book(&books, &states).unwrap().id, "0");
-        states.get_mut("0").unwrap().finished = true;
-        assert!(continue_book(&books, &states).is_none());
-        states.get_mut("0").unwrap().finished = false;
-        states.get_mut("0").unwrap().hidden_from_continue = true;
-        assert!(continue_book(&books, &states).is_none());
-        states.get_mut("0").unwrap().hidden_from_continue = false;
-        books.iter_mut().find(|b| b.id == "0").unwrap().available = false;
-        assert!(continue_book(&books, &states).is_none());
     }
 }
 

@@ -276,11 +276,9 @@ impl Books {
             .collect();
         let sort = self.selected_sort();
         library::sort_books(&mut self.books, &self.states, sort);
-        self.continue_id = if in_collections || self.search.is_some() {
-            None
-        } else {
-            library::continue_book(&self.books, &self.states).map(|b| b.id.clone())
-        };
+        // The resume card lives on Home only; browsing tabs are plain grids.
+        self.continue_id = None;
+        self.continue_rect = Rect::default();
         let y = t.top_bar + t.mm(2.0);
         self.tabs.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
         let y = if let Some(search) = &mut self.search {
@@ -309,12 +307,6 @@ impl Books {
             Rect::default()
         };
         let y = if in_collections { y + self.path_rect.h + t.mm(2.0) } else { y };
-        self.continue_rect = if self.continue_id.is_some() {
-            Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(20.0))
-        } else {
-            Rect::new(t.margin, y, 0, 0)
-        };
-        let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(3.0) } else { y };
         self.header = Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target);
         let sort_w = (self.header.w * 3 / 5).min(t.mm(51.0)).max(3 * t.target).min(self.header.w);
         self.sort.place(Rect::new(self.header.right() - sort_w, y, sort_w, t.target));
@@ -770,7 +762,7 @@ impl Screen for Books {
                 HAlign::Left,
             );
         }
-        if let Some(book) = self.continue_id.as_ref().and_then(|id| self.book(id)).cloned() {
+        if let Some(book) = self.continue_id.as_ref().filter(|_| self.is_home()).and_then(|id| self.book(id)).cloned() {
             let r = self.continue_rect;
             let cover = Rect::new(r.x, r.y, r.h * 2 / 3, r.h);
             draw_cover(cx, &book, cover, &self.store, &mut self.thumbnails);
@@ -789,12 +781,7 @@ impl Screen for Books {
                 Rect::new(x, r.y + t.mm(11.0), w, t.mm(5.0)),
                 HAlign::Left,
             );
-            let progress = if self.is_home() {
-                self.home.resume().map_or(0, |e| e.status.progress)
-            } else {
-                self.states.get(&book.id).map_or(0, |s| s.progress)
-            }
-            .min(10000);
+            let progress = self.home.resume().map_or(0, |e| e.status.progress).min(10000);
             let bar = Rect::new(x, r.bottom() - t.mm(3.0), (w - t.mm(14.0)).max(1), t.hairline);
             cx.fill(bar, LINE);
             cx.fill(Rect { w: (bar.w as i64 * progress as i64 / 10000) as i32, ..bar }, INK);
@@ -1552,6 +1539,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn all_books_has_no_resume_card_and_shows_two_full_rows() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("all-books-grid")?;
+        let id = store.library().books[0].id.clone();
+        let state = BookState {
+            position: crate::document::Position("exact".into()),
+            last_opened: 5,
+            progress: 1234,
+            ..Default::default()
+        };
+        store.save_book(&id, &state)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        books.navigation.tab = Tab::AllBooks;
+        books.refresh(&t);
+        assert!(books.continue_id.is_none(), "a resumable book stays on Home only");
+        assert_eq!(books.continue_rect, Rect::default());
+        assert_eq!(books.books.len(), 22);
+        assert_eq!(books.grid.cells().len(), 8);
+        assert_eq!(books.pager.pages, 3);
+        assert!(books.header.y < t.top_bar + t.target + t.mm(6.0), "the header follows the tabs directly");
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[test]
     fn sleep_cover_follows_the_last_book_when_search_or_collections_hide_continue() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("sleep-cover")?;
