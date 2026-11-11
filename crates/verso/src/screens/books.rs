@@ -38,13 +38,14 @@ impl Books {
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
         let paths = Paths::for_device();
         let books = document::list_books(&paths.books);
+        let fonts = worker.fonts();
         let mut s = Self {
             screen,
             worker,
             store: Store::new(),
             paths,
             books,
-            fonts: Vec::new(),
+            fonts,
             top,
             list: List::new(Vec::new()),
             pager,
@@ -75,6 +76,10 @@ impl Books {
         self.list.page = self.pager.page;
     }
     fn open(&mut self, i: usize, cx: &mut EventCx) {
+        if let Some(error) = &self.error {
+            cx.toast(error.clone(), None);
+            return;
+        }
         let path = self.books[i].clone();
         let id = match book_id(&path) {
             Ok(id) => id,

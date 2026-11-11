@@ -152,6 +152,10 @@ impl FontList {
                     "symbol",
                     "emoji",
                     "cjk",
+                    "chinese",
+                    "japanese",
+                    "korean",
+                    " ui",
                     "heisei",
                     "code2000",
                     "hans",
@@ -197,9 +201,8 @@ impl FontList {
                 self.area.w - 2 * t.margin - t.mm(8.0),
                 t.row,
             );
-            // Font names stay legible while the shared list owns press feedback.
-            cx.fill(rect, PAPER);
-            cx.line(&f.name, t.body.family(family), rect, HAlign::Left);
+            let gray = if self.list.is_pressed(i) { PAPER } else { INK };
+            cx.line(&f.name, t.body.family(family).gray(gray), rect, HAlign::Left);
         }
         self.pager.draw(cx);
     }

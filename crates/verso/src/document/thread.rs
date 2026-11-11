@@ -34,6 +34,7 @@ pub struct Worker {
     tx: mpsc::Sender<Command>,
     rx: RefCell<mpsc::Receiver<Reply>>,
     join: Option<JoinHandle<()>>,
+    fonts: RefCell<Vec<FontFace>>,
 }
 impl Worker {
     pub fn new(paths: Paths, dpi: u32, waker: Waker) -> Self {
@@ -131,15 +132,24 @@ impl Worker {
                 }
             })
             .expect("start book thread");
-        Self { tx, rx: RefCell::new(rx), join: Some(join) }
+        Self { tx, rx: RefCell::new(rx), join: Some(join), fonts: RefCell::new(Vec::new()) }
     }
     pub fn send(&self, c: Command) {
         if self.tx.send(c).is_err() {
             log::error!("book thread stopped");
         }
     }
+    pub fn fonts(&self) -> Vec<FontFace> {
+        self.fonts.borrow().clone()
+    }
     pub fn drain(&self) -> Vec<Reply> {
-        self.rx.borrow_mut().try_iter().collect()
+        let replies: Vec<_> = self.rx.borrow_mut().try_iter().collect();
+        for reply in &replies {
+            if let Reply::Fonts(fonts) = reply {
+                *self.fonts.borrow_mut() = fonts.clone();
+            }
+        }
+        replies
     }
 }
 impl Drop for Worker {

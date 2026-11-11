@@ -116,6 +116,10 @@ impl List {
         event
     }
 
+    pub fn is_pressed(&self, index: usize) -> bool {
+        self.pressed == Some(index) && self.press.is_down()
+    }
+
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         for (i, r) in self.visible() {

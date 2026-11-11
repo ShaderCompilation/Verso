@@ -105,7 +105,7 @@ impl Platform for Kindle {
                 libc::pollfd { fd: self.touch.fd(), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: self.wake_fd.as_raw_fd(), events: libc::POLLIN, revents: 0 },
             ];
-            // SAFETY: one valid pollfd.
+            // SAFETY: two initialized pollfds backed by live file descriptors.
             let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, wait_ms) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
@@ -183,11 +183,27 @@ struct PowerEvents {
 impl PowerEvents {
     fn start(tx: std::sync::mpsc::Sender<Event>, waker: Waker) -> Option<Self> {
         use std::io::BufRead;
-        let child = std::process::Command::new("lipc-wait-event")
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("lipc-wait-event");
+        command
             .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver"])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+            .stderr(std::process::Stdio::null());
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: only async-signal-safe syscalls run between fork and exec.
+        // The listener must also exit when Verso is killed without running Drop.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ECHILD));
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
