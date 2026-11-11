@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use super::{DeviceInfo, Event, Platform, Update};
+use super::{DeviceInfo, Event, Frontlight, Platform, Update, Waker};
 use crate::gfx::Canvas;
 use display::Display;
 use input::{Mapping, TouchInput};
@@ -27,6 +27,9 @@ pub struct Kindle {
     display: Display,
     touch: TouchInput,
     queue: VecDeque<Event>,
+    wake_fd: std::sync::Arc<std::os::fd::OwnedFd>,
+    _power: Option<PowerEvents>,
+    power_rx: std::sync::mpsc::Receiver<Event>,
 }
 
 impl Kindle {
@@ -42,11 +45,36 @@ impl Kindle {
         })?;
         let info =
             DeviceInfo { name: display.name.clone(), width: display.width, height: display.height, dpi: display.dpi };
-        Ok(Self { info, display, touch, queue: VecDeque::new() })
+        use std::os::fd::FromRawFd;
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        let (tx, power_rx) = std::sync::mpsc::channel();
+        let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()));
+        Ok(Self { info, display, touch, queue: VecDeque::new(), wake_fd, _power: power, power_rx })
     }
 }
 
 impl Platform for Kindle {
+    fn waker(&self) -> Waker {
+        fd_waker(self.wake_fd.clone())
+    }
+    fn frontlight(&mut self) -> Option<Frontlight> {
+        Some(Frontlight {
+            brightness: property("flIntensity")?.clamp(0, 24) as u8,
+            warmth: property("currentAmberLevel").map(|v| v.clamp(0, 24) as u8),
+        })
+    }
+    fn set_frontlight(&mut self, value: Frontlight) -> Result<()> {
+        set_property("flIntensity", value.brightness.min(24))?;
+        if let Some(warmth) = value.warmth {
+            set_property("currentAmberLevel", warmth.min(24))?;
+        }
+        Ok(())
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }
@@ -56,6 +84,9 @@ impl Platform for Kindle {
         loop {
             if QUIT.load(Ordering::Relaxed) {
                 return Ok(Some(Event::Quit));
+            }
+            if let Ok(e) = self.power_rx.try_recv() {
+                return Ok(Some(e));
             }
             if let Some(e) = self.queue.pop_front() {
                 return Ok(Some(e));
@@ -69,9 +100,13 @@ impl Platform for Kindle {
                     d.saturating_duration_since(Instant::now()).as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
                 }
             };
-            let mut pfd = libc::pollfd { fd: self.touch.fd(), events: libc::POLLIN, revents: 0 };
+            use std::os::fd::AsRawFd;
+            let mut pfds = [
+                libc::pollfd { fd: self.touch.fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: self.wake_fd.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            ];
             // SAFETY: one valid pollfd.
-            let rc = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
+            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, wait_ms) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -80,6 +115,14 @@ impl Platform for Kindle {
                 return Err(err.into());
             }
             if rc > 0 {
+                if pfds[1].revents & libc::POLLIN != 0 {
+                    let mut value = 0u64;
+                    unsafe {
+                        libc::read(self.wake_fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8);
+                    }
+                    return Ok(Some(self.power_rx.try_recv().unwrap_or(Event::Background)));
+                }
+                let pfd = &pfds[0];
                 if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
                     bail!("the touchscreen stopped working (poll flags {:#x})", pfd.revents);
                 }
@@ -110,6 +153,73 @@ fn install_signal_handlers() {
         libc::sigemptyset(&mut sa.sa_mask);
         for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+fn fd_waker(fd: std::sync::Arc<std::os::fd::OwnedFd>) -> Waker {
+    use std::os::fd::AsRawFd;
+    Waker::new(move || {
+        let one = 1u64;
+        unsafe {
+            libc::write(fd.as_raw_fd(), (&one as *const u64).cast(), 8);
+        }
+    })
+}
+fn property(name: &str) -> Option<i32> {
+    let out = std::process::Command::new("lipc-get-prop").args(["com.lab126.powerd", name]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok()).flatten()
+}
+fn set_property(name: &str, value: u8) -> Result<()> {
+    let status =
+        std::process::Command::new("lipc-set-prop").args(["com.lab126.powerd", name, &value.to_string()]).status()?;
+    anyhow::ensure!(status.success(), "couldn't change front light");
+    Ok(())
+}
+struct PowerEvents {
+    child: std::process::Child,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+impl PowerEvents {
+    fn start(tx: std::sync::mpsc::Sender<Event>, waker: Waker) -> Option<Self> {
+        use std::io::BufRead;
+        let child = std::process::Command::new("lipc-wait-event")
+            .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("power events unavailable: {e}");
+                return None;
+            }
+        };
+        let stdout = child.stdout.take()?;
+        let join = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let e = if line.contains("goingToScreenSaver") {
+                    Event::Sleep
+                } else if line.contains("outOfScreenSaver") {
+                    Event::Wake
+                } else {
+                    continue;
+                };
+                if tx.send(e).is_err() {
+                    break;
+                }
+                waker.wake();
+            }
+        });
+        Some(Self { child, join: Some(join) })
+    }
+}
+impl Drop for PowerEvents {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
         }
     }
 }

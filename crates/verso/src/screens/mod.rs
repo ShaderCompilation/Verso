@@ -2,14 +2,18 @@
 //! of a stack); a screen owns its widgets and any sheet or pop-up it opens.
 //! Toasts are app-wide.
 
+pub mod books;
+pub mod contents;
 pub mod gallery;
-pub mod spike;
+pub mod reader;
+pub mod reader_menu;
+pub mod text_sheet;
 
 use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{RefreshMode, Update};
+use crate::platform::{Frontlight, RefreshMode, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -42,6 +46,11 @@ pub trait Screen {
         Action::None
     }
 
+    /// Used by scripted screenshots to wait for asynchronous screen changes.
+    fn busy(&self) -> bool {
+        false
+    }
+
     /// Slow work to do once the current frame is on screen (so a "please
     /// wait" message shows first).
     fn has_pending_work(&self) -> bool {
@@ -50,6 +59,15 @@ pub trait Screen {
 
     fn run_pending_work(&mut self, _cx: &mut EventCx) -> Action {
         Action::None
+    }
+
+    /// A worker has new results. Return true if the screen needs drawing.
+    fn on_background(&mut self, _cx: &mut EventCx) {}
+    /// Called after pixels reach the platform, before waiting for input.
+    fn after_present(&mut self) {}
+    /// Save before a normal shutdown.
+    fn on_quit(&mut self) {
+        self.on_sleep();
     }
 
     /// The device is going to sleep.
@@ -62,6 +80,8 @@ pub struct EventCx<'a> {
     /// The whole screen.
     pub screen: Rect,
     pub now: Instant,
+    pub frontlight: &'a mut Option<Frontlight>,
+    pub light_request: &'a mut Option<Frontlight>,
     pub(crate) toast: &'a mut Option<Toast>,
     pub(crate) forced: &'a mut Vec<Update>,
 }

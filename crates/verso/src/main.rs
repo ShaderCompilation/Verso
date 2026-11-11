@@ -1,7 +1,7 @@
 //! Verso — a calm, lightweight e-reader. See docs/plan.md.
 //!
 //! Simulator only: `--screenshot out.png` renders without a window, saves a
-//! grayscale PNG at device size and exits. `--screen gallery|spike` picks the
+//! grayscale PNG at device size and exits. `--screen books|gallery` picks the
 //! start screen; `--tap x,y`, `--press x,y` (finger down, not lifted) and
 //! `--swipe x1,y1,x2,y2` (all repeatable, played in order) run first.
 
@@ -16,7 +16,9 @@ mod geom;
 mod gfx;
 mod logging;
 mod platform;
+mod reader;
 mod screens;
+mod store;
 mod ui;
 
 use std::time::{Duration, Instant};
@@ -87,11 +89,16 @@ fn parse_args() -> Result<Options> {
     Ok(opts)
 }
 
-fn start_screen(name: Option<&str>, theme: &ui::theme::Theme, rect: geom::Rect) -> Result<Box<dyn Screen>> {
-    Ok(match name.unwrap_or("gallery") {
-        "gallery" => Box::new(screens::gallery::Gallery::new(theme, rect)),
-        "spike" => Box::new(screens::spike::Spike::new(theme, rect)),
-        other => bail!("unknown screen {other:?}; try gallery or spike"),
+fn start_screen(
+    name: Option<&str>,
+    theme: &ui::theme::Theme,
+    rect: geom::Rect,
+    worker: std::rc::Rc<document::thread::Worker>,
+) -> Result<Box<dyn Screen>> {
+    Ok(match name.unwrap_or("books") {
+        "gallery" => Box::new(screens::gallery::Gallery::new(theme, rect, worker)),
+        "books" | "reader" => Box::new(screens::books::Books::new(theme, rect, worker)),
+        other => bail!("unknown screen {other:?}; try books or gallery"),
     })
 }
 
@@ -108,17 +115,27 @@ fn run() -> Result<()> {
 
     let theme = ui::theme::Theme::for_dpi(info.dpi);
     let bounds = geom::Rect::new(0, 0, info.width as i32, info.height as i32);
-    let mut app = App::new(&info, theme.clone(), start_screen(opts.screen.as_deref(), &theme, bounds)?);
+    let worker =
+        std::rc::Rc::new(document::thread::Worker::new(document::Paths::for_device(), info.dpi, platform.waker()));
+    let mut app = App::new(&info, theme.clone(), start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone())?);
+    app.frontlight = platform.frontlight();
     let mut gestures = GestureDetector::new(GestureConfig::for_dpi(info.dpi));
     app.refresh_all(RefreshMode::Full);
     let mut first_frame = true;
     let mut quit = false;
 
     loop {
+        if let Some(light) = app.light_request()
+            && let Err(e) = platform.set_frontlight(light)
+        {
+            log::error!("{e:#}");
+            app.frontlight = platform.frontlight();
+        }
         let updates = app.frame();
         if !updates.is_empty() {
             let t = Instant::now();
             platform.present(app.canvas(), &updates)?;
+            app.after_present();
             log::debug!("presented {} update(s) in {:?}: {updates:?}", updates.len(), t.elapsed());
             if first_frame {
                 log::info!("first frame on screen {:?} after start", started.elapsed());
@@ -139,6 +156,7 @@ fn run() -> Result<()> {
             continue;
         }
 
+        platform.set_busy(app.busy());
         let deadline = [gestures.next_deadline(), app.deadline()].into_iter().flatten().min();
         let mut timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         // Handle everything that's already waiting before drawing, so a fast
@@ -146,6 +164,7 @@ fn run() -> Result<()> {
         for _ in 0..MAX_BATCH {
             match platform.next_event(timeout)? {
                 None => break,
+                Some(Event::Background) => app.on_background(),
                 Some(Event::Touch(t)) => {
                     log::trace!("{t:?}");
                     if let Some(g) = gestures.on_touch(&t) {
@@ -178,6 +197,7 @@ fn run() -> Result<()> {
         app.on_tick(now);
     }
 
+    app.on_quit();
     platform.wait_for_complete()?;
     log::info!("bye");
     Ok(())

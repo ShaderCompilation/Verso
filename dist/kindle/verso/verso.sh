@@ -48,6 +48,7 @@ fi
 echo $$ >"${PIDFILE}"
 
 AWESOME_STOPPED=no
+STATUS_STOPPED=no
 VOLUMD_STOPPED=no
 PILLOW_DISABLED=no
 VERSO_PID=""
@@ -58,6 +59,7 @@ restore() {
     trap - EXIT
     log "restoring the Kindle UI"
     [ "${VOLUMD_STOPPED}" = yes ] && killall -CONT volumd 2>/dev/null
+    [ "${STATUS_STOPPED}" = yes ] && killall -CONT JunoStatusBarDriver 2>/dev/null
     [ "${AWESOME_STOPPED}" = yes ] && killall -CONT awesome 2>/dev/null
     # Put back what was on screen before, so there's no flash of our UI
     # while the home screen loads.
@@ -81,6 +83,8 @@ PILLOW_DISABLED=yes
 lipc-set-prop com.lab126.pillow disableEnablePillow disable  # status bar
 AWESOME_STOPPED=yes
 killall -STOP awesome 2>/dev/null  # window manager: stops the UI drawing over us
+STATUS_STOPPED=yes
+killall -STOP JunoStatusBarDriver 2>/dev/null  # the clock has its own process on PW6
 VOLUMD_STOPPED=yes
 killall -STOP volumd 2>/dev/null  # USB: keeps /mnt/us mounted if a cable is plugged in
 

@@ -34,3 +34,33 @@ unsafe extern "C" {
     pub fn verso_cre_draw(doc: *mut VersoCreDoc, buf: *mut u8, width: c_int, height: c_int, stride: c_int) -> c_int;
     pub fn verso_cre_get_prop(doc: *mut VersoCreDoc, key: *const c_char, buf: *mut c_char, buf_len: c_int) -> c_int;
 }
+
+unsafe extern "C" {
+    pub fn verso_cre_position(doc: *mut VersoCreDoc, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_restore(doc: *mut VersoCreDoc, position: *const c_char) -> c_int;
+    pub fn verso_cre_progress(doc: *mut VersoCreDoc) -> c_int;
+    pub fn verso_cre_typography(
+        doc: *mut VersoCreDoc,
+        face: *const c_char,
+        px: c_int,
+        spacing: c_int,
+        margin: c_int,
+        top: c_int,
+        bottom: c_int,
+        justify: c_int,
+        publisher: c_int,
+    ) -> c_int;
+    pub fn verso_cre_toc_count(doc: *mut VersoCreDoc) -> c_int;
+    pub fn verso_cre_toc_entry(
+        doc: *mut VersoCreDoc,
+        index: c_int,
+        field: c_int,
+        buf: *mut c_char,
+        len: c_int,
+    ) -> c_int;
+    pub fn verso_cre_images(doc: *mut VersoCreDoc) -> c_int;
+    pub fn verso_cre_embedded_fonts(doc: *mut VersoCreDoc) -> c_int;
+    pub fn verso_cre_font_count() -> c_int;
+    pub fn verso_cre_font_file(index: c_int, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_font_name(index: c_int, buf: *mut c_char, len: c_int) -> c_int;
+}

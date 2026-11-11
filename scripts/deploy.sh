@@ -47,6 +47,9 @@ if [ "$(ssh "$HOST" "cat $APP/data/cre/.version 2>/dev/null")" != "$CRE_VERSION"
     tar -C "$CRE_DATA" --owner=0 --group=0 -cf - epub.css html5.css hyph | ssh "$HOST" "tar -xf - -C $APP/data/cre"
     echo "$CRE_VERSION" | ssh "$HOST" "cat > $APP/data/cre/.version"
 fi
+# Book fonts and their licence, separate from crengine data.
+ssh "$HOST" "mkdir -p $APP/fonts"
+tar -C assets/fonts --owner=0 --group=0 -cf - Literata-Regular.ttf Literata-Italic.ttf Literata-SemiBold.ttf Literata-SemiBoldItalic.ttf Literata-LICENSE.txt | ssh "$HOST" "tar -xf - -C $APP/fonts"
 # Copy under a temporary name first, so a broken transfer never leaves half a binary.
 ssh "$HOST" "cat > $APP/verso.new && chmod 755 $APP/verso.new && mv -f $APP/verso.new $APP/verso" <"$BIN"
 

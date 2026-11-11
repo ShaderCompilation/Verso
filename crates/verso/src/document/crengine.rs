@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
-use super::{Document, Layout, Paths};
+use super::{Document, FontFace, Layout, Metadata, Paths, Position, TocEntry, Typography};
 
 /// Upper limit for crengine's on-disk document cache.
 const CACHE_MAX_BYTES: c_int = 64 << 20;
@@ -52,13 +52,24 @@ impl CreEngine {
         Ok(Self { paths, dpi })
     }
 
+    pub fn fonts(&self) -> Vec<FontFace> {
+        (0..unsafe { sys::verso_cre_font_count() })
+            .filter_map(|i| {
+                let name = read_string(|buf, len| unsafe { sys::verso_cre_font_name(i, buf, len) }).ok()?;
+                let file =
+                    read_string(|buf, len| unsafe { sys::verso_cre_font_file(i, buf, len) }).ok().map(Into::into);
+                Some(FontFace { name, file })
+            })
+            .collect()
+    }
+
     /// Opens and lays out a book. Slow for big books (seconds on the Kindle).
-    pub fn open(&self, path: &Path, layout: &Layout) -> Result<CreDocument> {
+    pub fn open(&self, path: &Path, layout: &Layout, typography: Option<(&Typography, bool)>) -> Result<CreDocument> {
         let raw = unsafe { sys::verso_cre_new(layout.width as c_int, layout.height as c_int, self.dpi as c_int) };
         if raw.is_null() {
             bail!("crengine could not create a document view");
         }
-        let mut doc = CreDocument { raw, font_size: layout.font_size, stats: OpenStats::default() };
+        let mut doc = CreDocument { raw, stats: OpenStats::default() };
         let css = cstr(&self.paths.engine_data.join("epub.css"))?;
         let face = CString::new(self.paths.font_face.as_str())?;
         let [l, t, r, b] = layout.margins.map(|m| m as c_int);
@@ -71,6 +82,9 @@ impl CreEngine {
             sys::verso_cre_set_margins(raw, l, t, r, b);
         }
 
+        if let Some((t, footer)) = typography {
+            doc.set_typography(t, self.dpi, footer)?;
+        }
         let t = Instant::now();
         if unsafe { sys::verso_cre_load(raw, cstr(path)?.as_ptr()) } != 0 {
             bail!("could not open {}", path.display());
@@ -79,6 +93,15 @@ impl CreEngine {
         let t = Instant::now();
         unsafe { sys::verso_cre_render(raw) };
         doc.stats.layout_ms = t.elapsed().as_millis() as u32;
+        anyhow::ensure!(doc.page_count() > 0, "book has no readable pages");
+        let pages = doc.page_count();
+        log::info!(
+            "opened {}: parse {} ms, layout {} ms, {} pages",
+            path.display(),
+            doc.stats.load_ms,
+            doc.stats.layout_ms,
+            pages
+        );
         Ok(doc)
     }
 }
@@ -94,25 +117,102 @@ pub struct OpenStats {
 
 pub struct CreDocument {
     raw: *mut sys::VersoCreDoc,
-    font_size: u32,
     pub stats: OpenStats,
 }
 
 impl CreDocument {
-    pub fn language(&mut self) -> String {
-        self.prop(c"language")
-    }
-
     fn prop(&mut self, key: &CStr) -> String {
-        let mut buf = [0 as c_char; 512];
-        unsafe {
-            sys::verso_cre_get_prop(self.raw, key.as_ptr(), buf.as_mut_ptr(), buf.len() as c_int);
-            CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
-        }
+        read_string(|buf, len| unsafe { sys::verso_cre_get_prop(self.raw, key.as_ptr(), buf, len) }).unwrap_or_default()
     }
 }
 
+fn read_string(f: impl Fn(*mut c_char, c_int) -> c_int) -> Result<String> {
+    let len = f(std::ptr::null_mut(), 0);
+    anyhow::ensure!((0..=1_048_576).contains(&len), "engine string getter failed");
+    let mut buf = vec![0u8; len as usize + 1];
+    anyhow::ensure!(f(buf.as_mut_ptr().cast(), buf.len() as c_int) == len, "engine string changed");
+    buf.pop();
+    Ok(String::from_utf8(buf)?)
+}
+
 impl Document for CreDocument {
+    fn position(&mut self) -> Result<Position> {
+        Ok(Position(read_string(|buf, len| unsafe { sys::verso_cre_position(self.raw, buf, len) })?))
+    }
+
+    fn go_to_position(&mut self, p: &Position) -> Result<()> {
+        let p = CString::new(p.0.as_str())?;
+        anyhow::ensure!(
+            unsafe { sys::verso_cre_restore(self.raw, p.as_ptr()) } == 0,
+            "saved position isn't in this book"
+        );
+        Ok(())
+    }
+
+    fn progress(&mut self) -> u32 {
+        unsafe { sys::verso_cre_progress(self.raw) }.clamp(0, 10000) as u32
+    }
+
+    fn toc(&mut self) -> Result<Vec<TocEntry>> {
+        let n = unsafe { sys::verso_cre_toc_count(self.raw) };
+        anyhow::ensure!(n >= 0, "couldn't read contents");
+        let mut entries = Vec::new();
+        for i in 0..n {
+            let string =
+                |field| read_string(|buf, len| unsafe { sys::verso_cre_toc_entry(self.raw, i, field, buf, len) });
+            let page = unsafe { sys::verso_cre_toc_entry(self.raw, i, 2, std::ptr::null_mut(), 0) };
+            if page < 0 {
+                continue;
+            }
+            entries.push(TocEntry {
+                title: string(0)?,
+                position: Position(string(1)?),
+                page: page as usize,
+                level: unsafe { sys::verso_cre_toc_entry(self.raw, i, 3, std::ptr::null_mut(), 0) }.max(1) as usize,
+            });
+        }
+        entries.sort_by_key(|e| e.page);
+        Ok(entries)
+    }
+
+    fn metadata(&mut self) -> Metadata {
+        Metadata {
+            title: self.prop(c"title"),
+            authors: self.prop(c"authors"),
+            language: self.prop(c"language"),
+            publisher_fonts: unsafe { sys::verso_cre_embedded_fonts(self.raw) } > 0,
+        }
+    }
+
+    fn has_images(&mut self) -> bool {
+        (unsafe { sys::verso_cre_images(self.raw) }) > 0
+    }
+
+    fn set_typography(&mut self, t: &Typography, dpi: u32, footer: bool) -> Result<()> {
+        let face = CString::new(if t.font == "Publisher font" { "Literata" } else { &t.font })?;
+        let mm = |v: f32| (v * dpi as f32 / 25.4).round() as c_int;
+        let mut t = t.clone();
+        t.normalize();
+        let px = (t.size_pt * dpi as f32 / 72.0).round() as c_int;
+        let started = Instant::now();
+        let rc = unsafe {
+            sys::verso_cre_typography(
+                self.raw,
+                face.as_ptr(),
+                px,
+                [100, 120, 140][t.spacing],
+                mm([4.0, 7.0, 10.0][t.margins]),
+                mm(6.0),
+                mm(if footer { 12.0 } else { 6.0 }),
+                t.justify as c_int,
+                (t.font == "Publisher font") as c_int,
+            )
+        };
+        anyhow::ensure!(rc == 0, "couldn't apply text settings");
+        log::info!("typography applied in {:?}", started.elapsed());
+        Ok(())
+    }
+
     fn page_count(&mut self) -> usize {
         unsafe { sys::verso_cre_page_count(self.raw) }.max(0) as usize
     }
@@ -125,28 +225,13 @@ impl Document for CreDocument {
         unsafe { sys::verso_cre_go_to_page(self.raw, page as c_int) };
     }
 
-    fn font_size(&self) -> u32 {
-        self.font_size
-    }
-
-    fn set_font_size(&mut self, px: u32) {
-        self.font_size = px;
-        unsafe {
-            sys::verso_cre_set_font_size(self.raw, px as c_int);
-            sys::verso_cre_render(self.raw);
-        }
-    }
-
     fn draw(&mut self, out: &mut [u8], stride: usize) -> Result<()> {
-        let (w, h) = (stride as c_int, (out.len() / stride) as c_int);
+        anyhow::ensure!(stride > 0 && !out.is_empty() && out.len().is_multiple_of(stride), "invalid page buffer");
+        let (w, h) = (c_int::try_from(stride)?, c_int::try_from(out.len() / stride)?);
         if unsafe { sys::verso_cre_draw(self.raw, out.as_mut_ptr(), w, h, stride as c_int) } != 0 {
             bail!("crengine failed to draw the page");
         }
         Ok(())
-    }
-
-    fn title(&mut self) -> String {
-        self.prop(c"title")
     }
 }
 

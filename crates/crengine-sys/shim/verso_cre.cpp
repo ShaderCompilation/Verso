@@ -5,6 +5,8 @@
 
 #include <string.h>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
 
 #include "lvdocview.h"
 #include "lvdrawbuf.h"
@@ -13,6 +15,11 @@
 
 struct VersoCreDoc {
     LVDocView *view;
+    lString8 css;
+    std::vector<LVTocItem *> toc;
+    std::unordered_map<int, uint64_t> offsets;
+    uint64_t text_length = 0;
+
 };
 
 // Runs `body`, turning any C++ exception into `fallback`.
@@ -29,6 +36,36 @@ static void set_str(LVDocView *v, const char *name, const char *value) {
     CRPropRef props = LVCreatePropsContainer();
     props->setString(name, value);
     v->propsApply(props);
+}
+
+static int copy_utf8(const lString32 &value, char *buf, int len) {
+    lString8 text = UnicodeToUtf8(value);
+    if (buf && len > 0) {
+        int n = std::min(text.length(), len - 1);
+        memcpy(buf, text.c_str(), n);
+        buf[n] = 0;
+    }
+    return text.length();
+}
+
+static void collect_toc(LVTocItem *item, std::vector<LVTocItem *> &out) {
+    if (!item) return;
+    for (int i = 0; i < item->getChildCount(); ++i) {
+        LVTocItem *child = item->getChild(i);
+        out.push_back(child);
+        collect_toc(child, out);
+    }
+}
+
+static void collect_offsets(ldomNode *node, VersoCreDoc *doc) {
+    if (!node) return;
+    if (node->isText()) {
+        doc->offsets[node->getDataIndex()] = doc->text_length;
+        doc->text_length += node->getText().length();
+    } else {
+        for (int i = 0; i < node->getChildCount(); ++i)
+            collect_offsets(node->getChildNode(i), doc);
+    }
 }
 
 extern "C" {
@@ -67,7 +104,9 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         props->setInt(PROP_EMBEDDED_FONTS, 1);
         v->propsApply(props);
         v->Resize(width, height);
-        return new VersoCreDoc{v};
+        VersoCreDoc *doc = new VersoCreDoc();
+        doc->view = v;
+        return doc;
     })
 }
 
@@ -87,6 +126,7 @@ int verso_cre_set_stylesheet_file(VersoCreDoc *doc, const char *path) {
         lString8 css;
         if (!LVLoadStylesheetFile(Utf8ToUnicode(path), css))
             return -1;
+        doc->css = css;
         doc->view->setStyleSheet(css, false);
         return 0;
     })
@@ -215,4 +255,108 @@ int verso_cre_get_prop(VersoCreDoc *doc, const char *key, char *buf, int buf_len
     })
 }
 
+
+int verso_cre_position(VersoCreDoc *doc, char *buf, int len) {
+    GUARD(-1, { return copy_utf8(doc->view->getBookmark().toString(), buf, len); })
+}
+int verso_cre_restore(VersoCreDoc *doc, const char *position) {
+    GUARD(-1, {
+        ldomXPointer pos = doc->view->getDocument()->createXPointer(Utf8ToUnicode(position));
+        if (pos.isNull() || pos.toPoint().y < 0) return -1;
+        doc->view->goToBookmark(pos);
+        doc->view->SetPos(pos.toPoint().y);
+        return 0;
+    })
+}
+int verso_cre_progress(VersoCreDoc *doc) {
+    GUARD(0, {
+        if (doc->offsets.empty()) collect_offsets(doc->view->getDocument()->getRootNode(), doc);
+        ldomXPointer pos = doc->view->getBookmark();
+        if (pos.isNull() || !doc->text_length) return 0;
+        ldomNode *node = pos.getNode();
+        while (node && !node->isText() && node->getChildCount()) node = node->getChildNode(0);
+        if (!node) return 0;
+        auto it = doc->offsets.find(node->getDataIndex());
+        if (it == doc->offsets.end()) return 0;
+        uint64_t offset = it->second + std::max(0, pos.getOffset());
+        return std::min(10000, (int)(offset * 10000 / doc->text_length));
+    })
+}
+int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,
+                         int margin, int top, int bottom, int justify, int publisher) {
+    GUARD(-1, {
+        LVDocView *v = doc->view;
+        ldomXPointer pos = v->getDocument() ? v->getBookmark() : ldomXPointer();
+        CRPropRef props = LVCreatePropsContainer();
+        props->setString(PROP_FONT_FACE, face);
+        props->setInt(PROP_EMBEDDED_FONTS, publisher);
+        v->propsApply(props);
+        v->setFontSize(px);
+        v->setDefaultInterlineSpace(spacing);
+        v->setPageMargins(lvRect(margin, top, margin, bottom));
+        lString8 css = doc->css;
+        if (!publisher) {
+            lString8 escaped;
+            for (const char *p = face; *p; ++p) {
+                if (*p == '\'' || *p == '\\') escaped << "\\";
+                escaped << lString8(p, 1);
+            }
+            css << "\n* { font-family: '" << escaped << "' !important; }\n";
+        }
+        css << (justify ? "\np, li { text-align: justify !important; }" : "\np, li { text-align: left !important; }");
+        v->setStyleSheet(css, false);
+        if (v->getDocument()) {
+            v->Render();
+            if (!pos.isNull()) {
+                v->goToBookmark(pos);
+                v->SetPos(pos.toPoint().y);
+            }
+        }
+        doc->offsets.clear(); doc->text_length = 0;
+        doc->toc.clear();
+        return 0;
+    })
+}
+int verso_cre_toc_count(VersoCreDoc *doc) {
+    GUARD(-1, {
+        doc->toc.clear(); collect_toc(doc->view->getToc(), doc->toc);
+        return (int)doc->toc.size();
+    })
+}
+int verso_cre_toc_entry(VersoCreDoc *doc, int index, int field, char *buf, int len) {
+    GUARD(-1, {
+        if (index < 0 || index >= (int)doc->toc.size()) return -1;
+        LVTocItem *item = doc->toc[index];
+        if (field == 0) return copy_utf8(item->getName(), buf, len);
+        if (field == 1) return copy_utf8(item->getXPointer().toString(), buf, len);
+        if (field == 2) return doc->view->getBookmarkPage(item->getXPointer());
+        return item->getLevel();
+    })
+}
+int verso_cre_images(VersoCreDoc *doc) {
+    GUARD(0, { return doc->view->getCurrentPageImageCount(); })
+}
+int verso_cre_embedded_fonts(VersoCreDoc *doc) {
+    GUARD(0, { return doc->view->getDocument()->getEmbeddedFontList().length(); })
+}
+int verso_cre_font_count(void) {
+    GUARD(0, { lString32Collection faces; fontMan->getFaceList(faces); return faces.length(); })
+}
+int verso_cre_font_name(int index, char *buf, int len) {
+    GUARD(-1, {
+        lString32Collection faces; fontMan->getFaceList(faces);
+        if (index < 0 || index >= faces.length()) return -1;
+        return copy_utf8(faces[index], buf, len);
+    })
+}
+
+int verso_cre_font_file(int index, char *buf, int len) {
+    GUARD(-1, {
+        lString32Collection faces; fontMan->getFaceList(faces);
+        if (index < 0 || index >= faces.length()) return -1;
+        lString8 file; int face_index; int family; bool math; bool emojis;
+        if (!fontMan->getFontFileNameAndFaceIndex(faces[index], false, false, file, face_index, family, math, emojis)) return -1;
+        return copy_utf8(Utf8ToUnicode(file), buf, len);
+    })
+}
 } // extern "C"

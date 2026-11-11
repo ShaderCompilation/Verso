@@ -123,7 +123,13 @@ impl Slider {
         cx.canvas.fill_rounded_rect(Rect::new(x0, cy - track_h / 2, x1 - x0, track_h), 2.0, LINE);
         let kx = x0 + ((x1 - x0) as f32 * self.frac()).round() as i32;
         let filled_h = t.mm(1.0);
-        cx.canvas.fill_rounded_rect(Rect::new(x0, cy - filled_h / 2, kx - x0, filled_h), filled_h as f32 / 2.0, INK);
+        if kx > x0 {
+            cx.canvas.fill_rounded_rect(
+                Rect::new(x0, cy - filled_h / 2, kx - x0, filled_h),
+                filled_h as f32 / 2.0,
+                INK,
+            );
+        }
         if self.ticks && self.step > 0.0 {
             let n = ((self.max - self.min) / self.step).round() as i32;
             for i in 1..n {

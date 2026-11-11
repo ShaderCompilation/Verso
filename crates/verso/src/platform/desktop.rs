@@ -24,7 +24,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowId};
 
-use super::{DeviceInfo, Event, Platform, RefreshMode, Touch, TouchPhase, Update};
+use super::{DeviceInfo, Event, Frontlight, Platform, RefreshMode, Touch, TouchPhase, Update, Waker};
 use crate::geom::{Point, Rect};
 use crate::gfx::{Canvas, save_gray_png};
 
@@ -35,6 +35,7 @@ pub struct Desktop {
     info: DeviceInfo,
     event_loop: EventLoop<()>,
     sim: Sim,
+    light: Frontlight,
 }
 
 impl Desktop {
@@ -43,7 +44,7 @@ impl Desktop {
         let scale = env_number("VERSO_SIM_SCALE", 0.5)?;
         let info = DeviceInfo { name: "Simulator".into(), width, height, dpi };
 
-        let mut event_loop = EventLoop::new().context("can't open a window (no display?)")?;
+        let mut event_loop = EventLoop::<()>::with_user_event().build().context("can't open a window (no display?)")?;
         let mut sim = Sim::new(width as usize, height as usize, scale);
         // Let winit create the window.
         let start = Instant::now();
@@ -59,11 +60,27 @@ impl Desktop {
             }
         }
         log::info!("simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot");
-        Ok(Self { info, event_loop, sim })
+        Ok(Self { info, event_loop, sim, light: Frontlight { brightness: 12, warmth: Some(0) } })
     }
 }
 
 impl Platform for Desktop {
+    fn waker(&self) -> Waker {
+        let proxy = self.event_loop.create_proxy();
+        Waker::new(move || {
+            let _ = proxy.send_event(());
+        })
+    }
+    fn frontlight(&mut self) -> Option<Frontlight> {
+        Some(self.light)
+    }
+    fn set_frontlight(&mut self, light: Frontlight) -> Result<()> {
+        self.light = light;
+        self.sim.light = light;
+        self.sim.dirty = true;
+        Ok(())
+    }
+
     fn info(&self) -> &DeviceInfo {
         &self.info
     }
@@ -144,6 +161,7 @@ struct Sim {
     flashes: Vec<Update>,
     flash_until: Option<Instant>,
     asleep: bool,
+    light: Frontlight,
     dirty: bool,
     error: Option<anyhow::Error>,
 }
@@ -165,6 +183,7 @@ impl Sim {
             flashes: Vec::new(),
             flash_until: None,
             asleep: false,
+            light: Frontlight { brightness: 12, warmth: Some(0) },
             dirty: true,
             error: None,
         }
@@ -244,6 +263,11 @@ impl Sim {
                 if self.asleep {
                     (r, gr, b) = (r / 4, gr / 4, b / 3 + 20);
                 }
+                let dim = 0.75 + self.light.brightness as f32 / 96.0;
+                let warm = self.light.warmth.unwrap_or(0) as f32 / 24.0;
+                r = (r as f32 * dim) as u32;
+                gr = (gr as f32 * dim * (1.0 - warm * 0.06)) as u32;
+                b = (b as f32 * dim * (1.0 - warm * 0.18)) as u32;
                 out[dx] = (r << 16) | (gr << 8) | b;
             }
         }
@@ -300,6 +324,10 @@ impl Sim {
 }
 
 impl ApplicationHandler for Sim {
+    fn user_event(&mut self, _el: &ActiveEventLoop, _event: ()) {
+        self.events.push_back(Event::Background);
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_none()
             && let Err(e) = self.create_window(el)

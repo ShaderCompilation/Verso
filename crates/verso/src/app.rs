@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-use crate::platform::{DeviceInfo, RefreshMode, Update};
+use crate::platform::{DeviceInfo, Frontlight, RefreshMode, Update};
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::Gesture;
@@ -34,6 +34,8 @@ pub struct App {
     needs_redraw: bool,
     asleep: bool,
     exit: bool,
+    pub frontlight: Option<Frontlight>,
+    light_request: Option<Frontlight>,
 }
 
 impl App {
@@ -55,6 +57,8 @@ impl App {
             needs_redraw: true,
             asleep: false,
             exit: false,
+            frontlight: None,
+            light_request: None,
         }
     }
 
@@ -149,6 +153,10 @@ impl App {
         }
     }
 
+    pub fn busy(&self) -> bool {
+        self.stack.last().is_some_and(|s| s.busy())
+    }
+
     pub fn has_pending_work(&self) -> bool {
         self.stack.last().is_some_and(|s| s.has_pending_work())
     }
@@ -156,6 +164,30 @@ impl App {
     pub fn run_pending_work(&mut self) {
         self.needs_redraw = true;
         self.with_screen(|screen, cx| screen.run_pending_work(cx));
+    }
+
+    pub fn on_background(&mut self) {
+        if self.asleep {
+            return;
+        }
+        self.needs_redraw = true;
+        self.with_screen(|screen, cx| {
+            screen.on_background(cx);
+            Action::None
+        });
+    }
+    pub fn after_present(&mut self) {
+        if let Some(s) = self.stack.last_mut() {
+            s.after_present();
+        }
+    }
+    pub fn on_quit(&mut self) {
+        for s in &mut self.stack {
+            s.on_quit();
+        }
+    }
+    pub fn light_request(&mut self) -> Option<Frontlight> {
+        self.light_request.take()
     }
 
     pub fn on_sleep(&mut self) {
@@ -168,6 +200,7 @@ impl App {
 
     pub fn on_wake(&mut self) {
         self.asleep = false;
+        self.on_background();
         self.refresh_all(RefreshMode::Full);
     }
 
@@ -177,6 +210,8 @@ impl App {
             theme: &self.theme,
             screen: self.canvas.bounds(),
             now: Instant::now(),
+            frontlight: &mut self.frontlight,
+            light_request: &mut self.light_request,
             toast: &mut self.toast,
             forced: &mut self.forced,
         };

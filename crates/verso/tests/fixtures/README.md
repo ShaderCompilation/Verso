@@ -1,0 +1,1 @@
+reader.epub is an original, generated two-chapter test book (100 numbered paragraphs per chapter), licensed with Verso. It contains no third-party book text or fonts. Used to check TOC, layout, positions and progress without private testbooks/.

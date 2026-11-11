@@ -31,13 +31,14 @@ pub enum Family {
     Sans,
     /// Literata: screen titles and book titles.
     Serif,
+    Book(u16),
 }
 
 impl Family {
     fn name(self) -> &'static str {
         match self {
             Family::Sans => "Inter",
-            Family::Serif => "Literata",
+            Family::Serif | Family::Book(_) => "Literata",
         }
     }
 
@@ -46,7 +47,7 @@ impl Family {
     fn cap_height(self) -> f32 {
         match self {
             Family::Sans => 0.727,
-            Family::Serif => 0.700,
+            Family::Serif | Family::Book(_) => 0.700,
         }
     }
 }
@@ -125,6 +126,7 @@ struct Key {
 
 pub struct TextRenderer {
     fonts: FontSystem,
+    book_families: Vec<String>,
     glyphs: SwashCache,
     layouts: HashMap<Key, Buffer>,
 }
@@ -139,9 +141,26 @@ impl TextRenderer {
         db.set_serif_family(Family::Serif.name());
         Self {
             fonts: FontSystem::new_with_locale_and_db("en-US".into(), db),
+            book_families: Vec::new(),
             glyphs: SwashCache::new(),
             layouts: HashMap::new(),
         }
+    }
+
+    /// Load a selected font locally, without copying any Kindle font off the device.
+    pub fn book_family(&mut self, name: &str, path: Option<&std::path::Path>) -> Family {
+        if let Some(i) = self.book_families.iter().position(|f| f == name) {
+            return Family::Book(i as u16);
+        }
+        if let Some(path) = path
+            && let Err(e) = self.fonts.db_mut().load_font_file(path)
+        {
+            log::warn!("loading font preview {}: {e}", path.display());
+            return Family::Serif;
+        }
+        let id = self.book_families.len();
+        self.book_families.push(name.into());
+        Family::Book(id as u16)
     }
 
     /// Size of the laid-out text: the widest line, and lines × line height.
@@ -183,7 +202,7 @@ impl TextRenderer {
             return;
         }
         let key = self.ensure_layout(text, style, Some(rect.w as f32), max_lines, align);
-        let Self { fonts, glyphs, layouts } = self;
+        let Self { fonts, glyphs, layouts, .. } = self;
         let buffer = &layouts[&key];
 
         // Centre the block from the top of the first line's capitals to the
@@ -205,7 +224,7 @@ impl TextRenderer {
                     SwashContent::Mask => canvas.blend_mask(x, y, p.width, p.height, &image.data, style.gray, rect),
                     // Colour glyphs (emoji): use their alpha as coverage.
                     SwashContent::Color => {
-                        let alpha: Vec<u8> = image.data.chunks_exact(4).map(|px| px[3]).collect();
+                        let alpha: Vec<u8> = image.data.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
                         canvas.blend_mask(x, y, p.width, p.height, &alpha, style.gray, rect)
                     }
                     SwashContent::SubpixelMask => {}
@@ -261,7 +280,11 @@ impl TextRenderer {
             Weight::Regular => fontdb::Weight::NORMAL,
             Weight::SemiBold => fontdb::Weight::SEMIBOLD,
         };
-        let mut attrs = Attrs::new().family(CtFamily::Name(style.family.name())).weight(weight);
+        let family = match style.family {
+            Family::Book(i) => self.book_families.get(i as usize).map(String::as_str).unwrap_or("Literata"),
+            other => other.name(),
+        };
+        let mut attrs = Attrs::new().family(CtFamily::Name(family)).weight(weight);
         if style.tracking != 0.0 {
             attrs = attrs.letter_spacing(style.tracking);
         }

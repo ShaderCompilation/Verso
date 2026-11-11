@@ -55,6 +55,20 @@ int verso_cre_draw(VersoCreDoc *doc, uint8_t *buf, int width, int height, int st
  * `key`: "title", "authors" or "language". Returns the full length. */
 int verso_cre_get_prop(VersoCreDoc *doc, const char *key, char *buf, int buf_len);
 
+/* Reader API. String getters return full UTF-8 byte length, excluding NUL. */
+int verso_cre_position(VersoCreDoc *doc, char *buf, int len);
+int verso_cre_restore(VersoCreDoc *doc, const char *position);
+int verso_cre_progress(VersoCreDoc *doc);
+int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,
+                         int margin, int top, int bottom, int justify, int publisher);
+int verso_cre_toc_count(VersoCreDoc *doc);
+int verso_cre_toc_entry(VersoCreDoc *doc, int index, int field, char *buf, int len);
+int verso_cre_images(VersoCreDoc *doc);
+int verso_cre_embedded_fonts(VersoCreDoc *doc);
+int verso_cre_font_count(void);
+int verso_cre_font_name(int index, char *buf, int len);
+int verso_cre_font_file(int index, char *buf, int len);
+
 #ifdef __cplusplus
 }
 #endif

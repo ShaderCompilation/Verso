@@ -68,6 +68,7 @@ pub struct Touch {
 #[cfg_attr(feature = "kindle", allow(dead_code))]
 pub enum Event {
     Touch(Touch),
+    Background,
     /// The device is going to sleep: save state, stop drawing.
     Sleep,
     /// The device woke up: the screen may have been drawn over, redraw everything.
@@ -76,7 +77,35 @@ pub enum Event {
     Quit,
 }
 
+/// A thread-safe way to interrupt a platform's blocking event wait.
+#[derive(Clone)]
+pub struct Waker(std::sync::Arc<dyn Fn() + Send + Sync>);
+
+impl Waker {
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(wake))
+    }
+    pub fn wake(&self) {
+        (self.0)();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frontlight {
+    pub brightness: u8,
+    pub warmth: Option<u8>,
+}
+
 pub trait Platform {
+    fn waker(&self) -> Waker;
+    fn set_busy(&mut self, _busy: bool) {}
+    fn frontlight(&mut self) -> Option<Frontlight> {
+        None
+    }
+    fn set_frontlight(&mut self, _value: Frontlight) -> Result<()> {
+        Ok(())
+    }
+
     fn info(&self) -> &DeviceInfo;
 
     /// Waits for the next event. Returns `None` if `timeout` passes first;

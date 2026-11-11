@@ -3,10 +3,11 @@
 //! a settings-style list and the sheet; page 3 has the cover grid and its
 //! long-press menu. The Phase 2 engine spike opens from page 1.
 
+use crate::document::thread::Worker;
 use crate::geom::{Point, Rect};
 use crate::gfx::{Family, HAlign, Icon, TextStyle, Weight};
 use crate::platform::RefreshMode;
-use crate::screens::spike::Spike;
+use crate::screens::books::Books;
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, PAPER, Theme};
@@ -15,6 +16,7 @@ use crate::ui::widgets::{
     Button, ButtonKind, Grid, GridEvent, IconButton, List, ListEvent, MenuEvent, Pager, PopupMenu, Row, Segment,
     Segmented, Sheet, SideLabel, Slider, SliderEvent, Step, Stepper, Toggle, TopBar,
 };
+use std::rc::Rc;
 
 const PAGES: usize = 3;
 
@@ -48,6 +50,7 @@ const BOOKS: [(&str, &str, Option<u8>); 8] = [
 ];
 
 pub struct Gallery {
+    worker: Rc<Worker>,
     screen: Rect,
     top_bar: TopBar,
     pager: Pager,
@@ -82,7 +85,7 @@ pub struct Gallery {
 }
 
 impl Gallery {
-    pub fn new(t: &Theme, screen: Rect) -> Self {
+    pub fn new(t: &Theme, screen: Rect, worker: Rc<Worker>) -> Self {
         let (m, w) = (t.margin, screen.w);
         let mut top_bar = TopBar::new("Widgets", true);
         top_bar.place(screen, t);
@@ -137,7 +140,7 @@ impl Gallery {
         y += t.mm(10.0);
 
         section(0, &mut y, "List row");
-        let mut spike_row = List::new(vec![Row::new("Engine spike (Phase 2)").chevron()]);
+        let mut spike_row = List::new(vec![Row::new("Open reader").chevron()]);
         spike_row.place(Rect::new(0, y, w, t.row), t.row, m);
 
         // ---- Page 2 ----
@@ -181,6 +184,7 @@ impl Gallery {
 
         Self {
             screen,
+            worker,
             top_bar,
             pager,
             labels,
@@ -241,7 +245,7 @@ impl Gallery {
             log::debug!("slider released at {v}");
         }
         if let Some(ListEvent::Tapped(_)) = self.spike_row.on_gesture(g) {
-            return Action::Push(Box::new(Spike::new(cx.theme, cx.screen)));
+            return Action::Push(Box::new(Books::new(cx.theme, cx.screen, self.worker.clone())));
         }
         Action::None
     }

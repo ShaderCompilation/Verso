@@ -97,6 +97,7 @@ impl Canvas {
     /// Blends a single-channel coverage mask (0 = none, 255 = full) onto the
     /// canvas in the given gray. Used for glyphs and icons. `x`/`y` is where the
     /// mask's top-left corner goes; anything outside `clip` is skipped.
+    #[allow(clippy::too_many_arguments)] // mask geometry, colour and clipping are independent
     pub fn blend_mask(&mut self, x: i32, y: i32, w: u32, h: u32, mask: &[u8], gray: u8, clip: Rect) {
         let Some(clip) = clip.intersect(&self.bounds()) else { return };
         let Some(area) = Rect::new(x, y, w as i32, h as i32).intersect(&clip) else { return };
@@ -127,7 +128,9 @@ impl Canvas {
         for y in r.y..r.bottom() {
             let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
             let d = (y as usize * width + r.x as usize) * 4;
-            for (px, &g) in data[d..d + r.w as usize * 4].chunks_exact_mut(4).zip(&src[s..s + r.w as usize]) {
+            for (px, &g) in
+                data[d..d + r.w as usize * 4].as_chunks_mut::<4>().0.iter_mut().zip(&src[s..s + r.w as usize])
+            {
                 px.copy_from_slice(&[g, g, g, 255]);
             }
         }
@@ -143,7 +146,7 @@ impl Canvas {
             let s = (y as usize * width + r.x as usize) * 4;
             let d = y as usize * stride + r.x as usize;
             let src_row = &src[s..s + r.w as usize * 4];
-            for (out, px) in dst[d..d + r.w as usize].iter_mut().zip(src_row.chunks_exact(4)) {
+            for (out, px) in dst[d..d + r.w as usize].iter_mut().zip(src_row.as_chunks::<4>().0.iter()) {
                 *out = luma(px[0], px[1], px[2]);
             }
         }
