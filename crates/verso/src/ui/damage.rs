@@ -53,16 +53,28 @@ impl FrameDiff {
         let (cols, rows) = ((self.width + TILE - 1) / TILE, (self.height + TILE - 1) / TILE);
         let mut dirty = vec![false; (cols * rows) as usize];
         let stride = self.width as usize * 4;
-        for row in 0..rows {
-            let y0 = row * TILE;
-            let y1 = (y0 + TILE).min(self.height);
-            for col in 0..cols {
-                let x0 = (col * TILE) as usize * 4;
-                let x1 = ((col * TILE + TILE).min(self.width)) as usize * 4;
-                dirty[(row * cols + col) as usize] = (y0..y1).any(|y| {
-                    let off = y as usize * stride;
-                    cur[off + x0..off + x1] != self.prev[off + x0..off + x1]
-                });
+        // Most frames change a small area, so compare whole bands of rows and
+        // whole lines first (big, fast comparisons) and only look at single
+        // tiles where something changed. On the Kindle this took the diff from
+        // ~65 ms to ~30 ms per frame (the rest is reading two 8.6 MB frames).
+        for (row, tiles) in dirty.chunks_mut(cols as usize).enumerate() {
+            let y0 = row * TILE as usize;
+            let y1 = (y0 + TILE as usize).min(self.height as usize);
+            let band = y0 * stride..y1 * stride;
+            if cur[band.clone()] == self.prev[band] {
+                continue;
+            }
+            for y in y0..y1 {
+                let line = y * stride..(y + 1) * stride;
+                let (a, b) = (&cur[line.clone()], &self.prev[line]);
+                if a == b {
+                    continue;
+                }
+                for (col, d) in tiles.iter_mut().enumerate().filter(|(_, d)| !**d) {
+                    let x0 = col * TILE as usize * 4;
+                    let x1 = (x0 + TILE as usize * 4).min(stride);
+                    *d = a[x0..x1] != b[x0..x1];
+                }
             }
         }
         Tiles { cols, rows, dirty }
@@ -218,6 +230,25 @@ mod tests {
         assert!(!diff.changed(&canvas).any());
         canvas.fill_rect(Rect::new(0, 0, 10, 10), 255);
         assert!(diff.changed(&canvas).any(), "changing it back is a change too");
+    }
+
+    #[test]
+    fn single_pixels_mark_their_tile_even_at_ragged_edges() {
+        // 70 × 37 doesn't divide into 16 px tiles: the last column and row are partial.
+        let mut canvas = Canvas::new(70, 37);
+        let diff = FrameDiff::new(&canvas);
+        let dots = [(0, 0), (15, 15), (16, 0), (69, 36), (33, 20), (64, 33)];
+        for &(x, y) in &dots {
+            canvas.fill_rect(Rect::new(x, y, 1, 1), 0);
+        }
+        let tiles = diff.changed(&canvas);
+        assert_eq!((tiles.cols, tiles.rows), (5, 3));
+        for row in 0..tiles.rows {
+            for col in 0..tiles.cols {
+                let expected = dots.iter().any(|&(x, y)| x / TILE == col && y / TILE == row);
+                assert_eq!(tiles.dirty[(row * tiles.cols + col) as usize], expected, "tile {col},{row}");
+            }
+        }
     }
 
     #[test]
