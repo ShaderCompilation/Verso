@@ -14,8 +14,10 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 ## Commits
 
 - **Commit when you finish an independent piece of work**: an implementation step, a plan phase item, a full feature, a docs update. Don't wait to be asked, and don't pile unrelated changes into one commit.
-- Only commit work that builds (`cargo build`, and `cargo kindle-build` if you touched Kindle-only code). Run tests if there are any for the code you changed.
-- Before any commit check that there are no linter errors - `cargo clippy`, and the code is properly formatted - `cargo fmt`
+- **Documentation-only changes need no code checks.** If you did not change code, do not run builds, tests, linters or formatters. Unrelated code changes already in the workspace do not count as your changes.
+- **Validate code changes once.** Run relevant tests, lint and formatting checks for the code you changed. Reuse successful results while the relevant code and build configuration remain unchanged; do not repeat checks just because you are about to commit.
+- **A standalone build is only a missing pre-commit prerequisite.** Run `cargo build` only when you changed code, are about to commit that code, and the latest changes have not already been successfully compiled by a build or test run. For Kindle-only code, the same rule applies to `cargo kindle-build` and equivalent successful Kindle-target builds. Compilation performed during verification counts; do not add a redundant build.
+- Before committing code, ensure relevant tests pass, there are no Clippy errors (`cargo clippy`), and formatting is correct (`cargo fmt --check`; use `cargo fmt` only when formatting changes are needed). Reuse existing successful checks of the latest changes.
 - Write short, clear commit messages: a one-line summary, then a few lines on what and why if needed.
 - Never push, force-push, rewrite history, or change the `third_party/FBInk` submodule pointer without asking.
 
