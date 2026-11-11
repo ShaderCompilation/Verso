@@ -11,14 +11,12 @@ use crate::geom::Rect;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     Exit,
-    Plus,
 }
 
 impl Icon {
     fn svg(self) -> &'static str {
         match self {
             Icon::Exit => include_str!("../../../../assets/icons/log-out.svg"),
-            Icon::Plus => include_str!("../../../../assets/icons/plus.svg"),
         }
     }
 }
@@ -59,7 +57,7 @@ mod tests {
 
     #[test]
     fn icons_render() {
-        for icon in [Icon::Exit, Icon::Plus] {
+        for icon in [Icon::Exit] {
             let mask = render_mask(icon, 48, 48);
             assert!(mask.iter().any(|&a| a > 200), "{icon:?} is blank");
         }

@@ -6,6 +6,7 @@ compile_error!("Enable exactly one backend: `desktop` (default) or `kindle`.");
 compile_error!("Enable a backend: `desktop` (default) or `kindle`.");
 
 mod app;
+mod document;
 mod geom;
 mod gfx;
 mod logging;
@@ -54,6 +55,11 @@ fn run() -> Result<()> {
         if app.wants_exit() {
             log::info!("exit requested");
             break;
+        }
+        if app.has_pending_work() {
+            // Its "please wait" frame is on screen now; do the slow part.
+            app.run_pending_work();
+            continue;
         }
 
         let timeout = gestures.next_deadline().map(|d| d.saturating_duration_since(Instant::now()));

@@ -87,6 +87,21 @@ impl Canvas {
         }
     }
 
+    /// Copies an 8-bit grayscale image (`stride` bytes per row) onto the
+    /// canvas, with its top-left corner at the top-left of `rect`.
+    pub fn blit_gray(&mut self, rect: Rect, src: &[u8], stride: usize) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let width = self.width() as usize;
+        let data = self.pixmap.data_mut();
+        for y in r.y..r.bottom() {
+            let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
+            let d = (y as usize * width + r.x as usize) * 4;
+            for (px, &g) in data[d..d + r.w as usize * 4].chunks_exact_mut(4).zip(&src[s..s + r.w as usize]) {
+                px.copy_from_slice(&[g, g, g, 255]);
+            }
+        }
+    }
+
     /// Copies `rect` into an 8-bit grayscale buffer laid out like the screen
     /// (`stride` bytes per row). Both backends present through this.
     pub fn copy_gray(&self, rect: Rect, dst: &mut [u8], stride: usize) {
@@ -167,6 +182,16 @@ mod tests {
         c.copy_gray(Rect::new(1, 1, 5, 1), &mut out, 8);
         assert_eq!(&out[8..16], &[200, 255, 0, 0, 0, 255, 200, 200]);
         assert!(out[..8].iter().all(|&v| v == 200));
+    }
+
+    #[test]
+    fn blit_gray_round_trips() {
+        let mut c = Canvas::new(4, 3);
+        let src = [10u8, 20, 30, 40, 50, 60];
+        c.blit_gray(Rect::new(1, 1, 3, 2), &src, 3);
+        let mut out = vec![0u8; 12];
+        c.copy_gray(c.bounds(), &mut out, 4);
+        assert_eq!(out, [255, 255, 255, 255, 255, 10, 20, 30, 255, 40, 50, 60]);
     }
 
     #[test]

@@ -28,6 +28,7 @@ void verso_cre_free(VersoCreDoc *doc);
  * loading re-lays out the book on the next render/draw. */
 int verso_cre_set_stylesheet_file(VersoCreDoc *doc, const char *path);
 void verso_cre_set_font_face(VersoCreDoc *doc, const char *face);
+/* After loading, this re-lays out the book and keeps the reading position. */
 void verso_cre_set_font_size(VersoCreDoc *doc, int px);
 int verso_cre_get_font_size(VersoCreDoc *doc);
 void verso_cre_set_margins(VersoCreDoc *doc, int left, int top, int right, int bottom);

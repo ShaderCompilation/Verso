@@ -38,6 +38,15 @@ echo "==> copying to $HOST:$APP and $EXT"
 ssh "$HOST" "mkdir -p $APP $EXT"
 tar -C dist/kindle/extensions/verso --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $EXT"
 tar -C dist/kindle/verso --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP"
+# crengine's style sheets and hyphenation patterns, only when crengine changed.
+CRE_DATA=third_party/crengine/cr3gui/data
+CRE_VERSION="$(git -C third_party/crengine rev-parse HEAD)"
+if [ "$(ssh "$HOST" "cat $APP/data/cre/.version 2>/dev/null")" != "$CRE_VERSION" ]; then
+    echo "==> copying crengine data"
+    ssh "$HOST" "rm -rf $APP/data/cre && mkdir -p $APP/data/cre"
+    tar -C "$CRE_DATA" --owner=0 --group=0 -cf - epub.css html5.css hyph | ssh "$HOST" "tar -xf - -C $APP/data/cre"
+    echo "$CRE_VERSION" | ssh "$HOST" "cat > $APP/data/cre/.version"
+fi
 # Copy under a temporary name first, so a broken transfer never leaves half a binary.
 ssh "$HOST" "cat > $APP/verso.new && chmod 755 $APP/verso.new && mv -f $APP/verso.new $APP/verso" <"$BIN"
 

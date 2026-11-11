@@ -101,7 +101,19 @@ void verso_cre_set_font_face(VersoCreDoc *doc, const char *face) {
 
 void verso_cre_set_font_size(VersoCreDoc *doc, int px) {
     try {
-        doc->view->setFontSize(px);
+        LVDocView *v = doc->view;
+        if (!v->getDocument()) {
+            v->setFontSize(px);
+            return;
+        }
+        // Re-layout keeps the page *number*; keep the reading position instead.
+        ldomXPointer pos = v->getBookmark();
+        v->setFontSize(px);
+        v->Render();
+        if (!pos.isNull()) {
+            v->goToBookmark(pos);
+            v->SetPos(pos.toPoint().y); // goToBookmark is lazy (as in KOReader's cre.cpp)
+        }
     } catch (...) {
     }
 }
