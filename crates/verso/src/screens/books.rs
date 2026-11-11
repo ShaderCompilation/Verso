@@ -9,6 +9,7 @@ use crate::library::{
     self, Book, Cover, LibraryIndex, Sort,
     collections::{self, Collections, Navigation, Tab},
     covers,
+    home::Summary,
     search::{self, Scope, SearchCache},
     worker::{Snapshot, Worker as LibraryWorker},
 };
@@ -48,6 +49,10 @@ pub struct Books {
     store: Store,
     roots: Vec<PathBuf>,
     index: LibraryIndex,
+    browsing_ready: bool,
+    home_active: bool,
+    home: Summary,
+    pending_home: Option<Summary>,
     books: Vec<Book>,
     collections: Collections,
     folders: Vec<PathBuf>,
@@ -90,18 +95,11 @@ impl Books {
     }
     fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
         let roots = store.library_folders();
-        let index = store.library();
-        let started = std::time::Instant::now();
-        let collections = Collections::from_index(&index, &roots);
-        log::info!(
-            "startup stage: collections books={} elapsed_us={}",
-            index.books.len(),
-            started.elapsed().as_micros()
-        );
+        let home = store.home_summary().unwrap_or_default();
         let navigation = store.navigation();
-        let tabs = Segmented::texts(&["All books", "Collections"], usize::from(navigation.tab == Tab::Collections));
+        let tabs = Segmented::texts(&["Home", "Collections", "All books"], 0);
         let library = LibraryWorker::new(store.clone(), roots.clone(), worker.waker());
-        let mut top = TopBar::new("Library", false);
+        let mut top = TopBar::new("Home", false);
         top.border = false;
         top.serif = screen.w >= t.mm(80.0);
         top.place(screen, t);
@@ -122,7 +120,7 @@ impl Books {
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
         let sort = Segmented::texts(
             &["Recent", "Title", "Author"],
-            match store.settings().library_sort {
+            match navigation.sort(store.settings().library_sort) {
                 Sort::Recent => 0,
                 Sort::Title => 1,
                 Sort::Author => 2,
@@ -135,9 +133,13 @@ impl Books {
             library,
             store,
             roots,
-            index,
+            index: LibraryIndex::default(),
+            browsing_ready: false,
+            home_active: true,
+            home,
+            pending_home: None,
             books: Vec::new(),
-            collections,
+            collections: Collections::default(),
             folders: Vec::new(),
             navigation,
             tabs,
@@ -183,7 +185,35 @@ impl Books {
             _ => Sort::Recent,
         }
     }
+    fn is_home(&self) -> bool {
+        self.home_active && self.search.is_none()
+    }
+    /// Loading the browsing model is explicitly deferred until the user asks for it.
+    fn prepare_browsing(&mut self) {
+        if self.browsing_ready {
+            return;
+        }
+        let snapshot = self.pending.take();
+        let complete = snapshot.as_ref().is_none_or(|s| !s.scanning);
+        self.index = snapshot.map_or_else(|| self.store.library(), |s| s.index);
+        let started = std::time::Instant::now();
+        self.collections = Collections::from_index(&self.index, &self.roots);
+        log::info!(
+            "startup stage: collections books={} elapsed_us={}",
+            self.index.books.len(),
+            started.elapsed().as_micros()
+        );
+        if complete {
+            self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
+        }
+        self.browsing_ready = true;
+    }
     fn refresh(&mut self, t: &Theme) {
+        if self.is_home() {
+            self.refresh_home(t);
+            return;
+        }
+        self.prepare_browsing();
         let started = std::time::Instant::now();
         let before = self.states.len();
         for b in &self.index.books {
@@ -195,6 +225,7 @@ impl Books {
             started.elapsed().as_micros()
         );
         let started = std::time::Instant::now();
+        self.tabs.selected = if self.navigation.tab == Tab::Collections { 1 } else { 2 };
         let in_collections = self.search.is_none() && self.navigation.tab == Tab::Collections;
         self.folders =
             if in_collections { self.collections.children(self.navigation.folder.as_deref()) } else { Vec::new() };
@@ -288,6 +319,47 @@ impl Books {
         self.thumbnails.retain(|(key, _, _), _| keys.contains(key));
         log::debug!("startup stage: view books={} elapsed_us={}", self.books.len(), started.elapsed().as_micros());
     }
+    fn refresh_home(&mut self, t: &Theme) {
+        self.top.title = "Home".into();
+        self.tabs.selected = 0;
+        let y = t.top_bar + t.mm(2.0);
+        self.tabs.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
+        let y = y + t.target + t.mm(5.0);
+        self.continue_id = self.home.resume().map(|e| e.book.id.clone());
+        self.continue_rect = if self.continue_id.is_some() {
+            Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(37.0))
+        } else {
+            Rect::default()
+        };
+        let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(6.0) } else { y };
+        self.header = Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(6.0));
+        self.folders.clear();
+        let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
+        self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
+        self.status = Rect::new(t.margin, self.screen.bottom() - t.mm(10.0), self.screen.w - 2 * t.margin, t.mm(6.0));
+        self.grid = Grid::new(self.books.len(), cols, 1);
+        self.grid.place(
+            Rect::new(
+                t.margin,
+                self.header.bottom() + t.mm(2.0),
+                self.header.w,
+                (self.status.y - self.header.bottom() - t.mm(4.0)).min(t.mm(45.0)).max(t.target),
+            ),
+            t.mm(3.5),
+            0,
+        );
+        self.prioritize();
+        let keys: std::collections::HashSet<_> = self
+            .home
+            .books
+            .iter()
+            .filter_map(|e| match &e.book.cover {
+                Cover::Ready(key) => Some(key),
+                _ => None,
+            })
+            .collect();
+        self.thumbnails.retain(|(key, _, _), _| keys.contains(key));
+    }
     fn prioritize(&self) {
         let mut ids: Vec<_> = self.continue_id.iter().cloned().collect();
         ids.extend(self.grid.cells().iter().filter_map(|(i, _)| self.grid_book(*i)).map(|b| b.id.clone()));
@@ -301,13 +373,19 @@ impl Books {
             search.page = self.pager.page;
             return;
         }
+        if self.is_home() {
+            return;
+        }
         self.navigation.set_page(self.pager.page);
+        self.navigation.set_sort(self.selected_sort());
         if let Err(e) = self.store.save_navigation(&self.navigation) {
             cx.toast(format!("Couldn't save library navigation: {e}"), None);
         }
     }
     fn navigate(&mut self, folder: Option<PathBuf>, cx: &mut EventCx) {
         let started = std::time::Instant::now();
+        self.home_active = false;
+        self.prepare_browsing();
         self.navigation.set_page(self.pager.page);
         self.navigation.folder = folder;
         self.pager.page = self.navigation.page();
@@ -319,6 +397,19 @@ impl Books {
     }
     fn apply_pending(&mut self, cx: &mut EventCx) {
         if self.touching || self.menu.is_some() || self.details.is_some() || self.reader.is_some() {
+            return;
+        }
+        if let Some(home) = self.pending_home.take()
+            && self.home != home
+        {
+            self.home = home;
+            if self.is_home() {
+                self.refresh(cx.theme);
+                cx.redraw();
+            }
+        }
+        // Retain only the newest index while Home is visible. Do not prepare it.
+        if self.is_home() {
             return;
         }
         if let Some(snapshot) = self.pending.take() {
@@ -369,18 +460,20 @@ impl Books {
     fn toggle_search(&mut self, cx: &mut EventCx) {
         if self.search.take().is_some() {
             self.search_action.icon = Icon::Search;
-            self.top.title = "Library".into();
+            self.top.title = if self.home_active { "Home" } else { "Library" }.into();
             self.pager.page = self.navigation.page();
             self.refresh(cx.theme);
             self.save_navigation(cx);
         } else {
             self.save_navigation(cx);
+            self.prepare_browsing();
             let mut cache = SearchCache::default();
             let started = std::time::Instant::now();
             cache.sync(&self.index);
             log::info!("search cache: {} books in {:?}", self.index.books.len(), started.elapsed());
-            let collection =
-                (self.navigation.tab == Tab::Collections).then(|| self.navigation.folder.clone()).flatten();
+            let collection = (!self.home_active && self.navigation.tab == Tab::Collections)
+                .then(|| self.navigation.folder.clone())
+                .flatten();
             let mut current = Button::new("This collection", ButtonKind::Secondary);
             current.enabled = collection.is_some();
             let mut keyboard = Keyboard::default();
@@ -422,7 +515,10 @@ impl Books {
     }
 
     fn book(&self, id: &str) -> Option<&Book> {
-        self.books.iter().find(|b| b.id == id)
+        self.books
+            .iter()
+            .find(|b| b.id == id)
+            .or_else(|| self.home.books.iter().find(|e| e.book.id == id).map(|e| &e.book))
     }
     fn open(&mut self, id: String, cx: &mut EventCx) {
         if let Some(error) = &self.engine_error {
@@ -467,7 +563,8 @@ impl Books {
     }
     fn returned(&mut self, cx: &mut EventCx) {
         self.library.pause(false);
-        if self.store.home_summary().is_none_or(|summary| !summary.complete) {
+        self.pending_home = self.store.home_summary();
+        if self.pending_home.as_ref().is_none_or(|summary| !summary.complete) {
             self.library.refresh_home();
         }
         if let Some(r) = self.reader.take() {
@@ -482,7 +579,7 @@ impl Books {
         cx.refresh(self.screen, RefreshMode::Full);
     }
     fn open_menu(&mut self, id: String, anchor: Point, t: &Theme) {
-        let state = self.states.get(&id).cloned().unwrap_or_default();
+        let state = self.store.book(&id);
         let mut menu = PopupMenu::open(
             vec![
                 (Some(Icon::BookOpen), "Open".into()),
@@ -513,7 +610,9 @@ impl Books {
         match self.store.save_book(id, &state) {
             Ok(()) => {
                 self.states.insert(id.to_owned(), state);
+                self.pending_home = self.store.home_summary();
                 self.library.refresh_home();
+                self.apply_pending(cx);
                 self.refresh(cx.theme);
                 cx.toast(if finished { "Marked finished" } else { "Removed from continue reading" }, None);
             }
@@ -613,7 +712,7 @@ impl Screen for Books {
         } else {
             self.tabs.draw(cx);
         }
-        if self.search.is_none() && self.navigation.tab == Tab::Collections {
+        if !self.is_home() && self.search.is_none() && self.navigation.tab == Tab::Collections {
             if self.navigation.folder.is_some() {
                 self.back.draw(cx);
             }
@@ -653,7 +752,12 @@ impl Screen for Books {
                 Rect::new(x, r.y + t.mm(11.0), w, t.mm(5.0)),
                 HAlign::Left,
             );
-            let progress = self.states.get(&book.id).cloned().unwrap_or_default().progress.min(10000);
+            let progress = if self.is_home() {
+                self.home.resume().map_or(0, |e| e.status.progress)
+            } else {
+                self.states.get(&book.id).map_or(0, |s| s.progress)
+            }
+            .min(10000);
             let bar = Rect::new(x, r.bottom() - t.mm(3.0), (w - t.mm(14.0)).max(1), t.hairline);
             cx.fill(bar, LINE);
             cx.fill(Rect { w: (bar.w as i64 * progress as i64 / 10000) as i32, ..bar }, INK);
@@ -666,7 +770,9 @@ impl Screen for Books {
             cx.hline(r.bottom() + t.mm(2.0), r.x, r.right(), t.hairline, LINE);
         }
         cx.line(
-            &if self.search.is_some() {
+            &if self.is_home() {
+                if self.books.is_empty() { String::new() } else { "Recent books".into() }
+            } else if self.search.is_some() {
                 counted(self.books.len(), "result")
             } else if self.navigation.tab == Tab::AllBooks {
                 format!("All books  {}", self.books.len())
@@ -674,10 +780,15 @@ impl Screen for Books {
                 format!("{} · {}", counted(self.folders.len(), "folder"), counted(self.books.len(), "book"))
             },
             t.heading,
-            Rect { w: self.sort.rect().x - self.header.x - t.mm(2.0), ..self.header },
+            Rect {
+                w: if self.is_home() { self.header.w } else { self.sort.rect().x - self.header.x - t.mm(2.0) },
+                ..self.header
+            },
             HAlign::Left,
         );
-        self.sort.draw(cx);
+        if !self.is_home() {
+            self.sort.draw(cx);
+        }
         for (i, cell) in self.grid.cells() {
             if let Some(path) = self.folders.get(i) {
                 let folder = &self.collections.folders[path];
@@ -725,7 +836,7 @@ impl Screen for Books {
             let y = cover.bottom() + t.mm(1.0);
             cx.line(&book.metadata.title, t.button, Rect::new(cell.x, y, cell.w, t.mm(4.0)), HAlign::Left);
             let state = self.states.get(&book.id).cloned().unwrap_or_default();
-            let label = status(&state);
+            let label = if self.is_home() { String::new() } else { status(&state) };
             let status_w = (cx.text.width(&label, t.caption).ceil() as i32 + t.mm(1.0)).min(cell.w * 2 / 3);
             cx.line(
                 &book.metadata.authors,
@@ -740,7 +851,7 @@ impl Screen for Books {
                 HAlign::Right,
             );
         }
-        if self.books.is_empty() && self.folders.is_empty() {
+        if !self.is_home() && self.books.is_empty() && self.folders.is_empty() {
             let message = if let Some(search) = &self.search {
                 if search.folded.is_empty() {
                     "No books in this scope.".into()
@@ -775,7 +886,9 @@ impl Screen for Books {
         let battery_w = if cx.battery.is_some() { t.mm(32.0) } else { 0 };
         cx.line(message, t.caption.gray(INK2), Rect { w: self.status.w - battery_w, ..self.status }, HAlign::Left);
         cx.battery(self.status);
-        self.pager.draw(cx);
+        if !self.is_home() {
+            self.pager.draw(cx);
+        }
         if let Some(search) = &self.search {
             search.keyboard.draw(cx);
         }
@@ -869,8 +982,20 @@ impl Screen for Books {
             if self.search.is_none()
                 && let Some(selected) = self.tabs.on_gesture(&g)
             {
-                self.navigation.set_page(self.pager.page);
-                self.navigation.tab = if selected == 0 { Tab::AllBooks } else { Tab::Collections };
+                if !self.is_home() {
+                    self.navigation.set_page(self.pager.page);
+                    self.navigation.set_sort(self.selected_sort());
+                }
+                self.home_active = selected == 0;
+                if !self.home_active {
+                    self.navigation.tab = if selected == 1 { Tab::Collections } else { Tab::AllBooks };
+                    self.top.title = "Library".into();
+                    self.sort.selected = match self.navigation.sort(self.store.settings().library_sort) {
+                        Sort::Recent => 0,
+                        Sort::Title => 1,
+                        Sort::Author => 2,
+                    };
+                }
                 self.pager.page = self.navigation.page();
                 self.thumbnails.clear();
                 self.refresh(cx.theme);
@@ -879,7 +1004,7 @@ impl Screen for Books {
                 self.apply_pending(cx);
                 return Action::None;
             }
-            if self.search.is_none() && self.navigation.tab == Tab::Collections {
+            if !self.is_home() && self.search.is_none() && self.navigation.tab == Tab::Collections {
                 if self.navigation.folder.is_some() && self.back.on_gesture(&g) {
                     let parent = self
                         .navigation
@@ -906,7 +1031,7 @@ impl Screen for Books {
                 self.scanning = true;
                 self.working = true;
             }
-            if self.sort.on_gesture(&g).is_some() {
+            if !self.is_home() && self.sort.on_gesture(&g).is_some() {
                 let mut settings = self.store.settings();
                 settings.library_sort = self.selected_sort();
                 if let Err(e) = self.store.save_settings(&settings) {
@@ -918,11 +1043,13 @@ impl Screen for Books {
                 cx.refresh(self.screen, RefreshMode::Full);
             }
             let old_page = self.pager.page;
-            self.pager.on_gesture(&g);
-            if let Gesture::Swipe { dir, .. } = g {
-                self.pager.on_swipe(dir);
+            if !self.is_home() {
+                self.pager.on_gesture(&g);
+                if let Gesture::Swipe { dir, .. } = g {
+                    self.pager.on_swipe(dir);
+                }
+                self.grid.page = self.pager.page;
             }
-            self.grid.page = self.pager.page;
             if old_page != self.pager.page {
                 self.thumbnails.clear();
                 self.prioritize();
@@ -1003,8 +1130,9 @@ impl Screen for Books {
     }
     fn on_background(&mut self, cx: &mut EventCx) {
         if let Some(home) = self.library.take_home() {
-            log::debug!("Home summary ready: resume={} recents={}", home.resume().is_some(), home.recents(4).len());
+            self.pending_home = Some(self.store.home_summary().unwrap_or(home));
         }
+        self.apply_pending(cx);
         if let Some(r) = &mut self.reader {
             r.on_background(cx);
         }
@@ -1014,6 +1142,13 @@ impl Screen for Books {
             }
             self.scanning = snapshot.scanning;
             self.working = snapshot.working;
+            for error in &snapshot.errors {
+                if !self.errors.contains(error) {
+                    log::warn!("{error}");
+                    cx.toast(error.clone(), None);
+                }
+            }
+            self.errors = snapshot.errors.clone();
             self.pending = Some(snapshot);
             self.apply_pending(cx);
         }
@@ -1058,17 +1193,31 @@ impl Screen for Books {
     }
     fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
         let book = if let Some(reader) = &self.reader {
-            self.index.books.iter().find(|b| b.id == reader.book_id() && b.available)?
+            if self.browsing_ready {
+                self.index.books.iter().find(|b| b.id == reader.book_id() && b.available)?
+            } else {
+                self.book(reader.book_id())?
+            }
+        } else if self.is_home() {
+            &self
+                .home
+                .books
+                .iter()
+                .filter(|e| e.book.available && e.status.last_opened > 0)
+                .max_by_key(|e| e.status.last_opened)?
+                .book
         } else {
-            // Search and Collections hide the continue-reading card, but keep
-            // the same most recently opened book as the sleep cover.
             self.index
                 .books
                 .iter()
                 .filter(|b| b.available && self.states.get(&b.id).is_some_and(|s| s.last_opened > 0))
                 .max_by_key(|b| self.states.get(&b.id).map_or(0, |s| s.last_opened))?
         };
-        match covers::sleep_cover(book, width, height) {
+        let mut book = book.clone();
+        if book.metadata.cover.is_none() {
+            book.metadata = library::epub::read(&book.path).ok()?;
+        }
+        match covers::sleep_cover(&book, width, height) {
             Ok(image) => Some(image),
             Err(e) => {
                 log::debug!("sleep cover unavailable: {e:#}");
@@ -1173,6 +1322,12 @@ fn detail_pages(
 mod tests {
     use super::*;
     use crate::library::selection_tests::book;
+    fn browsing_books(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Books {
+        let mut books = Books::with_store(t, screen, worker, store);
+        books.home_active = false;
+        books.refresh(t);
+        books
+    }
     fn with_cx(t: &Theme, screen: Rect, f: impl FnOnce(&mut EventCx)) {
         f(&mut EventCx {
             theme: t,
@@ -1216,11 +1371,103 @@ mod tests {
         Ok((store, root))
     }
     #[test]
+    fn home_is_summary_only_and_defers_updates_under_touch_and_details() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-lazy")?;
+        let index = store.library();
+        for (i, b) in index.books.iter().take(6).enumerate() {
+            store.save_book(
+                &b.id,
+                &BookState {
+                    position: crate::document::Position("exact".into()),
+                    last_opened: i as u64 + 1,
+                    progress: 4321,
+                    ..Default::default()
+                },
+            )?;
+        }
+        store.rebuild_home_summary(&index)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        assert!(books.is_home());
+        assert!(!books.browsing_ready);
+        assert!(books.index.books.is_empty() && books.states.is_empty() && books.collections.folders.is_empty());
+        assert_eq!(books.continue_id.as_deref(), Some("5"));
+        assert_eq!(books.books.len(), 4);
+        with_cx(&t, screen, |cx| {
+            let point = books.continue_rect.center();
+            books.on_gesture(Gesture::Down(point), cx);
+            books.pending_home = Some(Summary::default());
+            books.pending = Some(Snapshot { index: index.clone(), ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.continue_id.as_deref(), Some("5"));
+            books.on_gesture(Gesture::LongPress(point), cx);
+            books.on_gesture(Gesture::End(point), cx);
+            assert!(books.menu.is_some());
+            books.apply_pending(cx);
+            assert!(books.pending_home.is_some());
+            books.menu = None;
+            books.details = Some(Details::from_text(&t, screen, "Book", "details".into()));
+            books.apply_pending(cx);
+            assert!(books.pending_home.is_some());
+            books.details = None;
+            books.apply_pending(cx);
+            assert!(books.books.is_empty() && books.continue_id.is_none());
+            assert!(books.pending.is_some());
+            assert!(!books.browsing_ready && books.states.is_empty());
+            // Search from Home prepares the index once, then closes back to Home.
+            books.toggle_search(cx);
+            assert!(books.browsing_ready);
+            assert_eq!(books.search.as_ref().unwrap().scope, Scope::All);
+            assert!(!books.search.as_ref().unwrap().current.enabled);
+            books.toggle_search(cx);
+            assert!(books.is_home());
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn home_reader_uses_authoritative_position_and_returns_to_home() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-return")?;
+        let book = store.library().books[0].clone();
+        let state = BookState {
+            position: crate::document::Position("authoritative-anchor".into()),
+            last_opened: 7,
+            progress: 1000,
+            ..Default::default()
+        };
+        store.select_home_book(&book);
+        store.save_book(&book.id, &state)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            let point = Point::new(t.margin + 10, books.continue_rect.y + 10);
+            tap(&mut books, point, cx);
+            assert!(books.reader.is_some());
+            assert!(!books.browsing_ready && books.index.books.is_empty());
+            let mut updated = state.clone();
+            updated.progress = 6789;
+            store.save_book(&book.id, &updated).unwrap();
+            books.returned(cx);
+            assert!(books.is_home());
+            assert_eq!(books.home.resume().unwrap().status.progress, 6789);
+            assert!(!books.browsing_ready);
+            assert_eq!(store.book(&book.id).position.0, "authoritative-anchor");
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn sleep_cover_follows_the_last_book_when_search_or_collections_hide_continue() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("sleep-cover")?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
         let b = &mut books.index.books[0];
         b.path = path.clone();
@@ -1243,7 +1490,7 @@ mod tests {
         let (store, root) = collection_fixture("search-return")?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         with_cx(&t, screen, |cx| {
             books.navigation.tab = Tab::Collections;
             books.tabs.selected = 1;
@@ -1309,7 +1556,7 @@ mod tests {
         let (store, root) = collection_fixture("search-scan")?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         with_cx(&t, screen, |cx| {
             books.navigation.tab = Tab::Collections;
             books.navigate(Some("/books/Fiction".into()), cx);
@@ -1365,7 +1612,7 @@ mod tests {
         let (store, root) = collection_fixture("search-refresh")?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         with_cx(&t, screen, |cx| {
             books.toggle_search(cx);
             let search_button = books.search_action.rect().center();
@@ -1403,12 +1650,12 @@ mod tests {
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let worker = Rc::new(Worker::stub());
-        let mut books = Books::with_store(&t, screen, worker.clone(), store.clone());
+        let mut books = browsing_books(&t, screen, worker.clone(), store.clone());
         with_cx(&t, screen, |cx| {
             books.pager.page = 1;
             books.save_navigation(cx);
             let tab = books.tabs.rect();
-            tap(&mut books, Point::new(tab.x + tab.w * 3 / 4, tab.center().y), cx);
+            tap(&mut books, Point::new(tab.x + tab.w / 2, tab.center().y), cx);
             assert_eq!(books.folders, [PathBuf::from("/books"), PathBuf::from("/other/books")]);
             let p = books.grid.cells()[0].1.center();
             tap(&mut books, p, cx);
@@ -1437,10 +1684,10 @@ mod tests {
             assert_eq!(books.navigation.folder, Some("/books/Fiction/Nested".into()));
             assert_eq!(books.states[&id].progress, 4321);
             let tab = books.tabs.rect();
-            tap(&mut books, Point::new(tab.x + tab.w / 4, tab.center().y), cx);
+            tap(&mut books, Point::new(tab.x + tab.w * 5 / 6, tab.center().y), cx);
             assert_eq!(books.pager.page, 1, "All books has its own page");
             assert_eq!(books.states[&id].position.0, "same-anchor");
-            tap(&mut books, Point::new(tab.x + tab.w * 3 / 4, tab.center().y), cx);
+            tap(&mut books, Point::new(tab.x + tab.w / 2, tab.center().y), cx);
             let back = books.back.rect().center();
             tap(&mut books, back, cx);
             assert_eq!(books.navigation.folder, Some("/books/Fiction".into()));
@@ -1449,7 +1696,7 @@ mod tests {
             assert_eq!(books.pager.page, 1, "Back and reenter retain the folder page");
         });
         drop(books);
-        let restored = Books::with_store(&t, screen, worker, store.clone());
+        let restored = browsing_books(&t, screen, worker, store.clone());
         assert_eq!(restored.navigation.tab, Tab::Collections);
         assert_eq!(restored.navigation.folder, Some("/books/Fiction/Nested".into()));
         assert_eq!(restored.pager.page, 1);
@@ -1465,7 +1712,7 @@ mod tests {
         let (store, root) = collection_fixture("updates")?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         with_cx(&t, screen, |cx| {
             books.navigation.tab = Tab::Collections;
             books.tabs.selected = 1;
@@ -1522,7 +1769,7 @@ mod tests {
         store.save_library(&index)?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         books.navigation.tab = Tab::Collections;
         books.navigation.folder = Some("/books/Fiction/Nested".into());
         let mut canvas = crate::gfx::Canvas::new(1272, 1696);
@@ -1568,7 +1815,7 @@ mod tests {
         store.save_library(&LibraryIndex { books: (0..10).map(book).collect(), ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         books.pager.page = 1;
         books.refresh(&t);
         let point = books.grid.cells()[0].1.center();

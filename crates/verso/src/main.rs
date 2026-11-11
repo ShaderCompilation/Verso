@@ -119,10 +119,10 @@ fn start_screen(
     rect: geom::Rect,
     worker: std::rc::Rc<document::thread::Worker>,
 ) -> Result<Box<dyn Screen>> {
-    Ok(match name.unwrap_or("library") {
+    Ok(match name.unwrap_or("home") {
         "gallery" => Box::new(screens::gallery::Gallery::new(theme, rect, worker)),
-        "library" | "books" | "reader" => Box::new(screens::books::Books::new(theme, rect, worker)),
-        other => bail!("unknown screen {other:?}; try library or gallery"),
+        "home" | "library" | "books" | "reader" => Box::new(screens::books::Books::new(theme, rect, worker)),
+        other => bail!("unknown screen {other:?}; try home, library or gallery"),
     })
 }
 

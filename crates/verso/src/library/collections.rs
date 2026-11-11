@@ -1,6 +1,6 @@
 //! A filesystem-free view of the available index. Paths identify folders;
 //! book identities and all reading/cover state remain in the library.
-use super::LibraryIndex;
+use super::{LibraryIndex, Sort};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -19,10 +19,25 @@ pub struct Navigation {
     pub tab: Tab,
     pub folder: Option<PathBuf>,
     pub all_page: usize,
+    pub all_sort: Option<Sort>,
+    pub collections_sort: Option<Sort>,
     pub home_page: usize,
     pub folder_pages: BTreeMap<PathBuf, usize>,
 }
 impl Navigation {
+    pub fn sort(&self, fallback: Sort) -> Sort {
+        match self.tab {
+            Tab::AllBooks => self.all_sort,
+            Tab::Collections => self.collections_sort,
+        }
+        .unwrap_or(fallback)
+    }
+    pub fn set_sort(&mut self, sort: Sort) {
+        match self.tab {
+            Tab::AllBooks => self.all_sort = Some(sort),
+            Tab::Collections => self.collections_sort = Some(sort),
+        }
+    }
     pub fn page(&self) -> usize {
         match self.tab {
             Tab::AllBooks => self.all_page,
