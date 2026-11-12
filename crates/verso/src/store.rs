@@ -19,6 +19,8 @@ pub struct Settings {
     pub library_folder: Option<PathBuf>, // Legacy single-folder setting.
     pub library_folders: Option<Vec<PathBuf>>,
     pub library_sort: Sort,
+    /// Developer options in Settings (tap the version five times).
+    pub developer: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -29,6 +31,7 @@ impl Default for Settings {
             library_folder: None,
             library_folders: None,
             library_sort: Sort::Recent,
+            developer: false,
         }
     }
 }
