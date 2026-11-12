@@ -17,9 +17,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 - **Don't wait to be asked to commit**, but don't commit mid-phase just because some steps are finished. A standalone docs update requested on its own is its own commit; docs written as part of a phase belong in that phase's commit.
 - **Keep unrelated changes out of a commit.** If other work is already in the workspace, leave it for its own commit rather than bundling it in.
 - **Documentation-only changes need no code checks.** If you did not change code, do not run builds, tests, linters or formatters. Unrelated code changes already in the workspace do not count as your changes.
-- **Validate code changes once.** Run relevant tests, lint and formatting checks for the code you changed. Reuse successful results while the relevant code and build configuration remain unchanged; do not repeat checks just because you are about to commit.
-- **A standalone build is only a missing pre-commit prerequisite.** Run `cargo build` only when you changed code, are about to commit that code, and the latest changes have not already been successfully compiled by a build or test run. For Kindle-only code, the same rule applies to `cargo kindle-build` and equivalent successful Kindle-target builds. Compilation performed during verification counts; do not add a redundant build.
-- Before committing code, ensure relevant tests pass, there are no Clippy errors (`cargo clippy`), and formatting is correct (`cargo fmt --check`; use `cargo fmt` only when formatting changes are needed). Reuse existing successful checks of the latest changes.
+- **Validate code changes once, before committing.** For the code you changed, make sure relevant tests pass, `cargo clippy` reports no errors and `cargo fmt --check` is clean (run `cargo fmt` only when it reports changes). Reuse successful results while the code and build configuration are unchanged. A test run counts as a build, so run `cargo build` (or `cargo kindle-build` for Kindle-only code) only if nothing has compiled the latest changes yet.
 - Write short, clear commit messages: a one-line summary, then a few lines on what and why if needed.
 - Never push, force-push, rewrite history, or change the `third_party/FBInk` submodule pointer without asking.
 
@@ -33,7 +31,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 | `scripts/deploy.sh` | Build, copy to the Kindle, run through the launcher, stream the log (Kindle must be awake, KOReader closed) |
 | `scripts/gen-fbink-bindings.sh` | Regenerate FBInk bindings after updating the submodule |
 
-- Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `third_party/FBInk` (submodule), `assets/`, `dist/`, `scripts/`, `docs/`.
+- Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `crates/crengine-sys` (builds and binds crengine), `third_party/` (git submodules: FBInk, crengine and its libraries), `assets/`, `dist/`, `scripts/`, `docs/`.
 - The Kindle is reachable with `ssh kindle`. It's the user's own reading device: don't run anything destructive on it, and always make sure the Kindle UI comes back after testing.
   - Only write files inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`. Writing to `/dev/fb0` (the screen) is fine, and so is sending test touches to the touchscreen (`/dev/input/event1`) while Verso is running and has grabbed it.
   - Never run `mntroot`, factory reset, firmware updates, or `dd`, and never touch `/var/local`, `/etc` or the jailbreak files.
