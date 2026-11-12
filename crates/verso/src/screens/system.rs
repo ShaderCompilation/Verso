@@ -94,7 +94,7 @@ impl SystemSettings {
         match (self.wifi_pending, self.wifi) {
             (Some(true), _) => "Turning on…",
             (Some(false), _) => "Turning off…",
-            (None, Some(true)) if self.ssh.running => "On. Turning Wi-Fi off disconnects SSH.",
+            (None, Some(true)) if self.ssh.running => "On. Turning Wi-Fi off also stops SSH.",
             (None, Some(true)) => "On. Uses networks saved in Kindle settings.",
             (None, Some(false)) => "Off. Turn on to use a saved Wi-Fi network.",
             (None, None) => "Couldn't read Wi-Fi state. Reopen Settings to retry.",
@@ -225,7 +225,13 @@ impl Screen for SystemSettings {
     }
     fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
         if let Some(on) = self.wifi_pending.take() {
-            if let Err(e) = wifi::set_enabled(on) {
+            // Stop SSH before losing the network. If stopping fails, leave
+            // Wi-Fi alone so the server can still be reached and stopped.
+            let stop_ssh = if on { Ok(()) } else { ssh::set_running(false) };
+            if let Err(e) = stop_ssh {
+                log::error!("stopping SSH before Wi-Fi off: {e:#}");
+                cx.toast("Couldn't stop SSH. Wi-Fi left on.", None);
+            } else if let Err(e) = wifi::set_enabled(on) {
                 log::error!("Wi-Fi: {e:#}");
                 cx.toast(if on { "Couldn't turn Wi-Fi on" } else { "Couldn't turn Wi-Fi off" }, None);
             }
