@@ -1,7 +1,8 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
+mod selection;
 use crate::document::{
     FontFace, Metadata, Position, TocEntry,
-    thread::{Command, Page, Reply, Worker},
+    thread::{Command, Page, Reply, SelectionRequest, Worker},
 };
 use crate::geom::Rect;
 use crate::gfx::HAlign;
@@ -18,6 +19,7 @@ use crate::store::{
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK2, PAPER, Theme};
 use crate::ui::widget::DrawCx;
+use selection::SelectionState;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -46,6 +48,7 @@ pub struct Reader {
     save_error: Option<String>,
     error: Option<String>,
     opened_at: Option<Instant>,
+    selection: SelectionState,
 }
 enum Overlay {
     None,
@@ -95,6 +98,7 @@ impl Reader {
             save_error: None,
             error: None,
             opened_at: Some(Instant::now()),
+            selection: SelectionState::default(),
         }
     }
     pub fn failed_open(&self) -> bool {
@@ -105,6 +109,10 @@ impl Reader {
     }
     pub fn receive(&mut self, reply: Reply, cx: &mut EventCx) {
         match reply {
+            Reply::Selection { request, result } => {
+                let context = self.selection_context();
+                self.selection.receive(request, result, context, &self.worker, cx);
+            }
             Reply::Opened { generation, metadata, toc, pages, current } if generation == self.cache.generation => {
                 self.metadata = metadata;
                 self.toc = toc;
@@ -138,6 +146,7 @@ impl Reader {
             return;
         }
         self.laying_out = false;
+        self.selection.clear();
         self.anchor = page.position.clone();
         self.shown = Some(page.clone());
         self.save_pending = true;
@@ -210,6 +219,7 @@ impl Reader {
             Overlay::Text(Box::new(TextSheet::new(t, self.screen, &self.settings.typography, self.settings.footer)));
     }
     fn changed(&mut self) {
+        self.selection.clear();
         // A short debounce makes several quick taps one layout.
         self.cache.reset(self.cache.generation + 1);
         self.layout_at = Some(Instant::now() + Duration::from_millis(180));
@@ -251,9 +261,21 @@ impl Reader {
         result.map_err(|e| anyhow::anyhow!("Couldn't save your place: {e:#}"))
     }
     pub fn close(&mut self) -> anyhow::Result<()> {
+        self.selection.clear();
         self.flush_position()?;
         self.worker.send(Command::Close);
         Ok(())
+    }
+
+    fn selection_context(&self) -> Option<SelectionRequest> {
+        if self.laying_out || self.layout_at.is_some() {
+            return None;
+        }
+        self.shown.as_ref().filter(|p| p.generation == self.cache.generation).map(|p| SelectionRequest {
+            generation: p.generation,
+            page: p.number,
+            id: 0,
+        })
     }
 }
 impl Screen for Reader {
@@ -281,6 +303,7 @@ impl Screen for Reader {
         } else {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
         }
+        self.selection.draw(cx);
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Menu(menu) => {
@@ -306,6 +329,12 @@ impl Screen for Reader {
         }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        if matches!(self.overlay, Overlay::None)
+            && let Some(context) = self.selection_context()
+            && self.selection.on_gesture(g, context, &self.worker, cx)
+        {
+            return Action::None;
+        }
         if !matches!(self.overlay, Overlay::None) {
             // Overlay handlers can change pressed state or slider position
             // without returning an action. Keep immediate control feedback.
@@ -400,7 +429,10 @@ impl Screen for Reader {
         Action::None
     }
     fn busy(&self) -> bool {
-        self.laying_out || self.layout_at.is_some() || self.shown.as_ref().is_some_and(|p| p.number != self.target)
+        self.selection.busy()
+            || self.laying_out
+            || self.layout_at.is_some()
+            || self.shown.as_ref().is_some_and(|p| p.number != self.target)
     }
     fn deadline(&self) -> Option<Instant> {
         let step = match &self.overlay {
@@ -452,6 +484,7 @@ impl Screen for Reader {
         self.save();
     }
     fn on_sleep(&mut self) {
+        self.selection.sleep();
         let _ = self.flush_position();
         // Dropping the controls cancels held steppers and slider drags.
         self.overlay = Overlay::None;
@@ -465,6 +498,63 @@ impl Screen for Reader {
 mod tests {
     use super::*;
     use crate::store::BookState;
+
+    #[test]
+    fn selection_composes_on_canvas_and_dismissal_or_sleep_restores_cached_pixels() {
+        use crate::{
+            app::App,
+            document::{Selection, TextRange},
+            geom::Point,
+            platform::DeviceInfo,
+        };
+        for sleep in [false, true] {
+            let screen = Rect::new(0, 0, 600, 800);
+            let pixels: Vec<u8> = (0..600 * 800).map(|i| (i % 256) as u8).collect();
+            let page = Arc::new(Page {
+                generation: 1,
+                number: 0,
+                pixels: pixels.clone(),
+                position: Position("page0".into()),
+                progress: 0,
+                images: false,
+            });
+            let mut r = Reader::new(
+                screen,
+                Rc::new(Worker::stub()),
+                Store::at(std::env::temp_dir().join("verso-selection-draw-unused")),
+                "book".into(),
+                1,
+                Settings { footer: false, ..Settings::default() },
+                Vec::new(),
+                Position::default(),
+            );
+            r.shown = Some(page.clone());
+            r.cache.insert(page.clone(), 0);
+            r.pages = 3;
+            r.laying_out = false;
+            r.selection.selected = Some(Selection {
+                range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+                text: "selected".into(),
+                rects: vec![Rect::new(100, 100, 200, 30)],
+            });
+            let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+            let mut app = App::new(&info, Theme::for_dpi(150), Box::new(r));
+            app.refresh_all(RefreshMode::Page);
+            assert!(!app.frame().is_empty());
+            assert_ne!(app.canvas().gray_data(), pixels);
+            assert_eq!(page.pixels, pixels, "selection must not modify the shared page cache");
+            if sleep {
+                app.on_sleep();
+                app.on_wake();
+            } else {
+                let p = Point::new(590, 400); // Forward page-turn zone.
+                app.on_gesture(Gesture::Down(p));
+                app.on_gesture(Gesture::Tap(p));
+            }
+            assert!(!app.frame().is_empty());
+            assert_eq!(app.canvas().gray_data(), pixels, "same displayed page returns without selection");
+        }
+    }
 
     #[test]
     fn grayscale_pages_restore_after_menus_usb_and_wake_with_or_without_footer() {

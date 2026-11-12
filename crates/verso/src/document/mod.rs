@@ -49,6 +49,33 @@ impl Typography {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Position(pub String);
 
+/// Stable DOM positions, with an exclusive end. Never pixel offsets or page numbers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextRange {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub range: TextRange,
+    pub text: String,
+    /// Screen coordinates on the explicitly requested page.
+    pub rects: Vec<crate::geom::Rect>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SelectionQuery {
+    Word(crate::geom::Point),
+    /// Union a word with the fixed anchor; a collapsed anchor adjusts a handle.
+    Extend {
+        anchor: TextRange,
+        focus: crate::geom::Point,
+    },
+    #[allow(dead_code)] // Public extraction API for subsequent reading tools; exercised by engine tests.
+    Range(TextRange),
+}
+
 #[derive(Clone, Debug)]
 pub struct TocEntry {
     pub title: String,
@@ -72,6 +99,7 @@ pub struct FontFace {
 }
 
 pub trait Document {
+    fn select(&mut self, page: usize, query: &SelectionQuery) -> Result<Option<Selection>>;
     fn position(&mut self) -> Result<Position>;
     fn go_to_position(&mut self, position: &Position) -> Result<()>;
     /// Text offset in ten-thousandths; independent of page count.
@@ -188,5 +216,86 @@ mod tests {
         let mut reopened = engine.open(&book, &layout, None).unwrap();
         reopened.go_to_position(&position).unwrap();
         assert_eq!(reopened.current_page(), 5);
+        drop(reopened);
+        selection_checks(&engine, &layout);
+    }
+
+    fn selection_checks(engine: &CreEngine, layout: &Layout) {
+        use crate::geom::Point;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/selection.epub");
+        let mut doc = engine.open(&path, layout, None).unwrap();
+        let mut words = std::collections::BTreeMap::new();
+        // Use the real renderer's hit testing rather than hard-coding font metrics.
+        for y in (40..400).step_by(8) {
+            for x in (40..560).step_by(8) {
+                let p = Point::new(x, y);
+                if let Some(s) = doc.select(0, &SelectionQuery::Word(p)).unwrap() {
+                    words.entry(s.text.clone()).or_insert((p, s));
+                }
+            }
+        }
+        for word in ["Hello", "can't", "reader’s", "Привет", "мир", "Русский", "Formatting", "extraordinary"]
+        {
+            assert!(words.contains_key(word), "missing {word:?}; got {:?}", words.keys());
+        }
+        assert!(doc.select(0, &SelectionQuery::Word(Point::new(1, 1))).unwrap().is_none());
+        // Reopening at a narrow width splits the soft-hyphen word visually,
+        // while its stable range and extracted text remain unchanged.
+        let mut narrow = engine.open(&path, &Layout { width: 200, margins: [20; 4], ..layout.clone() }, None).unwrap();
+        let hyphenated =
+            narrow.select(0, &SelectionQuery::Range(words["extraordinary"].1.range.clone())).unwrap().unwrap();
+        assert_eq!(hyphenated.text, "extraordinary");
+        assert!(hyphenated.rects.len() > 1, "fixture must exercise a visually hyphenated word");
+        drop(narrow);
+        assert!(doc.select(0, &SelectionQuery::Word(Point::new(590, 790))).unwrap().is_none());
+        let (hello_point, hello) = &words["Hello"];
+        let (russian_point, russian) = &words["Привет"];
+        doc.go_to_page(1); // Simulate the engine being left on a prefetched neighbour.
+        assert_eq!(doc.select(0, &SelectionQuery::Word(*hello_point)).unwrap(), Some(hello.clone()));
+        let extended = doc
+            .select(0, &SelectionQuery::Extend { anchor: hello.range.clone(), focus: *russian_point })
+            .unwrap()
+            .unwrap();
+        assert!(extended.text.starts_with("Hello") && extended.text.ends_with("Привет"), "{:?}", extended.text);
+        assert!(extended.rects.len() > 1);
+        let backwards = doc
+            .select(0, &SelectionQuery::Extend { anchor: russian.range.clone(), focus: *hello_point })
+            .unwrap()
+            .unwrap();
+        assert_eq!(extended, backwards);
+        let reversed = TextRange { start: extended.range.end.clone(), end: extended.range.start.clone() };
+        assert_eq!(doc.select(0, &SelectionQuery::Range(reversed)).unwrap(), Some(extended.clone()));
+        let fixed = hello.range.end.clone();
+        let crossed = doc
+            .select(
+                0,
+                &SelectionQuery::Extend {
+                    anchor: TextRange { start: fixed.clone(), end: fixed.clone() },
+                    focus: *russian_point,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(crossed.range.start, fixed, "handle crossing keeps its opposite endpoint fixed");
+        // Endpoints must remain text positions when typography changes.
+        doc.set_typography(&Typography { size_pt: 12.0, ..Typography::default() }, 150, false).unwrap();
+        let restored = doc.select(0, &SelectionQuery::Range(hello.range.clone())).unwrap().unwrap();
+        assert_eq!(restored.text, "Hello");
+        assert_eq!(restored.range, hello.range);
+        // A whole-document range is clipped to the explicitly displayed page.
+        let first = doc.select(0, &SelectionQuery::Range(extended.range.clone())).unwrap().unwrap();
+        let last_page = doc.page_count() - 1;
+        let mut last = None;
+        for y in (30..770).step_by(10) {
+            for x in (30..570).step_by(20) {
+                if let Some(s) = doc.select(last_page, &SelectionQuery::Word(Point::new(x, y))).unwrap() {
+                    last = Some(s);
+                }
+            }
+        }
+        let all = TextRange { start: first.range.start, end: last.unwrap().range.end };
+        let clipped = doc.select(0, &SelectionQuery::Range(all)).unwrap().unwrap();
+        assert!(!clipped.text.contains("Final boundary"));
+        assert!(clipped.rects.iter().all(|r| r.y >= 0 && r.bottom() <= layout.height as i32));
     }
 }

@@ -55,6 +55,13 @@ impl Headless {
                     events.push_back(None); // Let the gesture timer fire before lifting.
                     touch(&mut events, TouchPhase::Up, p, held_at + Duration::from_millis(650));
                 }
+                ScriptStep::HoldDrag(a, b) => {
+                    let held_at = Instant::now() - Duration::from_secs(1);
+                    touch(&mut events, TouchPhase::Down, a, held_at);
+                    events.push_back(None);
+                    touch(&mut events, TouchPhase::Move, b, held_at + Duration::from_millis(600));
+                    touch(&mut events, TouchPhase::Up, b, held_at + Duration::from_millis(650));
+                }
                 ScriptStep::Press(p) => touch(&mut events, TouchPhase::Down, p, t),
                 ScriptStep::Swipe(a, b) => {
                     let mid = Point::new((a.x + b.x) / 2, (a.y + b.y) / 2);

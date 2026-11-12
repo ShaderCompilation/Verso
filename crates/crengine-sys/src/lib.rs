@@ -9,7 +9,27 @@ pub struct VersoCreDoc {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VersoCreRect {
+    pub left: c_int,
+    pub top: c_int,
+    pub right: c_int,
+    pub bottom: c_int,
+}
+
 unsafe extern "C" {
+    pub fn verso_cre_select(
+        doc: *mut VersoCreDoc,
+        page: c_int,
+        mode: c_int,
+        x: c_int,
+        y: c_int,
+        start: *const c_char,
+        end: *const c_char,
+    ) -> c_int;
+    pub fn verso_cre_selection_text(doc: *mut VersoCreDoc, field: c_int, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_selection_rects(doc: *mut VersoCreDoc, rects: *mut VersoCreRect, capacity: c_int) -> c_int;
     pub fn verso_cre_init(hyph_dir: *const c_char, cache_dir: *const c_char, cache_max_bytes: c_int) -> c_int;
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;
 

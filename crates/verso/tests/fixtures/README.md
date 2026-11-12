@@ -1,5 +1,9 @@
 reader.epub is an original, generated two-chapter test book (100 numbered paragraphs per chapter), licensed with Verso. It contains no third-party book text or fonts. Used to check TOC, layout, positions and progress without private testbooks/.
 
+selection.epub is original English/Russian text with punctuation, apostrophes,
+inline formatting, a soft hyphen, and enough text to span pages. Regenerate with
+`python3 scripts/gen-selection-fixture.py`. Licensed with Verso.
+
 library2.epub and library3.epub are tiny original EPUB 2/3 package/cover fixtures,
 licensed with Verso. Regenerate with `python3 scripts/gen-library-fixtures.py`.
 They contain a nested OPF, multiple creators, escaped text, a percent-encoded PNG

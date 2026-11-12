@@ -19,6 +19,8 @@ struct VersoCreDoc {
     std::vector<LVTocItem *> toc;
     std::unordered_map<int, uint64_t> offsets;
     uint64_t text_length = 0;
+    lString32 selection_start, selection_end, selection_text;
+    std::vector<VersoCreRect> selection_rects;
 
 };
 
@@ -68,7 +70,112 @@ static void collect_offsets(ldomNode *node, VersoCreDoc *doc) {
     }
 }
 
+// Use crengine's Unicode properties and visible DOM traversal, including words
+// split by inline markup. Apostrophes join letters, punctuation does not.
+static bool word_char(ldomXPointerEx p) {
+    if (p.isNull() || !p.isText() || !p.isVisible()) return false;
+    lChar32 c = p.getChar();
+    if (lGetCharProps(c) & (CH_PROP_ALPHA | CH_PROP_MODIFIER | CH_PROP_DIGIT | CH_PROP_HYPHEN))
+        return true;
+    if (c != '\'' && c != 0x2019) return false;
+    ldomXPointerEx before = p, after = p;
+    if (!before.prevVisibleChar(true) || !after.nextVisibleChar(true)) return false;
+    if (!after.getChar() && !after.nextVisibleChar(true)) return false;
+    return (lGetCharProps(before.getChar()) & CH_PROP_ALPHA)
+        && (lGetCharProps(after.getChar()) & CH_PROP_ALPHA);
+}
+
+static bool word_at(LVDocView *v, lvPoint point, ldomXRange &range) {
+    ldomXPointerEx p = v->getNodeByPoint(point, true, false);
+    if (p.isNull() || !p.isText()) return false;
+    if (!word_char(p)) {
+        // Hit testing can return the boundary just after the touched character.
+        if (!p.prevVisibleChar(true) || !word_char(p)) return false;
+    }
+    ldomXPointerEx start = p, last = p, scan = p;
+    while (scan.prevVisibleChar(true) && word_char(scan)) start = scan;
+    scan = p;
+    while (scan.nextVisibleChar(true)) {
+        if (!scan.getChar() && !scan.nextVisibleChar(true)) break;
+        if (!word_char(scan)) break;
+        last = scan;
+    }
+    ldomXPointerEx end(last.getNode(), last.getOffset() + 1);
+    range = ldomXRange(start, end);
+    // Exact word rectangles reject margins, interline whitespace and images.
+    LVArray<lvRect> rects;
+    range.getSegmentRects(rects);
+    for (int i = 0; i < rects.length(); ++i) {
+        lvPoint a = rects[i].topLeft(), b = rects[i].bottomRight();
+        if (v->docToWindowPoint(a) && v->docToWindowPoint(b, true)
+                && point.x >= a.x && point.x < b.x && point.y >= a.y && point.y < b.y)
+            return true;
+    }
+    return false;
+}
+
 extern "C" {
+
+int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
+                     const char *start, const char *end) {
+    GUARD(-1, {
+        doc->selection_rects.clear();
+        doc->selection_start.clear(); doc->selection_end.clear(); doc->selection_text.clear();
+        LVDocView *v = doc->view;
+        if (page < 0 || page >= v->getPageCount() || mode < 0 || mode > 2) return -1;
+        v->goToPage(page, false, true, false);
+        LVRef<ldomXRange> visible = v->getPageDocumentRange(page);
+        if (visible.isNull()) return 0;
+        ldomXRange range;
+        if (mode != 2 && !word_at(v, lvPoint(x, y), range)) return 0;
+        if (mode != 0) {
+            if (!start || !end) return -1;
+            ldomXPointerEx a = v->getDocument()->createXPointer(Utf8ToUnicode(start));
+            ldomXPointerEx b = v->getDocument()->createXPointer(Utf8ToUnicode(end));
+            if (a.isNull() || b.isNull() || !a.isText() || !b.isText()) return -1;
+            ldomXRange anchor(a, b); anchor.sort();
+            if (mode == 2) range = anchor;
+            else {
+                if (anchor.getStart().compare(range.getStart()) < 0) range.setStart(anchor.getStart());
+                if (anchor.getEnd().compare(range.getEnd()) > 0) range.setEnd(anchor.getEnd());
+            }
+        }
+        // Phase 1 never extends into an undisplayed page, even for a word split
+        // across a page boundary. Saved ranges can be re-extracted after reflow.
+        if (range.getStart().compare(visible->getStart()) < 0) range.setStart(visible->getStart());
+        if (range.getEnd().compare(visible->getEnd()) > 0) range.setEnd(visible->getEnd());
+        if (range.isNull() || range.getStart().compare(range.getEnd()) >= 0) return 0;
+        LVArray<lvRect> rects;
+        range.getSegmentRects(rects);
+        for (int i = 0; i < rects.length(); ++i) {
+            lvPoint a = rects[i].topLeft();
+            lvPoint b = rects[i].bottomRight();
+            if (v->docToWindowPoint(a) && v->docToWindowPoint(b, true) && b.x > a.x && b.y > a.y)
+                doc->selection_rects.push_back({a.x, a.y, b.x, b.y});
+        }
+        if (doc->selection_rects.empty()) return 0;
+        doc->selection_start = range.getStart().toString();
+        doc->selection_end = range.getEnd().toString();
+        doc->selection_text = removeSoftHyphens(range.getRangeText());
+        return 1;
+    })
+}
+int verso_cre_selection_text(VersoCreDoc *doc, int field, char *buf, int len) {
+    GUARD(-1, {
+        if (field == 0) return copy_utf8(doc->selection_start, buf, len);
+        if (field == 1) return copy_utf8(doc->selection_end, buf, len);
+        if (field == 2) return copy_utf8(doc->selection_text, buf, len);
+        return -1;
+    })
+}
+int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacity) {
+    GUARD(-1, {
+        int n = (int)doc->selection_rects.size();
+        if (rects && capacity > 0)
+            std::copy_n(doc->selection_rects.begin(), std::min(n, capacity), rects);
+        return n;
+    })
+}
 
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes) {
     GUARD(-1, {

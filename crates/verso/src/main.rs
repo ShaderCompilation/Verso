@@ -96,6 +96,10 @@ fn parse_args() -> Result<Options> {
                 let v = numbers(args.next(), 2, "--long-press")?;
                 opts.script.push(ScriptStep::LongPress(Point::new(v[0], v[1])));
             }
+            "--hold-drag" => {
+                let v = numbers(args.next(), 4, "--hold-drag")?;
+                opts.script.push(ScriptStep::HoldDrag(Point::new(v[0], v[1]), Point::new(v[2], v[3])));
+            }
             "--press" => {
                 let v = numbers(args.next(), 2, "--press")?;
                 opts.script.push(ScriptStep::Press(Point::new(v[0], v[1])));

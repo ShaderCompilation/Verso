@@ -23,7 +23,7 @@ pub enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gesture {
     Down(Point),
-    /// The finger moved (only sent once it's moved further than a tap allows).
+    /// The finger moved after crossing tap slop, or after a long press.
     Move(Point),
     Tap(Point),
     /// The finger has been held still; it's still down. `End` follows.
@@ -122,6 +122,9 @@ impl GestureDetector {
                 Some(Gesture::Down(t.pos))
             }
             TouchPhase::Move => {
+                if self.held == Some(t.id) {
+                    return Some(Gesture::Move(t.pos));
+                }
                 let c = self.contact.as_mut().filter(|c| c.id == t.id)?;
                 c.last = t.pos;
                 if c.start.distance(t.pos) > self.cfg.slop {
@@ -224,7 +227,8 @@ mod tests {
         assert_eq!(s.g.next_deadline(), Some(s.at(500)));
         assert_eq!(s.g.on_tick(s.at(499)), None);
         assert_eq!(s.g.on_tick(s.at(500)), Some(Gesture::LongPress(Point::new(100, 100))));
-        assert_eq!(s.touch(1, Move, 200, 100, 700), None, "moves after a long-press are ignored");
+        assert_eq!(s.touch(1, Move, 200, 100, 700), Some(Gesture::Move(Point::new(200, 100))));
+        assert_eq!(s.touch(3, Move, 400, 400, 750), None, "another finger's moves are ignored");
         assert_eq!(s.touch(3, Down, 400, 400, 800), None, "so is another finger");
         assert_eq!(s.touch(1, Up, 102, 100, 900), Some(Gesture::End(Point::new(102, 100))));
         // The next touch works normally again.

@@ -8,7 +8,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
-use super::{Document, FontFace, Layout, Metadata, Paths, Position, TocEntry, Typography};
+use super::{
+    Document, FontFace, Layout, Metadata, Paths, Position, Selection, SelectionQuery, TextRange, TocEntry, Typography,
+};
 
 /// Upper limit for crengine's on-disk document cache.
 const CACHE_MAX_BYTES: c_int = 64 << 20;
@@ -136,6 +138,46 @@ fn read_string(f: impl Fn(*mut c_char, c_int) -> c_int) -> Result<String> {
 }
 
 impl Document for CreDocument {
+    fn select(&mut self, page: usize, query: &SelectionQuery) -> Result<Option<Selection>> {
+        use crate::geom::{Point, Rect};
+        let (mode, point, range) = match query {
+            SelectionQuery::Word(p) => (0, *p, None),
+            SelectionQuery::Extend { anchor, focus } => (1, *focus, Some(anchor)),
+            SelectionQuery::Range(range) => (2, Point::default(), Some(range)),
+        };
+        let start = range.map(|r| CString::new(r.start.0.as_str())).transpose()?;
+        let end = range.map(|r| CString::new(r.end.0.as_str())).transpose()?;
+        let rc = unsafe {
+            sys::verso_cre_select(
+                self.raw,
+                c_int::try_from(page)?,
+                mode,
+                point.x,
+                point.y,
+                start.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+                end.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+            )
+        };
+        anyhow::ensure!(rc >= 0, "couldn't resolve selection");
+        if rc == 0 {
+            return Ok(None);
+        }
+        let string =
+            |field| read_string(|buf, len| unsafe { sys::verso_cre_selection_text(self.raw, field, buf, len) });
+        let n = unsafe { sys::verso_cre_selection_rects(self.raw, std::ptr::null_mut(), 0) };
+        anyhow::ensure!((1..=10000).contains(&n), "invalid selection rectangles");
+        let mut rects = vec![sys::VersoCreRect::default(); n as usize];
+        anyhow::ensure!(
+            unsafe { sys::verso_cre_selection_rects(self.raw, rects.as_mut_ptr(), n) } == n,
+            "selection rectangles changed"
+        );
+        Ok(Some(Selection {
+            range: TextRange { start: Position(string(0)?), end: Position(string(1)?) },
+            text: string(2)?,
+            rects: rects.into_iter().map(|r| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)).collect(),
+        }))
+    }
+
     fn position(&mut self) -> Result<Position> {
         Ok(Position(read_string(|buf, len| unsafe { sys::verso_cre_position(self.raw, buf, len) })?))
     }

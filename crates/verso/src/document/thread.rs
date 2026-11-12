@@ -1,5 +1,8 @@
 //! The only thread that touches crengine. Results carry a book/layout generation.
-use super::{CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, TocEntry, Typography};
+use super::{
+    CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, Selection, SelectionQuery, TocEntry,
+    Typography,
+};
 use crate::platform::Waker;
 use anyhow::Result;
 use std::cell::RefCell;
@@ -16,7 +19,15 @@ pub struct Page {
     pub progress: u32,
     pub images: bool,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionRequest {
+    pub generation: u64,
+    pub page: usize,
+    pub id: u64,
+}
 pub enum Command {
+    Select { request: SelectionRequest, query: SelectionQuery },
     Open { generation: u64, path: PathBuf, layout: Layout, typography: Typography, footer: bool, position: Position },
     Layout { generation: u64, typography: Typography, footer: bool, position: Position },
     Page { generation: u64, number: usize },
@@ -25,6 +36,7 @@ pub enum Command {
     Shutdown,
 }
 pub enum Reply {
+    Selection { request: SelectionRequest, result: Result<Option<Selection>, String> },
     Fonts(Vec<FontFace>),
     Opened { generation: u64, metadata: Metadata, toc: Vec<TocEntry>, pages: usize, current: usize },
     Page(Arc<Page>),
@@ -70,6 +82,15 @@ impl Worker {
                     }
                     let result: Result<()> = (|| {
                         match command {
+                            Command::Select { request, query } => {
+                                if request.generation == generation
+                                    && let Some(d) = &mut doc
+                                {
+                                    let result = d.select(request.page, &query).map_err(|e| format!("{e:#}"));
+                                    send(Reply::Selection { request, result });
+                                }
+                                return Ok(());
+                            }
                             Command::Open { generation: g, path, layout, typography, footer, position } => {
                                 generation = g;
                                 doc = None;
@@ -138,9 +159,16 @@ impl Worker {
     }
     #[cfg(test)]
     pub fn stub() -> Self {
-        let (tx, _) = mpsc::channel();
+        Self::recording_stub().0
+    }
+    #[cfg(test)]
+    pub fn recording_stub() -> (Self, mpsc::Receiver<Command>) {
+        let (tx, commands) = mpsc::channel();
         let (_, rx) = mpsc::channel();
-        Self { waker: Waker::new(|| {}), tx, rx: RefCell::new(rx), join: None, fonts: RefCell::new(Vec::new()) }
+        (
+            Self { waker: Waker::new(|| {}), tx, rx: RefCell::new(rx), join: None, fonts: RefCell::new(Vec::new()) },
+            commands,
+        )
     }
     pub fn waker(&self) -> Waker {
         self.waker.clone()

@@ -11,6 +11,17 @@ extern "C" {
 #endif
 
 typedef struct VersoCreDoc VersoCreDoc;
+typedef struct VersoCreRect { int left, top, right, bottom; } VersoCreRect;
+
+/* Resolve a word (mode 0), union it with an anchor (1), or extract a range (2).
+ * Explicitly visits page, even after speculative rendering. Stores a snapshot
+ * until the next call. Returns 1 for a selection, 0 for no text, -1 on error. */
+int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
+                     const char *start, const char *end);
+/* Snapshot fields: 0=start, 1=exclusive end, 2=plain text. */
+int verso_cre_selection_text(VersoCreDoc *doc, int field, char *buf, int len);
+/* Returns total count, copies at most capacity screen rectangles. */
+int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacity);
 
 /* Global setup, once per process. `hyph_dir` holds crengine's *.pattern
  * files (may be NULL: no hyphenation). `cache_dir` enables crengine's

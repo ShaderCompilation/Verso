@@ -172,6 +172,7 @@ pub enum ScriptStep {
     Text(TextInput),
     Tap(Point),
     LongPress(Point),
+    HoldDrag(Point, Point),
     /// Finger down, never lifted (to capture pressed states).
     Press(Point),
     Swipe(Point, Point),

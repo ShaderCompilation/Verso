@@ -55,6 +55,17 @@ impl Canvas {
         }
     }
 
+    /// Selection is composed on the canvas after copying cached page pixels.
+    pub fn invert_rect(&mut self, rect: Rect) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        for y in r.y..r.bottom() {
+            let row = y as usize * self.width as usize;
+            for pixel in &mut self.gray[row + r.x as usize..row + r.right() as usize] {
+                *pixel = 255 - *pixel;
+            }
+        }
+    }
+
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
         if let Some(path) = rounded_rect_path(rect, radius) {
             self.draw_path(&path, None, gray, Some(radius));
