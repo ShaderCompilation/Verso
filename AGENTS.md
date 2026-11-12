@@ -19,7 +19,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 - **Documentation-only changes need no code checks.** If you did not change code, do not run builds, tests, linters or formatters. Unrelated code changes already in the workspace do not count as your changes.
 - **Validate code changes once, before committing.** For the code you changed, make sure relevant tests pass, `cargo clippy` reports no errors and `cargo fmt --check` is clean (run `cargo fmt` only when it reports changes). Reuse successful results while the code and build configuration are unchanged. A test run counts as a build, so run `cargo build` (or `cargo kindle-build` for Kindle-only code) only if nothing has compiled the latest changes yet.
 - Write short, clear commit messages: a one-line summary, then a few lines on what and why if needed.
-- Never push, force-push, rewrite history, or change the `third_party/FBInk` submodule pointer without asking.
+- Never push, force-push, rewrite history, or change any `third_party/` submodule pointer without asking.
 
 ## Project basics
 
@@ -32,6 +32,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 | `scripts/gen-fbink-bindings.sh` | Regenerate FBInk bindings after updating the submodule |
 
 - Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `crates/crengine-sys` (builds and binds crengine), `third_party/` (git submodules: FBInk, crengine and its libraries), `assets/`, `dist/`, `scripts/`, `docs/`.
+- Don't edit files inside `third_party/`: changes there aren't part of Verso's history and a submodule update wipes them. Fix library code at build time instead, the way `CRENGINE_FIXES` in `crates/crengine-sys/build.rs` patches a copy of crengine.
 - The Kindle is reachable with `ssh kindle`. It's the user's own reading device: don't run anything destructive on it, and always make sure the Kindle UI comes back after testing.
   - Only write files inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`. Writing to `/dev/fb0` (the screen) is fine, and so is sending test touches to the touchscreen (`/dev/input/event1`) while Verso is running and has grabbed it.
   - Never run `mntroot`, factory reset, firmware updates, or `dd`, and never touch `/var/local`, `/etc` or the jailbreak files.
