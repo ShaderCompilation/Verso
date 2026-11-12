@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
 use crate::platform::{Battery, DeviceInfo, Frontlight, RefreshMode, TextInput, Update};
+use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::Gesture;
@@ -34,6 +35,8 @@ pub struct App {
     needs_redraw: bool,
     asleep: bool,
     exit: bool,
+    exit_prompt: Option<ExitPrompt>,
+    stop_ssh_on_exit: bool,
     pub frontlight: Option<Frontlight>,
     light_request: Option<Frontlight>,
     pub battery: Option<Battery>,
@@ -61,6 +64,8 @@ impl App {
             needs_redraw: true,
             asleep: false,
             exit: false,
+            exit_prompt: None,
+            stop_ssh_on_exit: false,
             frontlight: None,
             light_request: None,
             battery: None,
@@ -76,6 +81,27 @@ impl App {
 
     pub fn wants_exit(&self) -> bool {
         self.exit
+    }
+
+    /// User-requested exits ask what to do with a running SSH server. System
+    /// shutdown/recovery and headless capture completion bypass this prompt.
+    pub fn request_exit(&mut self) {
+        if self.exit_prompt.is_some() {
+            return;
+        }
+        if crate::platform::ssh::status().running {
+            self.show_exit_prompt();
+        } else {
+            self.exit = true;
+        }
+    }
+
+    fn show_exit_prompt(&mut self) {
+        self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
+        self.toast = None;
+        self.toast_touch = false;
+        self.exit_prompt = Some(ExitPrompt::new(&self.theme, self.canvas.bounds()));
+        self.needs_redraw = true;
     }
 
     /// Refreshes the whole display in the next frame (first frame, wake).
@@ -107,6 +133,9 @@ impl App {
                 screen.draw(&mut cx);
             }
             if let Some(prompt) = &mut self.usb_prompt {
+                prompt.draw(&mut cx);
+            }
+            if let Some(prompt) = &self.exit_prompt {
                 prompt.draw(&mut cx);
             }
             if let Some(toast) = &self.toast {
@@ -160,6 +189,22 @@ impl App {
             // the release itself changes no pixels.
             self.needs_redraw |= !self.fast_debt.is_empty();
         }
+        if let Some(mut prompt) = self.exit_prompt.take() {
+            let choice = prompt.on_gesture(&g);
+            self.needs_redraw = true;
+            match choice {
+                Some(ExitChoice::Cancel) => {}
+                Some(ExitChoice::KeepSsh) => self.exit = true,
+                Some(ExitChoice::StopSsh) => {
+                    self.exit = true;
+                    self.stop_ssh_on_exit = true;
+                    prompt.set_stopping(true);
+                    self.exit_prompt = Some(prompt);
+                }
+                None => self.exit_prompt = Some(prompt),
+            }
+            return;
+        }
         if let Some(mut prompt) = self.usb_prompt.take() {
             let mut action = Action::None;
             self.with_screen(|_, cx| {
@@ -167,7 +212,7 @@ impl App {
                 Action::None
             });
             match action {
-                Action::Exit => self.exit = true,
+                Action::Exit => self.request_exit(),
                 Action::Pop => self.needs_redraw = true,
                 _ => self.usb_prompt = Some(prompt),
             }
@@ -190,6 +235,13 @@ impl App {
     pub fn on_text_input(&mut self, input: &TextInput) -> bool {
         if self.asleep {
             return false;
+        }
+        if self.exit_prompt.is_some() {
+            if matches!(input, TextInput::Dismiss) {
+                self.exit_prompt = None;
+                self.needs_redraw = true;
+            }
+            return true;
         }
         if self.usb_prompt.is_some() {
             if matches!(input, TextInput::Dismiss) {
@@ -273,6 +325,24 @@ impl App {
                 log::error!("exit: {e:#}");
                 self.toast = Some(Toast::new(e.to_string(), None, Instant::now()));
                 self.exit = false;
+                self.stop_ssh_on_exit = false;
+                if let Some(prompt) = &mut self.exit_prompt {
+                    prompt.set_stopping(false);
+                }
+                self.needs_redraw = true;
+                return false;
+            }
+        }
+        // Save first: a failed save must keep both the app and SSH available.
+        if self.stop_ssh_on_exit {
+            self.stop_ssh_on_exit = false;
+            if let Err(e) = crate::platform::ssh::set_running(false) {
+                log::error!("stopping SSH on exit: {e:#}");
+                self.exit = false;
+                if let Some(prompt) = &mut self.exit_prompt {
+                    prompt.set_stopping(false);
+                }
+                self.toast = Some(Toast::new("Couldn't stop SSH. Try again or choose Exit.", None, Instant::now()));
                 self.needs_redraw = true;
                 return false;
             }
@@ -365,14 +435,14 @@ impl App {
             }
             Action::Pop => {
                 self.needs_redraw = true;
-                self.stack.pop();
-                if self.stack.is_empty() {
-                    self.exit = true;
+                if self.stack.len() == 1 {
+                    self.request_exit();
                 } else {
+                    self.stack.pop();
                     self.on_background();
                 }
             }
-            Action::Exit => self.exit = true,
+            Action::Exit => self.request_exit(),
         }
     }
 }
@@ -443,6 +513,78 @@ mod tests {
             }),
         )
     }
+    fn tap(app: &mut App, p: crate::geom::Point) {
+        app.on_gesture(Gesture::Down(p));
+        app.on_gesture(Gesture::Tap(p));
+    }
+
+    #[test]
+    fn ssh_exit_dialog_captures_input_and_dismissal_cancels_exit() {
+        let mut app = book_app(false);
+        app.frame();
+        app.show_exit_prompt();
+        assert!(!app.wants_exit());
+        assert!(!app.frame().is_empty());
+        // Background work and persistence keep running under the modal.
+        app.on_background();
+        app.after_present();
+        assert!(app.on_text_input(&TextInput::Insert("q".into())));
+        assert!(!app.wants_exit());
+        // Close button, outside tap, and Escape each cancel the exit.
+        let close = crate::geom::Point::new(
+            600 - app.theme.margin - app.theme.mm(2.0),
+            800 - app.theme.mm(63.0) + app.theme.mm(6.5),
+        );
+        for p in [close, crate::geom::Point::new(300, 100)] {
+            tap(&mut app, p);
+            assert!(app.exit_prompt.is_none());
+            assert!(!app.wants_exit());
+            app.show_exit_prompt();
+        }
+        app.on_sleep();
+        app.on_wake();
+        assert!(app.exit_prompt.is_some());
+        assert!(app.on_text_input(&TextInput::Dismiss));
+        assert!(app.exit_prompt.is_none());
+        assert!(!app.wants_exit());
+        app.show_exit_prompt();
+        let exit = crate::geom::Point::new(300, 800 - app.theme.mm(12.0) + app.theme.button_h / 2);
+        tap(&mut app, exit);
+        assert!(app.wants_exit());
+        assert!(!app.stop_ssh_on_exit);
+        assert!(app.on_quit());
+    }
+
+    #[test]
+    fn stop_ssh_exit_saves_first_and_keeps_the_dialog_on_save_failure() {
+        struct SavesOnce(bool);
+        impl Screen for SavesOnce {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn on_quit(&mut self) -> anyhow::Result<()> {
+                anyhow::ensure!(std::mem::replace(&mut self.0, true), "Couldn't save your place");
+                Ok(())
+            }
+        }
+        let mut app = book_app(false);
+        app.stack = vec![Box::new(SavesOnce(false))];
+        app.show_exit_prompt();
+        let stop = crate::geom::Point::new(300, 800 - app.theme.mm(24.0) + app.theme.button_h / 2);
+        tap(&mut app, stop);
+        assert!(app.wants_exit() && app.stop_ssh_on_exit);
+        assert!(!app.frame().is_empty(), "show Stopping SSH before the save and stop");
+        assert!(!app.on_quit());
+        assert!(!app.wants_exit() && !app.stop_ssh_on_exit);
+        assert!(app.exit_prompt.is_some());
+        // Retrying the same choice is enabled after a failed save.
+        tap(&mut app, stop);
+        assert!(app.wants_exit() && app.stop_ssh_on_exit);
+        assert!(app.on_quit());
+        assert!(!app.stop_ssh_on_exit);
+    }
+
     #[test]
     fn full_updates_keep_flash_strength_and_do_not_swallow_stronger_local_updates() {
         let mut app = book_app(false);

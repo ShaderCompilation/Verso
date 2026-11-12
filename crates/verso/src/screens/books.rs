@@ -638,20 +638,17 @@ impl Books {
     }
     fn open_menu(&mut self, id: String, anchor: Point, t: &Theme) {
         let state = self.store.book(&id);
-        let mut menu = PopupMenu::open(
-            vec![
-                (Some(Icon::BookOpen), "Open".into()),
-                (Some(Icon::Info), "Details".into()),
-                (Some(Icon::Check), "Mark finished".into()),
-                (None, "Remove from continue reading".into()),
-                (Some(Icon::Trash), "Delete…".into()),
-            ],
-            anchor,
-            self.screen,
-            t,
-        );
+        let mut items = vec![
+            (Some(Icon::BookOpen), "Open".into()),
+            (Some(Icon::Info), "Details".into()),
+            (Some(Icon::Check), "Mark finished".into()),
+        ];
+        if !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
+            items.push((None, "Remove from continue reading".into()));
+        }
+        items.push((Some(Icon::Trash), "Delete…".into()));
+        let mut menu = PopupMenu::open(items, anchor, self.screen, t);
         menu.set_enabled(2, !state.finished);
-        menu.set_enabled(3, !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished);
         self.menu = Some((id, menu));
         self.continue_press = Press::default();
         self.grid.on_gesture(&Gesture::Cancel(anchor));
@@ -1041,6 +1038,7 @@ impl Screen for Books {
             }
         } else if let Some((id, menu)) = &mut self.menu {
             let event = menu.on_gesture(&g, cx.theme);
+            let delete_index = menu.items.len() - 1;
             let id = id.clone();
             if let Some(event) = event {
                 self.menu = None;
@@ -1052,12 +1050,12 @@ impl Screen for Books {
                         }
                     }
                     MenuEvent::Chosen(2) => self.mark(&id, true, cx),
-                    MenuEvent::Chosen(3) => self.mark(&id, false, cx),
-                    MenuEvent::Chosen(4) => {
+                    MenuEvent::Chosen(index) if index == delete_index => {
                         if let Some(book) = self.book(&id) {
                             self.confirm = Some(ConfirmDelete::new(cx.theme, self.screen, id.clone(), book));
                         }
                     }
+                    MenuEvent::Chosen(3) => self.mark(&id, false, cx),
                     _ => {}
                 }
             }
@@ -1951,6 +1949,60 @@ mod tests {
     }
 
     #[test]
+    fn book_actions_hide_inapplicable_removal_and_keep_delete_routing() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("conditional-actions")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            for (position, hidden, finished, can_remove) in [
+                ("", false, false, false),
+                ("saved-position", false, false, true),
+                ("saved-position", true, false, false),
+                ("saved-position", false, true, false),
+            ] {
+                store
+                    .save_book(
+                        "0",
+                        &BookState {
+                            position: crate::document::Position(position.into()),
+                            hidden_from_continue: hidden,
+                            finished,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                books.open_menu("0".into(), Point::new(600, 600), &t);
+                let menu = &books.menu.as_ref().unwrap().1;
+                assert_eq!(menu.items.iter().any(|(_, label)| label == "Remove from continue reading"), can_remove);
+                assert_eq!(menu.items.len(), if can_remove { 5 } else { 4 });
+                let rect = menu.rect();
+                let delete =
+                    Point::new(rect.center().x, rect.y + t.mm(1.0) + (menu.items.len() as i32 - 1) * t.row + t.row / 2);
+                tap(&mut books, delete, cx);
+                assert!(books.confirm.is_some(), "the last row always asks to delete");
+                assert_eq!(store.book("0").hidden_from_continue, hidden);
+                books.confirm = None;
+            }
+            store
+                .save_book(
+                    "0",
+                    &BookState { position: crate::document::Position("saved-position".into()), ..Default::default() },
+                )
+                .unwrap();
+            books.open_menu("0".into(), Point::new(600, 600), &t);
+            let rect = books.menu.as_ref().unwrap().1.rect();
+            let remove = Point::new(rect.center().x, rect.y + t.mm(1.0) + 3 * t.row + t.row / 2);
+            tap(&mut books, remove, cx);
+            assert!(store.book("0").hidden_from_continue);
+            assert!(books.confirm.is_none());
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn delete_asks_first_then_removes_file_state_index_and_cover() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("delete")?;
         let file = root.join("doomed.epub");
@@ -1967,7 +2019,7 @@ mod tests {
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         let item = |books: &Books| {
             let menu = books.menu.as_ref().unwrap().1.rect();
-            Point::new(menu.center().x, menu.y + t.mm(1.0) + 4 * t.row + t.row / 2)
+            Point::new(menu.center().x, menu.y + t.mm(1.0) + 3 * t.row + t.row / 2)
         };
         with_cx(&t, screen, |cx| {
             assert!(books.books.iter().any(|b| b.id == "0"));

@@ -263,6 +263,10 @@ fn run() -> Result<()> {
                     app.on_usb(platform.usb_connected().unwrap_or(connected));
                 }
                 Some(Event::Quit) => {
+                    if cfg!(feature = "desktop") && opts.screenshot.is_none() {
+                        app.request_exit();
+                        break;
+                    }
                     // Draw what's pending first (screenshots need the last frame).
                     quit = true;
                     break;

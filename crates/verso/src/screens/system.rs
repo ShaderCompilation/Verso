@@ -187,6 +187,70 @@ impl Screen for SystemSettings {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum ExitChoice {
+    Cancel,
+    KeepSsh,
+    StopSsh,
+}
+
+/// App-wide confirmation: no touches reach the screen below it.
+pub struct ExitPrompt {
+    sheet: Sheet,
+    stop: Button,
+    exit: Button,
+    text: Rect,
+    stopping: bool,
+}
+impl ExitPrompt {
+    pub fn new(t: &Theme, screen: Rect) -> Self {
+        let sheet = Sheet::open("SSH is still running", t.mm(63.0).min(screen.h), screen, t);
+        let content = sheet.content(t);
+        let mut stop = Button::new("Stop and exit", ButtonKind::Primary);
+        stop.place(Rect::new(content.x, screen.bottom() - t.mm(24.0), content.w, t.button_h), t);
+        let mut exit = Button::new("Exit", ButtonKind::Secondary);
+        exit.place(Rect::new(content.x, screen.bottom() - t.mm(12.0), content.w, t.button_h), t);
+        Self { text: Rect { h: t.mm(23.0), ..content }, sheet, stop, exit, stopping: false }
+    }
+
+    pub fn set_stopping(&mut self, stopping: bool) {
+        self.stopping = stopping;
+        self.stop.enabled = !stopping;
+        self.exit.enabled = !stopping;
+    }
+
+    pub fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        cx.paragraph(
+            if self.stopping {
+                "Stopping SSH…"
+            } else {
+                "SSH will keep running after Verso closes. Stop it to close remote connections, or exit and leave it running."
+            },
+            cx.theme.small,
+            self.text,
+            HAlign::Left,
+        );
+        self.stop.draw(cx);
+        self.exit.draw(cx);
+    }
+
+    pub fn on_gesture(&mut self, g: &Gesture) -> Option<ExitChoice> {
+        if self.stopping {
+            return None;
+        }
+        if self.sheet.on_gesture(g) {
+            Some(ExitChoice::Cancel)
+        } else if self.stop.on_gesture(g) {
+            Some(ExitChoice::StopSsh)
+        } else if self.exit.on_gesture(g) {
+            Some(ExitChoice::KeepSsh)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct UsbPrompt {
     sheet: Sheet,
     exit: Button,
