@@ -39,4 +39,5 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
   - Before running Verso, check the Kindle is awake (`lipc-get-prop com.lab126.powerd state` is `active`) and no other app like KOReader is running. If it isn't ready, ask the user.
   - Never kill or pause other apps (KOReader, Amazon's UI) by hand. Only Verso's launcher may pause and resume the Kindle UI.
   - If the device is left in an odd state, put it back exactly as it was and tell the user.
+  - **KUAL always runs the latest build.** The app is in active development and the user tests every change on the device, so there is no separate "production" build to protect. After device work, the normal `/mnt/us/verso/verso` (and the launcher and KUAL files) must match the latest build: `scripts/deploy.sh` (or `--no-run`) installs it. Isolated copies for experiments are fine, but install the latest build when done instead of leaving an older one in place. Keep the user's settings, reading state and books.
 - Full setup and build details: [docs/setup.md](docs/setup.md).
