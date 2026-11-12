@@ -1,6 +1,9 @@
 # Kindle performance probes
 
 Sources used for the [2026-11-11 comparison](../../docs/research/performance.md).
+The [2026-11-12 repeat](../../docs/research/performance-2026-11-12.md) reuses the
+probe and KOReader wrapper, with updated sampling for slower startup and the
+new Home → library path. Its report records run order, boundaries and corrections.
 These are measurement components, not a deploy command. Running a reader still
 requires the launcher and device-readiness checks in `AGENTS.md`.
 
