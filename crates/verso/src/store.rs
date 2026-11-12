@@ -104,6 +104,13 @@ impl Store {
         }
         result
     }
+    /// Removes a deleted book's reading state. A missing record is fine.
+    pub fn remove_book(&self, id: &str) -> Result<()> {
+        match std::fs::remove_file(self.book_path(id)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
     pub fn library(&self) -> LibraryIndex {
         let started = std::time::Instant::now();
         let index = read::<LibraryIndex>(&self.root.join("library.json"))

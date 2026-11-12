@@ -49,6 +49,8 @@ struct Shared {
     /// Book ids whose visible thumbnail failed to load, and those since repaired.
     repairs: Vec<String>,
     repaired: Vec<String>,
+    /// Paths of deleted books to drop from the index.
+    removals: Vec<PathBuf>,
 }
 const REPAIR_LIMIT: usize = 32;
 const ERROR_LIMIT: usize = 32;
@@ -87,10 +89,14 @@ impl Channel {
         state.stop
     }
     /// Cover and identity work also stop for a new scan request.
+    /// A deletion also interrupts, and asks for the pass to run again after it.
     fn interrupted(&self) -> bool {
         let mut state = self.lock();
-        while state.paused && !state.stop && !state.requested {
+        while state.paused && !state.stop && !state.requested && state.removals.is_empty() {
             state = self.wait(state);
+        }
+        if !state.removals.is_empty() {
+            state.requested = true;
         }
         state.stop || state.requested
     }
@@ -149,6 +155,7 @@ impl Background {
                 while !state.stop
                     && !state.requested
                     && !state.home_requested
+                    && state.removals.is_empty()
                     && (state.paused || state.repairs.is_empty())
                 {
                     state = self.channel.wait(state);
@@ -156,6 +163,10 @@ impl Background {
                 if state.stop {
                     break;
                 }
+                let removals = std::mem::take(&mut state.removals);
+                drop(state);
+                self.remove(&removals);
+                let mut state = self.channel.lock();
                 (
                     std::mem::take(&mut state.retry),
                     std::mem::take(&mut state.requested),
@@ -311,8 +322,12 @@ impl Background {
 
     fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>) -> Next {
         let mut state = self.channel.lock();
-        while state.paused && !state.stop && !state.requested {
+        while state.paused && !state.stop && !state.requested && state.removals.is_empty() {
             state = self.channel.wait(state);
+        }
+        // Removing shifts book indices, so the pass restarts after a deletion.
+        if !state.removals.is_empty() {
+            state.requested = true;
         }
         if state.stop || state.requested {
             return Next::Interrupted;
@@ -324,6 +339,42 @@ impl Background {
         Next::Cover(visible.unwrap_or_else(|| *pending.first().unwrap()))
     }
 
+    /// Drops deleted books from the index, with their cached covers. No tombstone
+    /// is kept: the book's reading state was deleted too.
+    fn remove(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let before = self.index.books.len();
+        let store = &self.store;
+        self.index.books.retain(|book| {
+            if !paths.contains(&book.path) {
+                return true;
+            }
+            let key = match &book.cover {
+                Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
+                Cover::Pending => covers::key(book),
+            };
+            match std::fs::remove_file(store.cover_path(&key)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    log::warn!("removing cover of {}: {e}", book.path.display())
+                }
+                _ => {}
+            }
+            false
+        });
+        log::info!("library: removed {} deleted books", before - self.index.books.len());
+        if self.index.books.len() == before {
+            return;
+        }
+        self.unsaved = true;
+        self.unpublished = true;
+        let mut errors = Vec::new();
+        self.save(&mut errors, "library");
+        errors.iter().for_each(|e| log::warn!("{e}"));
+        self.rebuild_home();
+        self.publish();
+    }
     /// Records a displayed content change.
     fn changed(&mut self) {
         self.unsaved = true;
@@ -433,6 +484,12 @@ impl Worker {
     /// stops at its next check: between files, covers or 64 KiB fingerprint reads.
     pub fn pause(&self, paused: bool) {
         self.shared.0.lock().unwrap().paused = paused;
+        self.shared.1.notify_one();
+    }
+    /// Drop a deleted book (by path) from the index and its cover cache, without
+    /// a rescan. Interrupts a running pass, which then starts again.
+    pub fn remove(&self, path: PathBuf) {
+        self.shared.0.lock().unwrap().removals.push(path);
         self.shared.1.notify_one();
     }
     pub fn prioritize(&self, ids: Vec<String>) {

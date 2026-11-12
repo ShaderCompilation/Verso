@@ -6,7 +6,7 @@ use crate::document::{
 use crate::geom::{Point, Rect};
 use crate::gfx::{Family, HAlign, Icon};
 use crate::library::{
-    self, Book, Cover, LibraryIndex, Sort,
+    self, Book, Cover, LibraryIndex, Sort, Stamp,
     collections::{self, Collections, Navigation, Tab},
     covers,
     home::Summary,
@@ -101,6 +101,10 @@ pub struct Books {
     status: Rect,
     menu: Option<(String, PopupMenu)>,
     details: Option<Details>,
+    confirm: Option<ConfirmDelete>,
+    /// Books deleted this session (path and stamp), hidden from index and Home
+    /// updates the library worker published before it dropped them.
+    deleted: Vec<(PathBuf, Stamp)>,
     jump: Option<PageJump>,
     touching: bool,
     pending: Option<Snapshot>,
@@ -196,6 +200,8 @@ impl Books {
             status: Rect::default(),
             menu: None,
             details: None,
+            confirm: None,
+            deleted: Vec::new(),
             jump: None,
             touching: false,
             pending: None,
@@ -448,13 +454,17 @@ impl Books {
         if self.touching
             || self.menu.is_some()
             || self.details.is_some()
+            || self.confirm.is_some()
             || self.jump.is_some()
             || self.reader.is_some()
         {
             return;
         }
-        if let Some(home) = self.pending_home.take()
-            && self.home != home
+        if let Some(mut home) = self.pending_home.take()
+            && {
+                home.books.retain(|e| !self.was_deleted(&e.book));
+                self.home != home
+            }
         {
             self.home = home;
             if self.is_home() {
@@ -466,7 +476,8 @@ impl Books {
         if self.is_home() {
             return;
         }
-        if let Some(snapshot) = self.pending.take() {
+        if let Some(mut snapshot) = self.pending.take() {
+            snapshot.index.books.retain(|b| !self.was_deleted(b));
             let started = std::time::Instant::now();
             cx.redraw();
             self.index = snapshot.index;
@@ -633,6 +644,7 @@ impl Books {
                 (Some(Icon::Info), "Details".into()),
                 (Some(Icon::Check), "Mark finished".into()),
                 (None, "Remove from continue reading".into()),
+                (Some(Icon::Trash), "Delete…".into()),
             ],
             anchor,
             self.screen,
@@ -665,6 +677,41 @@ impl Books {
             }
             Err(e) => cx.toast(format!("Couldn't save book status: {e}"), None),
         }
+    }
+    fn was_deleted(&self, book: &Book) -> bool {
+        self.deleted.iter().any(|(path, stamp)| &book.path == path && &book.stamp == stamp)
+    }
+    /// Deletes the book file and its reading state. The library worker drops it
+    /// from the index and removes its cached cover; this view updates at once.
+    fn delete(&mut self, id: &str, cx: &mut EventCx) {
+        let Some(book) = self.book(id).cloned() else { return };
+        if let Err(e) = std::fs::remove_file(&book.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("deleting {}: {e}", book.path.display());
+            cx.toast(format!("Couldn't delete the book: {e}"), None);
+            return;
+        }
+        log::info!("deleted {}", book.path.display());
+        if let Err(e) = self.store.remove_book(&book.id) {
+            log::warn!("removing reading state of {}: {e}", book.path.display());
+        }
+        self.library.remove(book.path.clone());
+        self.deleted.push((book.path.clone(), book.stamp.clone()));
+        self.states.remove(&book.id);
+        self.home.books.retain(|e| e.book.id != book.id);
+        if self.browsing_ready {
+            self.index.books.retain(|b| b.path != book.path);
+            self.collections = Collections::from_index(&self.index, &self.roots);
+            self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
+            if let Some(search) = &mut self.search {
+                search.cache.sync(&self.index);
+            }
+        }
+        self.refresh(cx.theme);
+        self.save_navigation(cx);
+        cx.refresh(self.screen, RefreshMode::Full);
+        cx.toast(format!("Deleted “{}”", book.metadata.title), None);
     }
 }
 fn status(state: &BookState) -> String {
@@ -958,6 +1005,9 @@ impl Screen for Books {
         if let Some(details) = &mut self.details {
             details.draw(cx);
         }
+        if let Some(confirm) = &self.confirm {
+            confirm.draw(cx);
+        }
         if !self.thumbnails.requests.is_empty() {
             self.library.repair(std::mem::take(&mut self.thumbnails.requests));
         }
@@ -978,7 +1028,14 @@ impl Screen for Books {
         // Library controls own their press/capture state, including gestures
         // that return no action. Reader gestures invalidate independently.
         cx.redraw();
-        if let Some(details) = &mut self.details {
+        if let Some(confirm) = &mut self.confirm {
+            if let Some(delete) = confirm.on_gesture(&g) {
+                let id = self.confirm.take().map(|c| c.id).unwrap_or_default();
+                if delete {
+                    self.delete(&id, cx);
+                }
+            }
+        } else if let Some(details) = &mut self.details {
             if details.on_gesture(&g, cx) {
                 self.details = None;
             }
@@ -996,6 +1053,11 @@ impl Screen for Books {
                     }
                     MenuEvent::Chosen(2) => self.mark(&id, true, cx),
                     MenuEvent::Chosen(3) => self.mark(&id, false, cx),
+                    MenuEvent::Chosen(4) => {
+                        if let Some(book) = self.book(&id) {
+                            self.confirm = Some(ConfirmDelete::new(cx.theme, self.screen, id.clone(), book));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1373,6 +1435,46 @@ impl Details {
             cx.refresh(self.sheet.rect(), RefreshMode::Full);
         }
         false
+    }
+}
+
+/// "Delete book?" with Cancel and Delete. Nothing is removed until Delete.
+struct ConfirmDelete {
+    id: String,
+    sheet: Sheet,
+    message: String,
+    text: Rect,
+    cancel: Button,
+    delete: Button,
+}
+impl ConfirmDelete {
+    fn new(t: &Theme, screen: Rect, id: String, book: &Book) -> Self {
+        let sheet = Sheet::open("Delete book?", t.mm(52.0), screen, t);
+        let c = sheet.content(t);
+        let buttons_y = c.bottom() - t.margin - t.button_h;
+        let text = Rect { h: buttons_y - c.y - t.mm(3.0), ..c };
+        let w = (c.w - t.mm(3.0)) / 2;
+        let mut cancel = Button::new("Cancel", ButtonKind::Secondary);
+        cancel.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
+        let mut delete = Button::new("Delete", ButtonKind::Primary).with_icon(Icon::Trash);
+        delete.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
+        let title: String = book.metadata.title.chars().take(160).collect();
+        let message = format!("“{title}” and its reading progress will be removed from this device.");
+        Self { id, sheet, message, text, cancel, delete }
+    }
+    fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        let height = cx.text.measure(&self.message, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
+        cx.paragraph(&self.message, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
+        self.cancel.draw(cx);
+        self.delete.draw(cx);
+    }
+    /// Some(true) to delete, Some(false) to close without deleting.
+    fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
+        if self.sheet.on_gesture(g) || self.cancel.on_gesture(g) {
+            return Some(false);
+        }
+        self.delete.on_gesture(g).then_some(true)
     }
 }
 
@@ -1843,6 +1945,61 @@ mod tests {
             assert!(books.navigation.folder.is_none());
             assert_eq!(books.navigation.tab, Tab::Collections);
         });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn delete_asks_first_then_removes_file_state_index_and_cover() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("delete")?;
+        let file = root.join("doomed.epub");
+        std::fs::write(&file, b"not really an epub")?;
+        let mut index = store.library();
+        index.books[0].path = file.clone();
+        index.books[0].cover = Cover::Ready("doomedcover".into());
+        store.save_library(&index)?;
+        std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
+        std::fs::write(store.cover_path("doomedcover"), b"png")?;
+        store.save_book("0", &BookState { progress: 1234, ..Default::default() })?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let item = |books: &Books| {
+            let menu = books.menu.as_ref().unwrap().1.rect();
+            Point::new(menu.center().x, menu.y + t.mm(1.0) + 4 * t.row + t.row / 2)
+        };
+        with_cx(&t, screen, |cx| {
+            assert!(books.books.iter().any(|b| b.id == "0"));
+            // Cancel keeps everything.
+            books.open_menu("0".into(), Point::new(600, 600), &t);
+            let p = item(&books);
+            tap(&mut books, p, cx);
+            assert!(books.confirm.is_some());
+            let cancel = books.confirm.as_ref().unwrap().cancel.rect().center();
+            tap(&mut books, cancel, cx);
+            assert!(books.confirm.is_none() && file.exists());
+            // Delete removes the file and reading state, and the view updates at once.
+            books.open_menu("0".into(), Point::new(600, 600), &t);
+            let p = item(&books);
+            tap(&mut books, p, cx);
+            let delete = books.confirm.as_ref().unwrap().delete.rect().center();
+            tap(&mut books, delete, cx);
+            assert!(books.confirm.is_none());
+            assert!(!file.exists());
+            assert_eq!(store.book("0").progress, 0);
+            assert!(!books.books.iter().any(|b| b.id == "0"));
+            assert!(!books.index.books.iter().any(|b| b.id == "0"));
+            // An index published before the worker dropped the book doesn't bring it back.
+            books.pending = Some(Snapshot { index: index.clone(), ..Default::default() });
+            books.apply_pending(cx);
+            assert!(!books.books.iter().any(|b| b.id == "0"));
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.library().books.iter().any(|b| b.path == file) || store.cover_path("doomedcover").exists() {
+            assert!(std::time::Instant::now() < deadline, "the library worker drops the deleted book");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
