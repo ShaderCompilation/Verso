@@ -2336,6 +2336,7 @@ dependencies = [
  "crengine-sys",
  "env_logger",
  "fbink-sys",
+ "flate2",
  "image",
  "libc",
  "log",

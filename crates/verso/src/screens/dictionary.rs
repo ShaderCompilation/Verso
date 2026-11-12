@@ -1,0 +1,438 @@
+//! Lookup is an overlay over the unchanged cached book page.
+use crate::{
+    dictionary::{
+        Dictionary,
+        worker::{State, Worker},
+    },
+    geom::Rect,
+    gfx::HAlign,
+    platform::TextInput,
+    screens::EventCx,
+    ui::{
+        gesture::Gesture,
+        theme::{INK2, Theme},
+        widget::DrawCx,
+        widgets::{Button, ButtonKind, Keyboard, Pager, Sheet, TextField},
+    },
+};
+use std::rc::Rc;
+
+pub struct Lookup {
+    sheet: Sheet,
+    worker: Rc<Worker>,
+    request: u64,
+    pending: bool,
+    field: TextField,
+    keyboard: Keyboard,
+    search: Button,
+    previous: Button,
+    dictionaries_button: Button,
+    next: Button,
+    back: Button,
+    rescan: Button,
+    catalog: Vec<Dictionary>,
+    selected: Option<String>,
+    state: State,
+    pages: Vec<String>,
+    pager: Pager,
+    manager_pager: Pager,
+    manager: bool,
+    rows: Vec<(usize, Rect, Button, Button)>,
+    body: Rect,
+}
+impl Lookup {
+    pub fn new(query: &str, worker: Rc<Worker>, t: &Theme, screen: Rect) -> Self {
+        let sheet = Sheet::open("Dictionary", screen.h * 4 / 5, screen, t);
+        let content = sheet.content(t);
+        let gap = t.mm(2.0);
+        let mut field = TextField::default();
+        let mut search = Button::new("Look up", ButtonKind::Primary);
+        let search_w = t.mm(22.0);
+        field.place(Rect::new(content.x, content.y, content.w - search_w - gap, t.target));
+        field.edit(&TextInput::Insert(query.into()));
+        search.place(Rect::new(content.right() - search_w, content.y, search_w, t.target), t);
+        let row = Rect::new(content.x, content.y + t.target + gap, content.w, t.target);
+        let arrow = t.mm(16.0);
+        let mut previous = Button::new("‹", ButtonKind::Secondary);
+        let mut dictionaries_button = Button::new("Dictionaries", ButtonKind::Secondary);
+        let mut next = Button::new("›", ButtonKind::Secondary);
+        previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
+        next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
+        dictionaries_button.place(Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h), t);
+        let footer = Rect::new(content.x, screen.bottom() - t.target - gap, content.w, t.target);
+        let mut pager = Pager::new(1);
+        pager.place(footer, t);
+        let mut back = Button::new("Back", ButtonKind::Secondary);
+        let mut rescan = Button::new("Rescan", ButtonKind::Secondary);
+        back.place(Rect::new(content.x, content.y, content.w / 2 - gap, t.target), t);
+        rescan.place(Rect::new(content.x + content.w / 2 + gap, content.y, content.w / 2 - gap, t.target), t);
+        let body = Rect::new(content.x, row.bottom() + gap, content.w, footer.y - row.bottom() - 2 * gap);
+        let mut manager_pager = Pager::new(1);
+        manager_pager.place(footer, t);
+        let request = worker.lookup(query.into(), None, true);
+        let mut keyboard = Keyboard::default();
+        keyboard.place(screen, t);
+        Self {
+            sheet,
+            worker,
+            request,
+            pending: true,
+            field,
+            keyboard,
+            search,
+            previous,
+            dictionaries_button,
+            next,
+            back,
+            rescan,
+            catalog: Vec::new(),
+            selected: None,
+            state: State::NoResult,
+            pages: Vec::new(),
+            pager,
+            manager_pager,
+            manager: false,
+            rows: Vec::new(),
+            body,
+        }
+    }
+    pub fn busy(&self) -> bool {
+        self.pending
+    }
+    fn submit(&mut self, rescan: bool) {
+        self.request = self.worker.lookup(self.field.value().into(), self.selected.clone(), rescan);
+        self.pending = true;
+        self.pages.clear();
+        self.pager.set(0, 1);
+        self.field.focused = false;
+        self.keyboard.visible = false;
+    }
+    pub fn receive(&mut self, cx: &mut EventCx) {
+        if let Some(reply) = self.worker.receive()
+            && reply.id == self.request
+        {
+            self.pending = false;
+            self.catalog = reply.dictionaries;
+            self.selected = reply.selected;
+            self.state = reply.state;
+            self.pages.clear();
+            self.pager.set(0, 1);
+            if let Some(e) = reply.save_error {
+                log::warn!("dictionary preferences: {e}");
+                cx.toast("Couldn't save dictionary preferences", None);
+            }
+            self.place_rows(cx.theme);
+            cx.redraw();
+        }
+    }
+    fn place_rows(&mut self, t: &Theme) {
+        let top = self.sheet.content(t).y + t.target + t.mm(3.0);
+        let height = self.manager_pager.rect().y - top;
+        let row_h = t.target + t.mm(10.0);
+        let per = (height / row_h).max(1) as usize;
+        self.manager_pager.set(self.manager_pager.page, self.catalog.len().div_ceil(per));
+        self.rows.clear();
+        for (row, index) in (self.manager_pager.page * per..self.catalog.len()).take(per).enumerate() {
+            let d = &self.catalog[index];
+            let rect = Rect::new(self.body.x, top + row as i32 * row_h, self.body.w, row_h);
+            let width = t.mm(20.0);
+            let mut toggle = Button::new(if d.disabled { "Enable" } else { "Disable" }, ButtonKind::Secondary);
+            toggle.enabled = !self.pending;
+            toggle.place(Rect::new(rect.right() - 2 * width - t.mm(2.0), rect.y, width, t.target), t);
+            let mut up = Button::new("Move up", ButtonKind::Secondary);
+            up.enabled = index > 0 && !self.pending;
+            up.place(Rect::new(rect.right() - width, rect.y, width, t.target), t);
+            self.rows.push((index, rect, toggle, up));
+        }
+    }
+    fn cycle(&mut self, delta: isize) {
+        let enabled: Vec<_> = self.catalog.iter().filter(|d| !d.disabled).map(|d| d.id.clone()).collect();
+        if enabled.len() < 2 {
+            return;
+        }
+        let current = enabled.iter().position(|id| Some(id) == self.selected.as_ref()).unwrap_or(0);
+        let index = (current as isize + delta).rem_euclid(enabled.len() as isize) as usize;
+        self.selected = Some(enabled[index].clone());
+        self.submit(false);
+    }
+    pub fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
+        if !self.field.focused {
+            return false;
+        }
+        match input {
+            TextInput::Submit => {
+                self.selected = None;
+                self.submit(false);
+            }
+            TextInput::Dismiss => {
+                self.field.focused = false;
+                self.keyboard.visible = false;
+            }
+            _ => {
+                self.field.edit(input);
+            }
+        }
+        cx.redraw();
+        true
+    }
+    /// All gestures are consumed by the reader while this overlay is open.
+    pub fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> bool {
+        if self.keyboard.visible {
+            if let Some(input) = self.keyboard.on_gesture(g, cx.theme) {
+                self.on_text_input(&input, cx);
+            }
+            return false;
+        }
+        if self.sheet.on_gesture(g) {
+            return true;
+        }
+        if self.manager {
+            if self.back.on_gesture(g) {
+                self.manager = false;
+            }
+            if self.rescan.on_gesture(g) {
+                self.submit(true);
+                self.place_rows(cx.theme);
+            }
+            let old = self.manager_pager.page;
+            self.manager_pager.on_gesture(g);
+            if let Gesture::Swipe { dir, .. } = g {
+                self.manager_pager.on_swipe(*dir);
+            }
+            if old != self.manager_pager.page {
+                self.place_rows(cx.theme);
+            }
+            let mut change = None;
+            for (i, _, toggle, up) in &mut self.rows {
+                if toggle.on_gesture(g) {
+                    change = Some((*i, false));
+                }
+                if up.on_gesture(g) {
+                    change = Some((*i, true));
+                }
+            }
+            if let Some((i, up)) = change {
+                self.worker.change(self.catalog[i].id.clone(), up);
+                self.selected = None;
+                self.submit(false);
+                self.place_rows(cx.theme);
+            }
+        } else {
+            if self.field.on_gesture(g) {
+                self.field.focused = true;
+                self.keyboard.visible = true;
+            }
+            if self.search.on_gesture(g) {
+                self.selected = None;
+                self.submit(false);
+            }
+            if self.previous.on_gesture(g) {
+                self.cycle(-1);
+            }
+            if self.next.on_gesture(g) {
+                self.cycle(1);
+            }
+            if self.dictionaries_button.on_gesture(g) {
+                self.manager = true;
+                self.place_rows(cx.theme);
+            }
+            self.pager.on_gesture(g);
+            if let Gesture::Swipe { dir, .. } = g {
+                self.pager.on_swipe(*dir);
+            }
+        }
+        false
+    }
+    pub fn draw(&mut self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        let t = cx.theme;
+        if self.manager {
+            self.back.draw(cx);
+            self.rescan.draw(cx);
+            if self.catalog.is_empty() {
+                cx.text.draw(cx.canvas, "No dictionaries installed. Add StarDict files to the app data dictionaries/ folder, then tap Rescan.", t.body, self.body, HAlign::Left);
+            }
+            for (i, rect, toggle, up) in &self.rows {
+                let d = &self.catalog[*i];
+                let label = Rect::new(rect.x, rect.y, toggle.rect().x - rect.x - t.mm(2.0), t.target);
+                cx.line(&d.name, t.body, label, HAlign::Left);
+                let detail = if d.error.is_some() { format!("Unreadable · {}", d.id) } else { d.id.clone() };
+                cx.line(
+                    &detail,
+                    t.caption.gray(INK2),
+                    Rect::new(rect.x, rect.y + t.target, rect.w, t.mm(8.0)),
+                    HAlign::Left,
+                );
+                toggle.draw(cx);
+                up.draw(cx);
+            }
+            self.manager_pager.draw(cx);
+            return;
+        }
+        self.field.draw(cx);
+        self.search.draw(cx);
+        self.previous.enabled = self.catalog.iter().filter(|d| !d.disabled).count() > 1;
+        self.next.enabled = self.previous.enabled;
+        self.dictionaries_button.label = self
+            .catalog
+            .iter()
+            .find(|d| Some(&d.id) == self.selected.as_ref())
+            .map_or_else(|| "Dictionaries".into(), |d| d.name.clone());
+        self.previous.draw(cx);
+        self.dictionaries_button.draw(cx);
+        self.next.draw(cx);
+        if self.pages.is_empty() {
+            let message = if self.pending {
+                "Looking up…".to_owned()
+            } else {
+                match &self.state {
+            State::Definition(text) => text.clone(),
+            State::Missing => "No dictionaries installed. Add a StarDict dictionary to the app data dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
+            State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
+            State::NoResult => "No definition found. Tap the query to edit it, or try another dictionary.".into(),
+            State::Error(e) => format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."),
+        }
+            };
+            self.pages = cx.text.pages(&message, t.body, self.body.w, self.body.h);
+            self.pager.set(0, self.pages.len());
+        }
+        let page = self.pages[self.pager.page].trim_end();
+        let height = cx.text.measure(page, t.body, Some(self.body.w as f32)).1.ceil() as i32;
+        cx.text.draw(cx.canvas, page, t.body, Rect { h: height.min(self.body.h), ..self.body }, HAlign::Left);
+        self.pager.draw(cx);
+        self.keyboard.draw(cx);
+    }
+}
+
+pub struct SelectionActions {
+    sheet: Sheet,
+    dictionary: Button,
+}
+impl SelectionActions {
+    pub fn new(t: &Theme, screen: Rect) -> Self {
+        let sheet = Sheet::open("Selection", t.mm(28.0), screen, t);
+        let mut dictionary = Button::new("Dictionary", ButtonKind::Primary);
+        let body = sheet.content(t);
+        dictionary.place(Rect::new(body.x, body.y, body.w, t.target), t);
+        Self { sheet, dictionary }
+    }
+    pub fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
+        if self.sheet.on_gesture(g) {
+            Some(false)
+        } else if self.dictionary.on_gesture(g) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+    pub fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        self.dictionary.draw(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        platform::{TextInput, Waker},
+        store::Store,
+    };
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn query_editing_switching_preferences_and_stale_replies() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-lookup-ui-{}", std::process::id()));
+        let store = Store::at(root.clone());
+        std::fs::create_dir_all(store.dictionary_dir())?;
+        for name in ["a", "b"] {
+            let path = store.dictionary_dir().join(name);
+            std::fs::write(
+                path.with_extension("ifo"),
+                format!(
+                    "StarDict's dict ifo file\nversion=2.4.2\nbookname={name}\nwordcount=1\nidxfilesize=14\nsametypesequence=m\n"
+                ),
+            )?;
+            std::fs::write(path.with_extension("idx"), b"Hello\0\0\0\0\0\0\0\0\x07")?;
+            std::fs::write(path.with_extension("dict"), b"meaning")?;
+        }
+        let (tx, wake) = mpsc::channel();
+        let worker = Rc::new(Worker::new(
+            store.clone(),
+            Waker::new(move || {
+                let _ = tx.send(());
+            }),
+        ));
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut lookup = Lookup::new("Hello", worker.clone(), &t, screen);
+        let mut cx = EventCx {
+            theme: &t,
+            screen,
+            now: Instant::now(),
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut None,
+            forced: &mut Vec::new(),
+            needs_redraw: &mut false,
+        };
+        let wait = |lookup: &mut Lookup, cx: &mut EventCx| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while lookup.pending {
+                lookup.receive(cx);
+                if !lookup.pending {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                let _ = wake.recv_timeout(Duration::from_millis(20));
+            }
+        };
+        wait(&mut lookup, &mut cx);
+        assert!(matches!(&lookup.state, State::Definition(text) if text.contains("meaning")));
+        let initial = lookup.selected.clone();
+        lookup.cycle(1);
+        wait(&mut lookup, &mut cx);
+        assert_ne!(lookup.selected, initial);
+        // A field edit leaves the source selection/query untouched until submit.
+        lookup.field.focused = true;
+        lookup.keyboard.visible = true;
+        assert!(lookup.on_text_input(&TextInput::Clear, &mut cx));
+        assert!(lookup.on_text_input(&TextInput::Insert("absent".into()), &mut cx));
+        assert!(lookup.on_text_input(&TextInput::Submit, &mut cx));
+        wait(&mut lookup, &mut cx);
+        assert_eq!(lookup.state, State::NoResult);
+        // Change requests are persisted before the next result or exit barrier.
+        worker.change("b.ifo".into(), true);
+        lookup.submit(false);
+        wait(&mut lookup, &mut cx);
+        assert_eq!(lookup.catalog[0].id, "b.ifo");
+        worker.change("b.ifo".into(), false);
+        worker.flush()?;
+        let prefs: Vec<crate::dictionary::Preference> =
+            serde_json::from_slice(&std::fs::read(store.dictionary_preferences())?)?;
+        assert_eq!(prefs[0].id, "b.ifo");
+        assert!(prefs[0].disabled);
+        // An obsolete worker reply must not replace a newer request.
+        let old = lookup.request;
+        lookup.request += 1;
+        lookup.pending = true;
+        lookup.worker.result_for_test(crate::dictionary::worker::Reply {
+            id: old,
+            dictionaries: Vec::new(),
+            selected: None,
+            state: State::Missing,
+            save_error: None,
+        });
+        lookup.receive(&mut cx);
+        assert!(lookup.pending);
+        assert_eq!(lookup.catalog.len(), 2);
+        worker.flush()?;
+        drop(lookup);
+        drop(worker);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

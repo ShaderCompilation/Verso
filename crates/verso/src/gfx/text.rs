@@ -175,6 +175,48 @@ impl TextRenderer {
         self.measure(text, style, None).0
     }
 
+    /// Split at shaped line boundaries, including empty paragraph lines.
+    /// Shape at most 16 KiB at once, keeping long dictionary entries bounded.
+    pub fn pages(&mut self, source: &str, style: TextStyle, width: i32, height: i32) -> Vec<String> {
+        let lines = (height as f32 / style.line_height()).floor().max(1.0) as usize;
+        let mut pages = Vec::new();
+        let mut remaining = source;
+        while !remaining.is_empty() {
+            let mut end = remaining.len().min(16384);
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end < remaining.len()
+                && let Some(space) = remaining[..end].rfind(char::is_whitespace)
+                && space > end / 2
+            {
+                end = space + remaining[space..].chars().next().unwrap().len_utf8();
+            }
+            let text = &remaining[..end];
+            let buffer = self.shape(text, style, Some(width.max(1) as f32), 0, HAlign::Left);
+            let mut offsets = vec![0];
+            offsets.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+            let mut start = 0;
+            for (i, run) in buffer.layout_runs().enumerate() {
+                if i > 0 && i % lines == 0 {
+                    let boundary = offsets[run.line_i] + run.glyphs.iter().map(|g| g.start).min().unwrap_or(0);
+                    if boundary > start {
+                        pages.push(text[start..boundary].to_owned());
+                        start = boundary;
+                    }
+                }
+            }
+            if start < text.len() {
+                pages.push(text[start..].to_owned());
+            }
+            remaining = &remaining[end..];
+        }
+        if pages.is_empty() {
+            pages.push(String::new());
+        }
+        pages
+    }
+
     /// Draws one line of text in `rect`, cut short with "…" if it's too wide,
     /// and centred vertically on its capital letters.
     pub fn line(&mut self, canvas: &mut Canvas, text: &str, style: TextStyle, rect: Rect, align: HAlign) {
@@ -342,6 +384,26 @@ mod tests {
         let bounds = c.bounds();
         t.draw(&mut c, "Hi", STYLE, bounds, HAlign::Center);
         assert!(ink(&c).iter().any(|&v| v < 64), "some ink should be drawn");
+    }
+
+    #[test]
+    fn paged_text_preserves_every_byte_and_fits_without_ellipses() {
+        let mut renderer = TextRenderer::new();
+        for text in [
+            "Paragraph one has some words.\n\nParagraph two.\n\n".repeat(1200),
+            "Длинное определение с переносами строк.\n\n".repeat(300),
+            "word ".repeat(20000),
+            "verylongunbrokenword".repeat(100),
+            "עברית العربية café e\u{301} שלום\n".repeat(20),
+        ] {
+            let pages = renderer.pages(&text, STYLE, 300, 250);
+            assert_eq!(pages.concat(), text);
+            assert!(pages.len() > 1);
+            for page in pages {
+                let height = renderer.measure(page.trim_end(), STYLE, Some(300.0)).1;
+                assert!(height <= 250.0, "page exceeds its area: {height}: {page:?}");
+            }
+        }
     }
 
     #[test]

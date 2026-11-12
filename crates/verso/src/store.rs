@@ -136,6 +136,15 @@ impl Store {
     pub fn cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}.png"))
     }
+    pub fn dictionary_dir(&self) -> PathBuf {
+        self.root.join("dictionaries")
+    }
+    pub fn dictionary_cache(&self) -> PathBuf {
+        self.root.join("dictionary-cache")
+    }
+    pub fn dictionary_preferences(&self) -> PathBuf {
+        self.root.join("dictionaries.json")
+    }
     pub fn library_folders(&self) -> Vec<PathBuf> {
         folder_paths(self.settings(), std::env::var_os("VERSO_BOOKS"))
     }

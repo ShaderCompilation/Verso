@@ -1176,7 +1176,10 @@ impl Screen for Books {
         Action::None
     }
     fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
-        if self.reader.is_some() || self.search.is_none() {
+        if let Some(reader) = &mut self.reader {
+            return reader.on_text_input(input, cx);
+        }
+        if self.search.is_none() {
             return false;
         }
         // Entry overlays retain ownership until their touch is released.

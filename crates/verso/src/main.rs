@@ -11,6 +11,7 @@ compile_error!("Enable exactly one backend: `desktop` (default) or `kindle`.");
 compile_error!("Enable a backend: `desktop` (default) or `kindle`.");
 
 mod app;
+mod dictionary;
 mod document;
 mod geom;
 mod gfx;
@@ -216,6 +217,13 @@ fn run() -> Result<()> {
                     if let Some(g) = gestures.on_touch(&t) {
                         log::debug!("{g:?}");
                         app.on_gesture(g);
+                        // A release after a missed timer classifies as a
+                        // long press; deliver its release in this same batch.
+                        if matches!(t.phase, platform::TouchPhase::Up)
+                            && matches!(g, ui::gesture::Gesture::LongPress(_))
+                        {
+                            app.on_gesture(ui::gesture::Gesture::End(t.pos));
+                        }
                     }
                 }
                 Some(Event::Sleep) => {

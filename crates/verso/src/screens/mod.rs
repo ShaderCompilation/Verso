@@ -4,6 +4,7 @@
 
 pub mod books;
 pub mod contents;
+pub mod dictionary;
 pub mod gallery;
 pub mod reader;
 pub mod reader_menu;

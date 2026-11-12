@@ -9,6 +9,7 @@ use crate::gfx::HAlign;
 use crate::platform::RefreshMode;
 use crate::reader::{self, PageCache, Refresh, Zone};
 use crate::screens::contents::{Contents, ContentsEvent};
+use crate::screens::dictionary::{Lookup, SelectionActions};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
 use crate::screens::{Action, EventCx, Screen};
@@ -49,6 +50,7 @@ pub struct Reader {
     error: Option<String>,
     opened_at: Option<Instant>,
     selection: SelectionState,
+    dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
 }
 enum Overlay {
     None,
@@ -56,6 +58,8 @@ enum Overlay {
     Text(Box<TextSheet>),
     Fonts(Box<FontList>),
     Contents(Box<Contents>),
+    Lookup(Box<Lookup>),
+    SelectionActions(Box<SelectionActions>),
 }
 impl Reader {
     pub fn book_id(&self) -> &str {
@@ -99,6 +103,7 @@ impl Reader {
             error: None,
             opened_at: Some(Instant::now()),
             selection: SelectionState::default(),
+            dictionary: None,
         }
     }
     pub fn failed_open(&self) -> bool {
@@ -112,6 +117,7 @@ impl Reader {
             Reply::Selection { request, result } => {
                 let context = self.selection_context();
                 self.selection.receive(request, result, context, &self.worker, cx);
+                self.selection_released(cx);
             }
             Reply::Opened { generation, metadata, toc, pages, current } if generation == self.cache.generation => {
                 self.metadata = metadata;
@@ -137,6 +143,23 @@ impl Reader {
                 cx.toast(message, None);
             }
             _ => {}
+        }
+    }
+    fn lookup(&mut self, query: &str, cx: &mut EventCx) {
+        let service = self.dictionary.get_or_insert_with(|| {
+            Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
+        });
+        self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service.clone(), cx.theme, self.screen)));
+        cx.redraw();
+    }
+    fn selection_released(&mut self, cx: &mut EventCx) {
+        if let Some(text) = self.selection.take_released() {
+            if text.split_whitespace().count() == 1 {
+                self.lookup(&text, cx);
+            } else {
+                self.overlay = Overlay::SelectionActions(Box::new(SelectionActions::new(cx.theme, self.screen)));
+                cx.redraw();
+            }
         }
     }
     fn display(&mut self, page: Arc<Page>, cx: &mut EventCx) {
@@ -263,6 +286,9 @@ impl Reader {
     pub fn close(&mut self) -> anyhow::Result<()> {
         self.selection.clear();
         self.flush_position()?;
+        if let Some(worker) = &self.dictionary {
+            worker.flush()?;
+        }
         self.worker.send(Command::Close);
         Ok(())
     }
@@ -315,6 +341,8 @@ impl Screen for Reader {
             Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
             Overlay::Fonts(fonts) => fonts.draw(cx),
             Overlay::Contents(contents) => contents.draw(cx),
+            Overlay::Lookup(lookup) => lookup.draw(cx),
+            Overlay::SelectionActions(actions) => actions.draw(cx),
         }
         if self.laying_out || self.layout_at.is_some() || self.error.is_some() || self.save_error.is_some() {
             let message = self
@@ -329,10 +357,12 @@ impl Screen for Reader {
         }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
-        if matches!(self.overlay, Overlay::None)
+        if (matches!(self.overlay, Overlay::None)
+            || matches!(self.overlay, Overlay::SelectionActions(_)) && self.selection.adjusting(g, cx.theme))
             && let Some(context) = self.selection_context()
             && self.selection.on_gesture(g, context, &self.worker, cx)
         {
+            self.selection_released(cx);
             return Action::None;
         }
         if !matches!(self.overlay, Overlay::None) {
@@ -341,6 +371,27 @@ impl Screen for Reader {
             cx.redraw();
         }
         match &mut self.overlay {
+            Overlay::Lookup(lookup) => {
+                if lookup.on_gesture(&g, cx) {
+                    self.overlay = Overlay::None;
+                    self.selection.clear();
+                    if let Some(worker) = &self.dictionary {
+                        worker.cancel();
+                    }
+                }
+            }
+            Overlay::SelectionActions(actions) => {
+                if let Some(open) = actions.on_gesture(&g) {
+                    if open {
+                        if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
+                            self.lookup(&query, cx);
+                        }
+                    } else {
+                        self.overlay = Overlay::None;
+                        self.selection.clear();
+                    }
+                }
+            }
             Overlay::Menu(menu) => match menu.on_gesture(&g) {
                 Some(MenuEvent::Books) => {
                     return match self.close() {
@@ -429,7 +480,8 @@ impl Screen for Reader {
         Action::None
     }
     fn busy(&self) -> bool {
-        self.selection.busy()
+        matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.busy())
+            || self.selection.busy()
             || self.laying_out
             || self.layout_at.is_some()
             || self.shown.as_ref().is_some_and(|p| p.number != self.target)
@@ -460,6 +512,9 @@ impl Screen for Reader {
         Action::None
     }
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Overlay::Lookup(lookup) = &mut self.overlay {
+            lookup.receive(cx);
+        }
         let had_error = self.save_error.is_some();
         for result in self.persistence.drain() {
             self.save_error = result.err().map(|e| format!("{e:#}"));
@@ -475,6 +530,9 @@ impl Screen for Reader {
             cx.redraw();
         }
     }
+    fn on_text_input(&mut self, input: &crate::platform::TextInput, cx: &mut EventCx) -> bool {
+        if let Overlay::Lookup(lookup) = &mut self.overlay { lookup.on_text_input(input, cx) } else { false }
+    }
     fn after_present(&mut self) {
         if self.shown.is_some()
             && let Some(started) = self.opened_at.take()
@@ -485,12 +543,19 @@ impl Screen for Reader {
     }
     fn on_sleep(&mut self) {
         self.selection.sleep();
+        if let Some(worker) = &self.dictionary {
+            worker.cancel();
+        }
         let _ = self.flush_position();
         // Dropping the controls cancels held steppers and slider drags.
         self.overlay = Overlay::None;
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
-        self.flush_position()
+        self.flush_position()?;
+        if let Some(worker) = &self.dictionary {
+            worker.flush()?;
+        }
+        Ok(())
     }
 }
 

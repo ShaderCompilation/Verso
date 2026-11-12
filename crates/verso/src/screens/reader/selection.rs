@@ -19,6 +19,7 @@ pub(super) struct SelectionState {
     dragging: bool,
     moved: bool,
     offset: Point,
+    released: bool,
 }
 
 impl SelectionState {
@@ -28,10 +29,27 @@ impl SelectionState {
         self.anchor = None;
         self.queued = None;
         self.dragging = false;
+        self.released = false;
     }
 
     pub fn busy(&self) -> bool {
         self.pending.is_some()
+    }
+
+    pub fn take_released(&mut self) -> Option<String> {
+        if !self.released || self.busy() {
+            return None;
+        }
+        self.released = false;
+        self.selected.as_ref().map(|s| s.text.clone())
+    }
+
+    pub fn adjusting(&self, g: Gesture, theme: &crate::ui::theme::Theme) -> bool {
+        if self.captured {
+            return !matches!(g, Gesture::Down(_));
+        }
+        matches!(g, Gesture::Down(p) if self.handles(theme.mm(1.2).max(2)).is_some_and(|handles|
+            handles.iter().any(|(center, _)| center.distance(p) <= theme.mm(4.0) as f32)))
     }
 
     pub fn sleep(&mut self) {
@@ -102,6 +120,7 @@ impl SelectionState {
                         .min_by(|(_, (a, _)), (_, (b, _))| a.distance(p).total_cmp(&b.distance(p)))
                 });
                 if let Some((index, (_, target))) = handle {
+                    self.released = false;
                     let range = &self.selected.as_ref().unwrap().range;
                     let fixed = if index == 0 { &range.end } else { &range.start }.clone();
                     self.anchor = Some(TextRange { start: fixed.clone(), end: fixed });
@@ -133,6 +152,7 @@ impl SelectionState {
             }
             _ if self.captured => {
                 if g.ends_touch() {
+                    self.released = self.dragging;
                     if self.dragging && (self.moved || matches!(g, Gesture::Swipe { .. })) {
                         self.focus(g.pos(), context, worker);
                     }
@@ -312,6 +332,23 @@ mod tests {
             state.receive(request, Ok(None), Some(CONTEXT), worker, cx);
             assert!(!state.on_gesture(Gesture::Down(p), CONTEXT, worker, cx));
             assert!(!state.on_gesture(Gesture::Tap(p), CONTEXT, worker, cx));
+        });
+    }
+
+    #[test]
+    fn release_waits_for_the_final_reply_and_is_consumed_once() {
+        with_context(|state, worker, commands, cx| {
+            let p = Point::new(120, 110);
+            state.on_gesture(Gesture::LongPress(p), CONTEXT, worker, cx);
+            let (request, _) = next(commands);
+            assert!(state.take_released().is_none());
+            state.on_gesture(Gesture::End(p), CONTEXT, worker, cx);
+            assert!(state.take_released().is_none());
+            state.receive(request, Ok(Some(selected("word"))), Some(CONTEXT), worker, cx);
+            assert_eq!(state.take_released().as_deref(), Some("word"));
+            assert!(state.take_released().is_none());
+            state.sleep();
+            assert!(state.take_released().is_none());
         });
     }
 }
