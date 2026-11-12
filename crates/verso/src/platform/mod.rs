@@ -17,6 +17,7 @@ mod kindle;
 #[cfg(any(feature = "kindle", test))]
 mod power;
 pub mod ssh;
+pub mod wifi;
 
 /// How an area of the e-ink screen should be refreshed. The app states its
 /// intent; each backend picks the matching waveform. Ordered from weakest to

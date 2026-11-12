@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::HAlign;
-use crate::platform::ssh;
+use crate::platform::{ssh, wifi};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{SleepScreen, Store};
 use crate::ui::gesture::Gesture;
@@ -21,6 +21,10 @@ pub struct SystemSettings {
     version_press: Press,
     version_taps: (u8, Instant),
     developer: bool,
+    wifi: Option<bool>,
+    wifi_toggle: Toggle,
+    wifi_pending: Option<bool>,
+    wifi_top: i32,
     ssh: ssh::Status,
     ssh_toggle: Toggle,
     /// Start (true) or stop the SSH server once "Starting…" is on screen.
@@ -42,7 +46,12 @@ impl SystemSettings {
             usize::from(store.settings().sleep_screen == SleepScreen::Amazon),
         );
         sleep.place(Rect::new(content.x, content.y + t.mm(10.0), content.w, t.button_h));
-        let dev_top = sleep.rect().bottom() + t.mm(30.0);
+        let wifi_top = sleep.rect().bottom() + t.mm(26.0);
+        let wifi = Self::read_wifi();
+        let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
+        wifi_toggle.enabled = wifi.is_some();
+        wifi_toggle.place(content.right(), wifi_top + t.mm(4.0), t);
+        let dev_top = wifi_top + t.mm(24.0);
         let ssh = ssh::status();
         let mut ssh_toggle = Toggle::new(ssh.running);
         ssh_toggle.place(content.right(), dev_top + t.mm(12.0), t);
@@ -57,6 +66,10 @@ impl SystemSettings {
             version_press: Press::default(),
             version_taps: (0, Instant::now()),
             developer,
+            wifi,
+            wifi_toggle,
+            wifi_pending: None,
+            wifi_top,
             ssh_was_running: ssh.running,
             ssh,
             ssh_toggle,
@@ -65,6 +78,27 @@ impl SystemSettings {
         };
         this.sync_ssh_toggle();
         this
+    }
+
+    fn read_wifi() -> Option<bool> {
+        match wifi::enabled() {
+            Ok(on) => Some(on),
+            Err(e) => {
+                log::error!("Wi-Fi state: {e:#}");
+                None
+            }
+        }
+    }
+
+    fn wifi_note(&self) -> &'static str {
+        match (self.wifi_pending, self.wifi) {
+            (Some(true), _) => "Turning on…",
+            (Some(false), _) => "Turning off…",
+            (None, Some(true)) if self.ssh.running => "On. Turning Wi-Fi off disconnects SSH.",
+            (None, Some(true)) => "On. Uses networks saved in Kindle settings.",
+            (None, Some(false)) => "Off. Turn on to use a saved Wi-Fi network.",
+            (None, None) => "Couldn't read Wi-Fi state. Reopen Settings to retry.",
+        }
     }
 
     /// The developer section also shows while the server runs, so it can
@@ -131,6 +165,15 @@ impl Screen for SystemSettings {
             Rect::new(self.content.x, self.sleep.rect().bottom() + t.mm(6.0), self.content.w, t.mm(20.0)),
             HAlign::Left,
         );
+        let label = Rect::new(self.content.x, self.wifi_top, self.content.w - t.mm(12.0), t.mm(8.0));
+        cx.line("Wi-Fi", t.body, label, HAlign::Left);
+        self.wifi_toggle.draw(cx);
+        cx.paragraph(
+            self.wifi_note(),
+            t.small.gray(INK2),
+            Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(14.0)),
+            HAlign::Left,
+        );
         if self.show_developer() {
             let c = self.content;
             cx.section_label("Developer", Rect::new(c.x, self.dev_top, c.w, t.mm(8.0)));
@@ -159,7 +202,14 @@ impl Screen for SystemSettings {
                 cx.toast("Couldn't save sleep screen", None);
             }
         }
+        if self.wifi_pending.is_none()
+            && self.ssh_pending.is_none()
+            && let Some(on) = self.wifi_toggle.on_gesture(&g)
+        {
+            self.wifi_pending = Some(on);
+        }
         if self.show_developer()
+            && self.wifi_pending.is_none()
             && self.ssh_pending.is_none()
             && let Some(on) = self.ssh_toggle.on_gesture(&g)
         {
@@ -171,9 +221,21 @@ impl Screen for SystemSettings {
         Action::None
     }
     fn has_pending_work(&self) -> bool {
-        self.ssh_pending.is_some()
+        self.wifi_pending.is_some() || self.ssh_pending.is_some()
     }
     fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
+        if let Some(on) = self.wifi_pending.take() {
+            if let Err(e) = wifi::set_enabled(on) {
+                log::error!("Wi-Fi: {e:#}");
+                cx.toast(if on { "Couldn't turn Wi-Fi on" } else { "Couldn't turn Wi-Fi off" }, None);
+            }
+            self.wifi = Self::read_wifi();
+            self.wifi_toggle.on = self.wifi.unwrap_or(false);
+            self.wifi_toggle.enabled = self.wifi.is_some();
+            self.ssh = ssh::status();
+            self.sync_ssh_toggle();
+            cx.redraw();
+        }
         if let Some(on) = self.ssh_pending.take() {
             if let Err(e) = ssh::set_running(on) {
                 log::error!("SSH server: {e:#}");

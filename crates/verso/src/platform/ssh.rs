@@ -256,7 +256,11 @@ mod imp {
     static RUNNING: AtomicBool = AtomicBool::new(false);
 
     pub fn status() -> Status {
-        Status { running: RUNNING.load(Ordering::Relaxed), unavailable: None, address: Some("192.168.1.42".into()) }
+        Status {
+            running: RUNNING.load(Ordering::Relaxed),
+            unavailable: None,
+            address: super::super::wifi::enabled().unwrap_or(false).then(|| "192.168.1.42".into()),
+        }
     }
 
     pub fn set_running(on: bool) -> Result<()> {
