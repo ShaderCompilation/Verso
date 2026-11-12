@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
 use super::{
-    Document, FontFace, Layout, Metadata, Paths, Position, Selection, SelectionQuery, TextRange, TocEntry, Typography,
+    Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchHit, SearchStatus, Selection,
+    SelectionQuery, TextRange, TocEntry, Typography,
 };
 
 /// Upper limit for crengine's on-disk document cache.
@@ -176,6 +177,39 @@ impl Document for CreDocument {
             text: string(2)?,
             rects: rects.into_iter().map(|r| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)).collect(),
         }))
+    }
+
+    fn search_start(&mut self, query: &str) -> Result<()> {
+        let query = CString::new(query)?;
+        anyhow::ensure!(unsafe { sys::verso_cre_search_start(self.raw, query.as_ptr()) } == 0, "couldn't search");
+        Ok(())
+    }
+
+    fn search_step(&mut self, budget: std::time::Duration) -> Result<SearchBatch> {
+        let ms = c_int::try_from(budget.as_millis()).unwrap_or(c_int::MAX).max(1);
+        let n = unsafe { sys::verso_cre_search_step(self.raw, ms) };
+        anyhow::ensure!(n >= 0, "search failed");
+        let mut hits = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let string =
+                |field| read_string(|buf, len| unsafe { sys::verso_cre_search_hit(self.raw, i, field, buf, len) });
+            let page = unsafe { sys::verso_cre_search_hit(self.raw, i, 5, std::ptr::null_mut(), 0) };
+            hits.push(SearchHit {
+                range: TextRange { start: Position(string(0)?), end: Position(string(1)?) },
+                page: page.max(0) as usize,
+                before: string(2)?,
+                matched: string(3)?,
+                after: string(4)?,
+            });
+        }
+        let mut searched: c_int = 0;
+        let status = match unsafe { sys::verso_cre_search_state(self.raw, &mut searched) } {
+            0 => SearchStatus::Searching,
+            1 => SearchStatus::Finished,
+            2 => SearchStatus::Limited,
+            _ => bail!("search failed"),
+        };
+        Ok(SearchBatch { hits, searched_pages: searched.max(0) as usize, pages: self.page_count(), status })
     }
 
     fn position(&mut self) -> Result<Position> {

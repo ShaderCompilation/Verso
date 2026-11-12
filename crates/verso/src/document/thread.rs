@@ -1,7 +1,7 @@
 //! The only thread that touches crengine. Results carry a book/layout generation.
 use super::{
-    CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, Selection, SelectionQuery, TocEntry,
-    Typography,
+    CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchStatus,
+    Selection, SelectionQuery, TocEntry, Typography,
 };
 use crate::platform::Waker;
 use anyhow::Result;
@@ -9,6 +9,12 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// Engine time per search step before the queue is checked again.
+const SEARCH_SLICE: Duration = Duration::from_millis(60);
+/// Hitless progress replies are sent at most this often.
+const SEARCH_PROGRESS: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug)]
 pub struct Page {
@@ -26,12 +32,47 @@ pub struct SelectionRequest {
     pub page: usize,
     pub id: u64,
 }
+/// A search session on one book layout; IDs are never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchRequest {
+    pub generation: u64,
+    pub id: u64,
+}
 pub enum Command {
-    Select { request: SelectionRequest, query: SelectionQuery },
-    Open { generation: u64, path: PathBuf, layout: Layout, typography: Typography, footer: bool, position: Position },
-    Layout { generation: u64, typography: Typography, footer: bool, position: Position },
-    Page { generation: u64, number: usize },
-    Position { generation: u64, position: Position },
+    Select {
+        request: SelectionRequest,
+        query: SelectionQuery,
+    },
+    /// Replaces any running search. Steps interleave with other commands.
+    Search {
+        request: SearchRequest,
+        query: String,
+    },
+    CancelSearch,
+    Open {
+        generation: u64,
+        path: PathBuf,
+        layout: Layout,
+        typography: Typography,
+        footer: bool,
+        position: Position,
+    },
+    Layout {
+        generation: u64,
+        typography: Typography,
+        footer: bool,
+        position: Position,
+    },
+    Page {
+        generation: u64,
+        number: usize,
+    },
+    /// Replies with `Jumped` carrying `jump`, whatever page holds the position.
+    Position {
+        generation: u64,
+        position: Position,
+        jump: u64,
+    },
     Close,
     Shutdown,
 }
@@ -40,6 +81,8 @@ pub enum Reply {
     Fonts(Vec<FontFace>),
     Opened { generation: u64, metadata: Metadata, toc: Vec<TocEntry>, pages: usize, current: usize },
     Page(Arc<Page>),
+    Jumped { jump: u64, page: Arc<Page> },
+    Search { request: SearchRequest, result: Result<SearchBatch, String> },
     Error { generation: u64, message: String },
 }
 pub struct Worker {
@@ -74,14 +117,73 @@ impl Worker {
                 let mut generation = 0;
                 let mut dimensions = (0, 0);
                 let mut pending = None;
-                while let Some(command) = pending.take().or_else(|| commands.recv().ok()) {
+                // (request, last reply, started, hits so far)
+                let mut search: Option<(SearchRequest, Instant, Instant, usize)> = None;
+                loop {
+                    let command = match pending.take() {
+                        Some(command) => command,
+                        // A running search steps only while no command waits.
+                        None if search.is_some() => match commands.try_recv() {
+                            Ok(command) => command,
+                            Err(mpsc::TryRecvError::Empty) => {
+                                if let (Some((request, sent, started, found)), Some(d)) = (&mut search, &mut doc) {
+                                    let result = d.search_step(SEARCH_SLICE).map_err(|e| format!("{e:#}"));
+                                    let running = matches!(&result, Ok(b) if b.status == SearchStatus::Searching);
+                                    let hits = result.as_ref().map_or(0, |b| b.hits.len());
+                                    *found += hits;
+                                    if !running {
+                                        log::info!(
+                                            "search finished: {} hits over {} pages in {:?}",
+                                            found,
+                                            d.page_count(),
+                                            started.elapsed()
+                                        );
+                                    }
+                                    if !running || hits > 0 || sent.elapsed() >= SEARCH_PROGRESS {
+                                        *sent = Instant::now();
+                                        send(Reply::Search { request: *request, result });
+                                    }
+                                    if !running {
+                                        search = None;
+                                    }
+                                } else {
+                                    search = None;
+                                }
+                                continue;
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => break,
+                        },
+                        None => match commands.recv() {
+                            Ok(command) => command,
+                            Err(_) => break,
+                        },
+                    };
                     // Skip intermediate layouts already queued, preserving ordering of other commands.
                     let command = coalesce(command, &commands, &mut pending);
                     if matches!(command, Command::Shutdown) {
                         break;
                     }
+                    if matches!(command, Command::Open { .. } | Command::Layout { .. } | Command::Close) {
+                        search = None;
+                    }
                     let result: Result<()> = (|| {
                         match command {
+                            Command::Search { request, query } => {
+                                search = None;
+                                if request.generation == generation
+                                    && let Some(d) = &mut doc
+                                {
+                                    match d.search_start(&query) {
+                                        Ok(()) => search = Some((request, Instant::now(), Instant::now(), 0)),
+                                        Err(e) => send(Reply::Search { request, result: Err(format!("{e:#}")) }),
+                                    }
+                                }
+                                return Ok(());
+                            }
+                            Command::CancelSearch => {
+                                search = None;
+                                return Ok(());
+                            }
                             Command::Select { request, query } => {
                                 if request.generation == generation
                                     && let Some(d) = &mut doc
@@ -118,13 +220,13 @@ impl Worker {
                                 }
                                 return Ok(());
                             }
-                            Command::Position { generation: g, position } => {
+                            Command::Position { generation: g, position, jump } => {
                                 if g == generation
                                     && let Some(d) = &mut doc
                                 {
                                     d.go_to_position(&position)?;
                                     let number = d.current_page();
-                                    send(Reply::Page(render(d, g, number, dimensions)?));
+                                    send(Reply::Jumped { jump, page: render(d, g, number, dimensions)? });
                                 }
                                 return Ok(());
                             }

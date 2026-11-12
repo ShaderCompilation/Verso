@@ -23,6 +23,18 @@ int verso_cre_selection_text(VersoCreDoc *doc, int field, char *buf, int len);
 /* Returns total count, copies at most capacity screen rectangles. */
 int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacity);
 
+/* Book search. Start a literal, case-insensitive search from the beginning,
+ * keeping matches that start a word when the query starts with a letter or
+ * digit; each step searches whole blocks for about max_ms and keeps only that step's
+ * hits. Returns the number of new hits, or -1 on error. */
+int verso_cre_search_start(VersoCreDoc *doc, const char *query);
+int verso_cre_search_step(VersoCreDoc *doc, int max_ms);
+/* 0 = searching, 1 = finished, 2 = stopped at the hit limit. */
+int verso_cre_search_state(VersoCreDoc *doc, int *searched_pages);
+/* Hit fields: 0=start, 1=exclusive end, 2=text before, 3=match, 4=text after
+ * (UTF-8, returns full length), 5=page number (returned directly). */
+int verso_cre_search_hit(VersoCreDoc *doc, int index, int field, char *buf, int len);
+
 /* Global setup, once per process. `hyph_dir` holds crengine's *.pattern
  * files (may be NULL: no hyphenation). `cache_dir` enables crengine's
  * on-disk document cache (may be NULL). Returns 0 on success. */

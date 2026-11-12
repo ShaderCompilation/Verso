@@ -7,6 +7,7 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <chrono>
 
 #include "lvdocview.h"
 #include "lvdrawbuf.h"
@@ -21,8 +22,26 @@ struct VersoCreDoc {
     uint64_t text_length = 0;
     lString32 selection_start, selection_end, selection_text;
     std::vector<VersoCreRect> selection_rects;
-
+    // Book search: a cursor that advances block by block, and the last batch.
+    struct Hit { lString32 start, end, before, match, after; int page; };
+    lString32 search_pattern;
+    ldomXPointerEx search_cursor, search_end;
+    int search_page = 0, search_found = 0, search_status = 1;
+    bool search_word_start = true;
+    std::vector<Hit> search_hits;
 };
+
+// Literal matching that ignores case, Unicode encoding/compatibility forms,
+// inline markup, soft hyphens, invisible format characters and the various
+// space, apostrophe and dash characters books use.
+static const lUInt32 SEARCH_FLAGS = LDOM_FIND_TEXT_MATCH_ACROSS_TEXT_NODES
+    | LDOM_FIND_TEXT_COLLAPSE_CONSECUTIVE_SPACES | LDOM_FIND_TEXT_NORMALIZE_COMPATIBILITY
+    | LDOM_FIND_TEXT_IGNORE_FORMAT_CONTROL_CHARS | LDOM_FIND_TEXT_FOLD_SPACES
+    | LDOM_FIND_TEXT_FOLD_APOSTROPHES | LDOM_FIND_TEXT_FOLD_HYPHENS;
+static const int SEARCH_PAGES_PER_CHUNK = 4;
+static const int SEARCH_CHUNK_RANGES = 1 << 20; // per chunk, before word-start filtering
+static const int SEARCH_MAX_HITS = 500;
+static const int SNIPPET_BEFORE = 80, SNIPPET_AFTER = 160;
 
 // Runs `body`, turning any C++ exception into `fallback`.
 #define GUARD(fallback, body) \
@@ -114,7 +133,152 @@ static bool word_at(LVDocView *v, lvPoint point, ldomXRange &range) {
     return false;
 }
 
+
+// The first text position of the block after the one holding `p` (or `p`
+// itself at a block start). crengine matches within one rendered block, so
+// search chunks end there and never split a possible match.
+static ldomXPointerEx block_boundary(ldomXPointerEx p) {
+    if (!p.isText() && !p.nextVisibleText()) return ldomXPointerEx();
+    ldomXPointerEx before = p;
+    if (p.getOffset() == 0 && !before.prevVisibleText(true)) return p;
+    ldomNode *block = p.getThisBlockNode();
+    while (p.nextVisibleText())
+        if (p.getThisBlockNode() != block) return p;
+    return ldomXPointerEx();
+}
+
+static bool letter_or_digit(lChar32 c) {
+    return lGetCharProps(c) & (CH_PROP_ALPHA | CH_PROP_MODIFIER | CH_PROP_DIGIT);
+}
+
+// A match must start a word when the query does: "Vin" finds "Vin's" but not
+// "moving". Inline markup and soft hyphens inside a word don't break it.
+static bool starts_word(ldomXPointerEx p) {
+    while (p.prevVisibleChar(true)) {
+        lChar32 c = p.getChar();
+        if (c != UNICODE_SOFT_HYPHEN_CODE) return !letter_or_digit(c);
+    }
+    return true;
+}
+
+// Up to `want` characters of the same block before/after a text position.
+static lString32 block_text_before(ldomXPointerEx p, int want) {
+    lString32 out = p.getNode()->getText().substr(0, p.getOffset());
+    while (out.length() < want && p.prevVisibleText(true)) {
+        lString32 text = p.getNode()->getText();
+        text.append(out);
+        out = text;
+    }
+    return out.length() > want ? out.substr(out.length() - want, want) : out;
+}
+static lString32 block_text_after(ldomXPointerEx p, int want) {
+    lString32 text = p.getNode()->getText();
+    lString32 out = text.substr(p.getOffset(), text.length() - p.getOffset());
+    while (out.length() < want && p.nextVisibleText(true)) out.append(p.getNode()->getText());
+    return out.length() > want ? out.substr(0, want) : out;
+}
+
 extern "C" {
+
+int verso_cre_search_start(VersoCreDoc *doc, const char *query) {
+    GUARD(-1, {
+        doc->search_hits.clear();
+        doc->search_status = 1;
+        doc->search_page = 0;
+        doc->search_found = 0;
+        ldomDocument *d = doc->view->getDocument();
+        lString32 pattern = Utf8ToUnicode(query);
+        pattern.trim();
+        if (!d || pattern.empty()) return -1;
+        ldomXRange all(d->getRootNode(), true);
+        doc->search_cursor = all.getStart();
+        doc->search_end = all.getEnd();
+        if (!doc->search_cursor.isText() && !doc->search_cursor.nextVisibleText()) return 0;
+        doc->search_pattern = pattern;
+        doc->search_word_start = letter_or_digit(pattern[0]);
+        doc->search_status = 0;
+        return 0;
+    })
+}
+
+int verso_cre_search_step(VersoCreDoc *doc, int max_ms) {
+    GUARD(-1, {
+        doc->search_hits.clear();
+        LVDocView *v = doc->view;
+        int pages = v->getPageCount();
+        auto started = std::chrono::steady_clock::now();
+        while (doc->search_status == 0) {
+            // Search a few pages at a time, ending each chunk on a block boundary.
+            ldomXPointerEx end;
+            while (end.isNull() && doc->search_page < pages) {
+                doc->search_page = std::min(pages, doc->search_page + SEARCH_PAGES_PER_CHUNK);
+                if (doc->search_page >= pages) break;
+                LVRef<ldomXRange> page = v->getPageDocumentRange(doc->search_page);
+                if (page.isNull()) continue;
+                ldomXPointerEx boundary = block_boundary(page->getStart());
+                if (boundary.isNull()) doc->search_page = pages;
+                else if (boundary.compare(doc->search_cursor) > 0) end = boundary;
+            }
+            bool last = end.isNull();
+            if (last) end = doc->search_end;
+            ldomXRange range(doc->search_cursor, end);
+            ldomXRangeList found;
+            range.findText(doc->search_pattern, true, false, found, SEARCH_CHUNK_RANGES, 0, -1, false, false,
+                           SEARCH_FLAGS);
+            for (int i = 0; i < found.length(); ++i) {
+                if (doc->search_found == SEARCH_MAX_HITS) {
+                    doc->search_status = 2;
+                    break;
+                }
+                ldomXRange *r = found[i];
+                ldomXPointerEx a = r->getStart();
+                ldomXPointerEx b = r->getEnd();
+                if (!a.isText() || !b.isText()) continue;
+                if (doc->search_word_start && !starts_word(a)) continue;
+                VersoCreDoc::Hit hit;
+                hit.start = a.toString();
+                hit.end = b.toString();
+                hit.match = removeSoftHyphens(r->getRangeText(' '));
+                hit.before = removeSoftHyphens(block_text_before(a, SNIPPET_BEFORE));
+                hit.after = removeSoftHyphens(block_text_after(b, SNIPPET_AFTER));
+                hit.page = v->getBookmarkPage(a);
+                doc->search_hits.push_back(hit);
+                doc->search_found++;
+            }
+            if (doc->search_status == 0 && last) {
+                doc->search_status = 1;
+                doc->search_page = pages;
+            }
+            if (doc->search_status == 0) doc->search_cursor = end;
+            auto elapsed = std::chrono::steady_clock::now() - started;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() >= max_ms) break;
+        }
+        return (int)doc->search_hits.size();
+    })
+}
+
+int verso_cre_search_state(VersoCreDoc *doc, int *searched_pages) {
+    GUARD(-1, {
+        if (searched_pages) *searched_pages = doc->search_page;
+        return doc->search_status;
+    })
+}
+
+int verso_cre_search_hit(VersoCreDoc *doc, int index, int field, char *buf, int len) {
+    GUARD(-1, {
+        if (index < 0 || index >= (int)doc->search_hits.size()) return -1;
+        const VersoCreDoc::Hit &hit = doc->search_hits[index];
+        switch (field) {
+            case 0: return copy_utf8(hit.start, buf, len);
+            case 1: return copy_utf8(hit.end, buf, len);
+            case 2: return copy_utf8(hit.before, buf, len);
+            case 3: return copy_utf8(hit.match, buf, len);
+            case 4: return copy_utf8(hit.after, buf, len);
+            case 5: return hit.page;
+        }
+        return -1;
+    })
+}
 
 int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
                      const char *start, const char *end) {
@@ -421,6 +585,7 @@ int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing
         }
         doc->offsets.clear(); doc->text_length = 0;
         doc->toc.clear();
+        doc->search_hits.clear(); doc->search_status = 1;
         return 0;
     })
 }

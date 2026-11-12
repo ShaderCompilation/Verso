@@ -526,7 +526,7 @@ impl Books {
             let mut keyboard = Keyboard::default();
             keyboard.visible = true;
             keyboard.place(self.screen, cx.theme);
-            let mut field = TextField::default();
+            let mut field = TextField::new("Title, author or filename");
             field.focused = true;
             self.search = Some(SearchSession {
                 field,

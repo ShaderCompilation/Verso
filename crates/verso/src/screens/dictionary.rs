@@ -17,6 +17,12 @@ use crate::{
 };
 use std::rc::Rc;
 
+pub enum LookupEvent {
+    Close,
+    /// Search the book for the (possibly edited) query.
+    Search(String),
+}
+
 pub struct Lookup {
     sheet: Sheet,
     worker: Rc<Worker>,
@@ -28,6 +34,7 @@ pub struct Lookup {
     previous: Button,
     dictionaries_button: Button,
     next: Button,
+    find: Button,
     back: Button,
     rescan: Button,
     catalog: Vec<Dictionary>,
@@ -45,7 +52,7 @@ impl Lookup {
         let sheet = Sheet::open("Dictionary", screen.h * 4 / 5, screen, t);
         let content = sheet.content(t);
         let gap = t.mm(2.0);
-        let mut field = TextField::default();
+        let mut field = TextField::new("Word");
         let mut search = Button::new("Look up", ButtonKind::Primary);
         let search_w = t.mm(22.0);
         field.place(Rect::new(content.x, content.y, content.w - search_w - gap, t.target));
@@ -53,9 +60,13 @@ impl Lookup {
         search.place(Rect::new(content.right() - search_w, content.y, search_w, t.target), t);
         let row = Rect::new(content.x, content.y + t.target + gap, content.w, t.target);
         let arrow = t.mm(16.0);
+        let find_w = t.mm(30.0);
         let mut previous = Button::new("‹", ButtonKind::Secondary);
         let mut dictionaries_button = Button::new("Dictionaries", ButtonKind::Secondary);
         let mut next = Button::new("›", ButtonKind::Secondary);
+        let mut find = Button::new("Search book", ButtonKind::Secondary);
+        find.place(Rect::new(row.right() - find_w, row.y, find_w, row.h), t);
+        let row = Rect { w: row.w - find_w - gap, ..row };
         previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
         next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
         dictionaries_button.place(Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h), t);
@@ -83,6 +94,7 @@ impl Lookup {
             previous,
             dictionaries_button,
             next,
+            find,
             back,
             rescan,
             catalog: Vec::new(),
@@ -176,15 +188,15 @@ impl Lookup {
         true
     }
     /// All gestures are consumed by the reader while this overlay is open.
-    pub fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> bool {
+    pub fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Option<LookupEvent> {
         if self.keyboard.visible {
             if let Some(input) = self.keyboard.on_gesture(g, cx.theme) {
                 self.on_text_input(&input, cx);
             }
-            return false;
+            return None;
         }
         if self.sheet.on_gesture(g) {
-            return true;
+            return Some(LookupEvent::Close);
         }
         if self.manager {
             if self.back.on_gesture(g) {
@@ -236,12 +248,15 @@ impl Lookup {
                 self.manager = true;
                 self.place_rows(cx.theme);
             }
+            if self.find.on_gesture(g) {
+                return Some(LookupEvent::Search(self.field.value().to_owned()));
+            }
             self.pager.on_gesture(g);
             if let Gesture::Swipe { dir, .. } = g {
                 self.pager.on_swipe(*dir);
             }
         }
-        false
+        None
     }
     pub fn draw(&mut self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
@@ -281,6 +296,7 @@ impl Lookup {
         self.previous.draw(cx);
         self.dictionaries_button.draw(cx);
         self.next.draw(cx);
+        self.find.draw(cx);
         if self.pages.is_empty() {
             let message = if self.pending {
                 "Looking up…".to_owned()
@@ -304,29 +320,42 @@ impl Lookup {
     }
 }
 
+pub enum SelectionAction {
+    Dismiss,
+    Dictionary,
+    Search,
+}
 pub struct SelectionActions {
     sheet: Sheet,
+    search: Button,
     dictionary: Button,
 }
 impl SelectionActions {
     pub fn new(t: &Theme, screen: Rect) -> Self {
         let sheet = Sheet::open("Selection", t.mm(28.0), screen, t);
-        let mut dictionary = Button::new("Dictionary", ButtonKind::Primary);
         let body = sheet.content(t);
-        dictionary.place(Rect::new(body.x, body.y, body.w, t.target), t);
-        Self { sheet, dictionary }
+        let gap = t.mm(3.0);
+        let width = (body.w - gap) / 2;
+        let mut search = Button::new("Search in book", ButtonKind::Secondary);
+        search.place(Rect::new(body.x, body.y, width, t.target), t);
+        let mut dictionary = Button::new("Dictionary", ButtonKind::Primary);
+        dictionary.place(Rect::new(body.right() - width, body.y, width, t.target), t);
+        Self { sheet, search, dictionary }
     }
-    pub fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
+    pub fn on_gesture(&mut self, g: &Gesture) -> Option<SelectionAction> {
         if self.sheet.on_gesture(g) {
-            Some(false)
+            Some(SelectionAction::Dismiss)
+        } else if self.search.on_gesture(g) {
+            Some(SelectionAction::Search)
         } else if self.dictionary.on_gesture(g) {
-            Some(true)
+            Some(SelectionAction::Dictionary)
         } else {
             None
         }
     }
     pub fn draw(&self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
+        self.search.draw(cx);
         self.dictionary.draw(cx);
     }
 }

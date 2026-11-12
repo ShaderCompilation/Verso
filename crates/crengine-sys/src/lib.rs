@@ -30,6 +30,16 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn verso_cre_selection_text(doc: *mut VersoCreDoc, field: c_int, buf: *mut c_char, len: c_int) -> c_int;
     pub fn verso_cre_selection_rects(doc: *mut VersoCreDoc, rects: *mut VersoCreRect, capacity: c_int) -> c_int;
+    pub fn verso_cre_search_start(doc: *mut VersoCreDoc, query: *const c_char) -> c_int;
+    pub fn verso_cre_search_step(doc: *mut VersoCreDoc, max_ms: c_int) -> c_int;
+    pub fn verso_cre_search_state(doc: *mut VersoCreDoc, searched_pages: *mut c_int) -> c_int;
+    pub fn verso_cre_search_hit(
+        doc: *mut VersoCreDoc,
+        index: c_int,
+        field: c_int,
+        buf: *mut c_char,
+        len: c_int,
+    ) -> c_int;
     pub fn verso_cre_init(hyph_dir: *const c_char, cache_dir: *const c_char, cache_max_bytes: c_int) -> c_int;
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;
 

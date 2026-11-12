@@ -11,6 +11,7 @@ pub enum MenuEvent {
     Books,
     Close,
     Contents,
+    Search,
     Text,
     Page(usize),
     Chapter(isize),
@@ -26,6 +27,7 @@ pub struct ReaderMenu {
     light: Option<Slider>,
     warmth: Option<Slider>,
     contents: Button,
+    search: Button,
     text: Button,
     outside: bool,
 }
@@ -52,12 +54,29 @@ impl ReaderMenu {
         };
         let light_slider = light.map(|v| make_slider(panel.y + t.mm(27.0), v.brightness));
         let warmth = light.and_then(|v| v.warmth.map(|w| make_slider(panel.y + t.mm(39.0), w)));
-        let width = (screen.w - 2 * m - t.mm(4.0)) / 2;
+        let gap = t.mm(3.0);
+        let width = (screen.w - 2 * m - 2 * gap) / 3;
+        let y = screen.bottom() - t.mm(13.0);
         let mut contents = Button::new("Contents", ButtonKind::Secondary).with_icon(Icon::List);
+        let mut search = Button::new("Search", ButtonKind::Secondary).with_icon(Icon::Search);
         let mut text = Button::new("Text", ButtonKind::Secondary).with_icon(Icon::TextSize);
-        contents.place(Rect::new(m, screen.bottom() - t.mm(13.0), width, t.button_h), t);
-        text.place(Rect::new(m + width + t.mm(4.0), screen.bottom() - t.mm(13.0), width, t.button_h), t);
-        Self { top, panel, info, progress, prev, next, light: light_slider, warmth, contents, text, outside: false }
+        contents.place(Rect::new(m, y, width, t.button_h), t);
+        search.place(Rect::new(m + width + gap, y, width, t.button_h), t);
+        text.place(Rect::new(screen.w - m - width, y, width, t.button_h), t);
+        Self {
+            top,
+            panel,
+            info,
+            progress,
+            prev,
+            next,
+            light: light_slider,
+            warmth,
+            contents,
+            search,
+            text,
+            outside: false,
+        }
     }
     pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize) {
         let t = cx.theme;
@@ -83,6 +102,7 @@ impl ReaderMenu {
             }
         }
         self.contents.draw(cx);
+        self.search.draw(cx);
         self.text.draw(cx);
     }
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<MenuEvent> {
@@ -97,6 +117,9 @@ impl ReaderMenu {
         }
         if self.contents.on_gesture(g) {
             return Some(MenuEvent::Contents);
+        }
+        if self.search.on_gesture(g) {
+            return Some(MenuEvent::Search);
         }
         if self.text.on_gesture(g) {
             return Some(MenuEvent::Text);

@@ -15,9 +15,14 @@ pub struct TextField {
     rect: Rect,
     press: Press,
     pub focused: bool,
+    /// Shown while empty and unfocused.
+    pub placeholder: &'static str,
 }
 
 impl TextField {
+    pub fn new(placeholder: &'static str) -> Self {
+        Self { placeholder, ..Self::default() }
+    }
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -73,7 +78,7 @@ impl TextField {
         cx.canvas.stroke_rounded_rect(self.rect, t.radius, t.border as f32, INK);
         let inner = self.rect.inset_xy(t.mm(2.0), 0);
         if self.value.is_empty() && !self.focused {
-            cx.line("Title, author or filename", t.body.gray(INK2), inner, HAlign::Left);
+            cx.line(self.placeholder, t.body.gray(INK2), inner, HAlign::Left);
             return;
         }
         let budget = (inner.w - t.mm(2.0)).max(1) as f32;

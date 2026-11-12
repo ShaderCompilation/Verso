@@ -76,6 +76,35 @@ pub enum SelectionQuery {
     Range(TextRange),
 }
 
+/// One match from book search, with the text around it in the same block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    pub range: TextRange,
+    /// Valid for the layout that produced it.
+    pub page: usize,
+    pub before: String,
+    pub matched: String,
+    pub after: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchStatus {
+    #[default]
+    Searching,
+    Finished,
+    /// Stopped at the engine's hit limit.
+    Limited,
+}
+
+/// The hits found by one bounded search step.
+#[derive(Clone, Debug, Default)]
+pub struct SearchBatch {
+    pub hits: Vec<SearchHit>,
+    pub searched_pages: usize,
+    pub pages: usize,
+    pub status: SearchStatus,
+}
+
 #[derive(Clone, Debug)]
 pub struct TocEntry {
     pub title: String,
@@ -100,6 +129,10 @@ pub struct FontFace {
 
 pub trait Document {
     fn select(&mut self, page: usize, query: &SelectionQuery) -> Result<Option<Selection>>;
+    /// Starts a literal, case-insensitive search from the start of the book.
+    fn search_start(&mut self, query: &str) -> Result<()>;
+    /// Continues the search for about `budget`, returning only the new hits.
+    fn search_step(&mut self, budget: std::time::Duration) -> Result<SearchBatch>;
     fn position(&mut self) -> Result<Position>;
     fn go_to_position(&mut self, position: &Position) -> Result<()>;
     /// Text offset in ten-thousandths; independent of page count.
@@ -218,6 +251,82 @@ mod tests {
         assert_eq!(reopened.current_page(), 5);
         drop(reopened);
         selection_checks(&engine, &layout);
+        search_checks(&engine, &layout);
+    }
+
+    fn search_all(doc: &mut CreDocument, query: &str, budget: std::time::Duration) -> (Vec<SearchHit>, usize) {
+        doc.search_start(query).unwrap();
+        let (mut hits, mut steps) = (Vec::new(), 0);
+        loop {
+            let batch = doc.search_step(budget).unwrap();
+            steps += 1;
+            assert!(batch.searched_pages <= batch.pages);
+            hits.extend(batch.hits);
+            if batch.status != SearchStatus::Searching {
+                assert_eq!(batch.status, SearchStatus::Finished);
+                assert_eq!(batch.searched_pages, batch.pages);
+                return (hits, steps);
+            }
+            assert!(steps < 10_000, "search must finish");
+        }
+    }
+
+    fn search_checks(engine: &CreEngine, layout: &Layout) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/search.epub");
+        let mut doc = engine.open(&path, layout, None).unwrap();
+        let pages = doc.page_count();
+        assert!(pages > 20, "{pages} pages");
+        // Tiny budgets force many chunks; chunk boundaries must neither drop
+        // nor repeat a match, and hits stay in reading order.
+        let (hits, steps) = search_all(&mut doc, "ada", std::time::Duration::from_millis(1));
+        assert!(steps > 3, "{steps} steps");
+        assert_eq!(hits.len(), 200);
+        assert!(hits.windows(2).all(|w| w[0].page <= w[1].page && w[0].range != w[1].range));
+        assert!(hits.last().unwrap().page + 2 >= pages);
+        for (i, hit) in hits.iter().enumerate() {
+            assert_eq!(hit.matched, "Ada");
+            assert!(hit.before.ends_with(&format!("Paragraph {}. ", i + 1)), "{:?}", hit.before);
+            assert!(hit.after.starts_with(" watched the tide"), "{:?}", hit.after);
+        }
+        let (same, _) = search_all(&mut doc, "ada", std::time::Duration::from_secs(1));
+        assert_eq!(same, hits, "results do not depend on step size");
+        // Opening a hit resolves the same text on its page.
+        let hit = &hits[150];
+        let shown = doc.select(hit.page, &SelectionQuery::Range(hit.range.clone())).unwrap().unwrap();
+        assert_eq!(shown.text, "Ada");
+        for (query, count) in [
+            ("lovelace", 1),
+            ("Café", 2),
+            ("don't", 2),
+            ("new york", 2),
+            ("привет", 3),
+            ("extraordinary", 1),
+            ("a.b", 1),
+            ("office", 2),
+            ("vin", 2),
+            ("ving", 0),
+            ("vineyard", 1),
+            ("’s vine", 1),
+            ("  ada  watched ", 200),
+            ("absent phrase", 0),
+        ] {
+            assert_eq!(search_all(&mut doc, query, std::time::Duration::from_secs(1)).0.len(), count, "{query:?}");
+        }
+        let (lovelace, _) = search_all(&mut doc, "lovelace", std::time::Duration::from_secs(1));
+        let shown = doc.select(lovelace[0].page, &SelectionQuery::Range(lovelace[0].range.clone())).unwrap().unwrap();
+        assert_eq!(shown.text, "Lovelace");
+        assert!(doc.search_start("   ").is_err());
+        // A relayout invalidates a running search; the same query then finds
+        // the same ranges at new page numbers.
+        doc.search_start("ada").unwrap();
+        doc.set_typography(&Typography { size_pt: 16.0, ..Typography::default() }, 150, true).unwrap();
+        assert_eq!(doc.search_step(std::time::Duration::from_secs(1)).unwrap().status, SearchStatus::Finished);
+        let (relaid, _) = search_all(&mut doc, "ada", std::time::Duration::from_secs(1));
+        assert_eq!(
+            relaid.iter().map(|h| &h.range).collect::<Vec<_>>(),
+            hits.iter().map(|h| &h.range).collect::<Vec<_>>()
+        );
+        assert!(relaid.last().unwrap().page > hits.last().unwrap().page);
     }
 
     fn selection_checks(engine: &CreEngine, layout: &Layout) {

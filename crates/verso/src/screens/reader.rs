@@ -1,7 +1,8 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
+mod search;
 mod selection;
 use crate::document::{
-    FontFace, Metadata, Position, TocEntry,
+    FontFace, Metadata, Position, SelectionQuery, TocEntry,
     thread::{Command, Page, Reply, SelectionRequest, Worker},
 };
 use crate::geom::Rect;
@@ -9,7 +10,7 @@ use crate::gfx::HAlign;
 use crate::platform::RefreshMode;
 use crate::reader::{self, PageCache, Refresh, Zone};
 use crate::screens::contents::{Contents, ContentsEvent};
-use crate::screens::dictionary::{Lookup, SelectionActions};
+use crate::screens::dictionary::{Lookup, LookupEvent, SelectionAction, SelectionActions};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
 use crate::screens::{Action, EventCx, Screen};
@@ -20,6 +21,7 @@ use crate::store::{
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK2, PAPER, Theme};
 use crate::ui::widget::DrawCx;
+use search::{BarEvent, Origin, SearchBar, SearchEvent, SearchView, Session};
 use selection::SelectionState;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,7 +53,19 @@ pub struct Reader {
     opened_at: Option<Instant>,
     selection: SelectionState,
     dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
+    search: Session,
+    search_bar: Option<SearchBar>,
+    search_redraw: Option<Instant>,
+    /// The opened search hit on the displayed page, drawn inverted.
+    highlight: Option<(SelectionRequest, Vec<Rect>)>,
+    highlight_pending: Option<SelectionRequest>,
+    next_highlight: u64,
+    /// A `Command::Position` whose reply decides the target page; 0 = none.
+    jump: u64,
+    next_jump: u64,
 }
+/// Highlight requests share the selection reply; this bit keeps their IDs apart.
+const HIGHLIGHT_ID: u64 = 1 << 63;
 enum Overlay {
     None,
     Menu(Box<ReaderMenu>),
@@ -60,6 +74,7 @@ enum Overlay {
     Contents(Box<Contents>),
     Lookup(Box<Lookup>),
     SelectionActions(Box<SelectionActions>),
+    Search(Box<SearchView>),
 }
 impl Reader {
     pub fn book_id(&self) -> &str {
@@ -104,6 +119,14 @@ impl Reader {
             opened_at: Some(Instant::now()),
             selection: SelectionState::default(),
             dictionary: None,
+            search: Session::default(),
+            search_bar: None,
+            search_redraw: None,
+            highlight: None,
+            highlight_pending: None,
+            next_highlight: 0,
+            jump: 0,
+            next_jump: 0,
         }
     }
     pub fn failed_open(&self) -> bool {
@@ -114,10 +137,44 @@ impl Reader {
     }
     pub fn receive(&mut self, reply: Reply, cx: &mut EventCx) {
         match reply {
+            Reply::Selection { request, result } if self.highlight_pending == Some(request) => {
+                self.highlight_pending = None;
+                let context = self.selection_context();
+                match result {
+                    Ok(Some(found))
+                        if context.is_some_and(|c| c.generation == request.generation && c.page == request.page) =>
+                    {
+                        self.highlight = Some((request, found.rects));
+                        cx.redraw();
+                    }
+                    Ok(_) => {}
+                    Err(message) => log::warn!("search highlight: {message}"),
+                }
+            }
             Reply::Selection { request, result } => {
                 let context = self.selection_context();
                 self.selection.receive(request, result, context, &self.worker, cx);
                 self.selection_released(cx);
+            }
+            Reply::Jumped { jump, page } if page.generation == self.cache.generation => {
+                if jump == self.jump {
+                    self.jump = 0;
+                    self.target = page.number;
+                }
+                self.cache.insert(page.clone(), self.target);
+                if page.number == self.target {
+                    self.display(page, cx);
+                }
+            }
+            Reply::Search { request, result } => {
+                if self.search.receive(request, result)
+                    && (matches!(self.overlay, Overlay::Search(_)) || self.search_bar.is_some())
+                    && (!self.search.running() || self.search_redraw.is_none_or(|t| cx.now >= t))
+                {
+                    // Bounded e-ink updates while hits stream in; the final reply always shows.
+                    self.search_redraw = Some(cx.now + Duration::from_secs(1));
+                    cx.redraw();
+                }
             }
             Reply::Opened { generation, metadata, toc, pages, current } if generation == self.cache.generation => {
                 self.metadata = metadata;
@@ -170,6 +227,7 @@ impl Reader {
         }
         self.laying_out = false;
         self.selection.clear();
+        self.highlight = None;
         self.anchor = page.position.clone();
         self.shown = Some(page.clone());
         self.save_pending = true;
@@ -207,6 +265,7 @@ impl Reader {
         if self.target == page {
             return;
         }
+        self.jump = 0;
         self.target = page;
         self.turn_pending = true;
         if let Some(p) = self.cache.get(page) {
@@ -215,17 +274,108 @@ impl Reader {
             self.worker.send(Command::Page { generation: self.cache.generation, number: page });
         }
     }
-    fn jump_position(&mut self, page: usize, position: Position, cx: &mut EventCx) {
+    /// `page` is the position's page in the current layout, when known.
+    fn jump_position(&mut self, page: Option<usize>, position: Position, cx: &mut EventCx) -> bool {
         if self.laying_out || self.layout_at.is_some() {
-            return;
+            return false;
         }
-        self.target = page.min(self.pages.saturating_sub(1));
         self.turn_pending = true;
-        if let Some(p) = self.cache.get(self.target) {
+        if let Some(p) = page.map(|p| p.min(self.pages.saturating_sub(1))).and_then(|p| self.cache.get(p)) {
+            self.jump = 0;
+            self.target = p.number;
             self.display(p, cx);
         } else {
-            self.worker.send(Command::Position { generation: self.cache.generation, position });
+            self.next_jump += 1;
+            self.jump = self.next_jump;
+            if let Some(page) = page {
+                self.target = page.min(self.pages.saturating_sub(1));
+            }
+            self.worker.send(Command::Position { generation: self.cache.generation, position, jump: self.jump });
         }
+        true
+    }
+    fn open_search(&mut self, prefill: Option<&str>, cx: &mut EventCx) {
+        let generation = self.cache.generation;
+        let query = prefill.map(|q| q.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        if !query.is_empty() && query != self.search.query {
+            self.search_redraw = None;
+            self.search.start(&query, generation, &self.worker);
+        } else {
+            self.search.refresh(generation, &self.worker);
+        }
+        self.selection.clear();
+        let mut view = SearchView::new(cx.theme, self.screen, &self.search, self.search.query.is_empty());
+        view.reveal(&mut self.search);
+        self.overlay = Overlay::Search(Box::new(view));
+        cx.redraw();
+    }
+    fn open_hit(&mut self, index: usize, cx: &mut EventCx) {
+        let Some(hit) = self.search.hits.get(index).cloned() else { return };
+        let Some(shown) = self.shown.clone() else { return };
+        if self.laying_out || self.layout_at.is_some() || self.search.stale(self.cache.generation) {
+            return;
+        }
+        self.search.origin.get_or_insert_with(|| Origin {
+            position: shown.position.clone(),
+            page: shown.number,
+            generation: shown.generation,
+        });
+        self.search.current = Some(index);
+        self.overlay = Overlay::None;
+        self.search_bar.get_or_insert_with(|| SearchBar::new(cx.theme, self.screen));
+        self.highlight = None;
+        if self.jump_position(Some(hit.page), hit.range.start.clone(), cx) {
+            self.next_highlight += 1;
+            let request = SelectionRequest {
+                generation: self.cache.generation,
+                page: hit.page,
+                id: HIGHLIGHT_ID | self.next_highlight,
+            };
+            self.highlight_pending = Some(request);
+            self.worker.send(Command::Select { request, query: SelectionQuery::Range(hit.range.clone()) });
+        }
+        cx.redraw();
+    }
+    fn return_to_origin(&mut self, cx: &mut EventCx) {
+        let Some(origin) = self.search.origin.clone() else { return };
+        let page = (origin.generation == self.cache.generation).then_some(origin.page);
+        if self.jump_position(page, origin.position, cx) {
+            self.search.origin = None;
+            self.search_bar = None;
+            self.highlight = None;
+            self.highlight_pending = None;
+            self.overlay = Overlay::None;
+        }
+        cx.redraw();
+    }
+    fn on_bar(&mut self, event: BarEvent, cx: &mut EventCx) {
+        self.search.refresh(self.cache.generation, &self.worker);
+        let current = self.search.current.unwrap_or(0);
+        match event {
+            BarEvent::Previous if current > 0 => self.open_hit(current - 1, cx),
+            BarEvent::Next => self.open_hit(current + 1, cx),
+            BarEvent::Previous => {}
+            BarEvent::Results => self.open_search(None, cx),
+            BarEvent::Return => self.return_to_origin(cx),
+            BarEvent::Close => {
+                self.search.origin = None;
+                self.search_bar = None;
+                self.highlight = None;
+                self.highlight_pending = None;
+            }
+        }
+    }
+    fn on_search(&mut self, event: SearchEvent, cx: &mut EventCx) {
+        match event {
+            SearchEvent::Close => self.overlay = Overlay::None,
+            SearchEvent::Submit(query) => {
+                self.search_redraw = None;
+                self.search.start(&query, self.cache.generation, &self.worker);
+            }
+            SearchEvent::Open(index) => self.open_hit(index, cx),
+            SearchEvent::Return => self.return_to_origin(cx),
+        }
+        cx.redraw();
     }
     fn menu(&mut self, cx: &EventCx) {
         self.overlay = Overlay::Menu(Box::new(ReaderMenu::new(
@@ -243,6 +393,8 @@ impl Reader {
     }
     fn changed(&mut self) {
         self.selection.clear();
+        self.highlight = None;
+        self.highlight_pending = None;
         // A short debounce makes several quick taps one layout.
         self.cache.reset(self.cache.generation + 1);
         self.layout_at = Some(Instant::now() + Duration::from_millis(180));
@@ -329,7 +481,15 @@ impl Screen for Reader {
         } else {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
         }
+        if let Some((_, rects)) = &self.highlight {
+            for rect in rects {
+                cx.canvas.invert_rect(*rect);
+            }
+        }
         self.selection.draw(cx);
+        if let Some(bar) = &mut self.search_bar {
+            bar.draw(cx, &self.search);
+        }
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Menu(menu) => {
@@ -343,6 +503,7 @@ impl Screen for Reader {
             Overlay::Contents(contents) => contents.draw(cx),
             Overlay::Lookup(lookup) => lookup.draw(cx),
             Overlay::SelectionActions(actions) => actions.draw(cx),
+            Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
         }
         if self.laying_out || self.layout_at.is_some() || self.error.is_some() || self.save_error.is_some() {
             let message = self
@@ -357,11 +518,26 @@ impl Screen for Reader {
         }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        if matches!(self.overlay, Overlay::None)
+            && let Some(bar) = &mut self.search_bar
+        {
+            let (owned, event) = bar.on_gesture(&g);
+            if owned {
+                cx.redraw(); // pressed feedback
+                if let Some(event) = event {
+                    self.on_bar(event, cx);
+                }
+                return Action::None;
+            }
+        }
         if (matches!(self.overlay, Overlay::None)
             || matches!(self.overlay, Overlay::SelectionActions(_)) && self.selection.adjusting(g, cx.theme))
             && let Some(context) = self.selection_context()
             && self.selection.on_gesture(g, context, &self.worker, cx)
         {
+            if self.highlight.take().is_some() {
+                cx.redraw();
+            }
             self.selection_released(cx);
             return Action::None;
         }
@@ -372,24 +548,36 @@ impl Screen for Reader {
         }
         match &mut self.overlay {
             Overlay::Lookup(lookup) => {
-                if lookup.on_gesture(&g, cx) {
-                    self.overlay = Overlay::None;
-                    self.selection.clear();
+                if let Some(event) = lookup.on_gesture(&g, cx) {
                     if let Some(worker) = &self.dictionary {
                         worker.cancel();
                     }
+                    self.overlay = Overlay::None;
+                    self.selection.clear();
+                    if let LookupEvent::Search(query) = event {
+                        self.open_search(Some(&query), cx);
+                    }
                 }
             }
-            Overlay::SelectionActions(actions) => {
-                if let Some(open) = actions.on_gesture(&g) {
-                    if open {
-                        if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
-                            self.lookup(&query, cx);
-                        }
-                    } else {
-                        self.overlay = Overlay::None;
-                        self.selection.clear();
+            Overlay::SelectionActions(actions) => match actions.on_gesture(&g) {
+                Some(SelectionAction::Dictionary) => {
+                    if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
+                        self.lookup(&query, cx);
                     }
+                }
+                Some(SelectionAction::Search) => {
+                    let query = self.selection.selected.as_ref().map(|s| s.text.clone());
+                    self.open_search(query.as_deref(), cx);
+                }
+                Some(SelectionAction::Dismiss) => {
+                    self.overlay = Overlay::None;
+                    self.selection.clear();
+                }
+                None => {}
+            },
+            Overlay::Search(view) => {
+                if let Some(event) = view.on_gesture(&g, &mut self.search, cx.theme) {
+                    self.on_search(event, cx);
                 }
             }
             Overlay::Menu(menu) => match menu.on_gesture(&g) {
@@ -407,6 +595,7 @@ impl Screen for Reader {
                     self.overlay =
                         Overlay::Contents(Box::new(Contents::new(cx.theme, self.screen, &self.toc, self.target)))
                 }
+                Some(MenuEvent::Search) => self.open_search(None, cx),
                 Some(MenuEvent::Text) => self.text(cx.theme),
                 Some(MenuEvent::Page(page)) => self.go(page, cx),
                 Some(MenuEvent::Chapter(delta)) => {
@@ -417,7 +606,7 @@ impl Screen for Reader {
                     };
                     if let Some(c) = chapter {
                         let (page, position) = (c.page, c.position.clone());
-                        self.jump_position(page, position, cx);
+                        self.jump_position(Some(page), position, cx);
                     }
                 }
                 Some(MenuEvent::Light(value)) => {
@@ -455,7 +644,7 @@ impl Screen for Reader {
                 Some(ContentsEvent::Close) => self.menu(cx),
                 Some(ContentsEvent::Position(page, position)) => {
                     self.overlay = Overlay::None;
-                    self.jump_position(page, position, cx);
+                    self.jump_position(Some(page), position, cx);
                 }
                 None => {}
             },
@@ -481,6 +670,9 @@ impl Screen for Reader {
     }
     fn busy(&self) -> bool {
         matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.busy())
+            || matches!(&self.overlay, Overlay::Search(_)) && self.search.running()
+            || self.highlight_pending.is_some()
+            || self.jump != 0
             || self.selection.busy()
             || self.laying_out
             || self.layout_at.is_some()
@@ -508,6 +700,8 @@ impl Screen for Reader {
                 footer: self.settings.footer,
                 position: self.anchor.clone(),
             });
+            // Hit pages belong to a layout: re-run the query for the new one.
+            self.search.refresh(self.cache.generation, &self.worker);
         }
         Action::None
     }
@@ -531,7 +725,20 @@ impl Screen for Reader {
         }
     }
     fn on_text_input(&mut self, input: &crate::platform::TextInput, cx: &mut EventCx) -> bool {
-        if let Overlay::Lookup(lookup) = &mut self.overlay { lookup.on_text_input(input, cx) } else { false }
+        match &mut self.overlay {
+            Overlay::Lookup(lookup) => lookup.on_text_input(input, cx),
+            Overlay::Search(view) => {
+                let (consumed, event) = view.on_text_input(input);
+                if consumed {
+                    cx.redraw();
+                }
+                if let Some(event) = event {
+                    self.on_search(event, cx);
+                }
+                consumed
+            }
+            _ => false,
+        }
     }
     fn after_present(&mut self) {
         if self.shown.is_some()
@@ -543,6 +750,9 @@ impl Screen for Reader {
     }
     fn on_sleep(&mut self) {
         self.selection.sleep();
+        self.search.cancel(&self.worker);
+        self.highlight = None;
+        self.highlight_pending = None;
         if let Some(worker) = &self.dictionary {
             worker.cancel();
         }
@@ -618,6 +828,147 @@ mod tests {
             }
             assert!(!app.frame().is_empty());
             assert_eq!(app.canvas().gray_data(), pixels, "same displayed page returns without selection");
+        }
+    }
+
+    #[test]
+    fn search_hits_highlight_navigate_and_return_to_where_search_began() {
+        use crate::document::{SearchBatch, SearchHit, SearchStatus, Selection, TextRange, thread::SearchRequest};
+        use crate::geom::Point;
+        let (worker, commands) = Worker::recording_stub();
+        let screen = Rect::new(0, 0, 600, 800);
+        let theme = Theme::for_dpi(150);
+        let mut r = Reader::new(
+            screen,
+            Rc::new(worker),
+            Store::at(std::env::temp_dir().join("verso-search-reader-unused")),
+            "book".into(),
+            1,
+            Settings::default(),
+            Vec::new(),
+            Position::default(),
+        );
+        let page = |number: usize| {
+            Arc::new(Page {
+                generation: 1,
+                number,
+                pixels: vec![255; 600 * 800],
+                position: Position(format!("page-{number}")),
+                progress: 0,
+                images: false,
+            })
+        };
+        r.pages = 10;
+        r.laying_out = false;
+        r.shown = Some(page(2));
+        r.target = 2;
+        r.cache.insert(page(2), 2);
+        r.cache.insert(page(3), 2);
+        let mut cx = EventCx {
+            theme: &theme,
+            screen,
+            now: Instant::now(),
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut None,
+            forced: &mut Vec::new(),
+            needs_redraw: &mut false,
+        };
+        // Neighbour prefetches are covered elsewhere.
+        let drain = || commands.try_iter().filter(|c| !matches!(c, Command::Page { .. })).collect::<Vec<_>>();
+        r.open_search(Some("  Ada "), &mut cx);
+        let request = match drain().as_slice() {
+            [Command::Search { request, query }] if query == "Ada" => *request,
+            _ => panic!("expected one search"),
+        };
+        let hit = |page: usize| SearchHit {
+            range: TextRange { start: Position(format!("hit-{page}")), end: Position(format!("end-{page}")) },
+            page,
+            before: "Paragraph. ".into(),
+            matched: "Ada".into(),
+            after: " watched.".into(),
+        };
+        let batch =
+            SearchBatch { hits: vec![hit(3), hit(7)], searched_pages: 10, pages: 10, status: SearchStatus::Finished };
+        let stale = SearchRequest { id: request.id + 1, ..request };
+        r.receive(Reply::Search { request: stale, result: Ok(batch.clone()) }, &mut cx);
+        assert!(r.search.hits.is_empty(), "replies for other requests are ignored");
+        r.receive(Reply::Search { request, result: Ok(batch) }, &mut cx);
+        assert_eq!(r.search.hits.len(), 2);
+
+        // A cached hit page shows at once, then its range is highlighted.
+        r.on_search(SearchEvent::Open(0), &mut cx);
+        assert!(matches!(r.overlay, Overlay::None));
+        assert_eq!(r.shown.as_ref().unwrap().number, 3);
+        assert_eq!(r.search.origin.as_ref().unwrap().position, Position("page-2".into()));
+        let highlight = match drain().as_slice() {
+            [Command::Select { request, query: SelectionQuery::Range(range) }] => {
+                assert_eq!(range.start, Position("hit-3".into()));
+                *request
+            }
+            _ => panic!("expected a highlight request"),
+        };
+        assert_eq!((highlight.page, highlight.id & HIGHLIGHT_ID), (3, HIGHLIGHT_ID));
+        let rects = vec![Rect::new(10, 10, 50, 20)];
+        let found = Selection {
+            range: TextRange { start: Position("hit-3".into()), end: Position("end-3".into()) },
+            text: "Ada".into(),
+            rects: rects.clone(),
+        };
+        r.receive(Reply::Selection { request: highlight, result: Ok(Some(found.clone())) }, &mut cx);
+        assert_eq!(r.highlight.as_ref().map(|(_, r)| r.clone()), Some(rects));
+
+        // Touches on the bar never turn pages; touches above it still do.
+        let bar = r.search_bar.as_ref().unwrap().rect();
+        let on_bar = Point::new(bar.center().x - 60, bar.center().y);
+        r.on_gesture(Gesture::Down(on_bar), &mut cx);
+        r.on_gesture(Gesture::Tap(on_bar), &mut cx);
+        assert_eq!(r.shown.as_ref().unwrap().number, 3);
+
+        // An uncached hit asks the book thread to locate it; only that jump's
+        // reply decides the page, not an earlier prefetch.
+        r.on_bar(BarEvent::Next, &mut cx);
+        let jump = match drain().as_slice() {
+            [Command::Position { position, jump, .. }, Command::Select { request, .. }] => {
+                assert_eq!(*position, Position("hit-7".into()));
+                assert_eq!(request.page, 7);
+                *jump
+            }
+            _ => panic!("expected a jump and a highlight"),
+        };
+        r.receive(Reply::Page(page(4)), &mut cx);
+        assert_eq!(r.shown.as_ref().unwrap().number, 3);
+        r.receive(Reply::Jumped { jump, page: page(7) }, &mut cx);
+        assert_eq!(r.shown.as_ref().unwrap().number, 7);
+        assert!(r.highlight.is_none(), "a different page drops the old highlight");
+        assert_eq!(r.search.current, Some(1));
+
+        r.on_bar(BarEvent::Return, &mut cx);
+        let jump = match drain().as_slice() {
+            [Command::Position { position, jump, .. }] if *position == Position("page-2".into()) => *jump,
+            _ => panic!("expected a jump back to the origin"),
+        };
+        r.receive(Reply::Jumped { jump, page: page(2) }, &mut cx);
+        assert_eq!(r.shown.as_ref().unwrap().number, 2);
+        r.cache.insert(page(3), 2);
+        assert!(r.search.origin.is_none() && r.search_bar.is_none());
+        let forward = Point::new(590, 700);
+        r.on_gesture(Gesture::Down(forward), &mut cx);
+        r.on_gesture(Gesture::Tap(forward), &mut cx);
+        assert_eq!(r.shown.as_ref().unwrap().number, 3, "normal reading resumes");
+
+        // The session survives; a relayout re-runs the query for its pages.
+        r.open_search(None, &mut cx);
+        assert_eq!(r.search.hits.len(), 2);
+        assert!(drain().is_empty());
+        r.overlay = Overlay::None;
+        r.changed();
+        r.on_tick(&mut EventCx { now: Instant::now() + Duration::from_secs(1), ..cx });
+        match drain().as_slice() {
+            [Command::Layout { generation: 2, .. }, Command::Search { request, query }] => {
+                assert_eq!((request.generation, query.as_str()), (2, "Ada"));
+            }
+            _ => panic!("expected a relayout and a fresh search"),
         }
     }
 

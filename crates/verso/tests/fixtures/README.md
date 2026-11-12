@@ -9,3 +9,8 @@ licensed with Verso. Regenerate with `python3 scripts/gen-library-fixtures.py`.
 They contain a nested OPF, multiple creators, escaped text, a percent-encoded PNG
 path (EPUB 2) and a self-contained SVG (EPUB 3). Tests also generate malformed and
 oversized inputs in temporary directories.
+
+search.epub is original text with a name recurring in 200 paragraphs over two
+chapters, plus inline markup, case, Unicode canonical/compatibility forms,
+apostrophes, spaces, Cyrillic, a soft hyphen and regular-expression characters.
+Regenerate with `python3 scripts/gen-search-fixture.py`. Licensed with Verso.
