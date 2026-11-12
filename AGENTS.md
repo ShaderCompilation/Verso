@@ -29,9 +29,10 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 | `cargo kindle-build` | Release build for the Kindle (armv7, via cargo-zigbuild) |
 | `cargo test` | Unit tests |
 | `scripts/deploy.sh` | Build, copy to the Kindle, run through the launcher, stream the log (Kindle must be awake, KOReader closed) |
+| `scripts/build-ssh.sh` | Build the Kindle SSH server (Dropbear, sftp-server); `deploy.sh` runs it |
 | `scripts/gen-fbink-bindings.sh` | Regenerate FBInk bindings after updating the submodule |
 
-- Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `crates/crengine-sys` (builds and binds crengine), `third_party/` (git submodules: FBInk, crengine and its libraries), `assets/`, `dist/`, `scripts/`, `docs/`.
+- Layout: `crates/verso` (the app, `desktop` / `kindle` features), `crates/fbink-sys` (FBInk bindings), `crates/crengine-sys` (builds and binds crengine), `third_party/` (git submodules: FBInk, crengine and its libraries, Dropbear, OpenSSH), `assets/`, `dist/`, `scripts/`, `docs/`.
 - Don't edit files inside `third_party/`: changes there aren't part of Verso's history and a submodule update wipes them. Fix library code at build time instead, the way `CRENGINE_FIXES` in `crates/crengine-sys/build.rs` patches a copy of crengine.
 - The Kindle is reachable with `ssh kindle`. It's the user's own reading device: don't run anything destructive on it, and always make sure the Kindle UI comes back after testing.
   - Only write files inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`. Writing to `/dev/fb0` (the screen) is fine, and so is sending test touches to the touchscreen (`/dev/input/event1`) while Verso is running and has grabbed it.

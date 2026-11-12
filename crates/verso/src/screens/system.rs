@@ -25,6 +25,10 @@ pub struct SystemSettings {
     ssh_toggle: Toggle,
     /// Start (true) or stop the SSH server once "Starting…" is on screen.
     ssh_pending: Option<bool>,
+    /// The server was running when Settings opened. The developer section
+    /// then stays for this visit, so turning the server off doesn't make the
+    /// switch vanish.
+    ssh_was_running: bool,
     dev_top: i32,
 }
 impl SystemSettings {
@@ -53,6 +57,7 @@ impl SystemSettings {
             version_press: Press::default(),
             version_taps: (0, Instant::now()),
             developer,
+            ssh_was_running: ssh.running,
             ssh,
             ssh_toggle,
             ssh_pending: None,
@@ -65,7 +70,7 @@ impl SystemSettings {
     /// The developer section also shows while the server runs, so it can
     /// always be turned off.
     fn show_developer(&self) -> bool {
-        self.developer || self.ssh.running
+        self.developer || self.ssh.running || self.ssh_was_running
     }
 
     fn sync_ssh_toggle(&mut self) {

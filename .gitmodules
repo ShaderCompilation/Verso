@@ -37,3 +37,11 @@
 	path = third_party/xxhash
 	url = https://github.com/Cyan4973/xxHash.git
 	shallow = true
+[submodule "third_party/dropbear"]
+	path = third_party/dropbear
+	url = https://github.com/mkj/dropbear.git
+	shallow = true
+[submodule "third_party/openssh-portable"]
+	path = third_party/openssh-portable
+	url = https://github.com/openssh/openssh-portable.git
+	shallow = true
