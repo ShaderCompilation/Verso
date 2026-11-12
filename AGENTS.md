@@ -13,7 +13,9 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 
 ## Commits
 
-- **Commit when you finish an independent piece of work**: an implementation step, a plan phase item, a full feature, a docs update. Don't wait to be asked, and don't pile unrelated changes into one commit.
+- **Commit once per implementation phase.** A commit is one finished phase from `docs/plan.md` (with its status markers updated), not each checklist item or small step along the way. Keep working through the steps of the phase and commit when the phase is done. If a phase is genuinely large, split it into a few substantial, self-contained commits rather than a stream of small ones.
+- **Don't wait to be asked to commit**, but don't commit mid-phase just because some steps are finished. A standalone docs update requested on its own is its own commit; docs written as part of a phase belong in that phase's commit.
+- **Keep unrelated changes out of a commit.** If other work is already in the workspace, leave it for its own commit rather than bundling it in.
 - **Documentation-only changes need no code checks.** If you did not change code, do not run builds, tests, linters or formatters. Unrelated code changes already in the workspace do not count as your changes.
 - **Validate code changes once.** Run relevant tests, lint and formatting checks for the code you changed. Reuse successful results while the relevant code and build configuration remain unchanged; do not repeat checks just because you are about to commit.
 - **A standalone build is only a missing pre-commit prerequisite.** Run `cargo build` only when you changed code, are about to commit that code, and the latest changes have not already been successfully compiled by a build or test run. For Kindle-only code, the same rule applies to `cargo kindle-build` and equivalent successful Kindle-target builds. Compilation performed during verification counts; do not add a redundant build.
