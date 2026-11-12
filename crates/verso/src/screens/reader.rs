@@ -661,6 +661,15 @@ impl Screen for Reader {
                     },
                     Gesture::Swipe { dir: Direction::Left, .. } => 1,
                     Gesture::Swipe { dir: Direction::Right, .. } => -1,
+                    Gesture::Swipe { dir, from, .. }
+                        if self.screen.contains(from)
+                            && (dir == Direction::Down && from.y < self.screen.y + self.screen.h / 10
+                                || dir == Direction::Up && from.y >= self.screen.bottom() - self.screen.h / 10) =>
+                    {
+                        self.menu(cx);
+                        cx.redraw();
+                        return Action::None;
+                    }
                     _ => return Action::None,
                 };
                 self.go(self.target.saturating_add_signed(step), cx);
@@ -1090,6 +1099,46 @@ mod tests {
             assert!(cx.forced.is_empty());
         }
         assert!(r.cache.get(1).is_some());
+        // Only inward vertical swipes starting at an edge open the controls.
+        // Opening them preserves the displayed page and requests a redraw.
+        for (dir, from_y, to_y, opens) in [
+            (Direction::Down, 0, 400, true),
+            (Direction::Down, 168, 500, true),
+            (Direction::Down, 169, 500, false),
+            (Direction::Up, 1695, 1300, true),
+            (Direction::Up, 1527, 1200, true),
+            (Direction::Up, 1526, 1200, false),
+            (Direction::Up, 100, 0, false),
+            (Direction::Down, 1600, 1695, false),
+            (Direction::Down, 700, 1100, false),
+            (Direction::Up, 1100, 700, false),
+        ] {
+            let from = Point::new(636, from_y);
+            let to = Point::new(636, to_y);
+            for g in [Gesture::Down(from), Gesture::Move(to), Gesture::Swipe { dir, from, to }] {
+                r.on_gesture(g, &mut cx);
+            }
+            assert_eq!(matches!(r.overlay, Overlay::Menu(_)), opens, "{dir:?} from {from_y}");
+            assert_eq!(*cx.needs_redraw, opens);
+            assert_eq!(r.target, 0);
+            assert_eq!(r.shown.as_ref().unwrap().number, 0);
+            assert!(cx.forced.is_empty());
+            r.overlay = Overlay::None;
+            *cx.needs_redraw = false;
+        }
+        // Horizontal swipes still turn pages, including from the same edges.
+        for (dir, from_y, expected) in [(Direction::Left, 100, 1), (Direction::Right, 1600, 0)] {
+            let (from_x, to_x) = if dir == Direction::Left { (1000, 300) } else { (300, 1000) };
+            r.on_gesture(
+                Gesture::Swipe { dir, from: Point::new(from_x, from_y), to: Point::new(to_x, from_y) },
+                &mut cx,
+            );
+            assert!(matches!(r.overlay, Overlay::None));
+            assert_eq!(r.shown.as_ref().unwrap().number, expected);
+            assert!(*cx.needs_redraw);
+            *cx.needs_redraw = false;
+            cx.forced.clear();
+        }
         let p = Point::new(1100, 1000);
         for g in [Gesture::Down(p), Gesture::Move(p), Gesture::Cancel(p)] {
             r.on_gesture(g, &mut cx);
