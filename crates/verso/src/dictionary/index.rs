@@ -1,9 +1,9 @@
 //! Disk hash index of Unicode-folded keys. Constant-size build buffers, no
 //! resident word list, and a single open index. The source ordinal map lets
 //! synonyms point to the original entry even when offsets are 64 bit.
-use super::{Info, companion};
+use super::{Info, basename, companion, sibling};
 use crate::library::search::fold;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
@@ -93,11 +93,14 @@ fn record(file: &mut File, at: u64) -> Result<Record> {
 impl Index {
     pub fn open(path: &Path, cache: &Path, info: &Info, data_len: u64, current: &impl Fn() -> bool) -> Result<Self> {
         fs::create_dir_all(cache)?;
-        let (idx, compressed) = companion(path, "idx", "idx.gz")?;
-        let (dict, _) = companion(path, "dict", "dict.dz")?;
-        let syn = path.with_extension("syn");
+        let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
+        let (idx, compressed) = companion(&base, "idx", "idx.gz")?;
+        let (dict, _) = companion(&base, "dict", "dict.dz")?;
+        let syn = sibling(&base, "syn");
         let mut signature = Sha256::new();
         signature.update(b"verso-stardict-index-v1");
+        // `path` is the metadata actually read (`.ifo` or `.ifo.gz`), so
+        // switching or replacing either variant changes the signature.
         for source in [path, &idx, &dict, &syn] {
             signature.update(source.as_os_str().as_encoded_bytes());
             if source.exists() {
@@ -107,7 +110,9 @@ impl Index {
             }
         }
         let fingerprint = format!("{:x}", signature.finalize());
-        let name = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
+        // Named after the plain `.ifo` path for either variant: existing caches
+        // stay valid, and a replaced variant overwrites rather than orphans.
+        let name = format!("{:x}", Sha256::digest(sibling(&base, "ifo").as_os_str().as_encoded_bytes()));
         let dest = cache.join(format!("{name}.index"));
         if let Ok(mut file) = File::open(&dest)
             && file.metadata()?.len() >= HEADER

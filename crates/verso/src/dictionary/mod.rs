@@ -38,15 +38,46 @@ struct Info {
     types: String,
 }
 fn bounded_read(path: &Path, limit: usize) -> Result<String> {
+    bounded_text(fs::File::open(path)?, limit)
+}
+fn bounded_text(source: impl std::io::Read, limit: usize) -> Result<String> {
     use std::io::Read;
     let mut data = Vec::new();
-    fs::File::open(path)?.take(limit as u64 + 1).read_to_end(&mut data)?;
+    source.take(limit as u64 + 1).read_to_end(&mut data)?;
     ensure!(data.len() <= limit, "File is too large");
     Ok(String::from_utf8(data)?)
 }
+/// The basename shared by a dictionary's files: its `.ifo` or `.ifo.gz`
+/// metadata path without those suffixes. `None` for any other file.
+fn basename(path: &Path) -> Option<PathBuf> {
+    let plain = path.with_extension("");
+    match path.extension()?.to_str()? {
+        "ifo" => Some(plain),
+        "gz" if plain.extension().is_some_and(|e| e == "ifo") => Some(plain.with_extension("")),
+        _ => None,
+    }
+}
+/// A companion file: the basename plus `.{ext}`. Unlike `with_extension`, this
+/// keeps dots inside the basename and works for two-part suffixes.
+fn sibling(base: &Path, ext: &str) -> PathBuf {
+    let mut path = base.as_os_str().to_owned();
+    path.push(".");
+    path.push(ext);
+    path.into()
+}
+fn is_gzip(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "gz")
+}
 impl Info {
+    /// Reads `.ifo` or `.ifo.gz`; the decompressed text is bounded to 64 KiB.
     fn read(path: &Path) -> Result<Self> {
-        let text = bounded_read(path, 65536)?;
+        let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
+        let text = if is_gzip(path) {
+            bounded_text(flate2::read::GzDecoder::new(fs::File::open(path)?), 65536)
+                .context("Corrupt, truncated or oversized .ifo.gz")?
+        } else {
+            bounded_read(path, 65536)?
+        };
         let mut lines = text.lines();
         ensure!(lines.next() == Some("StarDict's dict ifo file"), "Invalid StarDict header");
         let fields: BTreeMap<_, _> = lines.filter_map(|l| l.split_once('=')).collect();
@@ -59,7 +90,7 @@ impl Info {
         ensure!(!name.is_empty(), "Missing dictionary name");
         let types = fields.get("sametypesequence").copied().unwrap_or("").to_owned();
         ensure!(types.bytes().all(|b| b.is_ascii_alphabetic()), "Invalid field types");
-        let syn_count = if path.with_extension("syn").exists() {
+        let syn_count = if sibling(&base, "syn").exists() {
             get("synwordcount")?.parse()?
         } else {
             let count = fields.get("synwordcount").copied().unwrap_or("0").parse()?;
@@ -76,12 +107,12 @@ impl Info {
         })
     }
 }
-fn companion(path: &Path, plain: &str, compressed: &str) -> Result<(PathBuf, bool)> {
-    let file = path.with_extension(plain);
+fn companion(base: &Path, plain: &str, compressed: &str) -> Result<(PathBuf, bool)> {
+    let file = sibling(base, plain);
     if file.is_file() {
         return Ok((file, false));
     }
-    let file = path.with_extension(compressed);
+    let file = sibling(base, compressed);
     ensure!(file.is_file(), "Missing .{plain} or .{compressed} file");
     Ok((file, true))
 }
@@ -107,16 +138,24 @@ fn discover_current(root: &Path, preferences: &[Preference], current: &impl Fn()
             let path = entry.path();
             if kind.is_dir() && entry.file_name() != "res" {
                 folders.push((path, depth + 1));
-            } else if kind.is_file() && path.extension().is_some_and(|e| e == "ifo") {
-                let id = path.strip_prefix(root)?.to_string_lossy().into_owned();
+            } else if kind.is_file()
+                && let Some(base) = basename(&path)
+            {
+                // One dictionary per basename: plain `.ifo` wins over `.ifo.gz`,
+                // and both share the plain `.ifo` ID so preferences carry over.
+                let plain = sibling(&base, "ifo");
+                if is_gzip(&path) && plain.is_file() {
+                    continue;
+                }
+                let id = plain.strip_prefix(root)?.to_string_lossy().into_owned();
                 let info = Info::read(&path).and_then(|i| {
-                    companion(&path, "idx", "idx.gz")?;
-                    companion(&path, "dict", "dict.dz")?;
+                    companion(&base, "idx", "idx.gz")?;
+                    companion(&base, "dict", "dict.dz")?;
                     Ok(i)
                 });
                 let (name, error) = match info {
                     Ok(i) => (i.name, None),
-                    Err(e) => (path.file_stem().unwrap_or_default().to_string_lossy().into(), Some(format!("{e:#}"))),
+                    Err(e) => (base.file_name().unwrap_or_default().to_string_lossy().into(), Some(format!("{e:#}"))),
                 };
                 let disabled = preferences.iter().any(|p| p.id == id && p.disabled);
                 found.push(Dictionary { id, name, path, error, disabled });
@@ -138,7 +177,8 @@ pub struct Backend {
 impl Backend {
     pub fn open(path: &Path, cache: &Path, current: &impl Fn() -> bool) -> Result<Self> {
         let info = Info::read(path)?;
-        let (data_path, compressed) = companion(path, "dict", "dict.dz")?;
+        let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
+        let (data_path, compressed) = companion(&base, "dict", "dict.dz")?;
         let definitions = Definitions::open(&data_path, compressed)?;
         let index = Index::open(path, cache, &info, definitions.len, current)?;
         Ok(Self { index, definitions, types: info.types })

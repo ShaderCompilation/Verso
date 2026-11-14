@@ -64,6 +64,32 @@ impl Fixture {
         Backend::open(&self.path(), &self.0.join("cache"), &|| true)
     }
 }
+impl Fixture {
+    /// Writes `test.ifo.gz` from `test.ifo`, removing the plain file unless kept.
+    fn gzip_ifo(&self, keep_plain: bool) -> Result<PathBuf> {
+        let gz = self.path().with_extension("ifo.gz");
+        fs::write(&gz, gzip(&fs::read(self.path())?)?)?;
+        if !keep_plain {
+            fs::remove_file(self.path())?;
+        }
+        Ok(gz)
+    }
+    fn cache_files(&self) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(self.0.join("cache"))? {
+            let path = entry?.path();
+            let mut signature = vec![0; 64];
+            fs::File::open(&path)?.read_exact(&mut signature)?;
+            files.push((path, signature));
+        }
+        Ok(files)
+    }
+}
+fn gzip(data: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data)?;
+    Ok(encoder.finish()?)
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -269,5 +295,126 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
     }
+    Ok(())
+}
+#[test]
+fn basename_strips_both_metadata_suffixes() {
+    assert_eq!(basename(Path::new("a/en.v2.ifo")), Some(PathBuf::from("a/en.v2")));
+    assert_eq!(basename(Path::new("a/en.v2.ifo.gz")), Some(PathBuf::from("a/en.v2")));
+    assert_eq!(sibling(Path::new("a/en.v2"), "idx.gz"), PathBuf::from("a/en.v2.idx.gz"));
+    for other in ["a/en.idx.gz", "a/.ifo", "a/.ifo.gz", "a/en.gz", "a/en"] {
+        assert_eq!(basename(Path::new(other)), None, "{other}");
+    }
+}
+#[test]
+fn compressed_metadata_alone_with_plain_and_compressed_companions() -> Result<()> {
+    for compressed in [false, true] {
+        let f = Fixture::new();
+        f.install(false, compressed)?;
+        let gz = f.gzip_ifo(false)?;
+        let found = discover(&f.0.join("dictionaries"), &[])?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].error, None);
+        assert_eq!(found[0].name, "Test dictionary");
+        assert_eq!(found[0].path, gz);
+        assert_eq!(found[0].id, "test.ifo", "same ID as a plain .ifo install");
+        let mut backend = Backend::open(&gz, &f.0.join("cache"), &|| true)?;
+        assert!(backend.lookup("FRUIT")?.contains("Apple\n\nA fruit."));
+        assert!(backend.lookup("apple")?.starts_with("apple\n\na lowercase entry"));
+    }
+    Ok(())
+}
+#[test]
+fn both_metadata_variants_list_once_and_prefer_plain() -> Result<()> {
+    let f = Fixture::new();
+    f.install(false, true)?;
+    let gz = f.path().with_extension("ifo.gz");
+    let text = fs::read_to_string(f.path())?.replace("Test dictionary", "Compressed copy");
+    fs::write(&gz, gzip(text.as_bytes())?)?;
+    let prefs = [Preference { id: "test.ifo".into(), disabled: true }];
+    let found = discover(&f.0.join("dictionaries"), &prefs)?;
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, f.path());
+    assert_eq!(found[0].name, "Test dictionary");
+    assert!(found[0].disabled);
+    Ok(())
+}
+#[test]
+fn corrupt_truncated_and_oversized_compressed_metadata_fail_per_dictionary() -> Result<()> {
+    let header = |f: &Fixture| fs::read(f.path());
+    type Make = fn(Vec<u8>) -> Result<Vec<u8>>;
+    let cases: [(&str, Make); 4] = [
+        ("corrupt", |_| Ok(b"not gzip at all".to_vec())),
+        ("truncated", |ifo| {
+            let z = gzip(&ifo)?;
+            Ok(z[..z.len() - 12].to_vec())
+        }),
+        ("bad checksum", |ifo| {
+            let mut z = gzip(&ifo)?;
+            let at = z.len() - 6;
+            z[at] ^= 0xff;
+            Ok(z)
+        }),
+        ("oversized", |mut ifo| {
+            ifo.extend(std::iter::repeat_n(b'#', 70000));
+            gzip(&ifo)
+        }),
+    ];
+    for (label, make) in cases {
+        let f = Fixture::new();
+        f.install(false, true)?;
+        let gz = f.path().with_extension("ifo.gz");
+        let data = make(header(&f)?)?;
+        if label == "oversized" {
+            assert!(data.len() < 65536, "compressed size is small, decompressed is not");
+        }
+        fs::write(&gz, data)?;
+        fs::remove_file(f.path())?;
+        let root = f.0.join("dictionaries");
+        fs::create_dir_all(root.join("other"))?;
+        let other = Fixture::new();
+        other.install(false, false)?;
+        for ext in ["ifo", "idx", "dict", "syn"] {
+            fs::copy(other.path().with_extension(ext), root.join("other/good").with_extension(ext))?;
+        }
+        let found = discover(&root, &[])?;
+        assert_eq!(found.len(), 2, "{label}");
+        let broken = found.iter().find(|d| d.path == gz).unwrap();
+        let error = broken.error.as_deref().unwrap_or_else(|| panic!("{label} has no error"));
+        assert!(error.contains(".ifo.gz"), "{label}: {error}");
+        assert_eq!(broken.name, "test");
+        assert!(found.iter().any(|d| d.path.ends_with("good.ifo") && d.error.is_none()), "{label}");
+        assert!(Backend::open(&gz, &f.0.join("cache"), &|| true).is_err(), "{label}");
+    }
+    Ok(())
+}
+#[test]
+fn replacing_either_metadata_variant_invalidates_cache() -> Result<()> {
+    let f = Fixture::new();
+    f.install(false, true)?;
+    assert!(f.backend()?.lookup("Apple")?.contains("A tree."));
+    let plain = f.cache_files()?;
+    assert_eq!(plain.len(), 1);
+    // Plain -> compressed: the cache file is reused by name but rebuilt.
+    let gz = f.gzip_ifo(false)?;
+    let open = || Backend::open(&gz, &f.0.join("cache"), &|| true);
+    assert!(open()?.lookup("Apple")?.contains("A tree."));
+    let compressed = f.cache_files()?;
+    assert_eq!(compressed.len(), 1);
+    assert_eq!(compressed[0].0, plain[0].0);
+    assert_ne!(compressed[0].1, plain[0].1);
+    // A valid cache is reused as long as the .ifo.gz is unchanged.
+    assert_eq!(f.cache_files()?, compressed);
+    let _ = open()?;
+    assert_eq!(f.cache_files()?, compressed);
+    // Replacing the .ifo.gz itself is detected.
+    let mut text = String::new();
+    GzDecoder::new(&fs::read(&gz)?[..]).read_to_string(&mut text)?;
+    fs::write(&gz, gzip(text.replace("wordcount=5", "wordcount=4").as_bytes())?)?;
+    assert!(open().is_err(), "stale cache is not reused after replacement");
+    // Back to plain metadata rebuilds again.
+    fs::write(f.path(), text)?;
+    assert!(f.backend()?.lookup("FRUIT")?.contains("A fruit."));
+    assert_ne!(f.cache_files()?[0].1, compressed[0].1);
     Ok(())
 }
