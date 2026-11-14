@@ -51,6 +51,8 @@ struct Shared {
     repaired: Vec<String>,
     /// Paths of deleted books to drop from the index.
     removals: Vec<PathBuf>,
+    /// A new folder list from Settings, used from the next pass.
+    roots: Option<Vec<PathBuf>>,
 }
 const REPAIR_LIMIT: usize = 32;
 const ERROR_LIMIT: usize = 32;
@@ -164,6 +166,9 @@ impl Background {
                     break;
                 }
                 let removals = std::mem::take(&mut state.removals);
+                if let Some(roots) = state.roots.take() {
+                    self.roots = roots;
+                }
                 drop(state);
                 self.remove(&removals);
                 let mut state = self.channel.lock();
@@ -469,6 +474,15 @@ impl Worker {
         let mut state = self.shared.0.lock().unwrap();
         state.requested = true;
         state.retry = true;
+        self.shared.1.notify_one();
+    }
+    /// Scan a new folder list. A running pass stops at its next cover or
+    /// identity check; books outside the new folders become unavailable but
+    /// keep their entries, so adding a folder back restores them.
+    pub fn set_roots(&self, roots: Vec<PathBuf>) {
+        let mut state = self.shared.0.lock().unwrap();
+        state.roots = Some(roots);
+        state.requested = true;
         self.shared.1.notify_one();
     }
     /// Recompute resume selection after finished/hidden flags change without a
@@ -1014,6 +1028,17 @@ mod tests {
         let worker = Worker::new(store.clone(), roots, Waker::new(|| {}));
         let removed = finished(&worker).0.expect("a removed book publishes the index");
         assert_eq!(removed.books.iter().filter(|b| b.available).count(), 1);
+        // A new folder list applies without restarting the worker. Books in a
+        // removed folder stay indexed as unavailable and return when re-added.
+        let other = root.join("other");
+        std::fs::create_dir_all(&other)?;
+        worker.set_roots(vec![other.clone()]);
+        let moved = finished(&worker).0.expect("a changed folder list publishes the index");
+        assert!(moved.books.iter().all(|b| !b.available) && !moved.books.is_empty());
+        worker.set_roots(vec![books.clone()]);
+        let back = finished(&worker).0.expect("re-adding the folder publishes the index");
+        assert_eq!(back.books.iter().filter(|b| b.available).count(), 1);
+        assert_eq!(store.book(&book.id).position, reading.position, "reading state survives");
         drop(worker);
         std::fs::remove_dir_all(root)?;
         Ok(())

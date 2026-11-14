@@ -4,6 +4,7 @@ pub mod position;
 use crate::document::{Position, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 use crate::library::{LibraryIndex, Sort};
+pub use crate::reader::TapZones;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -19,6 +20,10 @@ pub struct Settings {
     pub library_folder: Option<PathBuf>, // Legacy single-folder setting.
     pub library_folders: Option<Vec<PathBuf>>,
     pub library_sort: Sort,
+    /// Page turns between full flashes that clear ghosting; 0 never flashes
+    /// periodically (chapter starts and pictures still do).
+    pub page_flash: u32,
+    pub tap_zones: TapZones,
     /// Developer options in Settings (tap the version five times).
     pub developer: bool,
 }
@@ -31,10 +36,13 @@ impl Default for Settings {
             library_folder: None,
             library_folders: None,
             library_sort: Sort::Recent,
+            page_flash: DEFAULT_PAGE_FLASH,
+            tap_zones: TapZones::Standard,
             developer: false,
         }
     }
 }
+pub const DEFAULT_PAGE_FLASH: u32 = 6;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SleepScreen {
@@ -56,6 +64,9 @@ pub struct BookState {
 pub struct Store {
     root: PathBuf,
     selected_home: std::sync::Arc<std::sync::Mutex<Option<crate::library::Book>>>,
+    /// Counts settings saves through this store and its clones, so screens
+    /// can notice a change without rereading the file.
+    settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 impl Store {
     pub fn new() -> Self {
@@ -72,7 +83,7 @@ impl Store {
                     .join("verso")
             }
         });
-        Self { root, selected_home: Default::default() }
+        Self { root, selected_home: Default::default(), settings_saves: Default::default() }
     }
     pub fn settings(&self) -> Settings {
         let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
@@ -80,7 +91,13 @@ impl Store {
         s
     }
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
-        atomic(&self.root.join("settings.json"), s)
+        let result = atomic(&self.root.join("settings.json"), s);
+        self.settings_saves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+    /// Changes whenever settings were saved; compare to notice edits.
+    pub fn settings_saves(&self) -> u64 {
+        self.settings_saves.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn navigation(&self) -> Navigation {
         read(&self.root.join("library-navigation.json")).unwrap_or_default()
@@ -158,9 +175,20 @@ impl Store {
     pub fn library_folders(&self) -> Vec<PathBuf> {
         folder_paths(self.settings(), std::env::var_os("VERSO_BOOKS"))
     }
+    /// `VERSO_BOOKS` replaces the saved folder list (for development).
+    pub fn library_folders_overridden() -> bool {
+        std::env::var_os("VERSO_BOOKS").is_some()
+    }
+    /// Saves the folder list edited in Settings.
+    pub fn save_library_folders(&self, folders: Vec<PathBuf>) -> Result<()> {
+        let mut settings = self.settings();
+        settings.library_folders = Some(folders);
+        settings.library_folder = None;
+        self.save_settings(&settings)
+    }
     #[cfg(test)]
     pub fn at(root: PathBuf) -> Self {
-        Self { root, selected_home: Default::default() }
+        Self { root, selected_home: Default::default(), settings_saves: Default::default() }
     }
     fn book_path(&self, id: &str) -> PathBuf {
         self.root.join("books").join(format!("{id}.json"))
@@ -234,6 +262,18 @@ impl BookState {
     }
 }
 
+/// Adds `folder` to `folders`, replacing folders inside it. None when it is
+/// already part of the library (listed, or inside a listed folder).
+pub fn with_folder(folders: &[PathBuf], folder: &Path) -> Option<Vec<PathBuf>> {
+    let folder = normalize(folder);
+    if folders.iter().any(|f| folder.starts_with(normalize(f))) {
+        return None;
+    }
+    let mut result: Vec<_> = folders.iter().filter(|f| !normalize(f).starts_with(&folder)).cloned().collect();
+    result.push(folder);
+    Some(result)
+}
+
 fn folder_paths(settings: Settings, override_folders: Option<std::ffi::OsString>) -> Vec<PathBuf> {
     let folders = override_folders
         .map(|value| std::env::split_paths(&value).collect())
@@ -263,6 +303,42 @@ mod tests {
         let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
         assert_eq!(restored.sleep_screen, SleepScreen::Amazon);
         assert!(!restored.footer);
+        Ok(())
+    }
+    #[test]
+    fn reader_settings_default_and_round_trip() -> Result<()> {
+        let mut settings: Settings = serde_json::from_str(r#"{"footer":true}"#)?;
+        assert_eq!((settings.page_flash, settings.tap_zones), (6, TapZones::Standard));
+        settings.page_flash = 0;
+        settings.tap_zones = TapZones::Mirrored;
+        let json = serde_json::to_string(&settings)?;
+        assert!(json.contains(r#""tap_zones":"mirrored""#), "{json}");
+        let restored: Settings = serde_json::from_str(&json)?;
+        assert_eq!((restored.page_flash, restored.tap_zones), (0, TapZones::Mirrored));
+        Ok(())
+    }
+    #[test]
+    fn adding_folders_skips_covered_ones_and_absorbs_subfolders() {
+        let folders = vec![PathBuf::from("/mnt/us/documents"), PathBuf::from("/mnt/us/books/Tolkien")];
+        assert_eq!(with_folder(&folders, Path::new("/mnt/us/documents")), None);
+        assert_eq!(with_folder(&folders, Path::new("/mnt/us/documents/Fiction")), None);
+        assert_eq!(
+            with_folder(&folders, Path::new("/mnt/us/books")),
+            Some(vec![PathBuf::from("/mnt/us/documents"), PathBuf::from("/mnt/us/books")])
+        );
+        // A shared prefix that isn't a parent folder is a different folder.
+        assert_eq!(with_folder(&folders, Path::new("/mnt/us/doc")).map(|f| f.len()), Some(3));
+    }
+    #[test]
+    fn saving_settings_is_noticed_by_clones() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-store-saves-{}", std::process::id()));
+        let store = Store::at(root.clone());
+        let other = store.clone();
+        let before = other.settings_saves();
+        store.save_library_folders(vec!["/books".into()])?;
+        assert_ne!(other.settings_saves(), before);
+        assert_eq!(other.settings().library_folders, Some(vec![PathBuf::from("/books")]));
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]

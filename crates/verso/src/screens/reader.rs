@@ -93,6 +93,7 @@ impl Reader {
     ) -> Self {
         let mut cache = PageCache::default();
         cache.reset(generation);
+        let refresh = Refresh::new(settings.page_flash);
         Self {
             screen,
             persistence: Writer::new(store.clone(), id.clone(), worker.waker()),
@@ -107,7 +108,7 @@ impl Reader {
             target: 0,
             cache,
             shown: None,
-            refresh: Refresh::default(),
+            refresh,
             overlay: Overlay::None,
             layout_at: None,
             laying_out: true,
@@ -650,7 +651,7 @@ impl Screen for Reader {
             },
             Overlay::None => {
                 let step = match g {
-                    Gesture::Tap(p) => match reader::tap_zone(self.screen, p) {
+                    Gesture::Tap(p) => match reader::tap_zone(self.screen, p, self.settings.tap_zones) {
                         Zone::Menu => {
                             self.menu(cx);
                             cx.redraw();

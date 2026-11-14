@@ -70,6 +70,8 @@ pub struct Books {
     library: LibraryWorker,
     store: Store,
     roots: Vec<PathBuf>,
+    /// `Store::settings_saves` when `roots` was last checked.
+    settings_seen: u64,
     index: LibraryIndex,
     browsing_ready: bool,
     home_active: bool,
@@ -122,6 +124,7 @@ impl Books {
     }
     fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
         let roots = store.library_folders();
+        let settings_seen = store.settings_saves();
         let started = std::time::Instant::now();
         let home = store.home_summary();
         log::info!(
@@ -169,6 +172,7 @@ impl Books {
             library,
             store,
             roots,
+            settings_seen,
             index: LibraryIndex::default(),
             browsing_ready: false,
             home_active: true,
@@ -449,6 +453,30 @@ impl Books {
         self.save_navigation(cx);
         cx.refresh(self.screen, RefreshMode::Full);
         log::info!("collection switch {:?}: prepared in {:?}", self.navigation.folder, started.elapsed());
+    }
+    /// Library folders edited in Settings: scan the new list. The index that
+    /// scan publishes rebuilds collections and restores navigation as usual.
+    fn apply_folder_changes(&mut self, cx: &mut EventCx) {
+        let saves = self.store.settings_saves();
+        if saves == self.settings_seen {
+            return;
+        }
+        self.settings_seen = saves;
+        let roots = self.store.library_folders();
+        if roots != self.roots {
+            log::info!("library folders changed: {roots:?}");
+            self.roots = roots.clone();
+            self.library.set_roots(roots);
+            self.scanning = true;
+            self.working = true;
+            if self.browsing_ready {
+                // Folders outside the new list leave Collections at once.
+                self.collections = Collections::from_index(&self.index, &self.roots);
+                self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
+            }
+            self.refresh(cx.theme);
+            cx.redraw();
+        }
     }
     fn apply_pending(&mut self, cx: &mut EventCx) {
         if self.touching
@@ -1263,6 +1291,7 @@ impl Screen for Books {
         self.reader.as_mut().map_or(Action::None, |r| r.on_tick(cx))
     }
     fn on_background(&mut self, cx: &mut EventCx) {
+        self.apply_folder_changes(cx);
         if let Some(home) = self.library.take_home() {
             self.pending_home = Some(self.store.home_summary().unwrap_or(home));
         }
