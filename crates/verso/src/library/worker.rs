@@ -722,6 +722,7 @@ pub fn scan_roots(
             metadata,
             path,
             id: String::new(),
+            annotation_id: String::new(),
             legacy_id,
             fingerprint,
             fingerprint_attempted,

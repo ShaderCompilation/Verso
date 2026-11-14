@@ -285,3 +285,24 @@ python3 scripts/perf/startup.py after /tmp/after/verso --large /tmp/large --inst
   --output docs/research/home-startup-2026-11-11/after.json \
   --collections-tap 636,230 --summary seeded --mode lifecycle --runs 1
 ```
+
+## Highlights (text-selection Phase 4)
+
+Both scripts use only the original fixtures, synthetic records and isolated
+state under `/mnt/us/verso/highlights-*-check`; run them from the repository root
+with the Kindle awake and no reader open. They restore the Kindle UI at the end.
+
+- `highlights.py --binary … --probe … --output DIR`: injected-touch lifecycle
+  check. Cross-page save, restart, jump, KOReader import/removal/duplicates, a
+  blocked manifest write flushed on sleep, idle CPU, sleep/wake cleanup, then
+  landscape with larger text: find, jump and live reflow. Landscape touches are
+  injected at physical `(y, 1695 - x)` for logical `(x, y)`.
+- `highlights_load.py --binary … --probe … --output DIR`: opening, live relayout,
+  swipe page turns and memory with 0, 100 and 1,000 short highlights and 1,000
+  dense long ranges (21 paragraphs each, ~100 overlapping per page). Timings
+  come from the app's log timestamps and `elapsed_us` fields.
+- `redraw.py --experiment annotations --annotation-count N --annotation-fixture
+  reader.epub`: page-turn request latency with N short highlights.
+
+`annotation_fixture.py` builds the synthetic records from `reader.epub`; numeric
+results are in `highlights-results.csv`.

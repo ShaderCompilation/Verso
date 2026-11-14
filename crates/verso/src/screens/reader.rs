@@ -1,4 +1,5 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
+mod annotations;
 mod search;
 mod selection;
 use crate::document::{
@@ -63,6 +64,9 @@ pub struct Reader {
     /// A `Command::Position` whose reply decides the target page; 0 = none.
     jump: u64,
     next_jump: u64,
+    annotations: annotations::State,
+    extension: Option<annotations::ExtendBar>,
+    lookup_query: Option<String>,
 }
 /// Highlight requests share the selection reply; this bit keeps their IDs apart.
 const HIGHLIGHT_ID: u64 = 1 << 63;
@@ -75,6 +79,7 @@ enum Overlay {
     Lookup(Box<Lookup>),
     SelectionActions(Box<SelectionActions>),
     Search(Box<SearchView>),
+    Highlights(Box<annotations::View>),
 }
 impl Reader {
     pub fn book_id(&self) -> &str {
@@ -128,7 +133,17 @@ impl Reader {
             next_highlight: 0,
             jump: 0,
             next_jump: 0,
+            annotations: annotations::State::default(),
+            extension: None,
+            lookup_query: None,
         }
+    }
+    pub fn annotations(&mut self, mut book: crate::library::Book) {
+        if book.annotation_id.is_empty() {
+            book.annotation_id = book.id.clone();
+        }
+        self.annotations.service =
+            Some(crate::annotations::worker::Worker::new(self.store.clone(), book, self.worker.waker()));
     }
     pub fn failed_open(&self) -> bool {
         self.error.is_some() && self.shown.is_none()
@@ -138,6 +153,26 @@ impl Reader {
     }
     pub fn receive(&mut self, reply: Reply, cx: &mut EventCx) {
         match reply {
+            reply @ Reply::Resolved { generation, preview, revision, .. } if generation == self.cache.generation => {
+                let current = if preview {
+                    revision == self.annotations.import_id
+                } else {
+                    revision == self.annotations.revision
+                };
+                if current && self.annotations.receive(reply) {
+                    if !preview {
+                        self.annotations.paint_pending = true;
+                        self.cache.reset(self.cache.generation);
+                        self.cache.request(self.target);
+                        self.worker.send(Command::Page { generation: self.cache.generation, number: self.target });
+                        self.prefetch();
+                    }
+                    if let Overlay::Highlights(view) = &mut self.overlay {
+                        view.refresh(&self.annotations, None, cx.theme);
+                    }
+                    cx.redraw();
+                }
+            }
             Reply::Selection { request, result } if self.highlight_pending == Some(request) => {
                 self.highlight_pending = None;
                 let context = self.selection_context();
@@ -181,14 +216,21 @@ impl Reader {
                 self.metadata = metadata;
                 self.toc = toc;
                 self.pages = pages.max(1);
+                self.annotations.resolve(generation, &self.worker);
                 self.target = current.min(self.pages - 1);
                 if matches!(self.overlay, Overlay::Menu(_) | Overlay::Contents(_)) {
                     cx.redraw();
                 }
             }
-            Reply::Page(page) if page.generation == self.cache.generation => {
+            Reply::Page(page)
+                if page.generation == self.cache.generation
+                    && (self.annotations.service.is_none()
+                        || self.annotations.resolving
+                        || page.annotation_revision == self.annotations.revision) =>
+            {
                 self.cache.insert(page.clone(), self.target);
                 if page.number == self.target {
+                    self.annotations.paint_pending = false;
                     self.display(page, cx);
                 }
             }
@@ -213,6 +255,10 @@ impl Reader {
     }
     fn selection_released(&mut self, cx: &mut EventCx) {
         if let Some(text) = self.selection.take_released() {
+            self.lookup_query = None;
+            if self.selection.extending {
+                return;
+            }
             if text.split_whitespace().count() == 1 {
                 self.lookup(&text, cx);
             } else {
@@ -225,13 +271,24 @@ impl Reader {
         let layout_changed = self.laying_out;
         let different = self.shown.as_ref().is_none_or(|p| p.generation != page.generation || p.number != page.number);
         if !different {
+            if self.shown.as_ref().is_some_and(|p| p.annotation_revision != page.annotation_revision) {
+                self.shown = Some(page);
+                cx.redraw();
+            }
             return;
         }
         self.laying_out = false;
-        self.selection.clear();
+        if !self.selection.extending {
+            self.selection.clear();
+        }
         self.highlight = None;
         self.anchor = page.position.clone();
         self.shown = Some(page.clone());
+        if self.selection.extending
+            && let Some(context) = self.selection_context()
+        {
+            self.selection.page(context, &self.worker);
+        }
         self.save_pending = true;
         self.error = None;
         let chapter_start = self.toc.iter().any(|c| c.level <= 2 && c.page == page.number);
@@ -379,6 +436,80 @@ impl Reader {
         }
         cx.redraw();
     }
+    fn open_highlights(&mut self, ids: Option<Vec<usize>>, cx: &mut EventCx) {
+        self.selection.clear();
+        self.extension = None;
+        self.overlay =
+            Overlay::Highlights(Box::new(annotations::View::new(cx.theme, self.screen, &self.annotations, ids)));
+        cx.redraw();
+    }
+    fn save_highlight(&mut self, cx: &mut EventCx) {
+        if !self.annotations.ready || self.annotations.pending || self.selection.busy() {
+            cx.toast("Highlights are not ready to save", None);
+            return;
+        }
+        let Some(s) = self.selection.selected.clone() else { return };
+        let Some(service) = &self.annotations.service else { return };
+        let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string();
+        let id = crate::annotations::digest(
+            format!("{}:{}:{}", service.book.annotation_id, created, s.range.start.0).as_bytes(),
+        );
+        let a = crate::annotations::Annotation {
+            version: 1,
+            id,
+            book: service.book.annotation_id.clone(),
+            fingerprint: service.book.fingerprint.clone(),
+            range: s.range,
+            quotation: s.text,
+            created: crate::annotations::created_now(),
+            chapter: reader::chapter(&self.toc, s.start_page).map(|i| self.toc[i].title.clone()).unwrap_or_default(),
+            note: None,
+            provenance: None,
+        };
+        self.annotations.collection.add(a);
+        self.annotations.save();
+        self.annotations.resolve(self.cache.generation, &self.worker);
+        self.selection.clear();
+        self.extension = None;
+        self.overlay = Overlay::None;
+        cx.redraw();
+    }
+    fn annotation_event(&mut self, event: annotations::Event, cx: &mut EventCx) {
+        use annotations::Event;
+        match event {
+            Event::Close => {
+                self.annotations.cancel_import();
+                self.overlay = Overlay::None;
+            }
+            Event::Jump(i) => {
+                if let Some(a) = self.annotations.collection.records.get(i) {
+                    let p = a.range.start.clone();
+                    self.overlay = Overlay::None;
+                    self.jump_position(None, p, cx);
+                }
+            }
+            Event::Remove(i) => {
+                if let Some(a) = self.annotations.collection.records.get(i) {
+                    let id = a.id.clone();
+                    self.annotations.collection.remove(&id);
+                    self.annotations.save();
+                    self.annotations.resolve(self.cache.generation, &self.worker);
+                    self.open_highlights(None, cx);
+                }
+            }
+            Event::Preview(path) => self.annotations.start_import(path),
+            Event::Confirm => {
+                self.annotations.confirm(self.cache.generation, &self.worker);
+                self.open_highlights(None, cx);
+            }
+            Event::CancelImport => {
+                self.annotations.cancel_import();
+                self.annotations.resolve(self.cache.generation, &self.worker);
+            }
+            Event::Retry => self.annotations.save(),
+        }
+        cx.redraw();
+    }
     fn menu(&mut self, cx: &EventCx) {
         self.overlay = Overlay::Menu(Box::new(ReaderMenu::new(
             cx.theme,
@@ -394,6 +525,7 @@ impl Reader {
             Overlay::Text(Box::new(TextSheet::new(t, self.screen, &self.settings.typography, self.settings.footer)));
     }
     fn changed(&mut self) {
+        self.extension = None;
         self.selection.clear();
         self.highlight = None;
         self.highlight_pending = None;
@@ -439,6 +571,7 @@ impl Reader {
     }
     pub fn close(&mut self) -> anyhow::Result<()> {
         self.selection.clear();
+        self.annotations.flush()?;
         self.flush_position()?;
         if let Some(worker) = &self.dictionary {
             worker.flush()?;
@@ -483,12 +616,24 @@ impl Screen for Reader {
         } else {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
         }
+        if let Some(page) = &self.shown {
+            for patch in &page.painted {
+                if patch.pixels.is_empty() {
+                    cx.canvas.highlight_rect(patch.rect);
+                } else {
+                    cx.canvas.blit_gray(patch.rect, &patch.pixels, patch.rect.w as usize);
+                }
+            }
+        }
         if let Some((_, rects)) = &self.highlight {
             for rect in rects {
                 cx.canvas.invert_rect(*rect);
             }
         }
         self.selection.draw(cx);
+        if let Some(bar) = &mut self.extension {
+            bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
+        }
         if let Some(bar) = &mut self.search_bar {
             bar.draw(cx, &self.search);
         }
@@ -506,6 +651,7 @@ impl Screen for Reader {
             Overlay::Lookup(lookup) => lookup.draw(cx),
             Overlay::SelectionActions(actions) => actions.draw(cx),
             Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
+            Overlay::Highlights(view) => view.draw(cx, &self.annotations),
         }
         if self.laying_out || self.layout_at.is_some() || self.error.is_some() || self.save_error.is_some() {
             let message = self
@@ -520,6 +666,57 @@ impl Screen for Reader {
         }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        if self.selection.extending {
+            if let Some(bar) = &mut self.extension {
+                let (owned, event) = bar.gesture(&g);
+                if owned {
+                    if let Some(e) = event {
+                        match e {
+                            0 => self.go(self.target.saturating_sub(1), cx),
+                            1 => self.go(self.target + 1, cx),
+                            2 => self.save_highlight(cx),
+                            _ => {
+                                self.selection.clear();
+                                self.extension = None;
+                            }
+                        }
+                    }
+                    cx.redraw();
+                    return Action::None;
+                }
+            }
+            if let Some(context) = self.selection_context() {
+                self.selection.on_gesture(g, context, &self.worker, cx);
+                self.selection_released(cx);
+            }
+            return Action::None;
+        }
+        if matches!(self.overlay, Overlay::None)
+            && self.selection.selected.is_none()
+            && let Gesture::Tap(p) = g
+        {
+            let ids: Vec<_> = self
+                .shown
+                .as_ref()
+                .filter(|page| page.annotation_revision == self.annotations.revision)
+                .map(|page| {
+                    page.annotations
+                        .iter()
+                        .filter(|(_, rects)| rects.iter().any(|r| r.contains(p)))
+                        .map(|(i, _)| *i)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !ids.is_empty() {
+                let single = (ids.len() == 1).then_some(ids[0]);
+                self.open_highlights(Some(ids), cx);
+                if let (Some(i), Overlay::Highlights(view)) = (single, &mut self.overlay) {
+                    view.detail(i);
+                }
+                cx.redraw();
+                return Action::None;
+            }
+        }
         if matches!(self.overlay, Overlay::None)
             && let Some(bar) = &mut self.search_bar
         {
@@ -555,20 +752,30 @@ impl Screen for Reader {
                         worker.cancel();
                     }
                     self.overlay = Overlay::None;
-                    self.selection.clear();
-                    if let LookupEvent::Search(query) = event {
-                        self.open_search(Some(&query), cx);
+                    if let LookupEvent::Actions(query) = event {
+                        self.lookup_query = Some(query);
+                        self.overlay =
+                            Overlay::SelectionActions(Box::new(SelectionActions::new(cx.theme, self.screen)));
+                    } else {
+                        self.selection.clear();
                     }
                 }
             }
             Overlay::SelectionActions(actions) => match actions.on_gesture(&g) {
+                Some(SelectionAction::Highlight) => self.save_highlight(cx),
+                Some(SelectionAction::Extend) => {
+                    self.selection.extend();
+                    self.extension = Some(annotations::ExtendBar::new(cx.theme, self.screen));
+                    self.overlay = Overlay::None;
+                }
                 Some(SelectionAction::Dictionary) => {
                     if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
                         self.lookup(&query, cx);
                     }
                 }
                 Some(SelectionAction::Search) => {
-                    let query = self.selection.selected.as_ref().map(|s| s.text.clone());
+                    let query =
+                        self.lookup_query.take().or_else(|| self.selection.selected.as_ref().map(|s| s.text.clone()));
                     self.open_search(query.as_deref(), cx);
                 }
                 Some(SelectionAction::Dismiss) => {
@@ -577,6 +784,11 @@ impl Screen for Reader {
                 }
                 None => {}
             },
+            Overlay::Highlights(view) => {
+                if let Some(event) = view.gesture(&g, &self.annotations, cx.theme) {
+                    self.annotation_event(event, cx);
+                }
+            }
             Overlay::Search(view) => {
                 if let Some(event) = view.on_gesture(&g, &mut self.search, cx.theme) {
                     self.on_search(event, cx);
@@ -598,6 +810,7 @@ impl Screen for Reader {
                         Overlay::Contents(Box::new(Contents::new(cx.theme, self.screen, &self.toc, self.target)))
                 }
                 Some(MenuEvent::Search) => self.open_search(None, cx),
+                Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
                 Some(MenuEvent::Text) => self.text(cx.theme),
                 Some(MenuEvent::Page(page)) => self.go(page, cx),
                 Some(MenuEvent::Chapter(delta)) => {
@@ -680,7 +893,12 @@ impl Screen for Reader {
         Action::None
     }
     fn busy(&self) -> bool {
-        matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.busy())
+        self.annotations.resolving
+            || self.annotations.paint_pending
+            || self.annotations.importing
+            || self.annotations.pending
+            || self.annotations.service.is_some() && !self.annotations.ready && self.annotations.load_error.is_none()
+            || matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.busy())
             || matches!(&self.overlay, Overlay::Search(_)) && self.search.running()
             || self.highlight_pending.is_some()
             || self.jump != 0
@@ -720,6 +938,12 @@ impl Screen for Reader {
         if let Overlay::Lookup(lookup) = &mut self.overlay {
             lookup.receive(cx);
         }
+        if self.annotations.drain(self.cache.generation, &self.worker, cx) {
+            if let Overlay::Highlights(view) = &mut self.overlay {
+                view.refresh(&self.annotations, None, cx.theme);
+            }
+            cx.redraw();
+        }
         let had_error = self.save_error.is_some();
         for result in self.persistence.drain() {
             self.save_error = result.err().map(|e| format!("{e:#}"));
@@ -738,6 +962,13 @@ impl Screen for Reader {
     fn on_text_input(&mut self, input: &crate::platform::TextInput, cx: &mut EventCx) -> bool {
         match &mut self.overlay {
             Overlay::Lookup(lookup) => lookup.on_text_input(input, cx),
+            Overlay::Highlights(view) => {
+                let consumed = view.input(input);
+                if consumed {
+                    cx.redraw();
+                }
+                consumed
+            }
             Overlay::Search(view) => {
                 let (consumed, event) = view.on_text_input(input);
                 if consumed {
@@ -760,6 +991,8 @@ impl Screen for Reader {
         self.save();
     }
     fn on_sleep(&mut self) {
+        self.extension = None;
+        self.annotations.cancel_import();
         self.selection.sleep();
         self.search.cancel(&self.worker);
         self.highlight = None;
@@ -767,11 +1000,13 @@ impl Screen for Reader {
         if let Some(worker) = &self.dictionary {
             worker.cancel();
         }
+        let _ = self.annotations.flush();
         let _ = self.flush_position();
         // Dropping the controls cancels held steppers and slider drags.
         self.overlay = Overlay::None;
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
+        self.annotations.flush()?;
         self.flush_position()?;
         if let Some(worker) = &self.dictionary {
             worker.flush()?;
@@ -803,6 +1038,9 @@ mod tests {
                 position: Position("page0".into()),
                 progress: 0,
                 images: false,
+                annotation_revision: 0,
+                annotations: vec![],
+                painted: vec![],
             });
             let mut r = Reader::new(
                 screen,
@@ -822,6 +1060,9 @@ mod tests {
                 range: TextRange { start: Position("a".into()), end: Position("b".into()) },
                 text: "selected".into(),
                 rects: vec![Rect::new(100, 100, 200, 30)],
+                start_page: 0,
+                start_visible: true,
+                end_visible: true,
             });
             let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
             let mut app = App::new(&info, Theme::for_dpi(150), Box::new(r));
@@ -867,6 +1108,9 @@ mod tests {
                 position: Position(format!("page-{number}")),
                 progress: 0,
                 images: false,
+                annotation_revision: 0,
+                annotations: vec![],
+                painted: vec![],
             })
         };
         r.pages = 10;
@@ -922,6 +1166,9 @@ mod tests {
         assert_eq!((highlight.page, highlight.id & HIGHLIGHT_ID), (3, HIGHLIGHT_ID));
         let rects = vec![Rect::new(10, 10, 50, 20)];
         let found = Selection {
+            start_page: 0,
+            start_visible: true,
+            end_visible: true,
             range: TextRange { start: Position("hit-3".into()), end: Position("end-3".into()) },
             text: "Ada".into(),
             rects: rects.clone(),
@@ -1002,6 +1249,9 @@ mod tests {
                     position: Position(format!("page-{number}")),
                     progress: 2500,
                     images: false,
+                    annotation_revision: 0,
+                    annotations: vec![],
+                    painted: vec![],
                 })
             };
             let mut reader = Reader::new(
@@ -1084,6 +1334,9 @@ mod tests {
                 position: Position(format!("page-{number}")),
                 progress: 2500,
                 images: false,
+                annotation_revision: 0,
+                annotations: vec![],
+                painted: vec![],
             }))
         };
         r.receive(
@@ -1216,6 +1469,9 @@ mod tests {
                 position: Position(format!("page-{number}")),
                 progress: 2500,
                 images: false,
+                annotation_revision: 0,
+                annotations: vec![],
+                painted: vec![],
             })
         };
         r.receive(

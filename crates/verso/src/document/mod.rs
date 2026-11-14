@@ -50,7 +50,7 @@ impl Typography {
 pub struct Position(pub String);
 
 /// Stable DOM positions, with an exclusive end. Never pixel offsets or page numbers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextRange {
     pub start: Position,
     pub end: Position,
@@ -62,6 +62,9 @@ pub struct Selection {
     pub text: String,
     /// Screen coordinates on the explicitly requested page.
     pub rects: Vec<crate::geom::Rect>,
+    pub start_page: usize,
+    pub start_visible: bool,
+    pub end_visible: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +77,8 @@ pub enum SelectionQuery {
     },
     #[allow(dead_code)] // Public extraction API for subsequent reading tools; exercised by engine tests.
     Range(TextRange),
+    Geometry(TextRange),
+    Quotation(TextRange),
 }
 
 /// One match from book search, with the text around it in the same block.
@@ -129,6 +134,14 @@ pub struct FontFace {
 
 pub trait Document {
     fn select(&mut self, page: usize, query: &SelectionQuery) -> Result<Option<Selection>>;
+    /// Resolve original endpoints and validate their quotation; never search
+    /// for an alternative location when the content/engine has changed.
+    fn validate_range(&mut self, range: &TextRange, quotation: &str) -> Result<Option<Selection>> {
+        let expected = crate::annotations::normalize(quotation);
+        Ok(self
+            .select(0, &SelectionQuery::Quotation(range.clone()))?
+            .filter(|s| !expected.is_empty() && crate::annotations::normalize(&s.text) == expected))
+    }
     /// Starts a literal, case-insensitive search from the start of the book.
     fn search_start(&mut self, query: &str) -> Result<()>;
     /// Continues the search for about `budget`, returning only the new hits.
@@ -365,12 +378,15 @@ mod tests {
             .select(0, &SelectionQuery::Extend { anchor: hello.range.clone(), focus: *russian_point })
             .unwrap()
             .unwrap();
+        assert!(extended.text.is_empty(), "drag requests only geometry");
+        let extended = doc.select(0, &SelectionQuery::Range(extended.range)).unwrap().unwrap();
         assert!(extended.text.starts_with("Hello") && extended.text.ends_with("Привет"), "{:?}", extended.text);
         assert!(extended.rects.len() > 1);
         let backwards = doc
             .select(0, &SelectionQuery::Extend { anchor: russian.range.clone(), focus: *hello_point })
             .unwrap()
             .unwrap();
+        let backwards = doc.select(0, &SelectionQuery::Range(backwards.range)).unwrap().unwrap();
         assert_eq!(extended, backwards);
         let reversed = TextRange { start: extended.range.end.clone(), end: extended.range.start.clone() };
         assert_eq!(doc.select(0, &SelectionQuery::Range(reversed)).unwrap(), Some(extended.clone()));
@@ -403,8 +419,54 @@ mod tests {
             }
         }
         let all = TextRange { start: first.range.start, end: last.unwrap().range.end };
-        let clipped = doc.select(0, &SelectionQuery::Range(all)).unwrap().unwrap();
-        assert!(!clipped.text.contains("Final boundary"));
+        let clipped = doc.select(0, &SelectionQuery::Range(all.clone())).unwrap().unwrap();
+        assert!(clipped.text.contains("Final boundary"));
+        assert_eq!(clipped.range, all);
+        assert!(clipped.start_visible && !clipped.end_visible);
+        let end = doc.select(last_page, &SelectionQuery::Range(all.clone())).unwrap().unwrap();
+        assert_eq!(end.text, clipped.text);
+        assert!(!end.start_visible && end.end_visible);
+        let geometry = doc.select(last_page, &SelectionQuery::Geometry(all.clone())).unwrap().unwrap();
+        assert!(geometry.text.is_empty());
+        assert_eq!(geometry.rects, end.rects);
+        doc.annotation_clear();
+        assert_eq!(doc.annotation_add(9, &all).unwrap(), 0);
+        assert_eq!(doc.annotation_finish(1), vec![9]);
+        for page in 0..=last_page {
+            assert_eq!(doc.annotation_page(page), vec![9]);
+        }
+        let reversed = TextRange { start: all.end.clone(), end: all.start.clone() };
+        assert_eq!(doc.select(0, &SelectionQuery::Range(reversed)).unwrap().unwrap().text, clipped.text);
         assert!(clipped.rects.iter().all(|r| r.y >= 0 && r.bottom() <= layout.height as i32));
+        assert!(doc.validate_range(&all, &clipped.text).unwrap().is_some());
+        assert!(doc.validate_range(&all, "Edited quotation").unwrap().is_none());
+        let root = std::env::temp_dir().join(format!("verso-highlight-milestone-{}", std::process::id()));
+        let store = crate::store::Store::at(root.clone());
+        let mut collection = crate::annotations::Collection::load(&store, "milestone").unwrap();
+        collection.add(crate::annotations::Annotation {
+            version: 1,
+            id: "passage".into(),
+            book: "milestone".into(),
+            fingerprint: "original".into(),
+            range: all.clone(),
+            quotation: clipped.text.clone(),
+            created: "2026-11-15".into(),
+            chapter: "Selection".into(),
+            note: None,
+            provenance: None,
+        });
+        collection.commit(&store, "milestone").unwrap();
+        drop(doc);
+        let restored = crate::annotations::Collection::load(&store, "milestone").unwrap();
+        let mut landscape = engine.open(&path, &Layout { width: 800, height: 600, ..layout.clone() }, None).unwrap();
+        landscape.set_typography(&Typography { size_pt: 18.0, ..Typography::default() }, 150, true).unwrap();
+        let saved = &restored.records[0];
+        let range = landscape.validate_range(&saved.range, &saved.quotation).unwrap().unwrap();
+        assert_eq!(range.range, all);
+        assert_eq!(range.text, clipped.text);
+        landscape.go_to_position(&saved.range.start).unwrap();
+        let jump = landscape.current_page();
+        assert!(landscape.select(jump, &SelectionQuery::Geometry(all)).unwrap().unwrap().start_visible);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -645,6 +645,7 @@ impl Books {
         }
         let Some(book) = self.book(&id) else { return };
         let path = book.path.clone();
+        let annotation_book = book.clone();
         self.store.select_home_book(book);
         self.save_navigation(cx);
         self.library.pause(true);
@@ -662,6 +663,7 @@ impl Books {
             self.fonts.clone(),
             saved.position.clone(),
         ));
+        self.reader.as_mut().unwrap().annotations(annotation_book);
         let dpi = cx.theme.dpi;
         let margin = (7.0 * dpi / 25.4).round() as u32;
         let layout = Layout {

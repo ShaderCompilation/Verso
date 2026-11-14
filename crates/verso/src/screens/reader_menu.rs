@@ -12,6 +12,7 @@ pub enum MenuEvent {
     Close,
     Contents,
     Search,
+    Highlights,
     Text,
     Page(usize),
     Chapter(isize),
@@ -29,6 +30,7 @@ pub struct ReaderMenu {
     contents: Button,
     search: Button,
     text: Button,
+    highlights: Button,
     outside: bool,
 }
 impl ReaderMenu {
@@ -68,15 +70,18 @@ impl ReaderMenu {
         let light_slider = light.map(|v| make_slider(light_row, v.brightness));
         let warmth = light.and_then(|v| v.warmth.map(|w| make_slider(warmth_row, w)));
         let gap = t.mm(3.0);
-        let width = (screen.w - 2 * m - 2 * gap) / 3;
+        let width = (screen.w - 2 * m - 3 * gap) / 4;
         let y = screen.bottom() - t.mm(13.0);
-        let mut contents = Button::new("Contents", ButtonKind::Secondary).with_icon(Icon::List);
-        let mut search = Button::new("Search", ButtonKind::Secondary).with_icon(Icon::Search);
-        let mut text = Button::new("Text", ButtonKind::Secondary).with_icon(Icon::TextSize);
+        let mut contents = Button::new("Contents", ButtonKind::Secondary);
+        let mut search = Button::new("Search", ButtonKind::Secondary);
+        let mut text = Button::new("Text", ButtonKind::Secondary);
         contents.place(Rect::new(m, y, width, t.button_h), t);
         search.place(Rect::new(m + width + gap, y, width, t.button_h), t);
         text.place(Rect::new(screen.w - m - width, y, width, t.button_h), t);
+        let mut highlights = Button::new("Highlights", ButtonKind::Secondary);
+        highlights.place(Rect::new(m + 2 * (width + gap), y, width, t.button_h), t);
         Self {
+            highlights,
             top,
             panel,
             info,
@@ -117,6 +122,7 @@ impl ReaderMenu {
         self.contents.draw(cx);
         self.search.draw(cx);
         self.text.draw(cx);
+        self.highlights.draw(cx);
     }
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<MenuEvent> {
         if let Gesture::Down(p) = g {
@@ -133,6 +139,9 @@ impl ReaderMenu {
         }
         if self.search.on_gesture(g) {
             return Some(MenuEvent::Search);
+        }
+        if self.highlights.on_gesture(g) {
+            return Some(MenuEvent::Highlights);
         }
         if self.text.on_gesture(g) {
             return Some(MenuEvent::Text);

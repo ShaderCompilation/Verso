@@ -68,11 +68,14 @@ def main():
                         help='Sample smaps/status in library, reader and menu outside timed turns')
     parser.add_argument('--turn-delay-us', type=int, default=850000,
                         help='Delay after each 50 ms contact (default: 850000)')
-    parser.add_argument('--experiment', choices=['redraw', 'persistence'], default='redraw')
+    parser.add_argument('--experiment', choices=['redraw', 'persistence', 'annotations'], default='redraw')
     parser.add_argument('--position-check', action='store_true',
                         help='Verify saved page, close/reopen, sleep and normal-exit completion')
     parser.add_argument('--failure-check', action='store_true',
                         help='Block only the isolated position temp file, check errors and recover')
+    parser.add_argument('--home', action='store_true', help='Visit All books from the current Home screen')
+    parser.add_argument('--annotation-count', type=int, choices=[0, 100, 1000])
+    parser.add_argument('--annotation-fixture', type=Path, help='Local original reader.epub for synthetic records')
     args = parser.parse_args()
     APP = '/mnt/us/verso/' + args.experiment + '-check'
     assert 0 < args.turn_delay_us <= 1000000
@@ -97,6 +100,11 @@ def main():
                               'margins': 0, 'justify': True}, 'footer': True,
                 'library_folders': [APP + '/books'], 'library_sort': 'title'}
     upload(state + '/settings.json', json.dumps(settings).encode())
+    if args.annotation_count is not None:
+        assert args.experiment == 'annotations' and args.annotation_fixture
+        from annotation_fixture import fixture_tar
+        remote(f'mkdir -p {state}/annotations')
+        remote(f'tar -xf - -C {state}/annotations', fixture_tar(args.annotation_fixture, args.annotation_count))
     wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
                f'export RUST_LOG=info,verso=debug,verso::app=trace\n'
                f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
@@ -119,7 +127,8 @@ def main():
         sample('library')
         probe = f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe tap {pid}'
         # Prime axes: evdev can omit unchanged ABS values between sessions.
-        remote(f'{probe} 1 1 prime; sleep 2; {probe} 200 550 open; sleep 5')
+        home = f'{probe} 1000 230 all_books; sleep 2; ' if args.home else ''
+        remote(f'{probe} 1 1 prime; sleep 2; {home}{probe} 200 550 open; sleep 5')
         assert remote(f'grep -c "page .* rendered in" {APP}/verso.log') != '0', 'Book did not open'
         remote(
                f'{probe} 636 848 seek_menu; sleep 1; {probe} 338 1164 seek; sleep 2; '
@@ -145,6 +154,8 @@ def main():
         # Keep private logs on-device. Export numeric frame/gesture data only.
         frames = remote(f'grep -E "frame: drawn|Down\\(|Tap\\(|presented [0-9]+ update" {APP}/verso.log')
         results = {'variant': args.variant, 'run': run, 'frames': frames,
+                   'annotation_count': args.annotation_count,
+                   'annotation_setup': remote(f'grep -E "annotation resolution:|book first page" {APP}/{run}.setup.log || true'),
                    'turn_delay_us': args.turn_delay_us,
                    'persistence': remote(f'grep -E "position write:|after_present:" {APP}/verso.log || true'),
                    'setup_frames': remote(f'grep "frame: drawn" {APP}/{run}.setup.log'),

@@ -19,8 +19,8 @@ use std::rc::Rc;
 
 pub enum LookupEvent {
     Close,
-    /// Search the book for the (possibly edited) query.
-    Search(String),
+    /// Passage actions, retaining the independently edited lookup query.
+    Actions(String),
 }
 
 pub struct Lookup {
@@ -59,7 +59,7 @@ impl Lookup {
             Sheet::open("Dictionary", screen.h * 4 / 5, screen, t)
         };
         let content = sheet.content(t);
-        // A narrow side panel puts "Search book" on a row of its own.
+        // A narrow side panel puts Actions on a row of its own.
         let narrow = content.w < t.mm(90.0);
         let gap = t.mm(2.0);
         let mut field = TextField::new("Word");
@@ -74,7 +74,7 @@ impl Lookup {
         let mut previous = Button::new("‹", ButtonKind::Secondary);
         let mut dictionaries_button = Button::new("Dictionaries", ButtonKind::Secondary);
         let mut next = Button::new("›", ButtonKind::Secondary);
-        let mut find = Button::new("Search book", ButtonKind::Secondary);
+        let mut find = Button::new("Actions", ButtonKind::Secondary);
         let row = if narrow {
             find.place(Rect { y: row.bottom() + gap, ..row }, t);
             row
@@ -265,7 +265,7 @@ impl Lookup {
                 self.place_rows(cx.theme);
             }
             if self.find.on_gesture(g) {
-                return Some(LookupEvent::Search(self.field.value().to_owned()));
+                return Some(LookupEvent::Actions(self.field.value().to_owned()));
             }
             self.pager.on_gesture(g);
             if let Gesture::Swipe { dir, .. } = g {
@@ -340,15 +340,19 @@ pub enum SelectionAction {
     Dismiss,
     Dictionary,
     Search,
+    Highlight,
+    Extend,
 }
 pub struct SelectionActions {
     sheet: Sheet,
+    highlight: Button,
+    extend: Button,
     search: Button,
     dictionary: Button,
 }
 impl SelectionActions {
     pub fn new(t: &Theme, screen: Rect) -> Self {
-        let sheet = Sheet::open("Selection", t.mm(28.0), screen, t);
+        let sheet = Sheet::open("Selection", t.mm(43.0), screen, t);
         let body = sheet.content(t);
         let gap = t.mm(3.0);
         let width = (body.w - gap) / 2;
@@ -356,11 +360,19 @@ impl SelectionActions {
         search.place(Rect::new(body.x, body.y, width, t.target), t);
         let mut dictionary = Button::new("Dictionary", ButtonKind::Primary);
         dictionary.place(Rect::new(body.right() - width, body.y, width, t.target), t);
-        Self { sheet, search, dictionary }
+        let mut highlight = Button::new("Highlight", ButtonKind::Primary);
+        let mut extend = Button::new("Extend selection", ButtonKind::Secondary);
+        highlight.place(Rect::new(body.x, body.y + t.target + gap, width, t.target), t);
+        extend.place(Rect::new(body.right() - width, body.y + t.target + gap, width, t.target), t);
+        Self { sheet, search, dictionary, highlight, extend }
     }
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<SelectionAction> {
         if self.sheet.on_gesture(g) {
             Some(SelectionAction::Dismiss)
+        } else if self.highlight.on_gesture(g) {
+            Some(SelectionAction::Highlight)
+        } else if self.extend.on_gesture(g) {
+            Some(SelectionAction::Extend)
         } else if self.search.on_gesture(g) {
             Some(SelectionAction::Search)
         } else if self.dictionary.on_gesture(g) {
@@ -373,6 +385,8 @@ impl SelectionActions {
         self.sheet.draw(cx);
         self.search.draw(cx);
         self.dictionary.draw(cx);
+        self.highlight.draw(cx);
+        self.extend.draw(cx);
     }
 }
 

@@ -149,6 +149,9 @@ mod tests {
                 position: Position::default(),
                 progress: 0,
                 images: false,
+                annotation_revision: 0,
+                annotations: vec![],
+                painted: vec![],
             })
         };
         c.insert(page(1, 10), 10);

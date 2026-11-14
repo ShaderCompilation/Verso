@@ -22,6 +22,10 @@ struct VersoCreDoc {
     uint64_t text_length = 0;
     lString32 selection_start, selection_end, selection_text;
     std::vector<VersoCreRect> selection_rects;
+    int selection_visible = 0, selection_page = 0;
+    struct Annotation { int id; ldomXPointerEx start, end; };
+    std::vector<Annotation> annotations, pending_annotations;
+    std::vector<ldomXPointerEx> annotation_max_end;
     // Book search: a cursor that advances block by block, and the last batch.
     struct Hit { lString32 start, end, before, match, after; int page; };
     lString32 search_pattern;
@@ -286,29 +290,38 @@ int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
         doc->selection_rects.clear();
         doc->selection_start.clear(); doc->selection_end.clear(); doc->selection_text.clear();
         LVDocView *v = doc->view;
-        if (page < 0 || page >= v->getPageCount() || mode < 0 || mode > 2) return -1;
+        if (page < 0 || page >= v->getPageCount() || mode < 0 || mode > 4) return -1;
         v->goToPage(page, false, true, false);
         LVRef<ldomXRange> visible = v->getPageDocumentRange(page);
         if (visible.isNull()) return 0;
         ldomXRange range;
-        if (mode != 2 && !word_at(v, lvPoint(x, y), range)) return 0;
+        if (mode < 2 && !word_at(v, lvPoint(x, y), range)) return 0;
         if (mode != 0) {
             if (!start || !end) return -1;
             ldomXPointerEx a = v->getDocument()->createXPointer(Utf8ToUnicode(start));
             ldomXPointerEx b = v->getDocument()->createXPointer(Utf8ToUnicode(end));
             if (a.isNull() || b.isNull() || !a.isText() || !b.isText()) return -1;
+            if (a.getOffset() < 0 || b.getOffset() < 0 || a.getOffset() > a.getNode()->getText().length() || b.getOffset() > b.getNode()->getText().length()) return -1;
             ldomXRange anchor(a, b); anchor.sort();
-            if (mode == 2) range = anchor;
+            if (mode >= 2) range = anchor;
             else {
                 if (anchor.getStart().compare(range.getStart()) < 0) range.setStart(anchor.getStart());
                 if (anchor.getEnd().compare(range.getEnd()) > 0) range.setEnd(anchor.getEnd());
             }
         }
-        // Phase 1 never extends into an undisplayed page, even for a word split
-        // across a page boundary. Saved ranges can be re-extracted after reflow.
+        if (range.isNull() || range.getStart().compare(range.getEnd()) >= 0) return 0;
+        doc->selection_page = v->getBookmarkPage(range.getStart());
+        doc->selection_start = range.getStart().toString();
+        doc->selection_end = range.getEnd().toString();
+        if (mode == 0 || mode == 2 || mode == 4) doc->selection_text = removeSoftHyphens(range.getRangeText());
+        doc->selection_visible = 0;
+        if (mode == 4) return 1;
+        if (range.getStart().compare(visible->getStart()) >= 0 && range.getStart().compare(visible->getEnd()) < 0) doc->selection_visible |= 1;
+        if (range.getEnd().compare(visible->getStart()) > 0 && range.getEnd().compare(visible->getEnd()) <= 0) doc->selection_visible |= 2;
+        // Only paint geometry is clipped. Full endpoints/text always survive.
         if (range.getStart().compare(visible->getStart()) < 0) range.setStart(visible->getStart());
         if (range.getEnd().compare(visible->getEnd()) > 0) range.setEnd(visible->getEnd());
-        if (range.isNull() || range.getStart().compare(range.getEnd()) >= 0) return 0;
+        if (range.getStart().compare(range.getEnd()) >= 0) return 1;
         LVArray<lvRect> rects;
         range.getSegmentRects(rects);
         for (int i = 0; i < rects.length(); ++i) {
@@ -317,10 +330,7 @@ int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
             if (v->docToWindowPoint(a) && v->docToWindowPoint(b, true) && b.x > a.x && b.y > a.y)
                 doc->selection_rects.push_back({a.x, a.y, b.x, b.y});
         }
-        if (doc->selection_rects.empty()) return 0;
-        doc->selection_start = range.getStart().toString();
-        doc->selection_end = range.getEnd().toString();
-        doc->selection_text = removeSoftHyphens(range.getRangeText());
+
         return 1;
     })
 }
@@ -329,6 +339,8 @@ int verso_cre_selection_text(VersoCreDoc *doc, int field, char *buf, int len) {
         if (field == 0) return copy_utf8(doc->selection_start, buf, len);
         if (field == 1) return copy_utf8(doc->selection_end, buf, len);
         if (field == 2) return copy_utf8(doc->selection_text, buf, len);
+        if (field == 3) return doc->selection_visible;
+        if (field == 4) return doc->selection_page;
         return -1;
     })
 }
@@ -341,6 +353,58 @@ int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacit
     })
 }
 
+
+int verso_cre_annotation_clear(VersoCreDoc *doc) {
+    GUARD(-1, { doc->pending_annotations.clear(); return 0; })
+}
+int verso_cre_annotation_add(VersoCreDoc *doc, int id, const char *start, const char *end) {
+    GUARD(-1, {
+        auto *v = doc->view;
+        ldomXPointerEx a = v->getDocument()->createXPointer(Utf8ToUnicode(start));
+        ldomXPointerEx b = v->getDocument()->createXPointer(Utf8ToUnicode(end));
+        if (a.isNull() || b.isNull() || !a.isText() || !b.isText() || a.compare(b) >= 0) return -1;
+        doc->pending_annotations.push_back({id, a, b});
+        return v->getBookmarkPage(a);
+    })
+}
+int verso_cre_annotation_finish(VersoCreDoc *doc) {
+    GUARD(-1, {
+        doc->annotations.swap(doc->pending_annotations);
+        doc->pending_annotations.clear();
+        std::stable_sort(doc->annotations.begin(), doc->annotations.end(), [](const VersoCreDoc::Annotation &a, const VersoCreDoc::Annotation &b) {
+            return a.start.compare(b.start) < 0;
+        });
+        doc->annotation_max_end.clear();
+        for (const auto &a : doc->annotations) {
+            auto end = a.end;
+            if (!doc->annotation_max_end.empty() && doc->annotation_max_end.back().compare(end) > 0) end = doc->annotation_max_end.back();
+            doc->annotation_max_end.push_back(end);
+        }
+        return 0;
+    })
+}
+int verso_cre_annotation_order(VersoCreDoc *doc, int index) {
+    GUARD(-1, { return index >= 0 && index < (int)doc->annotations.size() ? doc->annotations[index].id : -1; })
+}
+int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity) {
+    GUARD(-1, {
+        auto visible = doc->view->getPageDocumentRange(page);
+        if (visible.isNull()) return 0;
+        const auto &a = doc->annotations;
+        // Prefix maximum ends skip every interval wholly before this page,
+        // including nested/overlapping ranges. Starts bound the other edge.
+        auto first = std::upper_bound(doc->annotation_max_end.begin(), doc->annotation_max_end.end(), visible->getStart(),
+            [](const ldomXPointerEx &p, const ldomXPointerEx &q) { return p.compare(q) < 0; });
+        int count = 0;
+        for (size_t i = first - doc->annotation_max_end.begin(); i < a.size(); ++i) {
+            if (a[i].start.compare(visible->getEnd()) >= 0) break;
+            if (a[i].end.compare(visible->getStart()) <= 0) continue;
+            if (ids && count < capacity) ids[count] = a[i].id;
+            count++;
+        }
+        return count;
+    })
+}
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes) {
     GUARD(-1, {
         CRLog::setStderrLogger();

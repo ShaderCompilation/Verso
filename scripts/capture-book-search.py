@@ -20,7 +20,7 @@ def main():
     shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
     opening = ['--tap', '1000,230', '--tap', '200,550']
     menu = [*opening, '--tap', '636,848']
-    search = [*menu, '--tap', '636,1601']
+    search = [*menu, '--tap', '486,1601']
     results = [*search, '--text', 'ada', '--edit', 'submit']
     opened = [*results, '--swipe', '900,1000,300,1000', '--tap', '600,1000']
     passage = [*opening, '--hold-drag', '190,297,500,297']
@@ -37,8 +37,9 @@ def main():
         'results-again': [*opened, '--tap', '697,1625'],
         'returned': [*opened, '--tap', '960,1625'],
         'passage': passage,
-        'passage-search': [*passage, '--tap', '330,1572'],
-        'dictionary-search': [*opening, '--long-press', '190,297', '--tap', '1036,685'],
+        'passage-search': [*passage, '--tap', '338,1395'],
+        # Dictionary → Actions → Search in book.
+        'dictionary-search': [*opening, '--long-press', '190,297', '--tap', '1036,685', '--tap', '338,1395'],
     }
     for name, steps in scenes.items():
         state = OUT / (name + '-state')

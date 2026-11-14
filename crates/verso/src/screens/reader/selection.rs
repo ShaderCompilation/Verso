@@ -11,6 +11,8 @@ use crate::ui::{gesture::Gesture, widget::DrawCx};
 #[derive(Default)]
 pub(super) struct SelectionState {
     pub selected: Option<Selection>,
+    pub extending: bool,
+    needs_quote: bool,
     pending: Option<SelectionRequest>,
     next_id: u64,
     anchor: Option<TextRange>,
@@ -24,6 +26,8 @@ pub(super) struct SelectionState {
 
 impl SelectionState {
     pub fn clear(&mut self) {
+        self.extending = false;
+        self.needs_quote = false;
         self.selected = None;
         self.pending = None;
         self.anchor = None;
@@ -52,6 +56,37 @@ impl SelectionState {
             handles.iter().any(|(center, _)| center.distance(p) <= theme.mm(4.0) as f32)))
     }
 
+    fn finish(&mut self, context: SelectionRequest, worker: &Worker) {
+        if self.released
+            && !self.busy()
+            && self.needs_quote
+            && let Some(s) = &self.selected
+        {
+            let range = s.range.clone();
+            self.needs_quote = false;
+            self.request(context, SelectionQuery::Range(range), worker);
+        }
+    }
+    pub fn extend(&mut self) {
+        self.extending = true;
+        self.released = false;
+    }
+    pub fn page(&mut self, context: SelectionRequest, worker: &Worker) {
+        if !self.extending {
+            self.clear();
+            return;
+        }
+        self.pending = None;
+        self.queued = None;
+        self.released = false;
+        if let Some(s) = &mut self.selected {
+            s.rects.clear();
+            s.start_visible = false;
+            s.end_visible = false;
+            let range = s.range.clone();
+            self.request(context, SelectionQuery::Geometry(range), worker);
+        }
+    }
     pub fn sleep(&mut self) {
         self.clear();
         self.captured = false;
@@ -62,8 +97,22 @@ impl SelectionState {
         let first = selection.rects.first()?;
         let last = selection.rects.last()?;
         Some([
-            (Point::new(first.x, first.y - radius), Point::new(first.x + 1, first.center().y)),
-            (Point::new(last.right(), last.bottom() + radius), Point::new(last.right() - 1, last.center().y)),
+            (
+                if selection.start_visible {
+                    Point::new(first.x, first.y - radius)
+                } else {
+                    Point::new(-10000, -10000)
+                },
+                Point::new(first.x + 1, first.center().y),
+            ),
+            (
+                if selection.end_visible {
+                    Point::new(last.right(), last.bottom() + radius)
+                } else {
+                    Point::new(-10000, -10000)
+                },
+                Point::new(last.right() - 1, last.center().y),
+            ),
         ])
     }
 
@@ -75,6 +124,9 @@ impl SelectionState {
         let radius = cx.theme.mm(1.2).max(2);
         if let Some(handles) = self.handles(radius) {
             for (center, target) in handles {
+                if center.x < 0 {
+                    continue;
+                }
                 cx.fill(Rect::new(center.x - 1, target.y.min(center.y), 3, (center.y - target.y).abs()), 0);
                 cx.canvas.fill_circle(center.x as f32, center.y as f32, radius as f32, 0);
             }
@@ -89,6 +141,7 @@ impl SelectionState {
     }
 
     fn focus(&mut self, point: Point, context: SelectionRequest, worker: &Worker) {
+        self.needs_quote = true;
         let focus = Point::new(point.x - self.offset.x, point.y - self.offset.y);
         if self.pending.is_some() {
             self.queued = Some(focus);
@@ -124,10 +177,13 @@ impl SelectionState {
                     let range = &self.selected.as_ref().unwrap().range;
                     let fixed = if index == 0 { &range.end } else { &range.start }.clone();
                     self.anchor = Some(TextRange { start: fixed.clone(), end: fixed });
-                    self.pending = None;
                     self.queued = None;
                     self.offset = Point::new(p.x - target.x, p.y - target.y);
                     self.dragging = true;
+                } else if self.extending {
+                    self.dragging = true;
+                    self.offset = Point::default();
+                    self.focus(p, context, worker);
                 } else {
                     self.clear();
                     cx.redraw();
@@ -158,6 +214,7 @@ impl SelectionState {
                     }
                     self.dragging = false;
                     self.captured = false;
+                    self.finish(context, worker);
                 }
                 true
             }
@@ -180,7 +237,10 @@ impl SelectionState {
         }
         self.pending = None;
         match result {
-            Ok(Some(selection)) => {
+            Ok(Some(mut selection)) => {
+                if selection.text.is_empty() {
+                    selection.text = self.selected.as_ref().map(|s| s.text.clone()).unwrap_or_default();
+                }
                 // The initial word remains fixed while extending in either direction.
                 if self.anchor.is_none() {
                     self.anchor = Some(selection.range.clone());
@@ -199,6 +259,7 @@ impl SelectionState {
         {
             self.request(request, SelectionQuery::Extend { anchor, focus }, worker);
         }
+        self.finish(request, worker);
     }
 }
 
@@ -232,6 +293,9 @@ mod tests {
             range: TextRange { start: Position("start".into()), end: Position("end".into()) },
             text: text.into(),
             rects: vec![Rect::new(100, 100, 200, 30)],
+            start_page: 0,
+            start_visible: true,
+            end_visible: true,
         }
     }
     fn next(commands: &std::sync::mpsc::Receiver<Command>) -> (SelectionRequest, SelectionQuery) {
@@ -260,6 +324,9 @@ mod tests {
             assert_eq!(state.selected.as_ref().unwrap().text, "word");
             state.receive(extension, Ok(Some(selected("passage"))), Some(CONTEXT), worker, cx);
             assert_eq!(state.selected.as_ref().unwrap().text, "passage");
+            let (quote, query) = next(commands);
+            assert!(matches!(query, SelectionQuery::Range(_)));
+            state.receive(quote, Ok(Some(selected("passage"))), Some(CONTEXT), worker, cx);
             assert!(!state.busy());
         });
     }
@@ -349,6 +416,36 @@ mod tests {
             assert!(state.take_released().is_none());
             state.sleep();
             assert!(state.take_released().is_none());
+        });
+    }
+    #[test]
+    fn extending_pages_preserves_endpoints_hides_false_handles_and_rejects_old_replies() {
+        with_context(|state, worker, commands, cx| {
+            let initial = selected("passage");
+            state.selected = Some(initial.clone());
+            state.anchor = Some(initial.range.clone());
+            state.extend();
+            let next_page = SelectionRequest { page: 4, ..CONTEXT };
+            state.page(next_page, worker);
+            let (geometry, query) = next(commands);
+            assert!(matches!(query,SelectionQuery::Geometry(ref r) if *r==initial.range));
+            assert_eq!(state.selected.as_ref().unwrap().range, initial.range);
+            assert!(state.handles(3).is_none());
+            let mut visible = initial.clone();
+            visible.start_visible = false;
+            visible.text.clear();
+            state.receive(geometry, Ok(Some(visible)), Some(next_page), worker, cx);
+            assert_eq!(state.selected.as_ref().unwrap().text, "passage");
+            assert!(state.handles(3).unwrap()[0].0.x < 0);
+            state.on_gesture(Gesture::Down(Point::new(350, 110)), next_page, worker, cx);
+            let (request, query) = next(commands);
+            assert!(matches!(query,SelectionQuery::Extend{anchor,..} if anchor==initial.range));
+            state.receive(request, Ok(Some(selected("wrong"))), Some(CONTEXT), worker, cx);
+            assert_eq!(state.selected.as_ref().unwrap().text, "passage");
+            state.sleep();
+            assert!(!state.extending);
+            state.receive(request, Ok(Some(selected("late"))), Some(next_page), worker, cx);
+            assert!(state.selected.is_none());
         });
     }
 }

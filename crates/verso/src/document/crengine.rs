@@ -148,6 +148,8 @@ impl Document for CreDocument {
             SelectionQuery::Word(p) => (0, *p, None),
             SelectionQuery::Extend { anchor, focus } => (1, *focus, Some(anchor)),
             SelectionQuery::Range(range) => (2, Point::default(), Some(range)),
+            SelectionQuery::Geometry(range) => (3, Point::default(), Some(range)),
+            SelectionQuery::Quotation(range) => (4, Point::default(), Some(range)),
         };
         let start = range.map(|r| CString::new(r.start.0.as_str())).transpose()?;
         let end = range.map(|r| CString::new(r.end.0.as_str())).transpose()?;
@@ -169,7 +171,7 @@ impl Document for CreDocument {
         let string =
             |field| read_string(|buf, len| unsafe { sys::verso_cre_selection_text(self.raw, field, buf, len) });
         let n = unsafe { sys::verso_cre_selection_rects(self.raw, std::ptr::null_mut(), 0) };
-        anyhow::ensure!((1..=10000).contains(&n), "invalid selection rectangles");
+        anyhow::ensure!((0..=10000).contains(&n), "invalid selection rectangles");
         let mut rects = vec![sys::VersoCreRect::default(); n as usize];
         anyhow::ensure!(
             unsafe { sys::verso_cre_selection_rects(self.raw, rects.as_mut_ptr(), n) } == n,
@@ -178,6 +180,9 @@ impl Document for CreDocument {
         Ok(Some(Selection {
             range: TextRange { start: Position(string(0)?), end: Position(string(1)?) },
             text: string(2)?,
+            start_page: unsafe { sys::verso_cre_selection_text(self.raw, 4, std::ptr::null_mut(), 0) }.max(0) as usize,
+            start_visible: unsafe { sys::verso_cre_selection_text(self.raw, 3, std::ptr::null_mut(), 0) } & 1 != 0,
+            end_visible: unsafe { sys::verso_cre_selection_text(self.raw, 3, std::ptr::null_mut(), 0) } & 2 != 0,
             rects: rects.into_iter().map(|r| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)).collect(),
         }))
     }
@@ -335,6 +340,43 @@ fn side_margin(width: u32, height: u32, font_px: c_int, base: c_int, setting: us
 
 fn cstr(path: &Path) -> Result<CString> {
     Ok(CString::new(path.as_os_str().as_encoded_bytes())?)
+}
+
+impl CreDocument {
+    pub fn annotation_clear(&mut self) {
+        unsafe {
+            sys::verso_cre_annotation_clear(self.raw);
+        }
+    }
+    pub fn annotation_add(&mut self, id: usize, range: &TextRange) -> Result<usize> {
+        let a = CString::new(range.start.0.as_str())?;
+        let b = CString::new(range.end.0.as_str())?;
+        let page = unsafe { sys::verso_cre_annotation_add(self.raw, id.try_into()?, a.as_ptr(), b.as_ptr()) };
+        anyhow::ensure!(page >= 0, "invalid annotation endpoints");
+        Ok(page as usize)
+    }
+    pub fn annotation_finish(&mut self, count: usize) -> Vec<usize> {
+        unsafe {
+            sys::verso_cre_annotation_finish(self.raw);
+        }
+        (0..count)
+            .map_while(|i| {
+                let id = unsafe { sys::verso_cre_annotation_order(self.raw, i as c_int) };
+                (id >= 0).then_some(id as usize)
+            })
+            .collect()
+    }
+    pub fn annotation_page(&mut self, page: usize) -> Vec<usize> {
+        let n = unsafe { sys::verso_cre_annotation_page(self.raw, page as c_int, std::ptr::null_mut(), 0) };
+        if n <= 0 {
+            return vec![];
+        }
+        let mut ids = vec![0; n as usize];
+        unsafe {
+            sys::verso_cre_annotation_page(self.raw, page as c_int, ids.as_mut_ptr(), n);
+        }
+        ids.into_iter().map(|i| i as usize).collect()
+    }
 }
 
 #[cfg(test)]

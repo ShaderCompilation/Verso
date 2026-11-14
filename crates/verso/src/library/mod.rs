@@ -48,6 +48,8 @@ pub enum Cover {
 pub struct Book {
     pub path: PathBuf,
     pub id: String,
+    #[serde(default)]
+    pub annotation_id: String,
     pub legacy_id: String,
     pub fingerprint: String,
     #[serde(default)]
@@ -97,7 +99,7 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
             previous_fingerprints.entry(&old.fingerprint).and_modify(|entry| *entry = None).or_insert(Some(old));
         }
     }
-    for b in books {
+    for b in books.iter_mut() {
         if let Some(old) = previous_paths.get(&b.path)
             && ((!b.fingerprint.is_empty() && b.fingerprint == old.fingerprint)
                 || (b.fingerprint.is_empty() && old.fingerprint.is_empty() && b.stamp == old.stamp)
@@ -131,6 +133,43 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
         }
         used.insert(b.id.clone());
     }
+    // Annotation identity is separate from reading identity. An unambiguous
+    // content match wins over the path, because records were made against that
+    // content; a same-path replacement keeps the identity only when no moved
+    // copy claimed it. Each previous identity goes to at most one book, and a
+    // fresh identity never reuses any previous one (its records may still exist).
+    let annotation_identity =
+        |o: &Book| if o.annotation_id.is_empty() { o.id.clone() } else { o.annotation_id.clone() };
+    let reserved: HashSet<String> = previous.iter().map(annotation_identity).collect();
+    let mut claimed = HashSet::new();
+    let mut assigned: Vec<Option<String>> = vec![None; books.len()];
+    for (slot, b) in assigned.iter_mut().zip(books.iter()) {
+        if fingerprints.get(&b.fingerprint) == Some(&1)
+            && let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
+            && claimed.insert(annotation_identity(old))
+        {
+            *slot = Some(annotation_identity(old));
+        }
+    }
+    for (slot, b) in assigned.iter_mut().zip(books.iter()) {
+        if slot.is_none()
+            && let Some(old) = previous_paths.get(&b.path)
+            && claimed.insert(annotation_identity(old))
+        {
+            *slot = Some(annotation_identity(old));
+        }
+    }
+    for (slot, b) in assigned.into_iter().zip(books.iter_mut()) {
+        b.annotation_id = slot.unwrap_or_else(|| {
+            let mut id = b.id.clone();
+            let mut suffix = 0;
+            while reserved.contains(&id) || !claimed.insert(id.clone()) {
+                suffix += 1;
+                id = format!("{}-n{suffix}", b.id);
+            }
+            id
+        });
+    }
 }
 
 pub fn sort_books(books: &mut [Book], states: &std::collections::HashMap<String, crate::store::BookState>, sort: Sort) {
@@ -160,6 +199,7 @@ pub(crate) mod selection_tests {
         Book {
             path: format!("/books/{id}.epub").into(),
             id: id.to_string(),
+            annotation_id: String::new(),
             legacy_id: id.to_string(),
             fingerprint: id.to_string(),
             fingerprint_attempted: true,
@@ -226,10 +266,12 @@ mod tests {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+    use std::collections::HashSet;
     fn book(path: &str, fingerprint: &str) -> Book {
         Book {
             path: path.into(),
             id: String::new(),
+            annotation_id: String::new(),
             legacy_id: "legacy".into(),
             fingerprint: fingerprint.into(),
             fingerprint_attempted: true,
@@ -256,6 +298,11 @@ mod identity_tests {
         replacement[0].metadata.identifier = "unrelated book".into();
         assign_ids(&mut replacement, &original);
         assert_ne!(replacement[0].id, "legacy");
+        assert_eq!(replacement[0].annotation_id, "legacy");
+        assert_eq!(moved[0].annotation_id, "legacy");
+        let mut moved_replacement = vec![book("/moved/replacement.epub", "unrelated bytes")];
+        assign_ids(&mut moved_replacement, &replacement);
+        assert_eq!(moved_replacement[0].annotation_id, "legacy");
         let mut collisions = vec![book("/a/title.epub", "one"), book("/b/title.epub", "two")];
         assign_ids(&mut collisions, &[]);
         assert_ne!(collisions[0].id, collisions[1].id);
@@ -267,5 +314,41 @@ mod identity_tests {
         assign_ids(&mut ambiguous, &original);
         assert!(ambiguous.iter().all(|b| b.id != "legacy"));
         assert_ne!(ambiguous[0].id, ambiguous[1].id);
+    }
+    #[test]
+    fn annotation_identities_stay_unambiguous() {
+        let mut original = vec![book("/a/title.epub", "one")];
+        assign_ids(&mut original, &[]);
+        // Replace the content at A while its old content moves to B in the same
+        // rescan: the moved content keeps the records, A gets a fresh identity.
+        let mut swapped = vec![book("/a/title.epub", "unrelated bytes"), book("/b/moved.epub", "one")];
+        swapped[0].metadata.identifier = "unrelated book".into();
+        assign_ids(&mut swapped, &original);
+        assert_eq!(swapped[1].annotation_id, "legacy");
+        assert_ne!(swapped[0].annotation_id, "legacy");
+        // Also when A's edit keeps its reading identity through the identifier.
+        let mut edited = vec![book("/a/title.epub", "new edition"), book("/b/moved.epub", "one")];
+        assign_ids(&mut edited, &original);
+        assert_eq!(edited[1].annotation_id, "legacy");
+        assert_ne!(edited[0].annotation_id, "legacy");
+        // Ambiguous copies fall back to the path; nobody else gets the identity.
+        let mut copies = vec![book("/a/title.epub", "one"), book("/b/copy.epub", "one")];
+        assign_ids(&mut copies, &original);
+        assert_eq!(copies[0].annotation_id, "legacy");
+        assert_ne!(copies[1].annotation_id, "legacy");
+        // A previously reserved identity is never handed out fresh, even after
+        // its book disappeared and a new book derives the same reading ID.
+        let mut kept = vec![book("/a/title.epub", "unrelated bytes")];
+        kept[0].metadata.identifier = "unrelated book".into();
+        assign_ids(&mut kept, &original);
+        assert_eq!(kept[0].annotation_id, "legacy");
+        let mut fresh = vec![book("/c/other.epub", "three")];
+        fresh[0].metadata.identifier = "other".into();
+        assign_ids(&mut fresh, &kept);
+        assert_ne!(fresh[0].annotation_id, "legacy");
+        for books in [&swapped, &edited, &copies] {
+            let ids: HashSet<_> = books.iter().map(|b| &b.annotation_id).collect();
+            assert_eq!(ids.len(), books.len());
+        }
     }
 }

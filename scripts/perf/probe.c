@@ -72,8 +72,10 @@ static void event(int fd, uint16_t type, uint16_t code, int32_t value) {
 
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "mark")) { verso_bench_mark(argv[2]); return 0; }
-    if (argc != 6 || strcmp(argv[1], "tap")) {
-        fprintf(stderr, "usage: probe mark LABEL | probe tap VERSO_PID X Y LABEL\n");
+    int held = argc == 8 && !strcmp(argv[1], "hold-drag");
+    int dragged = held || (argc == 8 && !strcmp(argv[1], "swipe"));
+    if (!dragged && (argc != 6 || strcmp(argv[1], "tap"))) {
+        fprintf(stderr, "usage: probe mark LABEL | probe tap VERSO_PID X Y LABEL | probe hold-drag VERSO_PID X1 Y1 X2 Y2 LABEL\n");
         return 2;
     }
     char path[80], comm[32] = {0};
@@ -87,9 +89,13 @@ int main(int argc, char **argv) {
     if (fd < 0) { perror("touchscreen"); return 1; }
     event(fd, 3, 0x2f, 0); event(fd, 3, 0x39, 123);
     event(fd, 3, 0x35, atoi(argv[3])); event(fd, 3, 0x36, atoi(argv[4])); event(fd, 0, 0, 0);
-    usleep(50000);
+    if (dragged) {
+        usleep(held ? 650000 : 50000);
+        event(fd, 3, 0x35, atoi(argv[5])); event(fd, 3, 0x36, atoi(argv[6])); event(fd, 0, 0, 0);
+        usleep(held ? 250000 : 50000);
+    } else { usleep(50000); }
     // The boundary is finger release, excluding the deliberate 50 ms contact.
-    verso_bench_mark(argv[5]);
+    verso_bench_mark(argv[argc - 1]);
     event(fd, 3, 0x39, -1); event(fd, 0, 0, 0);
     close(fd);
     return 0;

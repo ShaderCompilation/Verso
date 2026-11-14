@@ -47,6 +47,16 @@ impl Canvas {
         &self.gray
     }
 
+    pub fn highlight_rect(&mut self, rect: Rect) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        for y in r.y..r.bottom() {
+            let row = y as usize * self.width as usize;
+            for pixel in &mut self.gray[row + r.x as usize..row + r.right() as usize] {
+                *pixel = (*pixel).min(210);
+            }
+        }
+    }
+
     pub fn fill_rect(&mut self, rect: Rect, gray: u8) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         for y in r.y..r.bottom() {
@@ -330,6 +340,18 @@ fn rounded_path(r: tiny_skia::Rect, radius: f32) -> Option<tiny_skia::Path> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn saved_highlights_preserve_black_text_and_overlaps_are_idempotent() {
+        let mut canvas = Canvas::new(20, 20);
+        canvas.fill_rect(Rect::new(4, 4, 5, 5), 0);
+        canvas.highlight_rect(Rect::new(0, 0, 12, 12));
+        let first = canvas.gray_data().to_vec();
+        canvas.highlight_rect(Rect::new(0, 0, 12, 12));
+        assert_eq!(canvas.gray_data(), first);
+        assert_eq!(canvas.gray_data()[4 * 20 + 4], 0);
+        assert_eq!(canvas.gray_data()[0], 210);
+        assert_eq!(canvas.gray_data()[19 * 20 + 19], 255);
+    }
     #[test]
     fn bounded_shapes_match_the_full_rgba_rasterizer() {
         let (w, h) = (371, 289);

@@ -141,6 +141,9 @@ impl Store {
                 // scan roots cannot be mistaken for a move/replacement.
                 for book in &mut index.books {
                     book.path = normalize(&book.path);
+                    if book.annotation_id.is_empty() {
+                        book.annotation_id = book.id.clone();
+                    }
                 }
                 index
             })
@@ -165,6 +168,9 @@ impl Store {
     }
     pub fn cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}.png"))
+    }
+    pub fn annotation_dir(&self) -> PathBuf {
+        self.root.join("annotations")
     }
     pub fn dictionary_dir(&self) -> PathBuf {
         self.root.join("dictionaries")

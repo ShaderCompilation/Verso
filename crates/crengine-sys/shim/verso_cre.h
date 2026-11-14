@@ -13,12 +13,14 @@ extern "C" {
 typedef struct VersoCreDoc VersoCreDoc;
 typedef struct VersoCreRect { int left, top, right, bottom; } VersoCreRect;
 
-/* Resolve a word (mode 0), union it with an anchor (1), or extract a range (2).
+/* Resolve a word (0), extend geometry (1), extract a full range and clipped
+ * geometry (2), geometry only (3), or quotation only (4).
  * Explicitly visits page, even after speculative rendering. Stores a snapshot
  * until the next call. Returns 1 for a selection, 0 for no text, -1 on error. */
 int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
                      const char *start, const char *end);
-/* Snapshot fields: 0=start, 1=exclusive end, 2=plain text. */
+/* Snapshot fields: 0=start, 1=exclusive end, 2=plain text,
+ * 3=visible endpoint bits (start=1, end=2), 4=start page. */
 int verso_cre_selection_text(VersoCreDoc *doc, int field, char *buf, int len);
 /* Returns total count, copies at most capacity screen rectangles. */
 int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacity);
@@ -91,6 +93,13 @@ int verso_cre_embedded_fonts(VersoCreDoc *doc);
 int verso_cre_font_count(void);
 int verso_cre_font_name(int index, char *buf, int len);
 int verso_cre_font_file(int index, char *buf, int len);
+
+
+int verso_cre_annotation_clear(VersoCreDoc *doc);
+int verso_cre_annotation_add(VersoCreDoc *doc, int id, const char *start, const char *end);
+int verso_cre_annotation_finish(VersoCreDoc *doc);
+int verso_cre_annotation_order(VersoCreDoc *doc, int index);
+int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity);
 
 #ifdef __cplusplus
 }

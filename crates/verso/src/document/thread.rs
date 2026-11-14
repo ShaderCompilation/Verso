@@ -3,6 +3,8 @@ use super::{
     CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchStatus,
     Selection, SelectionQuery, TocEntry, Typography,
 };
+use crate::annotations::Annotation;
+use crate::geom::Rect;
 use crate::platform::Waker;
 use anyhow::Result;
 use std::cell::RefCell;
@@ -24,8 +26,39 @@ pub struct Page {
     pub position: Position,
     pub progress: u32,
     pub images: bool,
+    pub annotation_revision: u64,
+    pub annotations: Vec<(usize, Vec<Rect>)>,
+    pub painted: Vec<Paint>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Paint {
+    pub rect: Rect,
+    pub pixels: Vec<u8>,
+}
+impl Paint {
+    /// At most 512 KiB of prepared patches per cached page. Dense full-page
+    /// stress ranges fall back to idempotent composition on the drawing canvas.
+    fn prepare(rects: Vec<Rect>, pixels: &[u8], width: u32, height: u32) -> Vec<Self> {
+        let bounds = Rect::new(0, 0, width as i32, height as i32);
+        let rects: Vec<_> = rects.into_iter().filter_map(|r| r.intersect(&bounds)).collect();
+        let cached = rects.iter().map(|r| r.w as usize * r.h as usize).sum::<usize>() <= 512 * 1024;
+        rects
+            .into_iter()
+            .map(|rect| {
+                let mut patch = Vec::new();
+                if cached {
+                    patch.reserve(rect.w as usize * rect.h as usize);
+                    for y in rect.y..rect.bottom() {
+                        let row = y as usize * width as usize + rect.x as usize;
+                        patch.extend(pixels[row..row + rect.w as usize].iter().map(|v| (*v).min(210)));
+                    }
+                }
+                Self { rect, pixels: patch }
+            })
+            .collect()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionRequest {
     pub generation: u64,
@@ -38,7 +71,27 @@ pub struct SearchRequest {
     pub generation: u64,
     pub id: u64,
 }
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    pub index: usize,
+    pub page: Option<usize>,
+}
+struct Resolution {
+    started: Instant,
+    generation: u64,
+    revision: u64,
+    records: Vec<Annotation>,
+    next: usize,
+    found: Vec<Resolved>,
+    preview: bool,
+}
 pub enum Command {
+    Resolve {
+        generation: u64,
+        revision: u64,
+        records: Vec<Annotation>,
+        preview: bool,
+    },
     Select {
         request: SelectionRequest,
         query: SelectionQuery,
@@ -77,6 +130,7 @@ pub enum Command {
     Shutdown,
 }
 pub enum Reply {
+    Resolved { generation: u64, revision: u64, entries: Vec<Resolved>, preview: bool },
     Selection { request: SelectionRequest, result: Result<Option<Selection>, String> },
     Fonts(Vec<FontFace>),
     Opened { generation: u64, metadata: Metadata, toc: Vec<TocEntry>, pages: usize, current: usize },
@@ -117,15 +171,64 @@ impl Worker {
                 let mut generation = 0;
                 let mut dimensions = (0, 0);
                 let mut pending = None;
+                let mut resolution: Option<Resolution> = None;
+                let mut annotations: Vec<Annotation> = vec![];
+                let mut annotation_revision = 0;
                 // (request, last reply, started, hits so far)
                 let mut search: Option<(SearchRequest, Instant, Instant, usize)> = None;
                 loop {
                     let command = match pending.take() {
                         Some(command) => command,
                         // A running search steps only while no command waits.
-                        None if search.is_some() => match commands.try_recv() {
+                        None if search.is_some() || resolution.is_some() => match commands.try_recv() {
                             Ok(command) => command,
                             Err(mpsc::TryRecvError::Empty) => {
+                                if let (Some(task), Some(d)) = (&mut resolution, &mut doc) {
+                                    let started = Instant::now();
+                                    while task.next < task.records.len()
+                                        && started.elapsed() < Duration::from_millis(12)
+                                    {
+                                        let i = task.next;
+                                        task.next += 1;
+                                        let a = &task.records[i];
+                                        let page =
+                                            d.validate_range(&a.range, &a.quotation).ok().flatten().and_then(|_| {
+                                                if task.preview {
+                                                    d.go_to_position(&a.range.start).ok().map(|_| d.current_page())
+                                                } else {
+                                                    d.annotation_add(i, &a.range).ok()
+                                                }
+                                            });
+                                        task.found.push(Resolved { index: i, page });
+                                    }
+                                    if task.next == task.records.len() {
+                                        let mut task = resolution.take().unwrap();
+                                        if !task.preview {
+                                            let order = d.annotation_finish(task.records.len());
+                                            let mut ranks = vec![usize::MAX; task.records.len()];
+                                            for (rank, index) in order.into_iter().enumerate() {
+                                                ranks[index] = rank;
+                                            }
+                                            task.found.sort_by_key(|e| ranks[e.index]);
+                                            annotation_revision = task.revision;
+                                            annotations = task.records;
+                                        }
+                                        log::info!(
+                                            "annotation resolution: count={} unresolved={} preview={} elapsed_us={}",
+                                            task.found.len(),
+                                            task.found.iter().filter(|e| e.page.is_none()).count(),
+                                            task.preview,
+                                            task.started.elapsed().as_micros()
+                                        );
+                                        send(Reply::Resolved {
+                                            generation: task.generation,
+                                            revision: task.revision,
+                                            entries: task.found,
+                                            preview: task.preview,
+                                        });
+                                    }
+                                    continue;
+                                }
                                 if let (Some((request, sent, started, found)), Some(d)) = (&mut search, &mut doc) {
                                     let result = d.search_step(SEARCH_SLICE).map_err(|e| format!("{e:#}"));
                                     let running = matches!(&result, Ok(b) if b.status == SearchStatus::Searching);
@@ -165,9 +268,31 @@ impl Worker {
                     }
                     if matches!(command, Command::Open { .. } | Command::Layout { .. } | Command::Close) {
                         search = None;
+                        resolution = None;
+                        annotations.clear();
+                        annotation_revision = 0;
                     }
                     let result: Result<()> = (|| {
                         match command {
+                            Command::Resolve { generation: g, revision, records, preview } => {
+                                if g == generation
+                                    && let Some(d) = &mut doc
+                                {
+                                    if !preview {
+                                        d.annotation_clear();
+                                    }
+                                    resolution = Some(Resolution {
+                                        started: Instant::now(),
+                                        generation: g,
+                                        revision,
+                                        records,
+                                        next: 0,
+                                        found: vec![],
+                                        preview,
+                                    });
+                                }
+                                return Ok(());
+                            }
                             Command::Search { request, query } => {
                                 search = None;
                                 if request.generation == generation
@@ -216,7 +341,14 @@ impl Worker {
                                 if g == generation
                                     && let Some(d) = &mut doc
                                 {
-                                    send(Reply::Page(render(d, g, number, dimensions)?));
+                                    send(Reply::Page(render(
+                                        d,
+                                        g,
+                                        number,
+                                        dimensions,
+                                        annotation_revision,
+                                        &annotations,
+                                    )?));
                                 }
                                 return Ok(());
                             }
@@ -226,7 +358,10 @@ impl Worker {
                                 {
                                     d.go_to_position(&position)?;
                                     let number = d.current_page();
-                                    send(Reply::Jumped { jump, page: render(d, g, number, dimensions)? });
+                                    send(Reply::Jumped {
+                                        jump,
+                                        page: render(d, g, number, dimensions, annotation_revision, &annotations)?,
+                                    });
                                 }
                                 return Ok(());
                             }
@@ -247,7 +382,14 @@ impl Worker {
                                 metadata.language
                             );
                             send(Reply::Opened { generation, metadata, toc: d.toc()?, pages, current });
-                            send(Reply::Page(render(d, generation, current, dimensions)?));
+                            send(Reply::Page(render(
+                                d,
+                                generation,
+                                current,
+                                dimensions,
+                                annotation_revision,
+                                &annotations,
+                            )?));
                         }
                         Ok(())
                     })();
@@ -314,12 +456,49 @@ fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<C
     }
     c
 }
-fn render(d: &mut CreDocument, generation: u64, number: usize, (w, h): (u32, u32)) -> Result<Arc<Page>> {
+fn render(
+    d: &mut CreDocument,
+    generation: u64,
+    number: usize,
+    (w, h): (u32, u32),
+    revision: u64,
+    annotations: &[Annotation],
+) -> Result<Arc<Page>> {
     let started = std::time::Instant::now();
     let last = d.page_count().saturating_sub(1);
     d.go_to_page(number.min(last));
     let mut pixels = vec![255; w as usize * h as usize];
     d.draw(&mut pixels, w as usize)?;
+    let current = d.current_page();
+    let mut geometry = Vec::new();
+    let mut geometry_cache = std::collections::HashMap::<(&str, &str), Vec<Rect>>::new();
+    for index in d.annotation_page(current) {
+        let Some(a) = annotations.get(index) else { continue };
+        let key = (a.range.start.0.as_str(), a.range.end.0.as_str());
+        let rects = if let Some(rects) = geometry_cache.get(&key) {
+            rects.clone()
+        } else {
+            let Some(selection) = d.select(number, &SelectionQuery::Geometry(a.range.clone())).ok().flatten() else {
+                continue;
+            };
+            geometry_cache.insert(key, selection.rects.clone());
+            selection.rects
+        };
+        geometry.push((index, rects));
+    }
+    let painted = Paint::prepare(
+        crate::annotations::paint_union(geometry.iter().flat_map(|(_, rects)| rects.iter().copied())),
+        &pixels,
+        w,
+        h,
+    );
+    log::debug!(
+        "annotation geometry: page={} revision={} ranges={} rects={}",
+        current,
+        revision,
+        geometry.len(),
+        geometry.iter().map(|(_, r)| r.len()).sum::<usize>()
+    );
     let page = Page {
         generation,
         number: d.current_page(),
@@ -327,6 +506,9 @@ fn render(d: &mut CreDocument, generation: u64, number: usize, (w, h): (u32, u32
         position: d.position()?,
         progress: d.progress(),
         images: d.has_images(),
+        annotation_revision: revision,
+        painted,
+        annotations: geometry,
     };
     log::info!("page {} rendered in {:?}", page.number + 1, started.elapsed());
     Ok(Arc::new(page))
@@ -334,6 +516,33 @@ fn render(d: &mut CreDocument, generation: u64, number: usize, (w, h): (u32, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_highlights_preserve_cached_pixels_and_cap_patch_memory() {
+        let mut source = vec![255; 400];
+        source[6 * 20 + 6] = 0;
+        let original = source.clone();
+        let rects = crate::annotations::paint_union([Rect::new(0, 0, 10, 10), Rect::new(5, 5, 10, 10)].into_iter());
+        let patches = Paint::prepare(rects, &source, 20, 20);
+        let mut canvas = crate::gfx::Canvas::new(20, 20);
+        canvas.set_gray(&source);
+        for p in patches {
+            assert!(!p.pixels.is_empty());
+            canvas.blit_gray(p.rect, &p.pixels, p.rect.w as usize);
+        }
+        assert_eq!(source, original);
+        for y in 0..20 {
+            for x in 0..20 {
+                let inside = x < 10 && y < 10 || (5..15).contains(&x) && (5..15).contains(&y);
+                assert_eq!(
+                    canvas.gray_data()[y * 20 + x],
+                    if inside { source[y * 20 + x].min(210) } else { source[y * 20 + x] }
+                );
+            }
+        }
+        let dense = Paint::prepare(vec![Rect::new(0, 0, 1000, 1000)], &vec![255; 1_000_000], 1000, 1000);
+        assert!(dense[0].pixels.is_empty(), "dense ranges don't retain a second page buffer");
+    }
     #[test]
     fn layouts_coalesce_without_discarding_navigation() {
         let (tx, rx) = mpsc::channel();

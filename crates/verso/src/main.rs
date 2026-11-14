@@ -10,6 +10,7 @@ compile_error!("Enable exactly one backend: `desktop` (default) or `kindle`.");
 #[cfg(not(any(feature = "desktop", feature = "kindle")))]
 compile_error!("Enable a backend: `desktop` (default) or `kindle`.");
 
+mod annotations;
 mod app;
 mod dictionary;
 mod document;
