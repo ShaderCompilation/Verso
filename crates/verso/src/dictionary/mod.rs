@@ -1,12 +1,16 @@
 //! Offline StarDict. Source files are read only; rebuildable search data lives
 //! beside app state. Only the worker opens dictionaries.
 mod dictzip;
+mod discovery;
 mod index;
 mod text;
 pub mod worker;
 
 use anyhow::{Context, Result, ensure};
 use dictzip::Definitions;
+use discovery::discover_current;
+#[allow(unused_imports)] // used by the worker and Settings in later phases
+pub use discovery::{Catalog, Source, SourceStatus, discover_catalog};
 use index::Index;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -121,52 +125,14 @@ fn companion(base: &Path, plain: &str, compressed: &str) -> Result<(PathBuf, boo
 fn discover(root: &Path, preferences: &[Preference]) -> Result<Vec<Dictionary>> {
     discover_current(root, preferences, &|| true)
 }
-fn discover_current(root: &Path, preferences: &[Preference], current: &impl Fn() -> bool) -> Result<Vec<Dictionary>> {
-    if !root.try_exists()? {
-        return Ok(Vec::new());
-    }
-    let mut folders = vec![(root.to_owned(), 0)];
-    let mut found = Vec::new();
-    let mut visited = 0usize;
-    while let Some((folder, depth)) = folders.pop() {
-        ensure!(depth <= 32 && found.len() < 1024, "Dictionary discovery limit exceeded");
-        for entry in fs::read_dir(&folder).with_context(|| format!("Cannot read {}", folder.display()))? {
-            visited += 1;
-            ensure!(visited <= 100000 && current(), "Dictionary discovery cancelled or limit exceeded");
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            let path = entry.path();
-            if kind.is_dir() && entry.file_name() != "res" {
-                folders.push((path, depth + 1));
-            } else if kind.is_file()
-                && let Some(base) = basename(&path)
-            {
-                // One dictionary per basename: plain `.ifo` wins over `.ifo.gz`,
-                // and both share the plain `.ifo` ID so preferences carry over.
-                let plain = sibling(&base, "ifo");
-                if is_gzip(&path) && plain.is_file() {
-                    continue;
-                }
-                let id = plain.strip_prefix(root)?.to_string_lossy().into_owned();
-                let info = Info::read(&path).and_then(|i| {
-                    companion(&base, "idx", "idx.gz")?;
-                    companion(&base, "dict", "dict.dz")?;
-                    Ok(i)
-                });
-                let (name, error) = match info {
-                    Ok(i) => (i.name, None),
-                    Err(e) => (base.file_name().unwrap_or_default().to_string_lossy().into(), Some(format!("{e:#}"))),
-                };
-                let disabled = preferences.iter().any(|p| p.id == id && p.disabled);
-                found.push(Dictionary { id, name, path, error, disabled });
-            }
-        }
-    }
-    found.sort_by(|a, b| {
-        let rank = |id: &str| preferences.iter().position(|p| p.id == id).unwrap_or(usize::MAX);
-        rank(&a.id).cmp(&rank(&b.id)).then(a.name.cmp(&b.name)).then(a.id.cmp(&b.id))
-    });
-    Ok(found)
+/// The preferences after a change: listed dictionaries in their current order,
+/// then preferences of dictionaries that are not listed now (a missing or
+/// removed folder), so re-adding the location restores them.
+pub fn merged_preferences(dictionaries: &[Dictionary], previous: Vec<Preference>) -> Vec<Preference> {
+    let mut merged: Vec<_> =
+        dictionaries.iter().map(|d| Preference { id: d.id.clone(), disabled: d.disabled }).collect();
+    merged.extend(previous.into_iter().filter(|p| !dictionaries.iter().any(|d| d.id == p.id)));
+    merged
 }
 
 pub struct Backend {

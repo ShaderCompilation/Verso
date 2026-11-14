@@ -1,5 +1,5 @@
 //! Latest-query cancellation; preference writes remain ordered even on close.
-use super::{Backend, Dictionary, Preference, discover_current};
+use super::{Backend, Dictionary, Preference, discover_current, merged_preferences};
 use crate::{
     platform::Waker,
     store::{Store, atomic},
@@ -78,12 +78,7 @@ impl Worker {
                                     dictionaries[i].disabled = !dictionaries[i].disabled;
                                 }
                                 // Keep preferences for temporarily removed installations too.
-                                let mut updated: Vec<_> = dictionaries
-                                    .iter()
-                                    .map(|d| Preference { id: d.id.clone(), disabled: d.disabled })
-                                    .collect();
-                                updated.extend(preferences.into_iter().filter(|p| !updated_ids(&dictionaries, &p.id)));
-                                preferences = updated;
+                                preferences = merged_preferences(&dictionaries, preferences);
                                 save_error = atomic(&prefs_path, &preferences).err().map(|e| format!("{e:#}"));
                             }
                         }
@@ -204,9 +199,6 @@ impl Worker {
         self.tx.send(Command::Flush(tx))?;
         rx.recv()?.map_err(|e| anyhow::anyhow!("Couldn't save dictionary preferences: {e}"))
     }
-}
-fn updated_ids(dictionaries: &[Dictionary], id: &str) -> bool {
-    dictionaries.iter().any(|d| d.id == id)
 }
 impl Drop for Worker {
     fn drop(&mut self) {
