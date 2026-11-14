@@ -1,6 +1,7 @@
 //! Versioned annotation records and an atomic per-book manifest. Immutable record
 //! files become visible together when the manifest commits; tombstones retain
 //! import identities after removal. No KOReader files are written.
+pub mod export;
 pub mod lua;
 pub mod worker;
 use crate::{
@@ -69,6 +70,24 @@ pub fn created_now() -> String {
     )
 }
 
+/// The most characters a note may hold.
+pub const NOTE_LIMIT: usize = 4000;
+/// A note as stored: surrounding whitespace trimmed, blank means none.
+pub fn clean_note(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+impl Annotation {
+    /// The same passage with a different note. Record files are immutable, so
+    /// the edit is a new record with a new ID; everything else is kept,
+    /// including the import provenance.
+    pub fn with_note(&self, note: Option<String>) -> Self {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let id = digest(format!("{}:{nanos}:{note:?}", self.id).as_bytes());
+        Self { id, note, ..self.clone() }
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
@@ -109,6 +128,21 @@ impl Collection {
         }
         self.manifest.records.push(annotation.id.clone());
         self.records.push(annotation);
+    }
+    /// Puts `new` where the record `old` was, keeping its place in reading
+    /// and saved order. The old record file stays on disk, like a removed
+    /// record's, and import identities stay in `sources`. False if `old` is
+    /// not in the collection.
+    pub fn replace(&mut self, old: &str, new: Annotation) -> bool {
+        let Some(i) = self.records.iter().position(|a| a.id == old) else { return false };
+        if let Some(p) = &new.provenance {
+            self.manifest.sources.insert(p.entry.clone());
+        }
+        for id in self.manifest.records.iter_mut().filter(|id| *id == old) {
+            *id = new.id.clone();
+        }
+        self.records[i] = new;
+        true
     }
     pub fn remove(&mut self, id: &str) {
         self.manifest.records.retain(|i| i != id);
@@ -243,6 +277,33 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&unsupported)?)?;
         assert!(Collection::load(&store, "book").is_err());
         assert!(Collection::load(&store, "../escape").is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn replacing_a_note_keeps_position_and_sources_and_commits_a_new_record() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-annotation-replace-{}", std::process::id()));
+        let store = Store::at(root.clone());
+        let mut c = Collection::load(&store, "book")?;
+        for id in ["first", "second", "third"] {
+            c.add(record(id));
+        }
+        c.commit(&store, "book")?;
+        let edited = c.records[1].with_note(clean_note("  new words "));
+        assert_ne!(edited.id, "second");
+        assert_eq!(edited.note.as_deref(), Some("new words"));
+        assert!(c.replace("second", edited.clone()));
+        assert!(!c.replace("missing", record("x")));
+        assert_eq!(c.manifest.records, ["first", edited.id.as_str(), "third"]);
+        assert_eq!(c.records[1].id, edited.id);
+        assert!(c.manifest.sources.contains("second"), "import identities stay");
+        c.commit(&store, "book")?;
+        let restored = Collection::load(&store, "book")?;
+        assert_eq!(restored.records[1].note.as_deref(), Some("new words"));
+        assert_eq!(restored.records[1].quotation, "a quote");
+        assert!(store.annotation_dir().join("second.json").exists(), "the old file is kept");
+        let cleared = restored.records[1].with_note(clean_note(" \n "));
+        assert!(cleared.note.is_none());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

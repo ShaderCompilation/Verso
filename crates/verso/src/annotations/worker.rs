@@ -14,12 +14,16 @@ pub enum Command {
     Save(Collection),
     Preview(PathBuf, BTreeSet<String>, u64),
     Flush(mpsc::Sender<Result<(), String>>),
+    /// Writes one book's Markdown export; never changes annotations.
+    Export(export::Export),
     Stop,
 }
 pub enum Reply {
     Loaded(Result<(Collection, String), String>),
     Saved(Result<(), String>),
     Preview(u64, Result<Preview, String>),
+    /// The export's destination, or why it couldn't be written.
+    Exported(Result<PathBuf, String>),
 }
 #[derive(Clone, Default, Debug)]
 pub struct Preview {
@@ -101,6 +105,9 @@ impl Worker {
                             }
                             let _ = ack.send(result);
                         }
+                        Command::Export(e) => send(Reply::Exported(
+                            export::write(&store, &b.annotation_id, &e).map_err(|e| format!("{e:#}")),
+                        )),
                         Command::Stop => break,
                     }
                 }

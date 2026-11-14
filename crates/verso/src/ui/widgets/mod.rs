@@ -11,6 +11,7 @@ pub mod segmented;
 pub mod sheet;
 pub mod slider;
 pub mod stepper;
+pub mod text_area;
 pub mod text_field;
 pub mod toast;
 pub mod toggle;
@@ -30,4 +31,5 @@ pub use toggle::Toggle;
 pub use top_bar::TopBar;
 
 pub use keyboard::Keyboard;
+pub use text_area::TextArea;
 pub use text_field::TextField;

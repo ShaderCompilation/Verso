@@ -341,36 +341,50 @@ pub enum SelectionAction {
     Dictionary,
     Search,
     Highlight,
+    Note,
     Extend,
 }
 pub struct SelectionActions {
     sheet: Sheet,
     highlight: Button,
+    note: Button,
     extend: Button,
     search: Button,
     dictionary: Button,
 }
 impl SelectionActions {
+    /// Two columns in portrait; landscape uses three, so the sheet stays low
+    /// and leaves the selection visible.
     pub fn new(t: &Theme, screen: Rect) -> Self {
-        let sheet = Sheet::open("Selection", t.mm(43.0), screen, t);
-        let body = sheet.content(t);
+        let cols = if screen.w > screen.h { 3 } else { 2 };
+        let rows = (5 + cols - 1) / cols;
         let gap = t.mm(3.0);
-        let width = (body.w - gap) / 2;
+        let sheet = Sheet::open("Selection", t.mm(22.0) + rows * t.target + (rows - 1) * gap, screen, t);
+        let body = sheet.content(t);
+        let width = (body.w - (cols - 1) * gap) / cols;
+        let place = |b: &mut Button, i: i32| {
+            b.place(
+                Rect::new(body.x + (i % cols) * (width + gap), body.y + (i / cols) * (t.target + gap), width, t.target),
+                t,
+            )
+        };
         let mut search = Button::new("Search in book", ButtonKind::Secondary);
-        search.place(Rect::new(body.x, body.y, width, t.target), t);
         let mut dictionary = Button::new("Dictionary", ButtonKind::Primary);
-        dictionary.place(Rect::new(body.right() - width, body.y, width, t.target), t);
         let mut highlight = Button::new("Highlight", ButtonKind::Primary);
+        let mut note = Button::new("Add note", ButtonKind::Secondary);
         let mut extend = Button::new("Extend selection", ButtonKind::Secondary);
-        highlight.place(Rect::new(body.x, body.y + t.target + gap, width, t.target), t);
-        extend.place(Rect::new(body.right() - width, body.y + t.target + gap, width, t.target), t);
-        Self { sheet, search, dictionary, highlight, extend }
+        for (i, b) in [&mut search, &mut dictionary, &mut highlight, &mut note, &mut extend].into_iter().enumerate() {
+            place(b, i as i32);
+        }
+        Self { sheet, search, dictionary, highlight, note, extend }
     }
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<SelectionAction> {
         if self.sheet.on_gesture(g) {
             Some(SelectionAction::Dismiss)
         } else if self.highlight.on_gesture(g) {
             Some(SelectionAction::Highlight)
+        } else if self.note.on_gesture(g) {
+            Some(SelectionAction::Note)
         } else if self.extend.on_gesture(g) {
             Some(SelectionAction::Extend)
         } else if self.search.on_gesture(g) {
@@ -386,6 +400,7 @@ impl SelectionActions {
         self.search.draw(cx);
         self.dictionary.draw(cx);
         self.highlight.draw(cx);
+        self.note.draw(cx);
         self.extend.draw(cx);
     }
 }

@@ -37,9 +37,9 @@ def main():
         'results-again': [*opened, '--tap', '697,1625'],
         'returned': [*opened, '--tap', '960,1625'],
         'passage': passage,
-        'passage-search': [*passage, '--tap', '338,1395'],
+        'passage-search': [*passage, '--tap', '338,1253'],
         # Dictionary → Actions → Search in book.
-        'dictionary-search': [*opening, '--long-press', '190,297', '--tap', '1036,685', '--tap', '338,1395'],
+        'dictionary-search': [*opening, '--long-press', '190,297', '--tap', '1036,685', '--tap', '338,1253'],
     }
     for name, steps in scenes.items():
         state = OUT / (name + '-state')

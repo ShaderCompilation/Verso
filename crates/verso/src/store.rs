@@ -172,6 +172,10 @@ impl Store {
     pub fn annotation_dir(&self) -> PathBuf {
         self.root.join("annotations")
     }
+    /// Markdown exports of highlights and notes, reachable over USB.
+    pub fn export_dir(&self) -> PathBuf {
+        self.root.join("exports")
+    }
     pub fn dictionary_dir(&self) -> PathBuf {
         self.root.join("dictionaries")
     }

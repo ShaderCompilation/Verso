@@ -34,44 +34,7 @@ impl TextField {
     }
     /// Returns true only when the text changed (cursor movement is still drawn).
     pub fn edit(&mut self, input: &TextInput) -> bool {
-        let old = self.value.clone();
-        let previous = || self.value[..self.cursor].grapheme_indices(true).next_back().map_or(0, |(i, _)| i);
-        let next = || self.value[self.cursor..].graphemes(true).next().map_or(self.cursor, |g| self.cursor + g.len());
-        match input {
-            TextInput::Insert(text) => {
-                let text: String = text.chars().filter(|c| !c.is_control()).collect();
-                self.value.insert_str(self.cursor, &text);
-                self.cursor += text.len();
-                // An inserted combining mark/ZWJ may merge with adjacent text.
-                self.cursor = self
-                    .value
-                    .grapheme_indices(true)
-                    .map(|(i, _)| i)
-                    .find(|&i| i >= self.cursor)
-                    .unwrap_or(self.value.len());
-            }
-            TextInput::Backspace => {
-                let start = previous();
-                self.value.replace_range(start..self.cursor, "");
-                self.cursor = start;
-            }
-            TextInput::Delete => {
-                let end = next();
-                self.value.replace_range(self.cursor..end, "");
-            }
-            TextInput::Left => self.cursor = previous(),
-            TextInput::Right => self.cursor = next(),
-            TextInput::Home => self.cursor = 0,
-            TextInput::End => self.cursor = self.value.len(),
-            TextInput::Clear => {
-                self.value.clear();
-                self.cursor = 0;
-            }
-            TextInput::Submit | TextInput::Dismiss => {}
-        }
-        self.cursor =
-            self.value.grapheme_indices(true).map(|(i, _)| i).find(|&i| i >= self.cursor).unwrap_or(self.value.len());
-        old != self.value
+        edit(&mut self.value, &mut self.cursor, input)
     }
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
@@ -98,6 +61,45 @@ impl TextField {
             );
         }
     }
+}
+
+/// Applies one edit to `value` at `cursor` (a byte offset kept on grapheme
+/// boundaries). Inserted control characters are dropped. Returns true only
+/// when the text changed. Shared by the single-line field and the text area.
+pub(crate) fn edit(value: &mut String, cursor: &mut usize, input: &TextInput) -> bool {
+    let old = value.clone();
+    let previous =
+        |value: &str, cursor: usize| value[..cursor].grapheme_indices(true).next_back().map_or(0, |(i, _)| i);
+    let next = |value: &str, cursor: usize| value[cursor..].graphemes(true).next().map_or(cursor, |g| cursor + g.len());
+    match input {
+        TextInput::Insert(text) => {
+            let text: String = text.chars().filter(|c| !c.is_control()).collect();
+            value.insert_str(*cursor, &text);
+            *cursor += text.len();
+            // An inserted combining mark/ZWJ may merge with adjacent text.
+            *cursor = value.grapheme_indices(true).map(|(i, _)| i).find(|&i| i >= *cursor).unwrap_or(value.len());
+        }
+        TextInput::Backspace => {
+            let start = previous(value, *cursor);
+            value.replace_range(start..*cursor, "");
+            *cursor = start;
+        }
+        TextInput::Delete => {
+            let end = next(value, *cursor);
+            value.replace_range(*cursor..end, "");
+        }
+        TextInput::Left => *cursor = previous(value, *cursor),
+        TextInput::Right => *cursor = next(value, *cursor),
+        TextInput::Home => *cursor = 0,
+        TextInput::End => *cursor = value.len(),
+        TextInput::Clear => {
+            value.clear();
+            *cursor = 0;
+        }
+        TextInput::Submit | TextInput::Dismiss => {}
+    }
+    *cursor = value.grapheme_indices(true).map(|(i, _)| i).find(|&i| i >= *cursor).unwrap_or(value.len());
+    old != *value
 }
 
 #[cfg(test)]

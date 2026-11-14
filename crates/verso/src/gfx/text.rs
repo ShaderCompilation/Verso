@@ -217,6 +217,23 @@ impl TextRenderer {
         pages
     }
 
+    /// Byte offsets where each wrapped line of `text` starts (at least `[0]`).
+    /// Hard line breaks (`\n`) start a new line too.
+    pub fn line_starts(&mut self, text: &str, style: TextStyle, width: i32) -> Vec<usize> {
+        let mut offsets = vec![0];
+        offsets.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+        let buffer = self.layout(text, style, Some(width.max(1) as f32), 0, HAlign::Left);
+        let mut starts: Vec<usize> = buffer
+            .layout_runs()
+            .map(|run| offsets[run.line_i] + run.glyphs.iter().map(|g| g.start).min().unwrap_or(0))
+            .collect();
+        starts.dedup();
+        if starts.first() != Some(&0) {
+            starts.insert(0, 0);
+        }
+        starts
+    }
+
     /// Draws one line of text in `rect`, cut short with "…" if it's too wide,
     /// and centred vertically on its capital letters.
     pub fn line(&mut self, canvas: &mut Canvas, text: &str, style: TextStyle, rect: Rect, align: HAlign) {

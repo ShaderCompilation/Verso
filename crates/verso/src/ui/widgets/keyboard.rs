@@ -25,8 +25,14 @@ pub struct Keyboard {
     keys: Vec<(Button, KeyAction)>,
     key_h: i32,
     outside: bool,
+    /// The submit key's label; empty means "Search".
+    submit: &'static str,
 }
 impl Keyboard {
+    /// Names the submit key (for example "Save"); call before `place`.
+    pub fn set_submit(&mut self, label: &'static str) {
+        self.submit = label;
+    }
     pub fn place(&mut self, screen: Rect, t: &Theme) {
         self.screen = screen;
         self.keys.clear();
@@ -98,7 +104,7 @@ impl Keyboard {
             ),
             (if self.symbols { "ABC" } else { "123" }, KeyAction::Symbols),
             ("Space", KeyAction::Input(TextInput::Insert(" ".into()))),
-            ("Search", KeyAction::Input(TextInput::Submit)),
+            (if self.submit.is_empty() { "Search" } else { self.submit }, KeyAction::Input(TextInput::Submit)),
             ("Hide", KeyAction::Input(TextInput::Dismiss)),
         ];
         self.control_row(&controls, y, t);
@@ -196,6 +202,9 @@ mod tests {
         assert_eq!(tap(&mut k, "⌫", &t), Some(TextInput::Backspace));
         assert_eq!(tap(&mut k, "Clear", &t), Some(TextInput::Clear));
         assert_eq!(tap(&mut k, "Search", &t), Some(TextInput::Submit));
+        k.set_submit("Save");
+        k.place(k.screen, &t);
+        assert_eq!(tap(&mut k, "Save", &t), Some(TextInput::Submit));
         let p = Point::new(500, 100);
         k.on_gesture(&Gesture::Down(p), &t);
         assert_eq!(k.on_gesture(&Gesture::Tap(p), &t), Some(TextInput::Dismiss));

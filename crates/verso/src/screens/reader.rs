@@ -443,18 +443,15 @@ impl Reader {
             Overlay::Highlights(Box::new(annotations::View::new(cx.theme, self.screen, &self.annotations, ids)));
         cx.redraw();
     }
-    fn save_highlight(&mut self, cx: &mut EventCx) {
-        if !self.annotations.ready || self.annotations.pending || self.selection.busy() {
-            cx.toast("Highlights are not ready to save", None);
-            return;
-        }
-        let Some(s) = self.selection.selected.clone() else { return };
-        let Some(service) = &self.annotations.service else { return };
+    /// A new record for the current selection (not yet added or saved).
+    fn draft(&self) -> Option<crate::annotations::Annotation> {
+        let s = self.selection.selected.clone()?;
+        let service = self.annotations.service.as_ref()?;
         let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string();
         let id = crate::annotations::digest(
             format!("{}:{}:{}", service.book.annotation_id, created, s.range.start.0).as_bytes(),
         );
-        let a = crate::annotations::Annotation {
+        Some(crate::annotations::Annotation {
             version: 1,
             id,
             book: service.book.annotation_id.clone(),
@@ -465,14 +462,47 @@ impl Reader {
             chapter: reader::chapter(&self.toc, s.start_page).map(|i| self.toc[i].title.clone()).unwrap_or_default(),
             note: None,
             provenance: None,
-        };
-        self.annotations.collection.add(a);
-        self.annotations.save();
+        })
+    }
+    fn save_highlight(&mut self, cx: &mut EventCx) {
+        if !self.annotations.can_save() || self.selection.busy() {
+            cx.toast(annotations::NOT_READY, None);
+            return;
+        }
+        let Some(a) = self.draft() else { return };
+        if let Err(message) = self.annotations.add(a) {
+            cx.toast(message, None);
+            return;
+        }
         self.annotations.resolve(self.cache.generation, &self.worker);
         self.selection.clear();
         self.extension = None;
         self.overlay = Overlay::None;
         cx.redraw();
+    }
+    /// Opens the note editor for the selection; saving the note saves the
+    /// highlight with it. The selection is cleared: Cancel returns to reading.
+    fn note_selection(&mut self, cx: &mut EventCx) {
+        if !self.annotations.ready || self.selection.busy() {
+            cx.toast(annotations::NOT_READY, None);
+            return;
+        }
+        let Some(a) = self.draft() else { return };
+        self.open_highlights(None, cx);
+        if let Overlay::Highlights(view) = &mut self.overlay {
+            view.edit_note(annotations::NoteTarget::New(Box::new(a)), &self.annotations, cx.theme);
+        }
+    }
+    /// Book title and author for an export: library metadata, then the
+    /// opened document's, then the file name.
+    fn export_names(&self) -> (String, String) {
+        let book = self.annotations.service.as_ref().map(|w| &w.book);
+        let pick = |a: Option<&String>, b: &String| a.filter(|s| !s.trim().is_empty()).unwrap_or(b).clone();
+        let mut title = pick(book.map(|b| &b.metadata.title), &self.metadata.title);
+        if title.trim().is_empty() {
+            title = book.and_then(|b| b.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        }
+        (title, pick(book.map(|b| &b.metadata.authors), &self.metadata.authors))
     }
     fn annotation_event(&mut self, event: annotations::Event, cx: &mut EventCx) {
         use annotations::Event;
@@ -507,6 +537,41 @@ impl Reader {
                 self.annotations.resolve(self.cache.generation, &self.worker);
             }
             Event::Retry => self.annotations.save(),
+            Event::SaveNote(target, text) => {
+                let note = crate::annotations::clean_note(&text);
+                // A note that can't be saved yet stays in the open editor.
+                let result = match target {
+                    annotations::NoteTarget::New(mut a) => {
+                        a.note = note;
+                        self.annotations.add(*a).map(|()| {
+                            self.annotations.resolve(self.cache.generation, &self.worker);
+                            self.overlay = Overlay::None;
+                        })
+                    }
+                    annotations::NoteTarget::Existing(i) => self.annotations.set_note(i, note).map(|_| {
+                        if let Overlay::Highlights(view) = &mut self.overlay {
+                            view.refresh(&self.annotations, None, cx.theme);
+                            view.close_note(cx.theme);
+                        }
+                    }),
+                };
+                if let Err(message) = result {
+                    cx.toast(message, None);
+                }
+            }
+            Event::DeleteNote(i) => match self.annotations.set_note(i, None) {
+                Ok(_) => {
+                    if let Overlay::Highlights(view) = &mut self.overlay {
+                        view.refresh(&self.annotations, None, cx.theme);
+                        view.detail(i);
+                    }
+                }
+                Err(message) => cx.toast(message, None),
+            },
+            Event::Export => {
+                let (title, author) = self.export_names();
+                self.annotations.export(title, author);
+            }
         }
         cx.redraw();
     }
@@ -763,6 +828,7 @@ impl Screen for Reader {
             }
             Overlay::SelectionActions(actions) => match actions.on_gesture(&g) {
                 Some(SelectionAction::Highlight) => self.save_highlight(cx),
+                Some(SelectionAction::Note) => self.note_selection(cx),
                 Some(SelectionAction::Extend) => {
                     self.selection.extend();
                     self.extension = Some(annotations::ExtendBar::new(cx.theme, self.screen));
@@ -896,6 +962,7 @@ impl Screen for Reader {
         self.annotations.resolving
             || self.annotations.paint_pending
             || self.annotations.importing
+            || self.annotations.exporting
             || self.annotations.pending
             || self.annotations.service.is_some() && !self.annotations.ready && self.annotations.load_error.is_none()
             || matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.busy())
@@ -963,9 +1030,12 @@ impl Screen for Reader {
         match &mut self.overlay {
             Overlay::Lookup(lookup) => lookup.on_text_input(input, cx),
             Overlay::Highlights(view) => {
-                let consumed = view.input(input);
+                let (consumed, event) = view.input(input);
                 if consumed {
                     cx.redraw();
+                }
+                if let Some(event) = event {
+                    self.annotation_event(event, cx);
                 }
                 consumed
             }
@@ -1002,8 +1072,11 @@ impl Screen for Reader {
         }
         let _ = self.annotations.flush();
         let _ = self.flush_position();
-        // Dropping the controls cancels held steppers and slider drags.
-        self.overlay = Overlay::None;
+        // Dropping the controls cancels held steppers and slider drags. An open
+        // note editor stays, so typed text survives sleep.
+        if !matches!(&self.overlay, Overlay::Highlights(view) if view.editing_note()) {
+            self.overlay = Overlay::None;
+        }
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
         self.annotations.flush()?;
