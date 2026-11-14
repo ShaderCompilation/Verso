@@ -8,8 +8,6 @@ pub mod worker;
 
 use anyhow::{Context, Result, ensure};
 use dictzip::Definitions;
-use discovery::discover_current;
-#[allow(unused_imports)] // used by the worker and Settings in later phases
 pub use discovery::{Catalog, Source, SourceStatus, discover_catalog};
 use index::Index;
 use serde::{Deserialize, Serialize};
@@ -29,6 +27,10 @@ pub struct Dictionary {
     pub id: String,
     pub name: String,
     pub path: PathBuf,
+    /// The `.ifo` path below its source root, for telling copies apart.
+    pub relative: PathBuf,
+    /// Index into `Catalog::sources` of the source that listed it.
+    pub source: usize,
     pub error: Option<String>,
     pub disabled: bool,
 }
@@ -123,7 +125,7 @@ fn companion(base: &Path, plain: &str, compressed: &str) -> Result<(PathBuf, boo
 
 #[cfg(test)]
 fn discover(root: &Path, preferences: &[Preference]) -> Result<Vec<Dictionary>> {
-    discover_current(root, preferences, &|| true)
+    Ok(discover_catalog(root, &[], preferences, &|| true)?.dictionaries)
 }
 /// The preferences after a change: listed dictionaries in their current order,
 /// then preferences of dictionaries that are not listed now (a missing or

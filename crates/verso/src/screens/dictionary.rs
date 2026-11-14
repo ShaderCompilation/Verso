@@ -1,7 +1,7 @@
 //! Lookup is an overlay over the unchanged cached book page.
 use crate::{
     dictionary::{
-        Dictionary,
+        Dictionary, Source,
         worker::{State, Worker},
     },
     geom::Rect,
@@ -38,6 +38,9 @@ pub struct Lookup {
     back: Button,
     rescan: Button,
     catalog: Vec<Dictionary>,
+    sources: Vec<Source>,
+    /// Source problems, shown with every result.
+    warnings: Vec<String>,
     selected: Option<String>,
     state: State,
     pages: Vec<String>,
@@ -114,6 +117,8 @@ impl Lookup {
             back,
             rescan,
             catalog: Vec::new(),
+            sources: Vec::new(),
+            warnings: Vec::new(),
             selected: None,
             state: State::NoResult,
             pages: Vec::new(),
@@ -123,6 +128,25 @@ impl Lookup {
             rows: Vec::new(),
             body,
         }
+    }
+    /// The name, plus its source when another dictionary has the same name.
+    fn title(&self, d: &Dictionary) -> String {
+        if self.catalog.iter().filter(|o| o.name == d.name).count() > 1 {
+            let source = self.sources.get(d.source).map_or_else(String::new, Source::label);
+            format!("{} · {source}", d.name)
+        } else {
+            d.name.clone()
+        }
+    }
+    fn with_warnings(&self, mut message: String) -> String {
+        if !self.warnings.is_empty() {
+            message.push_str("\n\nSome dictionary folders had problems:");
+            for warning in &self.warnings {
+                message.push_str("\n• ");
+                message.push_str(warning);
+            }
+        }
+        message
     }
     pub fn busy(&self) -> bool {
         self.pending
@@ -141,8 +165,10 @@ impl Lookup {
         {
             self.pending = false;
             self.catalog = reply.dictionaries;
+            self.sources = reply.sources;
+            self.warnings = reply.warnings;
             self.selected = reply.selected;
-            self.state = reply.state;
+            self.state = reply.state.unwrap_or(State::NoResult);
             self.pages.clear();
             self.pager.set(0, 1);
             if let Some(e) = reply.save_error {
@@ -281,13 +307,18 @@ impl Lookup {
             self.back.draw(cx);
             self.rescan.draw(cx);
             if self.catalog.is_empty() {
-                cx.text.draw(cx.canvas, "No dictionaries installed. Add StarDict files to the app data dictionaries/ folder, then tap Rescan.", t.body, self.body, HAlign::Left);
+                let message = self.with_warnings(
+                    "No dictionaries found. Add StarDict files to Verso's dictionaries/ folder, then tap Rescan."
+                        .into(),
+                );
+                cx.text.draw(cx.canvas, &message, t.body, self.body, HAlign::Left);
             }
             for (i, rect, toggle, up) in &self.rows {
                 let d = &self.catalog[*i];
                 let label = Rect::new(rect.x, rect.y, toggle.rect().x - rect.x - t.mm(2.0), t.target);
                 cx.line(&d.name, t.body, label, HAlign::Left);
-                let detail = if d.error.is_some() { format!("Unreadable · {}", d.id) } else { d.id.clone() };
+                let location = d.location(&self.sources);
+                let detail = if d.error.is_some() { format!("Unreadable · {location}") } else { location };
                 cx.line(
                     &detail,
                     t.caption.gray(INK2),
@@ -308,7 +339,7 @@ impl Lookup {
             .catalog
             .iter()
             .find(|d| Some(&d.id) == self.selected.as_ref())
-            .map_or_else(|| "Dictionaries".into(), |d| d.name.clone());
+            .map_or_else(|| "Dictionaries".into(), |d| self.title(d));
         self.previous.draw(cx);
         self.dictionaries_button.draw(cx);
         self.next.draw(cx);
@@ -319,12 +350,13 @@ impl Lookup {
             } else {
                 match &self.state {
             State::Definition(text) => text.clone(),
-            State::Missing => "No dictionaries installed. Add a StarDict dictionary to the app data dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
+            State::Missing => "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
             State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
             State::NoResult => "No definition found. Tap the query to edit it, or try another dictionary.".into(),
             State::Error(e) => format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."),
         }
             };
+            let message = if self.pending { message } else { self.with_warnings(message) };
             self.pages = cx.text.pages(&message, t.body, self.body.w, self.body.h);
             self.pager.set(0, self.pages.len());
         }
@@ -466,6 +498,15 @@ mod tests {
         };
         wait(&mut lookup, &mut cx);
         assert!(matches!(&lookup.state, State::Definition(text) if text.contains("meaning")));
+        // Source warnings accompany results; same-name copies show their source.
+        lookup.warnings = vec!["/gone is not available.".into()];
+        assert!(lookup.with_warnings("text".into()).ends_with("problems:\n• /gone is not available."));
+        lookup.warnings.clear();
+        assert_eq!(lookup.title(&lookup.catalog[0]), lookup.catalog[0].name);
+        let mut copy = lookup.catalog[0].clone();
+        copy.name = lookup.catalog[1].name.clone();
+        assert_eq!(lookup.title(&copy), format!("{} · Verso", copy.name));
+        assert_eq!(copy.location(&lookup.sources), format!("Verso · {}", copy.id));
         let initial = lookup.selected.clone();
         lookup.cycle(1);
         wait(&mut lookup, &mut cx);
@@ -496,8 +537,10 @@ mod tests {
         lookup.worker.result_for_test(crate::dictionary::worker::Reply {
             id: old,
             dictionaries: Vec::new(),
+            sources: Vec::new(),
+            warnings: Vec::new(),
             selected: None,
-            state: State::Missing,
+            state: Some(State::Missing),
             save_error: None,
         });
         lookup.receive(&mut cx);

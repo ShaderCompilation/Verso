@@ -26,7 +26,6 @@ struct Limits {
 const LIMITS: Limits = Limits { depth: 32, entries: 100_000, dictionaries: 1024 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the worker and Settings in later phases
 pub enum SourceStatus {
     /// Scanned completely.
     Available,
@@ -38,7 +37,6 @@ pub enum SourceStatus {
     LimitReached,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // read by the worker and Settings in later phases
 pub struct Source {
     /// As configured (not resolved), so a missing folder keeps its spelling.
     pub root: PathBuf,
@@ -51,9 +49,29 @@ pub struct Catalog {
     /// The native source first, then external folders in configured order.
     pub sources: Vec<Source>,
 }
-#[allow(dead_code)] // read by the worker and Settings in later phases
+impl Source {
+    /// A short name: **Verso** for the native folder, **KOReader** for its
+    /// standard folder, otherwise the configured path.
+    pub fn label(&self) -> String {
+        if self.native {
+            "Verso".into()
+        } else if self.root == Path::new(crate::store::KOREADER_DICTIONARY_FOLDER) {
+            "KOReader".into()
+        } else {
+            self.root.display().to_string()
+        }
+    }
+}
+impl Dictionary {
+    /// Where it was found, e.g. `KOReader · en/wordnet.ifo`.
+    pub fn location(&self, sources: &[Source]) -> String {
+        let source = sources.get(self.source).map_or_else(String::new, Source::label);
+        format!("{source} · {}", self.relative.display())
+    }
+}
 impl Catalog {
     /// Whether every source was scanned fully (absent sources count as empty).
+    #[allow(dead_code)] // read by Settings in Phase 4 of the folders follow-up
     pub fn complete(&self) -> bool {
         self.sources.iter().all(|s| matches!(s.status, SourceStatus::Available | SourceStatus::Absent))
     }
@@ -82,7 +100,8 @@ fn discover_limited(
     // Real roots scanned completely; a root inside one has nothing new to offer.
     let mut covered: Vec<PathBuf> = Vec::new();
     let mut sources = Vec::new();
-    for (root, native) in std::iter::once((native, true)).chain(external.iter().map(|r| (r.as_path(), false))) {
+    let roots = std::iter::once((native, true)).chain(external.iter().map(|r| (r.as_path(), false)));
+    for (source, (root, native)) in roots.enumerate() {
         ensure!(current(), "Dictionary discovery cancelled");
         let status = if scan.exhausted {
             SourceStatus::LimitReached
@@ -95,7 +114,7 @@ fn discover_limited(
                 Ok(real) => {
                     // Native paths keep the configured spelling (stable cache
                     // names); external paths are real so IDs match across aliases.
-                    let status = scan.tree(if native { root } else { &real }, &real, native)?;
+                    let status = scan.tree(if native { root } else { &real }, &real, native, source)?;
                     if status == SourceStatus::Available {
                         covered.push(real);
                     }
@@ -134,7 +153,7 @@ impl<F: Fn() -> bool> Scan<'_, F> {
     /// Directory symlinks below the root are not followed (`file_type` does
     /// not follow links), so the real path of a file is `real` plus its path
     /// relative to `root`.
-    fn tree(&mut self, root: &Path, real: &Path, native: bool) -> Result<SourceStatus> {
+    fn tree(&mut self, root: &Path, real: &Path, native: bool, source: usize) -> Result<SourceStatus> {
         let mut status = SourceStatus::Available;
         let mut note = |problem: SourceStatus| {
             if status == SourceStatus::Available || problem == SourceStatus::LimitReached {
@@ -207,26 +226,12 @@ impl<F: Fn() -> bool> Scan<'_, F> {
                         }
                     };
                     let disabled = self.preferences.iter().any(|p| p.id == id && p.disabled);
-                    self.found.push(Dictionary { id, name, path, error, disabled });
+                    let relative = relative.to_owned();
+                    self.found.push(Dictionary { id, name, path, relative, source, error, disabled });
                 }
             }
         }
         Ok(status)
-    }
-}
-
-/// The native folder alone, for the current worker: a problem with it is an
-/// error, as before external folders existed.
-pub(super) fn discover_current(
-    root: &Path,
-    preferences: &[Preference],
-    current: &impl Fn() -> bool,
-) -> Result<Vec<Dictionary>> {
-    let catalog = discover_catalog(root, &[], preferences, current)?;
-    match &catalog.sources[0].status {
-        SourceStatus::Unreadable(e) => bail!("{e}"),
-        SourceStatus::LimitReached => bail!("Dictionary discovery limit exceeded"),
-        SourceStatus::Available | SourceStatus::Absent => Ok(catalog.dictionaries),
     }
 }
 

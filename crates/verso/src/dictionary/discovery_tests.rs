@@ -237,12 +237,16 @@ fn cancellation_never_returns_a_partial_catalog() {
 }
 
 #[test]
-fn current_worker_discovery_keeps_native_only_behavior() {
+fn native_only_sources_and_dictionary_locations() {
     let t = Temp::new();
     let native = t.join("native");
-    assert!(discover_current(&native, &[], &|| true).unwrap().is_empty(), "absent folder is empty");
-    install(&native.join("n.ifo"), "Native");
-    assert_eq!(discover_current(&native, &[], &|| true).unwrap()[0].id, "n.ifo");
+    let empty = scan(&native, &[], &[]);
+    assert!(empty.dictionaries.is_empty() && empty.complete(), "absent folder is an empty install");
+    install(&native.join("sub/n.ifo"), "Native");
+    install(&t.join("ext/e.ifo"), "External");
+    let catalog = scan(&native, &[t.join("ext")], &[]);
+    let found: Vec<_> = catalog.dictionaries.iter().map(|d| (d.source, d.relative.clone())).collect();
+    assert_eq!(found, vec![(1, PathBuf::from("e.ifo")), (0, PathBuf::from("sub/n.ifo"))]);
     fs::write(t.join("file"), b"").unwrap();
-    assert!(discover_current(&t.join("file"), &[], &|| true).is_err());
+    assert!(matches!(statuses(&scan(&t.join("file"), &[], &[]))[0], SourceStatus::Unreadable(_)));
 }

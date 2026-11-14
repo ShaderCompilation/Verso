@@ -271,7 +271,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
     loop {
         let r = receive()?;
         if r.id == latest {
-            assert!(matches!(r.state, State::Definition(_)));
+            assert!(matches!(r.state, Some(State::Definition(_))));
             break;
         }
     }
@@ -279,7 +279,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
     let latest = worker.lookup("fruit".into(), None, false);
     let reply = receive()?;
     assert_eq!(reply.id, latest);
-    assert_eq!(reply.state, State::Disabled);
+    assert_eq!(reply.state, Some(State::Disabled));
     let prefs: Vec<Preference> = serde_json::from_str(&fs::read_to_string(store.dictionary_preferences())?)?;
     assert!(prefs[0].disabled);
     drop(worker);
@@ -289,7 +289,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
     loop {
         if let Some(reply) = worker.receive() {
             assert_eq!(reply.id, id);
-            assert_eq!(reply.state, State::Disabled);
+            assert_eq!(reply.state, Some(State::Disabled));
             break;
         }
         assert!(std::time::Instant::now() < deadline);
