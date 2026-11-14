@@ -143,14 +143,19 @@ fn run() -> Result<()> {
         Some(path) => platform::open_headless(path, opts.script.clone())?,
         None => platform::open()?,
     };
+    let orientation = store::Store::new().settings().orientation;
+    if orientation != platform::Orientation::Portrait {
+        platform.set_orientation(orientation)?;
+    }
     let info = platform.info().clone();
-    log::info!("screen: {} {}x{} @ {} dpi", info.name, info.width, info.height, info.dpi);
+    log::info!("screen: {} {}x{} @ {} dpi, {orientation:?}", info.name, info.width, info.height, info.dpi);
 
     let theme = ui::theme::Theme::for_dpi(info.dpi);
     let bounds = geom::Rect::new(0, 0, info.width as i32, info.height as i32);
     let worker =
         std::rc::Rc::new(document::thread::Worker::new(document::Paths::for_device(), info.dpi, platform.waker()));
     let mut app = App::new(&info, theme.clone(), start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone())?);
+    app.set_orientation(orientation);
     app.frontlight = platform.frontlight();
     app.set_battery(platform.battery());
     if let Some(connected) = platform.usb_connected() {
@@ -190,6 +195,21 @@ fn run() -> Result<()> {
                 break;
             }
             quit = false;
+            continue;
+        }
+        if let Some(orientation) = app.take_orientation_request()
+            && app.prepare_relayout()
+        {
+            platform.set_orientation(orientation)?;
+            let info = platform.info().clone();
+            log::info!("screen turned: {}x{}, {orientation:?}", info.width, info.height);
+            gestures.reset();
+            let name = opts.screen.as_deref();
+            app.relayout(&info, orientation, |theme, rect| {
+                let root = start_screen(name, theme, rect, worker.clone()).expect("checked at startup");
+                let settings = screens::system::SystemSettings::new(theme, rect, store::Store::new());
+                vec![root, Box::new(settings.on_display_tab())]
+            });
             continue;
         }
         if app.has_pending_work() {
@@ -233,8 +253,8 @@ fn run() -> Result<()> {
                     let cover = app.draw_sleep_cover(store::Store::new().settings().sleep_screen);
                     platform.prepare_sleep(cover)?;
                     if cover {
-                        platform
-                            .present(app.canvas(), &[platform::Update { rect: bounds, mode: RefreshMode::Full }])?;
+                        let rect = app.canvas().bounds();
+                        platform.present(app.canvas(), &[platform::Update { rect, mode: RefreshMode::Full }])?;
                         platform.wait_for_complete()?;
                     }
                 }

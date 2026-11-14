@@ -37,7 +37,10 @@ impl ReaderMenu {
         top.serif = false;
         top.show_battery = true;
         top.place(screen, t);
-        let panel = screen.split_bottom(t.mm(61.0)).0;
+        // Landscape puts the two light sliders side by side, so more of the
+        // short page stays visible above the panel.
+        let wide = screen.w > screen.h;
+        let panel = screen.split_bottom(t.mm(if wide { 49.0 } else { 61.0 })).0;
         let m = t.margin;
         let info = Rect::new(m, panel.y + t.mm(3.0), screen.w - 2 * m, t.mm(7.0));
         let mut progress = Slider::new(0.0, pages.saturating_sub(1) as f32, 1.0, page as f32);
@@ -47,13 +50,23 @@ impl ReaderMenu {
         prev.place_at(crate::geom::Point::new(m + t.target / 2, progress.rect().center().y), t);
         let mut next = IconButton::new(Icon::ChevronRight);
         next.place_at(crate::geom::Point::new(screen.w - m - t.target / 2, progress.rect().center().y), t);
-        let make_slider = |y, value| {
+        // Each slider row: a label column, then the slider.
+        let make_slider = |row: Rect, value| {
             let mut s = Slider::new(0.0, 24.0, 1.0, value as f32);
-            s.place(Rect::new(m + t.mm(20.0), y, screen.w - 2 * m - t.mm(20.0), t.mm(6.0)), t);
+            s.place(Rect::new(row.x + t.mm(20.0), row.y, row.w - t.mm(20.0), t.mm(6.0)), t);
             s
         };
-        let light_slider = light.map(|v| make_slider(panel.y + t.mm(27.0), v.brightness));
-        let warmth = light.and_then(|v| v.warmth.map(|w| make_slider(panel.y + t.mm(39.0), w)));
+        let full = Rect::new(m, panel.y + t.mm(27.0), screen.w - 2 * m, t.mm(6.0));
+        let (light_row, warmth_row) = match light {
+            Some(Frontlight { warmth: Some(_), .. }) if wide => {
+                let gap = t.mm(10.0);
+                let w = (full.w - gap) / 2;
+                (Rect { w, ..full }, Rect { x: full.right() - w, w, ..full })
+            }
+            _ => (full, Rect { y: panel.y + t.mm(39.0), ..full }),
+        };
+        let light_slider = light.map(|v| make_slider(light_row, v.brightness));
+        let warmth = light.and_then(|v| v.warmth.map(|w| make_slider(warmth_row, w)));
         let gap = t.mm(3.0);
         let width = (screen.w - 2 * m - 2 * gap) / 3;
         let y = screen.bottom() - t.mm(13.0);
@@ -97,7 +110,7 @@ impl ReaderMenu {
         for (label, slider) in [("Light", &self.light), ("Warmth", &self.warmth)] {
             if let Some(s) = slider {
                 let r = s.rect();
-                cx.line(label, t.small, Rect::new(t.margin, r.y, t.mm(18.0), r.h), HAlign::Left);
+                cx.line(label, t.small, Rect::new(r.x - t.mm(20.0), r.y, t.mm(18.0), r.h), HAlign::Left);
                 s.draw(cx);
             }
         }

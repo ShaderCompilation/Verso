@@ -207,7 +207,8 @@ impl Reader {
         let service = self.dictionary.get_or_insert_with(|| {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
         });
-        self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service.clone(), cx.theme, self.screen)));
+        let word = self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)));
+        self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service.clone(), cx.theme, self.screen, word)));
         cx.redraw();
     }
     fn selection_released(&mut self, cx: &mut EventCx) {

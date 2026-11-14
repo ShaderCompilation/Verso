@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use crate::geom::Point;
-use crate::platform::{Event, Touch, TouchPhase};
+use crate::platform::{Event, Orientation, Touch, TouchPhase};
 
 // Event types and codes from <linux/input-event-codes.h>.
 const EV_SYN: u16 = 0x00;
@@ -83,11 +83,24 @@ struct Slot {
 
 /// Raw-to-screen coordinate mapping.
 pub struct Mapping {
+    /// The panel's native (portrait) size.
     pub width: u32,
     pub height: u32,
     pub swap_axes: bool,
     pub mirror_x: bool,
     pub mirror_y: bool,
+    pub orientation: Orientation,
+}
+
+impl Mapping {
+    /// Panel pixel → app screen pixel; the inverse of the display's rotation
+    /// (`Canvas::copy_gray_rotated`).
+    fn rotate(&self, p: Point) -> Point {
+        match self.orientation {
+            Orientation::Portrait => p,
+            Orientation::Landscape => Point::new(self.height as i32 - 1 - p.y, p.x),
+        }
+    }
 }
 
 pub struct TouchInput {
@@ -157,6 +170,10 @@ impl TouchInput {
             return Ok(input);
         }
         bail!("no multi-touch screen found in /dev/input")
+    }
+
+    pub fn set_orientation(&mut self, orientation: Orientation) {
+        self.map.orientation = orientation;
     }
 
     pub fn fd(&self) -> RawFd {
@@ -309,7 +326,7 @@ impl TouchInput {
         if self.map.mirror_y {
             y = self.map.height as i32 - 1 - y;
         }
-        Point::new(x, y)
+        self.map.rotate(Point::new(x, y))
     }
 }
 

@@ -4,6 +4,7 @@ pub mod position;
 use crate::document::{Position, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 use crate::library::{LibraryIndex, Sort};
+pub use crate::platform::Orientation;
 pub use crate::reader::TapZones;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ pub struct Settings {
     /// periodically (chapter starts and pictures still do).
     pub page_flash: u32,
     pub tap_zones: TapZones,
+    pub orientation: Orientation,
     /// Developer options in Settings (tap the version five times).
     pub developer: bool,
 }
@@ -38,6 +40,7 @@ impl Default for Settings {
             library_sort: Sort::Recent,
             page_flash: DEFAULT_PAGE_FLASH,
             tap_zones: TapZones::Standard,
+            orientation: Orientation::Portrait,
             developer: false,
         }
     }

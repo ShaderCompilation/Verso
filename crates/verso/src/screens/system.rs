@@ -8,7 +8,7 @@ use crate::gfx::{HAlign, Icon};
 use crate::platform::{ssh, wifi};
 use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::{Action, EventCx, Screen};
-use crate::store::{Settings, SleepScreen, Store, TapZones};
+use crate::store::{Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -17,9 +17,11 @@ use crate::ui::widgets::{Button, ButtonKind, IconButton, Pager, PagerEvent, Segm
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Reading,
+    Display,
     Library,
     Device,
 }
+const TABS: [Tab; 4] = [Tab::Reading, Tab::Display, Tab::Library, Tab::Device];
 
 /// Full-flash intervals offered in Settings (0 = never).
 const FLASH_CHOICES: [u32; 4] = [1, 6, 12, 0];
@@ -44,16 +46,20 @@ pub struct SystemSettings {
     /// `Store::settings_saves` when the folder list was last read.
     settings_seen: u64,
     // Reading
-    flash: Segmented,
     zones: Segmented,
     zones_preview: Rect,
+    // Display
+    orientation: Segmented,
+    flash: Segmented,
     // Library
     folders: Vec<PathBuf>,
     removes: Vec<IconButton>,
     folder_row: i32,
     folder_pager: Pager,
     add_folder: Button,
-    // Device
+    // Device: one column, or two side by side in landscape.
+    device_left: Rect,
+    device_right: Rect,
     sleep: Segmented,
     /// Tap it five times to show or hide the developer options.
     version: Rect,
@@ -81,40 +87,51 @@ impl SystemSettings {
         top.place(screen, t);
         let content = screen.split_top(t.top_bar).1.inset(t.margin);
         let settings = store.settings();
-        let mut tabs = Segmented::texts(&["Reading", "Library", "Device"], 0);
+        let mut tabs = Segmented::texts(&["Reading", "Display", "Library", "Device"], 0);
         tabs.place(Rect::new(content.x, content.y, content.w, t.button_h));
         let body = tabs.rect().bottom() + t.mm(6.0);
 
-        let mut flash =
-            Segmented::texts(&["Every page", "Every 6", "Every 12", "Never"], flash_choice(settings.page_flash));
-        flash.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
-        let zones_top = flash.rect().bottom() + t.mm(16.0);
         let selected = TapZones::ALL.iter().position(|&z| z == settings.tap_zones).unwrap_or(0);
         let mut zones = Segmented::texts(&["Standard", "Left-handed", "Halves"], selected);
-        zones.place(Rect::new(content.x, zones_top + t.mm(8.0), content.w, t.button_h));
-        // A small page with the zones drawn on it, portrait like the screen.
+        zones.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
+        // A small page with the zones drawn on it, shaped like the screen.
         let preview_top = zones.rect().bottom() + t.mm(5.0);
         let preview_h = (content.bottom() - preview_top).clamp(t.mm(20.0), t.mm(36.0));
         let preview_w = preview_h * screen.w / screen.h.max(1);
         let zones_preview = Rect::new(content.x, preview_top, preview_w, preview_h);
+
+        let mut orientation =
+            Segmented::texts(&["Portrait", "Landscape"], usize::from(settings.orientation == Orientation::Landscape));
+        orientation.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
+        let mut flash =
+            Segmented::texts(&["Every page", "Every 6", "Every 12", "Never"], flash_choice(settings.page_flash));
+        flash.place(Rect::new(content.x, orientation.rect().bottom() + t.mm(24.0), content.w, t.button_h));
 
         let mut add_folder = Button::new("Add folder", ButtonKind::Secondary).with_icon(Icon::Folder);
         add_folder.place(Rect::new(content.x, 0, content.w, t.button_h), t);
         let mut folder_pager = Pager::new(1);
         folder_pager.place(Rect::new(content.x, content.bottom() - t.mm(11.0), content.w, t.mm(11.0)), t);
 
+        // Landscape is too short for the developer section below the rest.
+        let (device_left, device_right) = if screen.w > screen.h {
+            let gap = t.mm(10.0);
+            let w = (content.w - gap) / 2;
+            (Rect { w, ..content }, Rect { x: content.right() - w, w, ..content })
+        } else {
+            (content, content)
+        };
         let mut sleep =
             Segmented::texts(&["Book cover", "Amazon"], usize::from(settings.sleep_screen == SleepScreen::Amazon));
-        sleep.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
+        sleep.place(Rect::new(device_left.x, body + t.mm(8.0), device_left.w, t.button_h));
         let wifi_top = sleep.rect().bottom() + t.mm(20.0);
         let wifi = Self::read_wifi();
         let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
         wifi_toggle.enabled = wifi.is_some();
-        wifi_toggle.place(content.right(), wifi_top + t.mm(4.0), t);
-        let dev_top = wifi_top + t.mm(22.0);
+        wifi_toggle.place(device_left.right(), wifi_top + t.mm(4.0), t);
+        let dev_top = if device_right == device_left { wifi_top + t.mm(22.0) } else { body };
         let ssh = ssh::status();
         let mut ssh_toggle = Toggle::new(ssh.running);
-        ssh_toggle.place(content.right(), dev_top + t.mm(12.0), t);
+        ssh_toggle.place(device_right.right(), dev_top + t.mm(12.0), t);
         let version = Rect::new(content.x, screen.bottom() - t.mm(14.0), content.w, t.target);
         let mut this = Self {
             top,
@@ -125,14 +142,17 @@ impl SystemSettings {
             screen,
             content,
             body,
-            flash,
             zones,
             zones_preview,
+            orientation,
+            flash,
             folders: Vec::new(),
             removes: Vec::new(),
             folder_row: t.row,
             folder_pager,
             add_folder,
+            device_left,
+            device_right,
             sleep,
             version,
             version_press: Press::default(),
@@ -153,6 +173,13 @@ impl SystemSettings {
         this
     }
 
+    /// Settings reopened after turning the screen, where the choice was made.
+    pub fn on_display_tab(mut self) -> Self {
+        self.tab = Tab::Display;
+        self.tabs.selected = TABS.iter().position(|&t| t == Tab::Display).unwrap_or(0);
+        self
+    }
+
     // ---- Reading ----
 
     fn save(&mut self, cx: &mut EventCx, what: &str, change: impl FnOnce(&mut Settings)) -> bool {
@@ -171,14 +198,6 @@ impl SystemSettings {
     fn draw_reading(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
         let c = self.content;
-        cx.section_label("Full page refresh", Rect::new(c.x, self.body, c.w, t.mm(8.0)));
-        self.flash.draw(cx);
-        cx.paragraph(
-            "A brief flash clears ghosting. Chapter starts and pictures always refresh fully.",
-            t.small.gray(INK2),
-            Rect::new(c.x, self.flash.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0)),
-            HAlign::Left,
-        );
         let zones_label = self.zones.rect().y - t.mm(8.0);
         cx.section_label("Tap zones", Rect::new(c.x, zones_label, c.w, t.mm(8.0)));
         self.zones.draw(cx);
@@ -200,17 +219,55 @@ impl SystemSettings {
     }
 
     fn reading_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
-        if let Some(i) = self.flash.on_gesture(g)
-            && !self.save(cx, "page refresh", |s| s.page_flash = FLASH_CHOICES[i])
-        {
-            self.flash.selected = flash_choice(self.store.settings().page_flash);
-        }
         if let Some(i) = self.zones.on_gesture(g)
             && !self.save(cx, "tap zones", |s| s.tap_zones = TapZones::ALL[i])
         {
             let current = self.store.settings().tap_zones;
             self.zones.selected = TapZones::ALL.iter().position(|&z| z == current).unwrap_or(0);
         }
+    }
+
+    // ---- Display ----
+
+    fn draw_display(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        let c = self.content;
+        cx.section_label("Orientation", Rect::new(c.x, self.orientation.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        self.orientation.draw(cx);
+        cx.paragraph(
+            "For landscape, turn the Kindle clockwise so its top edge is on the right.",
+            t.small.gray(INK2),
+            Rect::new(c.x, self.orientation.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0)),
+            HAlign::Left,
+        );
+        cx.section_label("Full page refresh", Rect::new(c.x, self.flash.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        self.flash.draw(cx);
+        cx.paragraph(
+            "A brief flash clears ghosting. Chapter starts and pictures always refresh fully.",
+            t.small.gray(INK2),
+            Rect::new(c.x, self.flash.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0)),
+            HAlign::Left,
+        );
+    }
+
+    fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
+        if let Some(i) = self.flash.on_gesture(g)
+            && !self.save(cx, "page refresh", |s| s.page_flash = FLASH_CHOICES[i])
+        {
+            self.flash.selected = flash_choice(self.store.settings().page_flash);
+        }
+        if let Some(i) = self.orientation.on_gesture(g) {
+            let orientation = if i == 0 { Orientation::Portrait } else { Orientation::Landscape };
+            let previous = self.store.settings().orientation;
+            if self.save(cx, "orientation", |s| s.orientation = orientation) {
+                if orientation != previous {
+                    return Action::Orientation(orientation);
+                }
+            } else {
+                self.orientation.selected = usize::from(self.store.settings().orientation == Orientation::Landscape);
+            }
+        }
+        Action::None
     }
 
     // ---- Library ----
@@ -391,7 +448,7 @@ impl SystemSettings {
 
     fn draw_device(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.content;
+        let c = self.device_left;
         cx.section_label("Sleep screen", Rect::new(c.x, self.body, c.w, t.mm(8.0)));
         self.sleep.draw(cx);
         cx.paragraph(
@@ -409,6 +466,7 @@ impl SystemSettings {
             Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(14.0)),
             HAlign::Left,
         );
+        let c = self.device_right;
         if self.show_developer() {
             cx.section_label("Developer", Rect::new(c.x, self.dev_top, c.w, t.mm(8.0)));
             // A label line centred on the toggle, then the note under it.
@@ -481,6 +539,7 @@ impl Screen for SystemSettings {
         self.tabs.draw(cx);
         match self.tab {
             Tab::Reading => self.draw_reading(cx),
+            Tab::Display => self.draw_display(cx),
             Tab::Library => self.draw_library(cx),
             Tab::Device => self.draw_device(cx),
         }
@@ -491,11 +550,12 @@ impl Screen for SystemSettings {
             return Action::Pop;
         }
         if let Some(i) = self.tabs.on_gesture(&g) {
-            self.tab = [Tab::Reading, Tab::Library, Tab::Device][i];
+            self.tab = TABS[i];
             return Action::None;
         }
         match self.tab {
             Tab::Reading => self.reading_gesture(&g, cx),
+            Tab::Display => return self.display_gesture(&g, cx),
             Tab::Library => return self.library_gesture(&g, cx),
             Tab::Device => self.device_gesture(&g, cx),
         }

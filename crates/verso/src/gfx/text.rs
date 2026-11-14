@@ -257,8 +257,9 @@ impl TextRenderer {
         let top = top.round();
 
         for run in runs {
+            let x = rect.x as f32 - wrapped_space(&run, align);
             for glyph in run.glyphs {
-                let phys = glyph.physical((rect.x as f32, top + run.line_y), 1.0);
+                let phys = glyph.physical((x, top + run.line_y), 1.0);
                 let Some(image) = glyphs.get_image(fonts, phys.cache_key) else { continue };
                 let p = image.placement;
                 let (x, y) = (phys.x + p.left, phys.y - p.top);
@@ -273,6 +274,18 @@ impl TextRenderer {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    fn runs(&mut self, text: &str, style: TextStyle, width: f32, max_lines: usize) -> Vec<(String, f32)> {
+        let buffer = self.shape(text, style, Some(width), max_lines, HAlign::Left);
+        buffer
+            .layout_runs()
+            .map(|r| {
+                let first = r.glyphs.first();
+                (first.map_or(String::new(), |g| r.text[g.start..g.end].to_owned()), wrapped_space(&r, HAlign::Left))
+            })
+            .collect()
     }
 
     fn layout(&mut self, text: &str, style: TextStyle, width: Option<f32>, max_lines: usize, align: HAlign) -> &Buffer {
@@ -341,6 +354,23 @@ impl TextRenderer {
     }
 }
 
+/// How far to shift a wrapped line left so it doesn't start with a space.
+/// With a line limit, cosmic-text lays out the last line again for the "…"
+/// and keeps the space it wrapped at.
+fn wrapped_space(run: &cosmic_text::LayoutRun, align: HAlign) -> f32 {
+    let continues = run.glyphs.first().is_some_and(|g| g.start > 0);
+    if !continues {
+        return 0.0;
+    }
+    let space: f32 =
+        run.glyphs.iter().take_while(|g| run.text[g.start..g.end].chars().all(char::is_whitespace)).map(|g| g.w).sum();
+    match align {
+        HAlign::Left => space,
+        HAlign::Center => space / 2.0,
+        HAlign::Right => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +395,22 @@ mod tests {
         assert!(bold > regular, "semibold should be wider: {bold} vs {regular}");
         let serif = t.width("Verso", STYLE.family(Family::Serif));
         assert!((serif - regular).abs() > 1.0, "Literata should differ from Inter");
+    }
+
+    #[test]
+    fn wrapped_lines_never_start_with_a_space() {
+        let mut t = TextRenderer::new();
+        let style = crate::ui::theme::Theme::for_dpi(300).body;
+        let text = "No dictionaries installed. Add a StarDict dictionary to the app data dictionaries/ folder, then open Dictionaries and tap Rescan.";
+        // Without a line limit, wrapped lines start at their first word.
+        assert!(t.runs(text, style, 812.0, 0).iter().all(|(first, shift)| first != " " && *shift == 0.0));
+        // With a limit, cosmic-text lays out the last line again and keeps
+        // the space it wrapped at; drawing skips it.
+        let runs = t.runs(text, style, 812.0, 3);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[2].0, " ");
+        assert!(runs[2].1 > 9.0, "the leading space is skipped");
+        assert_eq!(runs[0].1, 0.0, "a paragraph's own first character is kept");
     }
 
     #[test]

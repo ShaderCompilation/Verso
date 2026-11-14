@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{Frontlight, RefreshMode, TextInput, Update};
+use crate::platform::{Frontlight, Orientation, RefreshMode, TextInput, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -31,6 +31,9 @@ pub enum Action {
     Pop,
     /// Leave Verso.
     Exit,
+    /// Turn the screen. The app saves like on exit and rebuilds its screens
+    /// at the new size, reopening Settings on top of the library.
+    Orientation(Orientation),
 }
 
 pub trait Screen {

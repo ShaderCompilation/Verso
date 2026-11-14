@@ -24,7 +24,9 @@ use winit::keyboard::{Key, NamedKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowId};
 
-use super::{DeviceInfo, Event, Frontlight, Platform, RefreshMode, TextInput, Touch, TouchPhase, Update, Waker};
+use super::{
+    DeviceInfo, Event, Frontlight, Orientation, Platform, RefreshMode, TextInput, Touch, TouchPhase, Update, Waker,
+};
 use crate::geom::{Point, Rect};
 use crate::gfx::{Canvas, save_gray_png};
 
@@ -33,6 +35,8 @@ const LETTERBOX: u32 = 0x20_20_20;
 
 pub struct Desktop {
     info: DeviceInfo,
+    /// VERSO_SIM_SIZE: the panel in portrait.
+    native: (u32, u32),
     event_loop: EventLoop<()>,
     sim: Sim,
     light: Frontlight,
@@ -60,7 +64,13 @@ impl Desktop {
             }
         }
         log::info!("simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot");
-        Ok(Self { info, event_loop, sim, light: Frontlight { brightness: 12, warmth: Some(0) } })
+        Ok(Self {
+            info,
+            native: (width, height),
+            event_loop,
+            sim,
+            light: Frontlight { brightness: 12, warmth: Some(0) },
+        })
     }
 }
 
@@ -93,6 +103,27 @@ impl Platform for Desktop {
 
     fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {
+        // Unlike the Kindle, the simulator turns its window instead of
+        // rotating pixels, which is easier to use with a mouse.
+        let (w, h) = orientation.screen_size(self.native.0, self.native.1);
+        (self.info.width, self.info.height) = (w, h);
+        let sim = &mut self.sim;
+        if (sim.width, sim.height) == (w as usize, h as usize) {
+            return Ok(());
+        }
+        (sim.width, sim.height) = (w as usize, h as usize);
+        sim.panel = vec![255; sim.width * sim.height];
+        sim.flashes.clear();
+        if let Some(window) = &sim.window {
+            let size = window.inner_size();
+            // Keep the panel's scale: swap the window's sides.
+            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(size.height, size.width));
+        }
+        sim.dirty = true;
+        Ok(())
     }
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {

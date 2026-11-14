@@ -48,9 +48,19 @@ pub struct Lookup {
     body: Rect,
 }
 impl Lookup {
-    pub fn new(query: &str, worker: Rc<Worker>, t: &Theme, screen: Rect) -> Self {
-        let sheet = Sheet::open("Dictionary", screen.h * 4 / 5, screen, t);
+    /// `word` is where the looked-up text is on the page. In landscape a
+    /// bottom sheet would cover most of the page, so the dictionary stands at
+    /// the side away from the word instead.
+    pub fn new(query: &str, worker: Rc<Worker>, t: &Theme, screen: Rect, word: Option<Rect>) -> Self {
+        let sheet = if screen.w > screen.h {
+            let right = word.is_none_or(|w| w.center().x < screen.center().x);
+            Sheet::side("Dictionary", (screen.w * 11 / 20).max(t.mm(72.0)).min(screen.w), right, screen, t)
+        } else {
+            Sheet::open("Dictionary", screen.h * 4 / 5, screen, t)
+        };
         let content = sheet.content(t);
+        // A narrow side panel puts "Search book" on a row of its own.
+        let narrow = content.w < t.mm(90.0);
         let gap = t.mm(2.0);
         let mut field = TextField::new("Word");
         let mut search = Button::new("Look up", ButtonKind::Primary);
@@ -65,19 +75,25 @@ impl Lookup {
         let mut dictionaries_button = Button::new("Dictionaries", ButtonKind::Secondary);
         let mut next = Button::new("›", ButtonKind::Secondary);
         let mut find = Button::new("Search book", ButtonKind::Secondary);
-        find.place(Rect::new(row.right() - find_w, row.y, find_w, row.h), t);
-        let row = Rect { w: row.w - find_w - gap, ..row };
+        let row = if narrow {
+            find.place(Rect { y: row.bottom() + gap, ..row }, t);
+            row
+        } else {
+            find.place(Rect::new(row.right() - find_w, row.y, find_w, row.h), t);
+            Rect { w: row.w - find_w - gap, ..row }
+        };
         previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
         next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
         dictionaries_button.place(Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h), t);
-        let footer = Rect::new(content.x, screen.bottom() - t.target - gap, content.w, t.target);
+        let footer = Rect::new(content.x, sheet.rect().bottom() - t.target - gap, content.w, t.target);
         let mut pager = Pager::new(1);
         pager.place(footer, t);
         let mut back = Button::new("Back", ButtonKind::Secondary);
         let mut rescan = Button::new("Rescan", ButtonKind::Secondary);
         back.place(Rect::new(content.x, content.y, content.w / 2 - gap, t.target), t);
         rescan.place(Rect::new(content.x + content.w / 2 + gap, content.y, content.w / 2 - gap, t.target), t);
-        let body = Rect::new(content.x, row.bottom() + gap, content.w, footer.y - row.bottom() - 2 * gap);
+        let controls = find.rect().bottom().max(row.bottom());
+        let body = Rect::new(content.x, controls + gap, content.w, footer.y - controls - 2 * gap);
         let mut manager_pager = Pager::new(1);
         manager_pager.place(footer, t);
         let request = worker.lookup(query.into(), None, true);
@@ -397,7 +413,7 @@ mod tests {
         ));
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut lookup = Lookup::new("Hello", worker.clone(), &t, screen);
+        let mut lookup = Lookup::new("Hello", worker.clone(), &t, screen, None);
         let mut cx = EventCx {
             theme: &t,
             screen,

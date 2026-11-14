@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use super::desktop::sim_screen;
-use super::{DeviceInfo, Event, Frontlight, Platform, ScriptStep, Touch, TouchPhase, Update, Waker};
+use super::{DeviceInfo, Event, Frontlight, Orientation, Platform, ScriptStep, Touch, TouchPhase, Update, Waker};
 use crate::geom::Point;
 use crate::gfx::{Canvas, save_gray_png};
 
 pub struct Headless {
     info: DeviceInfo,
+    /// VERSO_SIM_SIZE: the panel in portrait.
+    native: (u32, u32),
     /// `None` is an idle moment between steps, so the app can finish slow
     /// work (like opening a book) before the next step.
     events: VecDeque<Option<Event>>,
@@ -78,6 +80,7 @@ impl Headless {
         let (wake_tx, wake_rx) = std::sync::mpsc::channel();
         Ok(Self {
             info,
+            native: (width, height),
             events,
             panel: vec![255; (width * height) as usize],
             out: out.to_owned(),
@@ -111,6 +114,14 @@ impl Platform for Headless {
 
     fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {
+        // The screenshot simply comes out in the new orientation.
+        let (w, h) = orientation.screen_size(self.native.0, self.native.1);
+        (self.info.width, self.info.height) = (w, h);
+        self.panel = vec![255; (w * h) as usize];
+        Ok(())
     }
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {

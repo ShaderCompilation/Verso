@@ -72,7 +72,7 @@ impl CreEngine {
         if raw.is_null() {
             bail!("crengine could not create a document view");
         }
-        let mut doc = CreDocument { raw, stats: OpenStats::default() };
+        let mut doc = CreDocument { raw, stats: OpenStats::default(), width: layout.width, height: layout.height };
         let css = cstr(&self.paths.engine_data.join("epub.css"))?;
         let face = CString::new(self.paths.font_face.as_str())?;
         let [l, t, r, b] = layout.margins.map(|m| m as c_int);
@@ -121,6 +121,9 @@ pub struct OpenStats {
 pub struct CreDocument {
     raw: *mut sys::VersoCreDoc,
     pub stats: OpenStats,
+    /// The page size in pixels.
+    width: u32,
+    height: u32,
 }
 
 impl CreDocument {
@@ -277,7 +280,7 @@ impl Document for CreDocument {
                 face.as_ptr(),
                 px,
                 [100, 120, 140][t.spacing],
-                mm([4.0, 7.0, 10.0][t.margins]),
+                side_margin(self.width, self.height, px, mm([4.0, 7.0, 10.0][t.margins]), t.margins),
                 mm(6.0),
                 mm(if footer { 12.0 } else { 6.0 }),
                 t.justify as c_int,
@@ -318,6 +321,35 @@ impl Drop for CreDocument {
     }
 }
 
+/// The left and right page margin in pixels. On a landscape page the
+/// margins grow so lines stay about 60–75 characters long: a column at most
+/// 33, 30 or 27 ems wide for Narrow, Normal and Wide margins. Portrait pages
+/// use the plain setting.
+fn side_margin(width: u32, height: u32, font_px: c_int, base: c_int, setting: usize) -> c_int {
+    if width <= height {
+        return base;
+    }
+    let column = (font_px as f32 * [33.0, 30.0, 27.0][setting.min(2)]) as c_int;
+    base.max((width as c_int - column) / 2)
+}
+
 fn cstr(path: &Path) -> Result<CString> {
     Ok(CString::new(path.as_os_str().as_encoded_bytes())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::side_margin;
+
+    #[test]
+    fn landscape_pages_keep_a_readable_line_length() {
+        // Portrait keeps the chosen margin.
+        assert_eq!(side_margin(1272, 1696, 42, 83, 1), 83);
+        // Landscape at 10 pt (42 px): a 1260 px column, centred.
+        assert_eq!(side_margin(1696, 1272, 42, 83, 1), 218);
+        // Wider margins still mean a narrower column.
+        assert!(side_margin(1696, 1272, 42, 118, 2) > side_margin(1696, 1272, 42, 83, 1));
+        // Large type already makes short lines: the plain margin wins.
+        assert_eq!(side_margin(1696, 1272, 100, 83, 1), 83);
+    }
 }

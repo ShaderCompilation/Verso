@@ -41,7 +41,30 @@ pub struct Update {
     pub mode: RefreshMode,
 }
 
-/// Static facts about the screen.
+/// Which way the user holds the device. The Paperwhite's panel is portrait
+/// and can't rotate in hardware, so landscape is drawn on a landscape canvas
+/// and rotated in software on the way to the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    #[default]
+    Portrait,
+    /// The device turned a quarter turn clockwise: its top edge on the right.
+    Landscape,
+}
+
+impl Orientation {
+    /// The app's screen size for a panel of `width`×`height` (its native,
+    /// unrotated size).
+    pub fn screen_size(self, width: u32, height: u32) -> (u32, u32) {
+        match self {
+            Self::Portrait => (width, height),
+            Self::Landscape => (height, width),
+        }
+    }
+}
+
+/// Static facts about the screen, in the app's orientation.
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
     pub name: String,
@@ -155,6 +178,10 @@ pub trait Platform {
     }
 
     fn info(&self) -> &DeviceInfo;
+
+    /// Turns the screen; `info()` then reports the new size. The next frame
+    /// must redraw everything.
+    fn set_orientation(&mut self, orientation: Orientation) -> Result<()>;
 
     /// Waits for the next event. Returns `None` if `timeout` passes first;
     /// `None` as the timeout waits forever.

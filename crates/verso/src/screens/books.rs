@@ -294,17 +294,32 @@ impl Books {
         self.continue_rect = Rect::default();
         let y = t.top_bar + t.mm(2.0);
         self.tabs.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
+        let landscape = self.screen.w > self.screen.h;
         let y = if let Some(search) = &mut self.search {
-            search.field.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
-            let scope_y = y + t.target + t.mm(2.0);
-            let w = (self.screen.w - 2 * t.margin - t.mm(2.0)) / 2;
-            search.all.place(Rect::new(t.margin, scope_y, w, t.target), t);
-            search.current.place(Rect::new(t.margin + w + t.mm(2.0), scope_y, w, t.target), t);
             search.all.kind = if search.scope == Scope::All { ButtonKind::Primary } else { ButtonKind::Secondary };
             search.current.kind = if search.scope == Scope::All { ButtonKind::Secondary } else { ButtonKind::Primary };
-            search.context =
-                Rect::new(t.margin, scope_y + t.target + t.mm(1.0), self.screen.w - 2 * t.margin, t.mm(6.0));
-            search.context.bottom() + t.mm(2.0)
+            let gap = t.mm(2.0);
+            if landscape {
+                // One row for the field and scope, and no scope note, so a row
+                // of results fits above the keyboard.
+                let width = self.screen.w - 2 * t.margin;
+                let w = (width * 2 / 5 - gap) / 2;
+                let field_w = width - 2 * (w + gap);
+                search.field.place(Rect::new(t.margin, y, field_w, t.target));
+                search.all.place(Rect::new(t.margin + field_w + gap, y, w, t.target), t);
+                search.current.place(Rect::new(self.screen.w - t.margin - w, y, w, t.target), t);
+                search.context = Rect::default();
+                y + t.target + t.mm(3.0)
+            } else {
+                search.field.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
+                let scope_y = y + t.target + gap;
+                let w = (self.screen.w - 2 * t.margin - gap) / 2;
+                search.all.place(Rect::new(t.margin, scope_y, w, t.target), t);
+                search.current.place(Rect::new(t.margin + w + gap, scope_y, w, t.target), t);
+                search.context =
+                    Rect::new(t.margin, scope_y + t.target + t.mm(1.0), self.screen.w - 2 * t.margin, t.mm(6.0));
+                search.context.bottom() + gap
+            }
         } else {
             y + t.target + t.mm(3.0)
         };
@@ -325,11 +340,17 @@ impl Books {
         self.sort.place(Rect::new(self.header.right() - sort_w, y, sort_w, t.target));
         self.status = Rect::new(t.margin, self.pager.rect().y - t.mm(6.0), self.screen.w - 2 * t.margin, t.mm(6.0));
         let top = self.header.bottom() + t.mm(1.5);
+        // Landscape search keeps its single row of results above the
+        // keyboard, whether or not the keyboard is open, so paging is the same.
+        let bottom = match &self.search {
+            Some(search) if landscape => self.status.y.min(search.keyboard.rect().y - t.mm(2.0)),
+            _ => self.status.y,
+        };
         let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
-        let rows = ((self.status.y - top) / t.mm(32.0)).clamp(1, 2) as usize;
+        let rows = ((bottom - top) / t.mm(32.0)).clamp(1, 2) as usize;
         self.grid = Grid::new(self.folders.len() + self.books.len(), cols, rows);
         self.grid.place(
-            Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (self.status.y - top).max(t.target)),
+            Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (bottom - top).max(t.target)),
             t.mm(3.5),
             t.mm(3.0),
         );
@@ -360,22 +381,33 @@ impl Books {
         let y = t.top_bar + t.mm(2.0);
         self.tabs.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
         let y = y + t.target + t.mm(5.0);
+        let width = self.screen.w - 2 * t.margin;
+        self.status = Rect::new(t.margin, self.screen.bottom() - t.mm(10.0), width, t.mm(6.0));
         self.continue_id = self.home.resume().map(|e| e.book.id.clone());
-        self.continue_rect = if self.continue_id.is_some() {
-            Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(37.0))
+        // Landscape is too short to stack the resume card above the recent
+        // books, so they stand side by side.
+        let side = self.continue_id.is_some() && self.screen.w > self.screen.h;
+        self.continue_rect = if side {
+            Rect::new(t.margin, y, width / 2, (self.status.y - y - t.mm(8.0)).min(t.mm(45.0)))
+        } else if self.continue_id.is_some() {
+            Rect::new(t.margin, y, width, t.mm(37.0))
         } else {
             Rect::default()
         };
-        let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(6.0) } else { y };
-        self.header = Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.mm(6.0));
+        self.header = if side {
+            let x = self.continue_rect.right() + t.mm(6.0);
+            Rect::new(x, y, self.screen.w - t.margin - x, t.mm(6.0))
+        } else {
+            let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(6.0) } else { y };
+            Rect::new(t.margin, y, width, t.mm(6.0))
+        };
         self.folders.clear();
-        let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
+        let cols = (self.header.w / t.mm(if side { 19.0 } else { 22.0 })).clamp(1, 4) as usize;
         self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
-        self.status = Rect::new(t.margin, self.screen.bottom() - t.mm(10.0), self.screen.w - 2 * t.margin, t.mm(6.0));
         self.grid = Grid::new(self.books.len(), cols, 1);
         self.grid.place(
             Rect::new(
-                t.margin,
+                self.header.x,
                 self.header.bottom() + t.mm(2.0),
                 self.header.w,
                 (self.status.y - self.header.bottom() - t.mm(4.0)).min(t.mm(45.0)).max(t.target),
@@ -675,7 +707,9 @@ impl Books {
             items.push((None, "Remove from continue reading".into()));
         }
         items.push((Some(Icon::Trash), "Delete…".into()));
-        let mut menu = PopupMenu::open(items, anchor, self.screen, t);
+        // Keep the top bar readable; on a short screen the menu opens beside the book.
+        let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
+        let mut menu = PopupMenu::open(items, anchor, area, t);
         menu.set_enabled(2, !state.finished);
         self.menu = Some((id, menu));
         self.continue_press = Press::default();
@@ -840,8 +874,10 @@ impl Screen for Books {
                 }
                 Scope::Collection(folder) => format!("Collection · {} (including subfolders)", folder.display()),
             };
-            let context = path_tail(cx.text, &context, t.caption, search.context.w);
-            cx.line(&context, t.caption.gray(INK2), search.context, HAlign::Left);
+            if !search.context.is_empty() {
+                let context = path_tail(cx.text, &context, t.caption, search.context.w);
+                cx.line(&context, t.caption.gray(INK2), search.context, HAlign::Left);
+            }
         } else {
             self.tabs.draw(cx);
         }
@@ -1097,7 +1133,12 @@ impl Screen for Books {
                 None => {}
             }
         } else if self.search.as_ref().is_some_and(|s| s.keyboard.visible) {
+            let before = self.search.as_ref().map(|s| s.keyboard.rect());
             let input = self.search.as_mut().and_then(|s| s.keyboard.on_gesture(&g, cx.theme));
+            if self.search.as_ref().map(|s| s.keyboard.rect()) != before {
+                // Another language can add a row of keys.
+                self.refresh(cx.theme);
+            }
             if let Some(input) = input {
                 self.edit_search(&input, cx);
             }

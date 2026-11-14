@@ -10,7 +10,7 @@ use fbink_sys as fb;
 
 use crate::geom::Rect;
 use crate::gfx::Canvas;
-use crate::platform::{RefreshMode, Update};
+use crate::platform::{Orientation, RefreshMode, Update};
 
 pub struct Display {
     fd: i32,
@@ -18,8 +18,11 @@ pub struct Display {
     fb: *mut u8,
     fb_len: usize,
     stride: usize,
+    /// The panel's native (portrait) size.
     pub width: u32,
     pub height: u32,
+    /// The app draws a landscape canvas that `present` turns onto the panel.
+    pub orientation: Orientation,
     pub dpi: u32,
     pub name: String,
     inverted: bool,
@@ -94,6 +97,7 @@ impl Display {
                 stride,
                 width,
                 height,
+                orientation: Orientation::Portrait,
                 dpi: st.screen_dpi as u32,
                 name,
                 inverted: st.inverted_grayscale,
@@ -110,10 +114,23 @@ impl Display {
         // as the FBInk session is open (checked in `open`), and only we use it.
         let pixels = unsafe { std::slice::from_raw_parts_mut(self.fb, self.fb_len) };
 
+        let (cw, ch) = self.orientation.screen_size(self.width, self.height);
+        if (canvas.width(), canvas.height()) != (cw, ch) {
+            bail!("canvas is {}x{}, expected {cw}x{ch}", canvas.width(), canvas.height());
+        }
         let mut flashed = false;
         for u in updates {
-            let Some(r) = u.rect.intersect(&screen) else { continue };
-            canvas.copy_gray(r, pixels, self.stride);
+            let r = match self.orientation {
+                Orientation::Portrait => {
+                    let Some(r) = u.rect.intersect(&screen) else { continue };
+                    canvas.copy_gray(r, pixels, self.stride);
+                    r
+                }
+                Orientation::Landscape => {
+                    let Some(r) = canvas.copy_gray_rotated(u.rect, pixels, self.stride) else { continue };
+                    r
+                }
+            };
             if self.inverted {
                 for y in r.y..r.bottom() {
                     let row = y as usize * self.stride;

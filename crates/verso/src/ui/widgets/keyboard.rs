@@ -23,12 +23,16 @@ pub struct Keyboard {
     rect: Rect,
     screen: Rect,
     keys: Vec<(Button, KeyAction)>,
+    key_h: i32,
     outside: bool,
 }
 impl Keyboard {
     pub fn place(&mut self, screen: Rect, t: &Theme) {
         self.screen = screen;
         self.keys.clear();
+        // Landscape is short: slightly lower keys leave room for results.
+        self.key_h = if screen.w > screen.h { t.mm(7.5).min(t.target) } else { t.target };
+        let key_h = self.key_h;
         let gap = t.mm(0.5).max(1);
         let width = screen.w - 2 * t.margin;
         let cols = ((width + gap) / (t.target + gap)).clamp(1, 10) as usize;
@@ -54,7 +58,7 @@ impl Keyboard {
             rows.iter().map(|row| (*row).to_owned()).collect()
         };
         let count: usize = rows.iter().map(|row| row.chars().count().div_ceil(cols)).sum();
-        let h = (count as i32 + 2) * (t.target + gap) + 2 * gap;
+        let h = (count as i32 + 2) * (key_h + gap) + 2 * gap;
         self.rect = Rect::new(screen.x, screen.bottom() - h, screen.w, h);
         let mut y = self.rect.y + gap;
         for row in &rows {
@@ -67,11 +71,11 @@ impl Keyboard {
                     self.add(
                         &label,
                         KeyAction::Input(TextInput::Insert(label.clone())),
-                        Rect::new(x + i as i32 * (key_w + gap), y, key_w, t.target),
+                        Rect::new(x + i as i32 * (key_w + gap), y, key_w, key_h),
                         t,
                     );
                 }
-                y += t.target + gap;
+                y += key_h + gap;
             }
         }
         let edits = [
@@ -82,7 +86,7 @@ impl Keyboard {
             ("Clear", KeyAction::Input(TextInput::Clear)),
         ];
         self.control_row(&edits, y, t);
-        y += t.target + gap;
+        y += key_h + gap;
         let controls = [
             (
                 match self.language {
@@ -99,9 +103,19 @@ impl Keyboard {
         ];
         self.control_row(&controls, y, t);
     }
+    /// The area the keyboard covers (when visible).
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
     fn add(&mut self, label: &str, action: KeyAction, rect: Rect, t: &Theme) {
         let mut b = Button::new(label, ButtonKind::Secondary);
-        b.place(rect, t);
+        if rect.h < t.target {
+            // Low landscape keys: grow into the gaps only, so rows don't overlap.
+            let gap = t.mm(0.5).max(1);
+            b.place_with_hit(rect, rect.inset(-gap / 2 - 1));
+        } else {
+            b.place(rect, t);
+        }
         self.keys.push((b, action));
     }
     fn control_row(&mut self, row: &[(&str, KeyAction)], y: i32, t: &Theme) {
@@ -112,7 +126,7 @@ impl Keyboard {
             self.add(
                 label,
                 action.clone(),
-                Rect::new(self.screen.x + t.margin + i as i32 * (w + gap), y, w, t.target),
+                Rect::new(self.screen.x + t.margin + i as i32 * (w + gap), y, w, self.key_h),
                 t,
             );
         }

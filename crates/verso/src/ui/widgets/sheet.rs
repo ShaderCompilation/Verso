@@ -1,5 +1,5 @@
-//! A panel that comes up from the bottom of the screen with a title and a
-//! close button. What's on it belongs to the screen that opened it; the screen
+//! A panel that comes up from the bottom of the screen (or, in landscape,
+//! can stand at one side) with a title and a close button. What's on it belongs to the screen that opened it; the screen
 //! passes touches to the sheet first while it's open.
 
 use crate::geom::{Point, Rect};
@@ -13,6 +13,7 @@ pub struct Sheet {
     pub title: String,
     /// The visible panel.
     rect: Rect,
+    screen: Rect,
     close: IconButton,
     /// A touch started above the sheet.
     outside: bool,
@@ -21,10 +22,20 @@ pub struct Sheet {
 impl Sheet {
     /// A sheet `height` pixels tall at the bottom of `screen`.
     pub fn open(title: impl Into<String>, height: i32, screen: Rect, theme: &Theme) -> Self {
-        let rect = screen.split_bottom(height).0;
+        Self::at(title, screen.split_bottom(height).0, screen, theme)
+    }
+
+    /// A full-height panel `width` pixels wide at the left or right edge of
+    /// `screen`, for landscape, where a bottom sheet would be too short.
+    pub fn side(title: impl Into<String>, width: i32, right: bool, screen: Rect, theme: &Theme) -> Self {
+        let rect = if right { screen.split_right(width).0 } else { screen.split_left(width).0 };
+        Self::at(title, rect, screen, theme)
+    }
+
+    fn at(title: impl Into<String>, rect: Rect, screen: Rect, theme: &Theme) -> Self {
         let mut close = IconButton::new(Icon::Close);
         close.place_at(Point::new(rect.right() - theme.margin - theme.mm(2.0), rect.y + theme.mm(6.5)), theme);
-        Self { title: title.into(), rect, close, outside: false }
+        Self { title: title.into(), rect, screen, close, outside: false }
     }
 
     pub fn rect(&self) -> Rect {
@@ -49,8 +60,14 @@ impl Sheet {
 
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
-        // Extend below the screen so only the top corners are rounded.
-        let panel = Rect::new(self.rect.x, self.rect.y, self.rect.w, self.rect.h + t.radius_sheet as i32 * 2);
+        // Extend past the screen edges the panel touches, so only its free
+        // corners are rounded (the top ones, for a bottom sheet).
+        let r = self.rect;
+        let extra = t.radius_sheet as i32 * 2;
+        let grow = |touches: bool| if touches { extra } else { 0 };
+        let (left, top) = (grow(r.x <= self.screen.x), grow(r.y <= self.screen.y));
+        let (right, bottom) = (grow(r.right() >= self.screen.right()), grow(r.bottom() >= self.screen.bottom()));
+        let panel = Rect::new(r.x - left, r.y - top, r.w + left + right, r.h + top + bottom);
         cx.canvas.fill_rounded_rect(panel, t.radius_sheet, PAPER);
         cx.canvas.stroke_rounded_rect(panel, t.radius_sheet, t.border as f32, INK);
         let title =

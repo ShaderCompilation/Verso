@@ -25,17 +25,25 @@ pub struct PopupMenu {
 }
 
 impl PopupMenu {
-    /// Opens the menu just below `anchor` (or above it if there's no room),
-    /// kept inside the screen margins.
+    /// Opens the menu just below `anchor`, or above it if there's no room.
+    /// If it fits neither (a short landscape screen), it opens beside the
+    /// anchor instead. Always kept inside the screen margins.
     pub fn open(items: Vec<(Option<Icon>, String)>, anchor: Point, screen: Rect, theme: &Theme) -> Self {
-        let w = theme.mm(70.0).min(screen.w - 2 * theme.margin);
+        let m = theme.margin;
+        let gap = theme.mm(2.0);
+        let w = theme.mm(70.0).min(screen.w - 2 * m);
         let h = theme.row * items.len() as i32 + 2 * theme.mm(1.0);
-        let x = (anchor.x - w / 2).clamp(screen.x + theme.margin, screen.right() - theme.margin - w);
-        let below = anchor.y + theme.mm(2.0);
-        let y = if below + h <= screen.bottom() - theme.margin {
-            below
+        let centered = (anchor.x - w / 2).clamp(screen.x + m, screen.right() - m - w);
+        let (below, above) = (anchor.y + gap, anchor.y - gap - h);
+        let (x, y) = if below + h <= screen.bottom() - m {
+            (centered, below)
+        } else if above >= screen.y + m {
+            (centered, above)
         } else {
-            (anchor.y - theme.mm(2.0) - h).max(theme.margin)
+            let right = anchor.x + gap;
+            let x = if right + w <= screen.right() - m { right } else { anchor.x - gap - w };
+            let y = (anchor.y - h / 2).clamp(screen.y + m, (screen.bottom() - m - h).max(screen.y + m));
+            (x.clamp(screen.x + m, screen.right() - m - w), y)
         };
         let enabled = vec![true; items.len()];
         Self { items, rect: Rect::new(x, y, w, h), pressed: None, press: Press::default(), outside: false, enabled }
@@ -162,5 +170,18 @@ mod tests {
         let m = PopupMenu::open(items, Point::new(1260, 1650), screen, &theme);
         assert!(m.rect().right() <= screen.right() - theme.margin);
         assert!(m.rect().bottom() < 1650, "opens above the finger when there's no room below");
+    }
+
+    #[test]
+    fn opens_beside_the_finger_on_a_short_screen() {
+        let theme = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1696, 1272);
+        let items = vec![(None, "A".to_string()); 5];
+        for finger in [Point::new(240, 700), Point::new(1500, 700)] {
+            let m = PopupMenu::open(items.clone(), finger, screen, &theme);
+            assert!(!m.rect().contains(finger), "the long-pressed book stays visible");
+            assert!(m.rect().y >= theme.margin && m.rect().bottom() <= screen.bottom() - theme.margin);
+            assert!(m.rect().x >= theme.margin && m.rect().right() <= screen.right() - theme.margin);
+        }
     }
 }

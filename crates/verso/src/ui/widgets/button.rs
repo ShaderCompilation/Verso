@@ -54,6 +54,13 @@ impl Button {
         self.hit = rect.at_least(theme.target, theme.target);
     }
 
+    /// Like `place`, but touches count only inside `hit`: for packed keys
+    /// lower than a full touch target, whose grown areas would overlap.
+    pub fn place_with_hit(&mut self, rect: Rect, hit: Rect) {
+        self.rect = rect;
+        self.hit = hit;
+    }
+
     pub fn rect(&self) -> Rect {
         self.rect
     }

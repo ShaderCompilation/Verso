@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-use crate::platform::{Battery, DeviceInfo, Frontlight, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode, TextInput, Update};
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::damage::{self, FrameDiff};
@@ -43,6 +43,9 @@ pub struct App {
     usb_prompt: Option<Box<dyn Screen>>,
     usb_connected: bool,
     wake_cleanup: Option<Instant>,
+    orientation: Orientation,
+    /// A screen asked to turn the display; see `take_orientation_request`.
+    orientation_request: Option<Orientation>,
 }
 
 impl App {
@@ -72,7 +75,56 @@ impl App {
             usb_prompt: None,
             usb_connected: false,
             wake_cleanup: None,
+            orientation: Orientation::Portrait,
+            orientation_request: None,
         }
+    }
+
+    /// The orientation the canvas is drawn in (set at startup or by `relayout`).
+    pub fn set_orientation(&mut self, orientation: Orientation) {
+        self.orientation = orientation;
+    }
+
+    pub fn take_orientation_request(&mut self) -> Option<Orientation> {
+        self.orientation_request.take()
+    }
+
+    /// Saves every screen like a normal exit, before a relayout. On failure
+    /// the error is shown and the screens stay as they are.
+    pub fn prepare_relayout(&mut self) -> bool {
+        self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
+        for s in &mut self.stack {
+            if let Err(e) = s.on_quit() {
+                log::error!("before turning the screen: {e:#}");
+                self.toast = Some(Toast::new(e.to_string(), None, Instant::now()));
+                self.needs_redraw = true;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Replaces the screens with ones built for a new screen size (after
+    /// `prepare_relayout`). The old screens are dropped first, so their
+    /// workers stop before the new ones start.
+    pub fn relayout(
+        &mut self,
+        info: &DeviceInfo,
+        orientation: Orientation,
+        build: impl FnOnce(&Theme, Rect) -> Vec<Box<dyn Screen>>,
+    ) {
+        self.stack.clear();
+        self.orientation = orientation;
+        self.canvas = Canvas::new(info.width, info.height);
+        self.diff = FrameDiff::new(&self.canvas);
+        self.stack = build(&self.theme, self.canvas.bounds());
+        assert!(!self.stack.is_empty(), "relayout needs at least one screen");
+        if self.usb_prompt.is_some() {
+            self.usb_prompt = Some(Box::new(crate::screens::system::UsbPrompt::new(&self.theme, self.canvas.bounds())));
+        }
+        self.toast_touch = false;
+        self.touch_down = false;
+        self.refresh_all(RefreshMode::Full);
     }
 
     pub fn canvas(&self) -> &Canvas {
@@ -368,8 +420,20 @@ impl App {
         if preference == crate::store::SleepScreen::Amazon {
             return false;
         }
-        let cover = self.stack.iter().rev().find_map(|s| s.sleep_cover(self.canvas.width(), self.canvas.height()));
+        // The cover stays portrait, like Amazon's sleep screen: in landscape
+        // it is drawn turned, so the display's rotation stands it upright.
+        let (w, h) = (self.canvas.width(), self.canvas.height());
+        let (cover_w, cover_h) = match self.orientation {
+            Orientation::Portrait => (w, h),
+            Orientation::Landscape => (h, w),
+        };
+        let cover = self.stack.iter().rev().find_map(|s| s.sleep_cover(cover_w, cover_h));
         let Some(cover) = cover else { return false };
+        let cover = match self.orientation {
+            Orientation::Portrait => cover,
+            // Panel pixel (y, w - 1 - x) shows canvas pixel (x, y).
+            Orientation::Landscape => image::imageops::rotate90(&cover),
+        };
         self.canvas.fill(PAPER);
         self.canvas.blit_gray(self.canvas.bounds(), cover.as_raw(), cover.width() as usize);
         true
@@ -443,6 +507,7 @@ impl App {
                 }
             }
             Action::Exit => self.request_exit(),
+            Action::Orientation(o) => self.orientation_request = Some(o),
         }
     }
 }
@@ -710,6 +775,64 @@ mod tests {
         assert!(!app.draw_sleep_cover(crate::store::SleepScreen::Amazon));
         assert!(!book_app(false).draw_sleep_cover(crate::store::SleepScreen::Cover));
     }
+    #[test]
+    fn landscape_sleep_cover_is_drawn_turned_so_it_stands_upright() {
+        struct Marked;
+        impl Screen for Marked {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
+                assert_eq!((width, height), (600, 800), "covers are made for the portrait panel");
+                let mut cover = image::GrayImage::from_pixel(width, height, image::Luma([119]));
+                cover.put_pixel(0, 0, image::Luma([0]));
+                Some(cover)
+            }
+        }
+        let info = DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Marked));
+        app.set_orientation(Orientation::Landscape);
+        assert!(app.draw_sleep_cover(crate::store::SleepScreen::Cover));
+        // The panel's top-left pixel shows the canvas's top-right one.
+        let mut panel = vec![255u8; 600 * 800];
+        app.canvas.copy_gray_rotated(app.canvas.bounds(), &mut panel, 600);
+        assert_eq!(panel[0], 0);
+        assert_eq!(panel[1], 119);
+    }
+
+    #[test]
+    fn turning_the_screen_saves_and_rebuilds_the_screens_at_the_new_size() {
+        struct Turns(Rc<Cell<usize>>);
+        impl Screen for Turns {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+                if matches!(g, Gesture::Tap(_)) { Action::Orientation(Orientation::Landscape) } else { Action::None }
+            }
+            fn on_quit(&mut self) -> anyhow::Result<()> {
+                self.0.set(self.0.get() + 1);
+                Ok(())
+            }
+        }
+        let saves = Rc::new(Cell::new(0));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Turns(saves.clone())));
+        app.frame();
+        tap(&mut app, crate::geom::Point::new(300, 400));
+        assert_eq!(app.take_orientation_request(), Some(Orientation::Landscape));
+        assert!(app.take_orientation_request().is_none());
+        assert!(app.prepare_relayout());
+        assert_eq!(saves.get(), 1, "positions are saved before the screens are rebuilt");
+        let turned = DeviceInfo { width: 800, height: 600, ..info };
+        app.relayout(&turned, Orientation::Landscape, |_, rect| {
+            assert_eq!(rect, Rect::new(0, 0, 800, 600));
+            vec![Box::new(Turns(saves.clone())), Box::new(Turns(saves.clone()))]
+        });
+        assert_eq!(app.stack.len(), 2);
+        assert_eq!(app.canvas.bounds(), Rect::new(0, 0, 800, 600));
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 800, 600), mode: RefreshMode::Full }]);
+    }
+
     #[test]
     fn late_wake_cleanup_rewrites_unchanged_pixels_and_cancels_on_resleep() {
         let mut app = book_app(false);

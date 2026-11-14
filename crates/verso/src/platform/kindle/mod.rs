@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use super::{Battery, DeviceInfo, Event, Frontlight, Platform, Update, Waker};
+use super::{Battery, DeviceInfo, Event, Frontlight, Orientation, Platform, Update, Waker};
 use crate::gfx::Canvas;
 use display::Display;
 use input::{Mapping, TouchInput};
@@ -46,6 +46,7 @@ impl Kindle {
             swap_axes: display.touch_swap_axes,
             mirror_x: display.touch_mirror_x,
             mirror_y: display.touch_mirror_y,
+            orientation: Orientation::Portrait,
         })?;
         let info =
             DeviceInfo { name: display.name.clone(), width: display.width, height: display.height, dpi: display.dpi };
@@ -157,6 +158,15 @@ impl Platform for Kindle {
 
     fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {
+        self.display.orientation = orientation;
+        self.touch.set_orientation(orientation);
+        (self.info.width, self.info.height) = orientation.screen_size(self.display.width, self.display.height);
+        // Touches already queued were mapped for the old orientation.
+        self.queue.retain(|e| !matches!(e, Event::Touch(_)));
+        Ok(())
     }
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {
