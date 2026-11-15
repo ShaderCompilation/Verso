@@ -28,7 +28,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+mod moving;
 mod selection;
+use moving::{Carry, ClashSheet};
 use selection::Selection;
 
 /// Decoded covers for the visible view only. A cache file that fails to load is
@@ -213,6 +215,8 @@ pub struct Books {
     details: Option<Details>,
     confirm: Option<ConfirmDelete>,
     selection: Option<Selection>,
+    carry: Option<Carry>,
+    clash: Option<ClashSheet>,
     /// Edits after a publication's revision are replayed in order. Acknowledged
     /// publications are never patched twice, including rename chains and reuse.
     changes: Vec<(u64, PathChange)>,
@@ -322,6 +326,8 @@ impl Books {
             details: None,
             confirm: None,
             selection: None,
+            carry: None,
+            clash: None,
             changes: Vec::new(),
             index_revision: 0,
             worker_home_revision: 0,
@@ -605,7 +611,9 @@ impl Books {
         })
     }
     fn navigate(&mut self, folder: Option<PathBuf>, cx: &mut EventCx) {
-        self.end_selection(cx);
+        if !self.carrying() {
+            self.end_selection(cx);
+        }
         let started = std::time::Instant::now();
         self.home_active = false;
         self.prepare_browsing();
@@ -648,6 +656,7 @@ impl Books {
             || self.menu.is_some()
             || self.details.is_some()
             || self.confirm.is_some()
+            || self.clash.is_some()
             || self.name_sheet.is_some()
             || self.jump.is_some()
             || self.reader.is_some()
@@ -696,7 +705,7 @@ impl Books {
                 self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
                 self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
             }
-            if old_folder != self.navigation.folder {
+            if old_folder != self.navigation.folder && !self.carrying() {
                 self.end_selection(cx);
             }
             let page = self.pager.page;
@@ -859,6 +868,7 @@ impl Books {
         }
         if !self.is_home() {
             items.push((Some(Icon::SquareCheck), "Select".into()));
+            items.push((Some(Icon::FolderInput), "Move".into()));
         }
         items.push((Some(Icon::Trash), "Delete…".into()));
         // Keep the top bar readable; on a short screen the menu opens beside the book.
@@ -900,6 +910,7 @@ impl Books {
             (Some(Icon::Info), "Details".into()),
             (Some(Icon::Search), "Search in this folder".into()),
             (Some(Icon::SquareCheck), "Select".into()),
+            (Some(Icon::FolderInput), "Move".into()),
             (Some(Icon::FolderPlus), "New folder…".into()),
             (Some(Icon::Pencil), "Rename…".into()),
             (Some(Icon::Trash), "Delete…".into()),
@@ -908,8 +919,9 @@ impl Books {
         let mut menu = PopupMenu::open(items, anchor, area, t);
         let protected = self.folder_protected(&path);
         menu.set_enabled(3, !protected);
-        menu.set_enabled(5, !protected);
+        menu.set_enabled(4, !protected);
         menu.set_enabled(6, !protected);
+        menu.set_enabled(7, !protected);
         self.menu = Some((Target::Folder(path), menu));
         self.grid.on_gesture(&Gesture::Cancel(anchor));
     }
@@ -1230,7 +1242,9 @@ impl Screen for Books {
             return;
         }
         let t = cx.theme;
+        let paste_enabled = self.paste_reason().is_none();
         if let Some(selection) = &mut self.selection {
+            selection.paste.enabled = paste_enabled;
             selection.draw(cx);
         } else {
             self.top.draw(cx);
@@ -1259,6 +1273,9 @@ impl Screen for Books {
             }
         } else {
             self.tabs.draw(cx);
+            if self.carrying() {
+                cx.canvas.fade_rect(self.tabs.rect());
+            }
         }
         if !self.is_home() && self.search.is_none() && self.navigation.tab == Tab::Collections {
             if self.navigation.folder.is_some() {
@@ -1426,13 +1443,14 @@ impl Screen for Books {
                 HAlign::Left,
             );
         }
-        let message = self.errors.first().map(String::as_str).unwrap_or(if self.scanning {
-            "Scanning library…"
-        } else if self.working {
-            "Preparing covers…"
-        } else {
-            ""
-        });
+        let message =
+            self.paste_reason().or_else(|| self.errors.first().map(String::as_str)).unwrap_or(if self.scanning {
+                "Scanning library…"
+            } else if self.working {
+                "Preparing covers…"
+            } else {
+                ""
+            });
         let battery_w = if cx.battery.is_some() { t.mm(32.0) } else { 0 };
         cx.line(message, t.caption.gray(INK2), Rect { w: self.status.w - battery_w, ..self.status }, HAlign::Left);
         cx.battery(self.status);
@@ -1454,6 +1472,9 @@ impl Screen for Books {
         }
         if let Some(confirm) = &self.confirm {
             confirm.draw(cx);
+        }
+        if let Some(clash) = &self.clash {
+            clash.draw(cx);
         }
         if let Some(sheet) = &mut self.name_sheet {
             sheet.draw(cx);
@@ -1484,6 +1505,14 @@ impl Screen for Books {
                 Some(NameEvent::Submit) => self.submit_name(cx),
                 None => {}
             }
+        } else if let Some(clash) = &mut self.clash {
+            if let Some(answer) = clash.on_gesture(&g) {
+                self.clash = None;
+                match answer {
+                    Some(choice) => self.continue_paste(Some(choice), cx),
+                    None => self.finish_paste(Some("Paste cancelled; remaining items stayed in place".into()), cx),
+                }
+            }
         } else if let Some(confirm) = &mut self.confirm {
             match confirm.on_gesture(&g) {
                 // A selection can be large: show "Deleting…" first, then delete
@@ -1504,11 +1533,16 @@ impl Screen for Books {
             let event = menu.on_gesture(&g, cx.theme);
             let delete_index = menu.items.len() - 1;
             let select_index = menu.items.iter().position(|(_, label)| label == "Select");
+            let move_index = menu.items.iter().position(|(_, label)| label == "Move");
             let target = target.clone();
             if let Some(event) = event {
                 self.menu = None;
                 if matches!(event, MenuEvent::Chosen(i) if Some(i) == select_index) {
                     self.start_selection(target, cx);
+                    return Action::None;
+                }
+                if matches!(event, MenuEvent::Chosen(i) if Some(i) == move_index) {
+                    self.start_move(vec![target], cx);
                     return Action::None;
                 }
                 match (target, event) {
@@ -1546,9 +1580,9 @@ impl Screen for Books {
                             self.search.as_mut().unwrap().scope = Scope::Collection(path);
                             self.refresh(cx.theme);
                         }
-                        MenuEvent::Chosen(4) => self.start_name(NameOperation::Create(path), cx.theme),
-                        MenuEvent::Chosen(5) => self.start_name(NameOperation::Rename(path), cx.theme),
-                        MenuEvent::Chosen(6) => self.ask_delete_folder(path, cx),
+                        MenuEvent::Chosen(5) => self.start_name(NameOperation::Create(path), cx.theme),
+                        MenuEvent::Chosen(6) => self.start_name(NameOperation::Rename(path), cx.theme),
+                        MenuEvent::Chosen(7) => self.ask_delete_folder(path, cx),
                         _ => {}
                     },
                 }
@@ -1615,7 +1649,8 @@ impl Screen for Books {
             if self.selection.is_none() && self.exit.on_gesture(&g) {
                 return Action::Pop;
             }
-            if self.search.is_none()
+            if !self.carrying()
+                && self.search.is_none()
                 && let Some(selected) = self.tabs.on_gesture(&g)
             {
                 self.end_selection(cx);
@@ -1649,7 +1684,7 @@ impl Screen for Books {
                     return Action::None;
                 }
                 if self.navigation.folder.is_some() && self.back.on_gesture(&g) {
-                    if self.selection.is_some() {
+                    if self.selection.is_some() && !self.carrying() {
                         self.end_selection(cx);
                         return Action::None;
                     }
@@ -1708,6 +1743,17 @@ impl Screen for Books {
                     GridEvent::Tapped(i) => (i, false),
                     GridEvent::LongPressed(i) => (i, true),
                 };
+                if self.carrying() {
+                    if !long {
+                        if let Some(path) = self.folders.get(i).cloned() {
+                            self.navigate(Some(path), cx);
+                        } else {
+                            cx.toast("Paste or cancel first", None);
+                        }
+                    }
+                    self.apply_pending(cx);
+                    return Action::None;
+                }
                 if self.selection.is_some() {
                     if !long {
                         self.toggle_selection(i);
@@ -1758,7 +1804,7 @@ impl Screen for Books {
             cx.redraw();
             return true;
         }
-        if self.confirm.is_some() {
+        if self.confirm.is_some() || self.carrying() {
             return true;
         }
         if self.search.is_none() {
@@ -1917,6 +1963,7 @@ impl Screen for Books {
         }
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
+        self.persist_paste();
         if let Some(r) = &mut self.reader {
             r.on_quit()?;
         }
@@ -2123,7 +2170,7 @@ mod tests {
         books.refresh(t);
         books
     }
-    fn with_cx(t: &Theme, screen: Rect, f: impl FnOnce(&mut EventCx)) {
+    pub(super) fn with_cx(t: &Theme, screen: Rect, f: impl FnOnce(&mut EventCx)) {
         f(&mut EventCx {
             theme: t,
             screen,
@@ -2135,7 +2182,7 @@ mod tests {
             needs_redraw: &mut false,
         });
     }
-    fn tap(books: &mut Books, p: Point, cx: &mut EventCx) {
+    pub(super) fn tap(books: &mut Books, p: Point, cx: &mut EventCx) {
         books.on_gesture(Gesture::Down(p), cx);
         books.on_gesture(Gesture::Tap(p), cx);
     }
@@ -2796,7 +2843,7 @@ mod tests {
                 books.open_menu("0".into(), Point::new(600, 600), &t);
                 let menu = &books.menu.as_ref().unwrap().1;
                 assert_eq!(menu.items.iter().any(|(_, label)| label == "Remove from continue reading"), can_remove);
-                assert_eq!(menu.items.len(), if can_remove { 6 } else { 5 });
+                assert_eq!(menu.items.len(), if can_remove { 7 } else { 6 });
                 let rect = menu.rect();
                 let delete =
                     Point::new(rect.center().x, rect.y + t.mm(1.0) + (menu.items.len() as i32 - 1) * t.row + t.row / 2);
@@ -3153,7 +3200,7 @@ mod tests {
             books.navigate(Some(library.clone()), cx);
             books.open_folder_menu(library.clone(), Point::new(200, 600), &t);
             let rect = books.menu.as_ref().unwrap().1.rect();
-            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 5 * t.row + t.row / 2);
+            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 6 * t.row + t.row / 2);
             tap(&mut books, rename, cx);
             assert!(books.menu.is_some() && books.name_sheet.is_none(), "root rename is disabled");
             let delete = Point::new(rename.x, rename.y + t.row);

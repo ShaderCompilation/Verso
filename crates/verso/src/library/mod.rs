@@ -76,6 +76,8 @@ impl LibraryIndex {
     pub const VERSION: u32 = 1;
 
     pub fn move_path(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        // A destination receiving a book or folder is no longer empty.
+        self.empty_folders.retain(|p| !to.starts_with(p));
         for book in &mut self.books {
             rewrite_path(&mut book.path, from, to);
         }
@@ -104,7 +106,7 @@ impl Default for LibraryIndex {
 
 pub(crate) fn rewrite_path(path: &mut PathBuf, from: &std::path::Path, to: &std::path::Path) {
     if let Ok(tail) = path.strip_prefix(from) {
-        *path = to.join(tail);
+        *path = if tail.as_os_str().is_empty() { to.to_owned() } else { to.join(tail) };
     }
 }
 

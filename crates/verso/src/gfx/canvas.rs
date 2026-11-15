@@ -47,6 +47,17 @@ impl Canvas {
         &self.gray
     }
 
+    /// Blend a carried library card towards paper while preserving its details.
+    pub fn fade_rect(&mut self, rect: Rect) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        for y in r.y..r.bottom() {
+            let row = y as usize * self.width as usize;
+            for pixel in &mut self.gray[row + r.x as usize..row + r.right() as usize] {
+                *pixel = 153 + (*pixel as u16 * 102 / 255) as u8;
+            }
+        }
+    }
+
     pub fn highlight_rect(&mut self, rect: Rect) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         for y in r.y..r.bottom() {

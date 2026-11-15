@@ -7,6 +7,9 @@ pub(super) struct Selection {
     count: Rect,
     pub(super) all: Button,
     pub(super) delete: Button,
+    pub(super) move_items: Button,
+    pub(super) paste: Button,
+    pub(super) carrying: bool,
     pub(super) cancel: Button,
 }
 impl Selection {
@@ -14,35 +17,64 @@ impl Selection {
         let gap = t.mm(2.0);
         // Keep the same arrangement on smaller panels.
         let width = screen.w - 2 * t.margin;
-        let button_w = ((width * 3 / 5 - 2 * gap) / 3).max(t.mm(18.0));
+        let button_w = (width * 4 / 5 - 3 * gap) / 4;
         let y = (t.top_bar - t.button_h) / 2;
         let mut cancel = Button::new("Cancel", ButtonKind::Secondary);
         cancel.place(Rect::new(screen.right() - t.margin - button_w, y, button_w, t.button_h), t);
         let mut delete = Button::new("Delete…", ButtonKind::Secondary);
-        delete.place(Rect::new(cancel.rect().x - gap - button_w, y, button_w, t.button_h), t);
+        delete.place(Rect::new(cancel.rect().x - gap - button_w - t.mm(2.0), y, button_w + t.mm(2.0), t.button_h), t);
+        let mut move_items = Button::new("Move", ButtonKind::Secondary);
+        move_items
+            .place(Rect::new(delete.rect().x - gap - button_w + t.mm(1.0), y, button_w - t.mm(1.0), t.button_h), t);
+        let mut paste = Button::new("Paste", ButtonKind::Primary);
+        paste.place(Rect::new(cancel.rect().x - gap - button_w, y, button_w, t.button_h), t);
         let mut all = Button::new("Select all", ButtonKind::Secondary);
-        all.place(Rect::new(delete.rect().x - gap - button_w, y, button_w, t.button_h), t);
+        all.place(Rect::new(move_items.rect().x - gap - button_w - t.mm(3.0), y, button_w + t.mm(3.0), t.button_h), t);
         Self {
             items: HashSet::from([target]),
             count: Rect::new(t.margin, 0, all.rect().x - t.margin - gap, t.top_bar),
             all,
             delete,
+            move_items,
+            paste,
+            carrying: false,
             cancel,
         }
     }
     pub(super) fn draw(&mut self, cx: &mut DrawCx) {
         self.delete.enabled = !self.items.is_empty();
-        let label = format!("{} selected", self.items.len());
-        let style = if cx.text.width(&label, cx.theme.button) > self.count.w as f32 {
-            cx.theme.caption
+        self.move_items.enabled = !self.items.is_empty();
+        let label = if self.carrying {
+            format!("Moving {}", counted(self.items.len(), "item"))
         } else {
-            cx.theme.button
+            format!("{} selected", self.items.len())
         };
-        cx.line(&label, style, self.count, HAlign::Left);
-        self.all.draw(cx);
-        self.delete.draw(cx);
+        let count = if self.carrying {
+            Rect { w: self.paste.rect().x - self.count.x - cx.theme.mm(2.0), ..self.count }
+        } else {
+            self.count
+        };
+        let style =
+            if cx.text.width(&label, cx.theme.button) > count.w as f32 { cx.theme.caption } else { cx.theme.button };
+        if !self.carrying && cx.text.width(&label, style) > count.w as f32 {
+            cx.paragraph(
+                &format!("{}\nselected", self.items.len()),
+                style,
+                count.inset_xy(0, cx.theme.mm(2.0)),
+                HAlign::Left,
+            );
+        } else {
+            cx.line(&label, style, count, HAlign::Left);
+        }
+        if self.carrying {
+            self.paste.draw(cx);
+        } else {
+            self.all.draw(cx);
+            self.move_items.draw(cx);
+            self.delete.draw(cx);
+        }
         self.cancel.draw(cx);
-        cx.hint(self.count, RefreshMode::Fast);
+        cx.hint(count, RefreshMode::Fast);
     }
 }
 impl Books {
@@ -60,7 +92,7 @@ impl Books {
             .collect()
     }
     pub(super) fn retain_selection(&mut self) {
-        if self.selection.is_none() {
+        if self.selection.as_ref().is_none_or(|s| s.carrying) {
             return;
         }
         let available: HashSet<_> = self.selectable().into_iter().collect();
@@ -80,6 +112,7 @@ impl Books {
         cx.refresh(self.screen, RefreshMode::Ui);
     }
     pub(super) fn end_selection(&mut self, cx: &mut EventCx) {
+        self.carry = None;
         if self.selection.take().is_some() {
             cx.refresh(self.screen, RefreshMode::Ui);
         }
@@ -103,6 +136,12 @@ impl Books {
         if matches!(&target, Target::Folder(p) if self.folder_protected(p)) {
             return;
         }
+        if selection.carrying {
+            if selection.items.contains(&target) {
+                cx.canvas.fade_rect(cell);
+            }
+            return;
+        }
         let t = cx.theme;
         let size = t.mm(6.0);
         let r = Rect::new(cell.right() - size, cell.y, size, size);
@@ -116,9 +155,23 @@ impl Books {
         cx.hint(area, RefreshMode::Fast);
     }
     pub(super) fn selection_controls(&mut self, g: &Gesture, cx: &mut EventCx) -> bool {
+        let paste_enabled = self.paste_reason().is_none();
         let Some(selection) = &mut self.selection else { return false };
         if selection.cancel.on_gesture(g) {
             self.end_selection(cx);
+            return true;
+        }
+        if selection.carrying {
+            selection.paste.enabled = paste_enabled;
+            if selection.paste.on_gesture(g) {
+                self.start_paste(cx);
+            }
+            return g.pos().y < cx.theme.top_bar;
+        }
+        selection.move_items.enabled = !selection.items.is_empty();
+        if selection.move_items.on_gesture(g) {
+            let targets = self.selected_targets();
+            self.start_move(targets, cx);
             return true;
         }
         if selection.all.on_gesture(g) {

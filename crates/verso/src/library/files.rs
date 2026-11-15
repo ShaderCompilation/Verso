@@ -229,6 +229,155 @@ pub fn delete_selection(items: &[DeleteItem], index: &LibraryIndex, store: &Stor
     result
 }
 
+/// Clash policy applies to both the book name and its reserved sidecar name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClashChoice {
+    Skip,
+    KeepBoth,
+}
+#[derive(Clone, Debug)]
+pub enum MoveItem {
+    Book(PathBuf),
+    Folder(PathBuf),
+}
+impl MoveItem {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Book(p) | Self::Folder(p) => p,
+        }
+    }
+    pub fn move_to(&self, destination: &Path, choice: Option<ClashChoice>) -> Result<MoveOutcome> {
+        match self {
+            Self::Book(path) => move_book(path, destination, choice),
+            Self::Folder(path) => move_folder(path, destination, choice),
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum MoveOutcome {
+    Clash,
+    Skipped,
+    Moved(PathBuf),
+}
+fn occupied(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+fn target_free(path: &Path, book: bool) -> Result<bool> {
+    // Reserve a sidecar name even for a book without one: an orphan sidecar
+    // must never become associated with the incoming book.
+    Ok(!occupied(path)? && (!book || !occupied(&sidecar(path))?))
+}
+pub fn next_free_name(parent: &Path, name: &std::ffi::OsStr, book: bool) -> Result<PathBuf> {
+    let name = Path::new(name);
+    let stem = if book { name.file_stem().unwrap_or(name.as_os_str()) } else { name.as_os_str() };
+    for n in 2u64.. {
+        let mut numbered = stem.to_os_string();
+        numbered.push(format!(" ({n})"));
+        if book && let Some(extension) = name.extension() {
+            numbered.push(".");
+            numbered.push(extension);
+        }
+        let candidate = parent.join(numbered);
+        if target_free(&candidate, book)? {
+            return Ok(candidate);
+        }
+    }
+    bail!("No free name available")
+}
+fn move_target(path: &Path, destination: &Path, book: bool, choice: Option<ClashChoice>) -> Result<MoveOutcome> {
+    let source = std::fs::canonicalize(path).context("The source no longer exists")?;
+    let dest = std::fs::canonicalize(destination).context("The destination no longer exists")?;
+    ensure!(dest.is_dir(), "Choose a destination folder");
+    ensure!(source.parent() != Some(dest.as_path()), "Choose a different folder");
+    if !book {
+        ensure!(!dest.starts_with(&source), "Cannot move a folder inside itself");
+    }
+    let meta = std::fs::symlink_metadata(path)?;
+    ensure!(if book { meta.is_file() } else { meta.is_dir() }, "The source has changed");
+    let name = path.file_name().context("Cannot move a library root")?;
+    let target = destination.join(name);
+    if target_free(&target, book)? {
+        return Ok(MoveOutcome::Moved(target));
+    }
+    match choice {
+        None => Ok(MoveOutcome::Clash),
+        Some(ClashChoice::Skip) => Ok(MoveOutcome::Skipped),
+        Some(ClashChoice::KeepBoth) => Ok(MoveOutcome::Moved(next_free_name(destination, name, book)?)),
+    }
+}
+/// Refuse replacement atomically where available. Kindle's FUSE mount rejects
+/// RENAME_NOREPLACE, so recheck immediately before ordinary rename there, as for
+/// folder renaming. That fallback cannot exclude a concurrent external writer.
+fn rename_free(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from_c = std::ffi::CString::new(from.as_os_str().as_bytes())?;
+    let to_c = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+    // SAFETY: both C strings live through the syscall; it retains no pointers.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)) {
+        return rename_checked(from, to);
+    }
+    Err(error)
+}
+fn rename_checked(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(to) {
+        Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::rename(from, to)
+}
+/// Move the book and KOReader data together. Never copy across filesystems.
+pub fn move_book(path: &Path, destination: &Path, choice: Option<ClashChoice>) -> Result<MoveOutcome> {
+    move_book_with(path, destination, choice, rename_free)
+}
+fn move_book_with(
+    path: &Path,
+    destination: &Path,
+    choice: Option<ClashChoice>,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<MoveOutcome> {
+    let outcome = move_target(path, destination, true, choice)?;
+    let MoveOutcome::Moved(target) = &outcome else { return Ok(outcome) };
+    let data = sidecar(path);
+    let has_data = occupied(&data)?;
+    rename(path, target).context("Couldn't move book")?;
+    if has_data && let Err(error) = rename(&data, &sidecar(target)) {
+        if let Err(rollback) = rename(target, path) {
+            bail!(
+                "Couldn't move KOReader data: {error}; couldn't restore book: {rollback}. Book is at {}",
+                target.display()
+            );
+        }
+        bail!("Couldn't move KOReader data; book restored: {error}");
+    }
+    Ok(outcome)
+}
+pub fn move_folder(path: &Path, destination: &Path, choice: Option<ClashChoice>) -> Result<MoveOutcome> {
+    let outcome = move_target(path, destination, false, choice)?;
+    if let MoveOutcome::Moved(target) = &outcome {
+        rename_free(path, target).context("Couldn't move folder")?;
+    }
+    Ok(outcome)
+}
+
 /// KOReader keeps a book's progress and highlights in `Name.sdr` beside it.
 pub fn sidecar(book: &Path) -> PathBuf {
     book.with_extension("sdr")
@@ -260,9 +409,78 @@ mod tests {
     use crate::library::worker::scan;
     use crate::store::BookState;
 
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ))
+    }
+    #[test]
+    fn moves_sidecars_folders_and_refuses_cycles_and_clashes() -> Result<()> {
+        let root = temp_root("verso-file-moves");
+        let source = root.join("Source");
+        let dest = root.join("Destination");
+        std::fs::create_dir_all(source.join("Tree/Child"))?;
+        std::fs::create_dir_all(&dest)?;
+        std::fs::write(source.join("Book.epub"), b"book")?;
+        std::fs::create_dir(source.join("Book.sdr"))?;
+        std::fs::write(source.join("Book.sdr/metadata.epub.lua"), b"reading data")?;
+        std::fs::write(dest.join("Book.sdr"), b"orphan")?;
+        assert_eq!(move_book(&source.join("Book.epub"), &dest, None)?, MoveOutcome::Clash);
+        assert_eq!(move_book(&source.join("Book.epub"), &dest, Some(ClashChoice::Skip))?, MoveOutcome::Skipped);
+        assert_eq!(
+            move_book(&source.join("Book.epub"), &dest, Some(ClashChoice::KeepBoth))?,
+            MoveOutcome::Moved(dest.join("Book (2).epub"))
+        );
+        assert_eq!(std::fs::read(dest.join("Book (2).sdr/metadata.epub.lua"))?, b"reading data");
+        assert_eq!(std::fs::read(dest.join("Book.sdr"))?, b"orphan");
+        std::fs::write(source.join("Plain.EPUB"), b"plain")?;
+        assert_eq!(move_book(&source.join("Plain.EPUB"), &dest, None)?, MoveOutcome::Moved(dest.join("Plain.EPUB")));
+        assert!(!dest.join("Plain.sdr").exists());
+        let tree = source.join("Tree");
+        assert!(move_folder(&tree, &tree.join("Child"), None).is_err());
+        assert!(move_folder(&tree, &tree, None).is_err());
+        assert!(move_folder(&tree, &source, None).is_err());
+        std::fs::create_dir(dest.join("Tree"))?;
+        std::fs::create_dir(dest.join("Tree (2)"))?;
+        assert_eq!(move_folder(&tree, &dest, None)?, MoveOutcome::Clash);
+        assert_eq!(move_folder(&tree, &dest, Some(ClashChoice::Skip))?, MoveOutcome::Skipped);
+        assert_eq!(move_folder(&tree, &dest, Some(ClashChoice::KeepBoth))?, MoveOutcome::Moved(dest.join("Tree (3)")));
+        assert!(dest.join("Tree (3)/Child").is_dir());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn sidecar_failure_rolls_back_and_rename_never_overwrites() -> Result<()> {
+        let root = temp_root("verso-move-rollback");
+        std::fs::create_dir_all(root.join("Source/Book.sdr"))?;
+        std::fs::create_dir_all(root.join("Dest"))?;
+        let book = root.join("Source/Book.epub");
+        std::fs::write(&book, b"book")?;
+        let dest = root.join("Dest");
+        let error = move_book_with(&book, &dest, None, |from, to| {
+            if from == sidecar(&book) {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                rename_free(from, to)
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("book restored"));
+        assert!(book.exists() && sidecar(&book).exists() && !dest.join("Book.epub").exists());
+        std::fs::write(dest.join("Book.epub"), b"existing")?;
+        assert!(rename_free(&book, &dest.join("Book.epub")).is_err());
+        assert!(rename_checked(&book, &dest.join("Book.epub")).is_err());
+        assert_eq!(std::fs::read(dest.join("Book.epub"))?, b"existing");
+        assert_eq!(std::fs::read(book)?, b"book");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn batch_delete_continues_after_failure_and_keeps_survivor_progress() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("verso-batch-delete-{}", std::process::id()));
+        let root = temp_root("verso-batch-delete");
         std::fs::create_dir_all(root.join("blocked.epub"))?;
         std::fs::write(root.join("good.epub"), b"book")?;
         std::fs::create_dir_all(root.join("Folder"))?;
@@ -320,7 +538,7 @@ mod tests {
 
     #[test]
     fn names_operations_counts_and_reading_identity() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("verso-folder-files-{}", std::process::id()));
+        let root = temp_root("verso-folder-files");
         std::fs::create_dir_all(&root)?;
         for name in ["", "  ", ".", "..", ".hidden", "a/b", "null\0", "a\tb", "book.sdr", "a:b", "why?", "a\\b", "x|y"]
         {
@@ -374,7 +592,7 @@ mod tests {
     #[test]
     fn a_partial_delete_forgets_only_the_books_already_gone() -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("verso-partial-delete-{}", std::process::id()));
+        let root = temp_root("verso-partial-delete");
         let folder = root.join("Folder");
         let locked = folder.join("locked");
         std::fs::create_dir_all(&locked)?;
@@ -408,7 +626,7 @@ mod tests {
 
     #[test]
     fn sidecars_are_removed_with_their_book_only() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("verso-sidecar-{}", std::process::id()));
+        let root = temp_root("verso-sidecar");
         std::fs::create_dir_all(root.join("Book.sdr"))?;
         std::fs::write(root.join("Book.sdr/metadata.epub.lua"), b"progress")?;
         std::fs::create_dir_all(root.join("Other.sdr"))?;

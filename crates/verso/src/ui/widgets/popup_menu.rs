@@ -18,6 +18,7 @@ pub struct PopupMenu {
     pub items: Vec<(Option<Icon>, String)>,
     rect: Rect,
     row_h: i32,
+    rows: usize,
     pressed: Option<usize>,
     press: Press,
     /// A touch started outside the card.
@@ -32,9 +33,12 @@ impl PopupMenu {
     pub fn open(items: Vec<(Option<Icon>, String)>, anchor: Point, screen: Rect, theme: &Theme) -> Self {
         let m = theme.margin;
         let gap = theme.mm(2.0);
-        let w = theme.mm(70.0).min(screen.w - 2 * m);
-        let row_h = theme.row.min((screen.h - 2 * m - 2 * theme.mm(1.0)) / items.len().max(1) as i32);
-        let h = row_h * items.len() as i32 + 2 * theme.mm(1.0);
+        let available_h = screen.h - 2 * m - 2 * theme.mm(1.0);
+        let columns = if available_h / (items.len().max(1) as i32) < theme.target { 2 } else { 1 };
+        let rows = items.len().max(1).div_ceil(columns);
+        let w = theme.mm(70.0 * columns as f32).min(screen.w - 2 * m);
+        let row_h = theme.row.min(available_h / rows as i32);
+        let h = row_h * rows as i32 + 2 * theme.mm(1.0);
         let centered = (anchor.x - w / 2).clamp(screen.x + m, screen.right() - m - w);
         let (below, above) = (anchor.y + gap, anchor.y - gap - h);
         let (x, y) = if below + h <= screen.bottom() - m {
@@ -52,6 +56,7 @@ impl PopupMenu {
             items,
             rect: Rect::new(x, y, w, h),
             row_h,
+            rows,
             pressed: None,
             press: Press::default(),
             outside: false,
@@ -76,9 +81,16 @@ impl PopupMenu {
 
     fn item_rects(&self, theme: &Theme) -> Vec<Rect> {
         let top = self.rect.y + theme.mm(1.0);
-        (0..self.items.len() as i32)
+        let columns = self.items.len().max(1).div_ceil(self.rows);
+        let width = (self.rect.w - 2 * theme.border) / columns as i32;
+        (0..self.items.len())
             .map(|k| {
-                Rect::new(self.rect.x + theme.border, top + k * self.row_h, self.rect.w - 2 * theme.border, self.row_h)
+                Rect::new(
+                    self.rect.x + theme.border + (k / self.rows) as i32 * width,
+                    top + (k % self.rows) as i32 * self.row_h,
+                    width,
+                    self.row_h,
+                )
             })
             .collect()
     }
@@ -152,6 +164,26 @@ mod tests {
     fn menu(theme: &Theme) -> PopupMenu {
         let items = vec![(Some(Icon::BookOpen), "Open".into()), (None, "Details".into())];
         PopupMenu::open(items, Point::new(600, 400), Rect::new(0, 0, 1272, 1696), theme)
+    }
+
+    #[test]
+    fn eight_actions_keep_touch_targets_and_route_both_columns() {
+        for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167), (800, 600, 167)] {
+            let t = Theme::for_dpi(dpi);
+            let area = Rect::new(0, t.top_bar, w, h - t.top_bar);
+            let mut menu = PopupMenu::open(vec![(None, "Action".into()); 8], area.center(), area, &t);
+            assert!(menu.row_h >= t.target, "{w}x{h}: {} < {}", menu.row_h, t.target);
+            assert!(menu.rect().y >= area.y && menu.rect().bottom() <= area.bottom() - t.margin);
+            for (i, rect) in menu.item_rects(&t).into_iter().enumerate() {
+                assert!(rect.w >= t.target);
+                let p = rect.center();
+                menu.on_gesture(&Gesture::Down(p), &t);
+                assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), Some(MenuEvent::Chosen(i)));
+                menu.set_enabled(i, false);
+                menu.on_gesture(&Gesture::Down(p), &t);
+                assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), None);
+            }
+        }
     }
 
     #[test]
