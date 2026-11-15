@@ -16,9 +16,6 @@ use cosmic_text::{
 use super::Canvas;
 use crate::geom::Rect;
 
-// Phase 2 provides the API and tests use all of it; the dictionary screen
-// adopts it in Phase 3, which removes this allow.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod styled;
 
 const INTER_REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/Inter-Regular.ttf");

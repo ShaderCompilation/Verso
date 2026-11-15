@@ -33,6 +33,11 @@ pub struct Theme {
     pub small: TextStyle,
     /// 8.5 pt: list rows, labels.
     pub body: TextStyle,
+    /// Dictionary prose: 9 pt Literata; headwords: 11 pt SemiBold.
+    pub dictionary_body: TextStyle,
+    pub dictionary_headword: TextStyle,
+    /// Per nesting level, capped at four levels by the lookup screen (2.5 mm).
+    pub dictionary_indent: i32,
     /// 8.5 pt SemiBold: buttons.
     pub button: TextStyle,
     /// 10 pt SemiBold: section and sheet titles.
@@ -72,6 +77,9 @@ impl Theme {
             caption: sans(6.5),
             small: sans(7.5),
             body: sans(8.5),
+            dictionary_body: TextStyle::new(pt(9.0), Weight::Regular, Family::Serif),
+            dictionary_headword: TextStyle::new(pt(11.0), Weight::SemiBold, Family::Serif),
+            dictionary_indent: mm(2.5),
             button: sans(8.5).weight(Weight::SemiBold),
             heading: sans(10.0).weight(Weight::SemiBold),
             title: TextStyle::new(pt(13.0), Weight::SemiBold, Family::Serif),

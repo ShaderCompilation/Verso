@@ -21,6 +21,8 @@ pub enum PagerEvent {
 pub struct Pager {
     pub page: usize,
     pub pages: usize,
+    /// More pages are being laid out; the available pages remain navigable.
+    pub incomplete: bool,
     /// The counter is tappable and reports `Jump`.
     pub jump: bool,
     rect: Rect,
@@ -35,6 +37,7 @@ impl Pager {
         Self {
             page: 0,
             pages: pages.max(1),
+            incomplete: false,
             jump: false,
             rect: Rect::default(),
             counter: Rect::default(),
@@ -101,12 +104,16 @@ impl Pager {
 
     pub fn draw(&mut self, cx: &mut DrawCx) {
         self.sync();
-        if self.pages <= 1 {
+        if self.pages <= 1 && !self.incomplete {
             return;
         }
         self.prev.draw(cx);
         self.next.draw(cx);
-        let label = format!("{} of {}", self.page + 1, self.pages);
+        let label = if self.incomplete {
+            format!("{} of …", self.page + 1)
+        } else {
+            format!("{} of {}", self.page + 1, self.pages)
+        };
         let t = cx.theme;
         if self.jump && self.counter_press.is_down() {
             cx.canvas.fill_rounded_rect(self.counter, t.radius, INK);

@@ -32,7 +32,6 @@ impl Style {
     pub const MUTED: Self = Self(4);
     pub const PHONETIC: Self = Self(8);
     pub const LINK: Self = Self(16);
-    #[cfg(test)]
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }

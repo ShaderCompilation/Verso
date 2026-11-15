@@ -992,6 +992,12 @@ impl Screen for Reader {
         };
         [self.layout_at, step].into_iter().flatten().min()
     }
+    fn has_idle_work(&self) -> bool {
+        matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.paginating())
+    }
+    fn on_idle(&mut self, text: &mut crate::gfx::TextRenderer) -> bool {
+        if let Overlay::Lookup(lookup) = &mut self.overlay { lookup.on_idle(text) } else { false }
+    }
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
         if let Overlay::Text(s) = &mut self.overlay
             && s.on_tick(cx.now, &mut self.settings.typography)

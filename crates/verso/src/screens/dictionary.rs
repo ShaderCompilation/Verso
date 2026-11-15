@@ -1,36 +1,86 @@
 //! Lookup is an overlay over the unchanged cached book page.
 use crate::{
     dictionary::{
-        Dictionary, Entry, Source,
+        BlockKind, Dictionary, Source, Style,
         worker::{State, Worker},
     },
     geom::Rect,
-    gfx::HAlign,
+    gfx::{HAlign, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, TextRenderer, TextStyle},
     platform::TextInput,
     screens::EventCx,
     ui::{
         gesture::Gesture,
-        theme::{INK2, Theme},
+        theme::{INK2, LINE, Theme},
         widget::DrawCx,
         widgets::{Button, ButtonKind, Keyboard, Pager, Sheet, TextField},
     },
 };
 use std::rc::Rc;
 
-/// Temporary Phase 1 projection; styled layout replaces this in Phase 3.
-fn preview(entries: &[Entry]) -> String {
-    entries
-        .iter()
-        .map(|entry| {
-            let mut text = entry.headword.clone();
-            for block in &entry.blocks {
-                text.push('\n');
-                text.push_str(&block.text);
+/// All visible content shares one pagination, including provenance and errors.
+fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<StyledBlock> {
+    let paragraph = |text: String, base: TextStyle| {
+        StyledBlock::Paragraph(StyledParagraph { text, spans: Vec::new(), base, muted: INK2, indent: 0.0 })
+    };
+    if pending {
+        return vec![paragraph("Looking up…".into(), t.body)];
+    }
+    let gap = t.dictionary_body.line_height() / 2.0;
+    let rule = || StyledBlock::Rule { space: gap, thickness: t.hairline, gray: LINE };
+    let mut blocks = Vec::new();
+    match state {
+        State::Definition { entries, base_forms } => {
+            if let Some(forms) = base_forms {
+                let plural = if forms.count > 1 { "s" } else { "" };
+                blocks.push(paragraph(format!("Base form{plural} of “{}”", forms.query), t.small.gray(INK2)));
+                blocks.push(StyledBlock::Gap(gap));
             }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+            for (i, entry) in entries.iter().enumerate() {
+                if i > 0 { blocks.push(rule()); }
+                blocks.push(paragraph(entry.headword.clone(), t.dictionary_headword));
+                for block in &entry.blocks {
+                    match block.kind {
+                        BlockKind::Gap => blocks.push(StyledBlock::Gap(gap)),
+                        BlockKind::Rule => blocks.push(rule()),
+                        BlockKind::Text | BlockKind::Heading => {
+                            let spans = block.spans.iter().map(|span| {
+                                let mut style = SpanStyle::default();
+                                for (from, to) in [
+                                    (Style::BOLD, SpanStyle::BOLD),
+                                    (Style::ITALIC, SpanStyle::ITALIC),
+                                    (Style::MUTED, SpanStyle::MUTED),
+                                    (Style::PHONETIC, SpanStyle::PHONETIC),
+                                    (Style::LINK, SpanStyle::UNDERLINE),
+                                ] {
+                                    if span.style.contains(from) { style = style.union(to); }
+                                }
+                                StyledSpan { bytes: span.start as usize..span.end as usize, style }
+                            }).collect();
+                            let base = if block.kind == BlockKind::Heading {
+                                t.dictionary_body.weight(crate::gfx::Weight::SemiBold)
+                            } else { t.dictionary_body };
+                            blocks.push(StyledBlock::Paragraph(StyledParagraph {
+                                text: block.text.clone(), spans, base, muted: INK2,
+                                indent: (block.depth.min(4) as i32 * t.dictionary_indent) as f32,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        State::Missing => blocks.push(paragraph("No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(), t.body)),
+        State::Disabled => blocks.push(paragraph("All dictionaries are disabled. Open Dictionaries to enable one.".into(), t.body)),
+        State::NoResult => blocks.push(paragraph("No definition found. Tap the query to edit it, or try another dictionary.".into(), t.body)),
+        State::Error(e) => blocks.push(paragraph(format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."), t.body)),
+    }
+    if !warnings.is_empty() {
+        blocks.push(StyledBlock::Gap(gap));
+        blocks.push(paragraph("Some dictionary folders had problems:".into(), t.body));
+        for warning in warnings {
+            blocks.push(paragraph(format!("• {warning}"), t.body));
+        }
+    }
+    blocks
 }
 
 pub enum LookupEvent {
@@ -59,7 +109,8 @@ pub struct Lookup {
     warnings: Vec<String>,
     selected: Option<String>,
     state: State,
-    pages: Vec<String>,
+    pages: Option<StyledPagination>,
+    layout_error: Option<String>,
     pager: Pager,
     manager_pager: Pager,
     manager: bool,
@@ -137,7 +188,8 @@ impl Lookup {
             warnings: Vec::new(),
             selected: None,
             state: State::NoResult,
-            pages: Vec::new(),
+            pages: None,
+            layout_error: None,
             pager,
             manager_pager,
             manager: false,
@@ -164,33 +216,41 @@ impl Lookup {
         }
         message
     }
-    fn message(&self) -> String {
-        if self.pending {
-            return "Looking up…".into();
-        }
-        let message = match &self.state {
-            State::Definition { entries, base_forms } => {
-                let text = preview(entries);
-                if let Some(forms) = base_forms {
-                    let plural = if forms.count > 1 { "s" } else { "" };
-                    format!("Base form{plural} of “{}”\n\n{text}", forms.query)
-                } else { text }
-            }
-            State::Missing => "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
-            State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
-            State::NoResult => "No definition found. Tap the query to edit it, or try another dictionary.".into(),
-            State::Error(e) => format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."),
-        };
-        self.with_warnings(message)
-    }
     pub fn busy(&self) -> bool {
-        self.pending
+        self.pending || !self.manager && (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
+    }
+    pub fn paginating(&self) -> bool {
+        self.pages.as_ref().is_some_and(|p| !p.is_complete())
+    }
+    /// One bounded piece per idle turn, after the visible page was presented.
+    pub fn on_idle(&mut self, text: &mut TextRenderer) -> bool {
+        let Some(pages) = self.pages.as_mut().filter(|p| !p.is_complete()) else { return false };
+        let had_next = self.pager.page + 1 < pages.pages().len();
+        if let Err(e) = text.paginate_styled_step(pages) {
+            self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
+            self.pages = None;
+            self.pager.set(0, 1);
+            self.pager.incomplete = false;
+            return true;
+        }
+        self.pager.set(self.pager.page, pages.pages().len());
+        self.pager.incomplete = !pages.is_complete();
+        if pages.is_complete() {
+            log::debug!(
+                "dictionary pagination complete: {} pages, {} pieces",
+                pages.pages().len(),
+                pages.paragraphs().len()
+            );
+        }
+        pages.is_complete() || !had_next && self.pager.page + 1 < pages.pages().len()
     }
     fn submit(&mut self, rescan: bool) {
         self.request = self.worker.lookup(self.field.value().into(), self.selected.clone(), rescan);
         self.pending = true;
-        self.pages.clear();
+        self.pages = None;
+        self.layout_error = None;
         self.pager.set(0, 1);
+        self.pager.incomplete = true;
         self.field.focused = false;
         self.keyboard.visible = false;
     }
@@ -204,8 +264,10 @@ impl Lookup {
             self.warnings = reply.warnings;
             self.selected = reply.selected;
             self.state = reply.state.unwrap_or(State::NoResult);
-            self.pages.clear();
+            self.pages = None;
+            self.layout_error = None;
             self.pager.set(0, 1);
+            self.pager.incomplete = true;
             if let Some(e) = reply.save_error {
                 log::warn!("dictionary preferences: {e}");
                 cx.toast("Couldn't save dictionary preferences", None);
@@ -379,23 +441,40 @@ impl Lookup {
         self.dictionaries_button.draw(cx);
         self.next.draw(cx);
         self.find.draw(cx);
-        if self.pages.is_empty() {
-            let message = self.message();
+        if self.pages.is_none() && self.layout_error.is_none() {
             let started = std::time::Instant::now();
-            self.pages = cx.text.pages(&message, t.body, self.body.w, self.body.h);
-            log::debug!(
-                "dictionary pagination: {:?}, {} text bytes, {} pages",
-                started.elapsed(),
-                message.len(),
-                self.pages.len()
-            );
-            self.pager.set(0, self.pages.len());
+            let result =
+                StyledPagination::new(content(&self.state, self.pending, &self.warnings, t), self.body.w, self.body.h)
+                    .and_then(|mut pages| {
+                        cx.text.paginate_styled_until(&mut pages, 1)?;
+                        Ok(pages)
+                    });
+            match result {
+                Ok(pages) => {
+                    self.pager.set(0, pages.pages().len());
+                    self.pager.incomplete = !pages.is_complete();
+                    self.pages = Some(pages);
+                }
+                Err(e) => {
+                    self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
+                    self.pager.set(0, 1);
+                    self.pager.incomplete = false;
+                }
+            }
+            log::debug!("dictionary first page pagination: {:?}", started.elapsed());
         }
-        let page = self.pages[self.pager.page].trim_end();
-        let started = std::time::Instant::now();
-        let height = cx.text.measure(page, t.body, Some(self.body.w as f32)).1.ceil() as i32;
-        cx.text.draw(cx.canvas, page, t.body, Rect { h: height.min(self.body.h), ..self.body }, HAlign::Left);
-        log::debug!("dictionary page draw: {:?}, {} text bytes", started.elapsed(), page.len());
+        if let Some(pages) = &mut self.pages {
+            let started = std::time::Instant::now();
+            // Keep accents, italic overhangs and descenders in the controls' gap.
+            let clip = self.body.inset(-t.mm(0.5).max(2));
+            if let Err(e) = cx.text.draw_styled_page(cx.canvas, pages, self.pager.page, self.body, clip, t.hairline) {
+                log::error!("dictionary page draw: {e:#}");
+            }
+            log::debug!("dictionary page draw: {:?}", started.elapsed());
+        }
+        if let Some(error) = &self.layout_error {
+            cx.text.draw(cx.canvas, error, t.body, self.body, HAlign::Left);
+        }
         self.pager.draw(cx);
         self.keyboard.draw(cx);
     }
@@ -474,7 +553,6 @@ impl SelectionActions {
 mod tests {
     use super::*;
     use crate::{
-        dictionary::worker::BaseForms,
         platform::{TextInput, Waker},
         store::Store,
     };
@@ -482,6 +560,120 @@ mod tests {
         sync::mpsc,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn styled_lookup_orders_content_and_pages_identically_in_both_orientations() -> anyhow::Result<()> {
+        use crate::{
+            dictionary::{Block, Entry, Span, worker::BaseForms},
+            gfx::{Canvas, IconRenderer},
+            ui::gesture::Direction,
+        };
+        let t = Theme::for_dpi(300);
+        let worker = Rc::new(Worker::new(
+            Store::at(std::env::temp_dir().join(format!("verso-styled-lookup-{}", std::process::id()))),
+            Waker::new(|| {}),
+        ));
+        for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
+            let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None);
+            lookup.pending = false;
+            lookup.state = State::Definition {
+                entries: vec![
+                    Entry {
+                        headword: "leaf".into(),
+                        blocks: vec![
+                            Block {
+                                kind: BlockKind::Text,
+                                depth: 9,
+                                text: "An example /liːf/".into(),
+                                spans: vec![
+                                    Span {
+                                        start: 0,
+                                        end: 10,
+                                        style: Style::BOLD.union(Style::ITALIC).union(Style::MUTED).union(Style::LINK),
+                                    },
+                                    Span { start: 11, end: 17, style: Style::PHONETIC },
+                                ],
+                            },
+                            Block::plain("A long original definition with enough words to wrap. ".repeat(1000)),
+                        ],
+                    },
+                    Entry { headword: "leave".into(), blocks: vec![Block::plain("To depart.")] },
+                ],
+                base_forms: Some(BaseForms { query: "leaves".into(), count: 2 }),
+            };
+            lookup.warnings = vec!["/gone is not available.".into()];
+            let input = content(&lookup.state, false, &lookup.warnings, &t);
+            let StyledBlock::Paragraph(p) = &input[3] else { panic!("definition paragraph") };
+            assert_eq!(p.indent, (4 * t.dictionary_indent) as f32);
+            assert_eq!(p.muted, INK2);
+            assert!(p.spans[0].style.contains(
+                SpanStyle::BOLD.union(SpanStyle::ITALIC).union(SpanStyle::MUTED).union(SpanStyle::UNDERLINE)
+            ));
+            assert!(p.spans[1].style.contains(SpanStyle::PHONETIC));
+            let mut text = TextRenderer::new();
+            let mut canvas = Canvas::new(screen.w as u32, screen.h as u32);
+            let mut icons = IconRenderer::default();
+            let draw = |lookup: &mut Lookup, canvas: &mut Canvas, text: &mut TextRenderer, icons: &mut IconRenderer| {
+                canvas.fill(crate::ui::theme::PAPER);
+                lookup.draw(&mut DrawCx::new(canvas, text, icons, &t, &mut Vec::new()));
+                let r = lookup.body;
+                (r.y..r.bottom())
+                    .flat_map(|y| {
+                        canvas.gray_data()[y as usize * screen.w as usize + r.x as usize
+                            ..y as usize * screen.w as usize + r.right() as usize]
+                            .to_vec()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let first = draw(&mut lookup, &mut canvas, &mut text, &mut icons);
+            assert!(!lookup.pages.as_ref().unwrap().pages().is_empty());
+            assert!(lookup.pager.incomplete);
+            assert!(lookup.busy());
+            while lookup.paginating() {
+                lookup.on_idle(&mut text);
+            }
+            assert!(!lookup.busy());
+            assert!(!lookup.pager.incomplete);
+            let pages = lookup.pages.as_ref().unwrap();
+            let mut recovered = String::new();
+            for page in pages.pages() {
+                for part in &page.paragraphs {
+                    let piece = pages.piece(part.paragraph);
+                    let lines = &pages.paragraphs()[part.paragraph].lines[part.lines.clone()];
+                    recovered
+                        .push_str(&piece.text[lines.first().unwrap().bytes.start..lines.last().unwrap().bytes.end]);
+                    recovered.push('\n');
+                }
+            }
+            assert_eq!(recovered.lines().filter(|s| *s == "leaf").count(), 1);
+            assert_eq!(recovered.lines().filter(|s| *s == "leave").count(), 1);
+            assert!(recovered.starts_with("Base forms of “leaves”\nleaf\n"));
+            assert!(
+                recovered
+                    .ends_with("leave\nTo depart.\nSome dictionary folders had problems:\n• /gone is not available.\n")
+            );
+            let mut cx = EventCx {
+                theme: &t,
+                screen,
+                now: Instant::now(),
+                frontlight: &mut None,
+                light_request: &mut None,
+                toast: &mut None,
+                forced: &mut Vec::new(),
+                needs_redraw: &mut false,
+            };
+            let swipe = |dir| Gesture::Swipe { dir, from: screen.center(), to: screen.center() };
+            lookup.on_gesture(&swipe(Direction::Left), &mut cx);
+            assert_eq!(lookup.pager.page, 1);
+            let second = draw(&mut lookup, &mut canvas, &mut text, &mut icons);
+            assert_ne!(first, second);
+            lookup.on_gesture(&swipe(Direction::Right), &mut cx);
+            assert_eq!(first, draw(&mut lookup, &mut canvas, &mut text, &mut icons));
+            lookup.on_gesture(&swipe(Direction::Left), &mut cx);
+            assert_eq!(second, draw(&mut lookup, &mut canvas, &mut text, &mut icons));
+        }
+        Ok(())
+    }
 
     #[test]
     fn query_editing_switching_preferences_and_stale_replies() -> anyhow::Result<()> {
@@ -531,32 +723,24 @@ mod tests {
             }
         };
         wait(&mut lookup, &mut cx);
-        assert!(matches!(&lookup.state, State::Definition { entries, .. } if preview(entries).contains("meaning")));
-        let exact_message = lookup.message();
-        assert_eq!(exact_message, "Hello\nmeaning");
-        for (query, count, from, text) in [
-            ("thunders", 1, "Base form of “thunders”", "thunder\n\nA loud sound."),
-            ("axes", 2, "Base forms of “axes”", "axis\n\nA line.\n\naxe\n\nA tool."),
-        ] {
-            let base_forms = Some(BaseForms { query: query.into(), count });
-            let parts: Vec<_> = text.split("\n\n").collect();
-            let entries = parts
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| Entry { headword: pair[0].into(), blocks: vec![crate::dictionary::Block::plain(pair[1])] })
-                .collect::<Vec<_>>();
-            let text = preview(&entries);
-            lookup.state = State::Definition { entries, base_forms };
-            assert_eq!(lookup.message(), format!("{from}\n\n{text}"));
-        }
-        lookup.state = State::NoResult;
-        assert!(!lookup.message().contains("Base form"));
-        lookup.state = State::Definition {
-            entries: vec![Entry { headword: "Hello".into(), blocks: vec![crate::dictionary::Block::plain("meaning")] }],
-            base_forms: None,
+        assert!(matches!(&lookup.state, State::Definition { entries, .. } if entries[0].blocks[0].text == "meaning"));
+        let exact = lookup.state.clone();
+        let first_paragraph = |state: &State| {
+            let StyledBlock::Paragraph(p) = content(state, false, &[], &t).remove(0) else { panic!("first paragraph") };
+            p.text
         };
-        assert!(!lookup.message().contains("Base form"));
+        assert_eq!(first_paragraph(&exact), "Hello");
+        for (count, label) in [(1, "Base form of “axes”"), (2, "Base forms of “axes”")] {
+            if let State::Definition { base_forms, .. } = &mut lookup.state {
+                *base_forms = Some(crate::dictionary::worker::BaseForms { query: "axes".into(), count });
+            }
+            assert_eq!(first_paragraph(&lookup.state), label);
+        }
+        assert!(!first_paragraph(&State::NoResult).contains("Base form"));
+        lookup.state = exact;
+        lookup.manager = true;
+        assert!(!lookup.busy(), "the manager does not wait for hidden pages to be drawn");
+        lookup.manager = false;
         // Source warnings accompany results; same-name copies show their source.
         lookup.warnings = vec!["/gone is not available.".into()];
         assert!(lookup.with_warnings("text".into()).ends_with("problems:\n• /gone is not available."));

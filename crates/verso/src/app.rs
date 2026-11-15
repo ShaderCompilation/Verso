@@ -317,12 +317,16 @@ impl App {
             return None;
         }
         let screen = self.stack.last().and_then(|s| s.deadline());
-        [screen, self.toast.as_ref().map(|t| t.until), self.wake_cleanup].into_iter().flatten().min()
+        let idle = self.stack.last().filter(|s| s.has_idle_work()).map(|_| Instant::now());
+        [screen, idle, self.toast.as_ref().map(|t| t.until), self.wake_cleanup].into_iter().flatten().min()
     }
 
     pub fn on_tick(&mut self, now: Instant) {
         if self.asleep {
             return;
+        }
+        if let Some(screen) = self.stack.last_mut().filter(|s| s.has_idle_work()) {
+            self.needs_redraw |= screen.on_idle(&mut self.text);
         }
         if self.wake_cleanup.is_some_and(|due| now >= due) {
             self.wake_cleanup = None;
@@ -895,6 +899,51 @@ mod tests {
         assert!(app.wants_exit());
         assert_eq!(touches.get(), 0);
     }
+    #[test]
+    fn idle_layout_runs_one_step_per_turn_and_redraws_only_visible_progress() {
+        struct LayoutScreen {
+            remaining: Rc<Cell<usize>>,
+        }
+        impl Screen for LayoutScreen {
+            fn draw(&mut self, cx: &mut DrawCx) {
+                cx.fill(Rect::new(0, 0, 20, 20), crate::ui::theme::INK);
+            }
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn has_idle_work(&self) -> bool {
+                self.remaining.get() > 0
+            }
+            fn on_idle(&mut self, _: &mut TextRenderer) -> bool {
+                self.remaining.set(self.remaining.get() - 1);
+                self.remaining.get() == 0
+            }
+        }
+        let remaining = Rc::new(Cell::new(3));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(LayoutScreen { remaining: remaining.clone() }));
+        assert!(!app.frame().is_empty());
+        assert_eq!(remaining.get(), 3, "present the initial frame before more layout");
+        assert!(app.deadline().is_some());
+        app.on_tick(Instant::now());
+        assert_eq!(remaining.get(), 2);
+        assert!(app.frame().is_empty(), "cache-only progress needs no drawing");
+        app.on_sleep();
+        assert!(app.deadline().is_none());
+        app.on_tick(Instant::now());
+        assert_eq!(remaining.get(), 2);
+        app.on_wake();
+        app.on_tick(Instant::now());
+        assert_eq!(remaining.get(), 1);
+        app.frame();
+        app.on_tick(Instant::now());
+        assert_eq!(remaining.get(), 0);
+        assert!(app.needs_redraw, "completion changes the page counter");
+        // Wake's separate delayed repaint may still have a deadline.
+        app.on_tick(Instant::now() + Duration::from_secs(2));
+        assert!(app.deadline().is_none(), "finished layout stops waking the event loop");
+    }
+
     struct TimedScreen {
         ticks: Rc<Cell<usize>>,
         backgrounds: Rc<Cell<usize>>,

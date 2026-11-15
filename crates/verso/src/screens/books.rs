@@ -1331,6 +1331,12 @@ impl Screen for Books {
     fn deadline(&self) -> Option<std::time::Instant> {
         self.reader.as_ref().and_then(Screen::deadline)
     }
+    fn has_idle_work(&self) -> bool {
+        self.reader.as_ref().is_some_and(Screen::has_idle_work)
+    }
+    fn on_idle(&mut self, text: &mut crate::gfx::TextRenderer) -> bool {
+        self.reader.as_mut().is_some_and(|r| r.on_idle(text))
+    }
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
         self.reader.as_mut().map_or(Action::None, |r| r.on_tick(cx))
     }

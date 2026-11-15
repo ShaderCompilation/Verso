@@ -65,6 +65,15 @@ pub trait Screen {
         Action::None
     }
 
+    /// Bounded layout work after presentation, interleaved with input. Returns
+    /// whether visible state changed; cache-only progress needs no redraw.
+    fn has_idle_work(&self) -> bool {
+        false
+    }
+    fn on_idle(&mut self, _text: &mut crate::gfx::TextRenderer) -> bool {
+        false
+    }
+
     /// Used by scripted screenshots to wait for asynchronous screen changes.
     fn busy(&self) -> bool {
         false
