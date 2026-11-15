@@ -16,10 +16,16 @@ use cosmic_text::{
 use super::Canvas;
 use crate::geom::Rect;
 
+// Phase 2 provides the API; the dictionary screen adopts it in Phase 3.
+#[allow(dead_code)]
+pub mod styled;
+
 const INTER_REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/Inter-Regular.ttf");
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../../../../assets/fonts/Inter-SemiBold.ttf");
 const LITERATA_REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/Literata-Regular.ttf");
 const LITERATA_SEMIBOLD: &[u8] = include_bytes!("../../../../assets/fonts/Literata-SemiBold.ttf");
+const LITERATA_ITALIC: &[u8] = include_bytes!("../../../../assets/fonts/Literata-Italic.ttf");
+const LITERATA_SEMIBOLD_ITALIC: &[u8] = include_bytes!("../../../../assets/fonts/Literata-SemiBoldItalic.ttf");
 
 /// Laid-out texts kept at most. The cache is simply cleared when it's full;
 /// a screen only shows a few dozen texts.
@@ -134,7 +140,14 @@ pub struct TextRenderer {
 impl TextRenderer {
     pub fn new() -> Self {
         let mut db = fontdb::Database::new();
-        for data in [INTER_REGULAR, INTER_SEMIBOLD, LITERATA_REGULAR, LITERATA_SEMIBOLD] {
+        for data in [
+            INTER_REGULAR,
+            INTER_SEMIBOLD,
+            LITERATA_REGULAR,
+            LITERATA_SEMIBOLD,
+            LITERATA_ITALIC,
+            LITERATA_SEMIBOLD_ITALIC,
+        ] {
             db.load_font_source(fontdb::Source::Binary(Arc::new(data)));
         }
         db.set_sans_serif_family(Family::Sans.name());
@@ -401,11 +414,21 @@ mod tests {
     }
 
     #[test]
-    fn both_families_and_weights_are_available() {
+    fn all_six_embedded_faces_are_available() {
         let mut t = TextRenderer::new();
-        let faces: Vec<(String, u16)> = t.fonts.db().faces().map(|f| (f.families[0].0.clone(), f.weight.0)).collect();
-        for want in [("Inter", 400), ("Inter", 600), ("Literata", 400), ("Literata", 600)] {
-            assert!(faces.iter().any(|(n, w)| n == want.0 && *w == want.1), "{want:?} missing: {faces:?}");
+        let faces: Vec<_> = t.fonts.db().faces().map(|f| (f.families[0].0.clone(), f.weight.0, f.style)).collect();
+        for (name, weight, style) in [
+            ("Inter", 400, fontdb::Style::Normal),
+            ("Inter", 600, fontdb::Style::Normal),
+            ("Literata", 400, fontdb::Style::Normal),
+            ("Literata", 600, fontdb::Style::Normal),
+            ("Literata", 400, fontdb::Style::Italic),
+            ("Literata", 600, fontdb::Style::Italic),
+        ] {
+            assert!(
+                faces.iter().any(|(n, w, s)| n == name && *w == weight && *s == style),
+                "{name} {weight} {style:?} missing: {faces:?}"
+            );
         }
         let regular = t.width("Verso", STYLE);
         let bold = t.width("Verso", STYLE.weight(Weight::SemiBold));
