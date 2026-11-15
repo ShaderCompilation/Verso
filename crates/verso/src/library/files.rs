@@ -4,12 +4,17 @@ use crate::store::Store;
 use anyhow::{Context, Result, bail, ensure};
 use std::path::{Path, PathBuf};
 
+const WINDOWS_RESERVED: [char; 8] = ['\\', ':', '*', '?', '"', '<', '>', '|'];
+
 pub fn validate_name(parent: &Path, name: &str) -> Result<PathBuf> {
     let name = name.trim();
     ensure!(!name.is_empty(), "Enter a folder name");
     ensure!(!name.starts_with('.'), "Names cannot begin with a dot");
     ensure!(!name.contains('/'), "Names cannot contain /");
-    ensure!(!name.contains('\0'), "Names cannot contain a null character");
+    ensure!(!name.chars().any(char::is_control), "Names cannot contain control characters");
+    // Linux allows these, but a Windows computer reading the Kindle over USB
+    // can't show or copy a folder whose name has them.
+    ensure!(!name.contains(WINDOWS_RESERVED), "Names cannot contain \\ : * ? \" < > |");
     ensure!(!name.ends_with(".sdr"), "Names ending in .sdr are reserved for reading data");
     let target = parent.join(name);
     match std::fs::symlink_metadata(&target) {
@@ -20,9 +25,16 @@ pub fn validate_name(parent: &Path, name: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Shown instead of a raw "No such file or directory" when another device or
+/// app removed the folder meanwhile.
+const GONE: &str = "This folder no longer exists";
+
 pub fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
     let path = validate_name(parent, name)?;
-    std::fs::create_dir(&path).context("Couldn't create folder")?;
+    match std::fs::create_dir(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(GONE),
+        result => result.context("Couldn't create folder")?,
+    }
     Ok(path)
 }
 
@@ -32,7 +44,11 @@ pub fn rename_folder(path: &Path, name: &str) -> Result<PathBuf> {
         return Ok(path.to_owned());
     }
     let target = validate_name(parent, name)?;
-    ensure!(std::fs::symlink_metadata(path)?.is_dir(), "This is no longer a folder");
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => ensure!(meta.is_dir(), "This is no longer a folder"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(GONE),
+        Err(e) => return Err(e).context("Couldn't rename folder"),
+    }
     std::fs::rename(path, &target).context("Couldn't rename folder")?;
     Ok(target)
 }
@@ -76,17 +92,36 @@ pub fn count_contents(path: &Path) -> Result<Contents> {
     Ok(result)
 }
 
-/// The caller removes the returned ids from its view; covers belong to the worker.
-/// State cleanup follows successful removal, so a failed delete keeps progress.
-pub fn delete_folder(path: &Path, index: &LibraryIndex, store: &Store) -> Result<Vec<String>> {
-    std::fs::remove_dir_all(path).context("Couldn't delete folder")?;
-    let ids: Vec<_> = index.books.iter().filter(|b| b.path.starts_with(path)).map(|b| b.id.clone()).collect();
-    for id in &ids {
+/// What a folder delete removed. `remove_dir_all` can stop partway, so a
+/// failed delete still lists the indexed books whose files are already gone.
+#[derive(Debug)]
+pub struct Deletion {
+    /// Ids and paths of the removed books; their reading state is gone too.
+    pub books: Vec<(String, PathBuf)>,
+    pub error: Option<anyhow::Error>,
+}
+
+/// The caller removes the returned books from its view; covers belong to the
+/// worker. Only books whose files are gone lose their reading state, so a book
+/// that a failed delete left in place keeps its progress.
+pub fn delete_folder(path: &Path, index: &LibraryIndex, store: &Store) -> Deletion {
+    let error = std::fs::remove_dir_all(path).context("Couldn't delete folder").err();
+    let books: Vec<_> = index
+        .books
+        .iter()
+        .filter(|b| b.path.starts_with(path))
+        .filter(|b| {
+            error.is_none()
+                || std::fs::symlink_metadata(&b.path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        })
+        .map(|b| (b.id.clone(), b.path.clone()))
+        .collect();
+    for (id, _) in &books {
         if let Err(e) = store.remove_book(id) {
             log::warn!("removing deleted book state {id}: {e}");
         }
     }
-    Ok(ids)
+    Deletion { books, error }
 }
 
 /// KOReader keeps a book's progress and highlights in `Name.sdr` beside it.
@@ -124,7 +159,8 @@ mod tests {
     fn names_operations_counts_and_reading_identity() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-folder-files-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
-        for name in ["", "  ", ".", "..", ".hidden", "a/b", "null\0", "book.sdr"] {
+        for name in ["", "  ", ".", "..", ".hidden", "a/b", "null\0", "a\tb", "book.sdr", "a:b", "why?", "a\\b", "x|y"]
+        {
             assert!(validate_name(&root, name).is_err(), "{name:?}");
         }
         let folder = create_folder(&root, "  Толкин  ")?;
@@ -157,12 +193,52 @@ mod tests {
         assert_eq!(store.book("7").progress, 4200);
         let rescanned = scan(&root, &index, false, &|| false, |_| {}).unwrap().index;
         assert_eq!(rescanned.books.iter().find(|b| b.available).unwrap().id, "7");
-        assert!(delete_folder(&root.join("missing"), &index, &store).is_err());
+        assert_eq!(format!("{:#}", rename_folder(&root.join("missing"), "New").unwrap_err()), GONE);
+        assert_eq!(format!("{:#}", create_folder(&root.join("missing"), "New").unwrap_err()), GONE);
+        let missing = delete_folder(&root.join("missing"), &index, &store);
+        assert!(missing.error.is_some() && missing.books.is_empty());
         assert_eq!(store.book("7").progress, 4200, "a failed removal retains progress");
-        assert_eq!(delete_folder(&renamed, &index, &store)?, ["7"]);
+        let deletion = delete_folder(&renamed, &index, &store);
+        assert!(deletion.error.is_none());
+        assert_eq!(deletion.books.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["7"]);
         index.remove_path(&renamed);
         assert!(index.books.is_empty() && !renamed.exists());
         assert_eq!(store.book("7").progress, 0);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_partial_delete_forgets_only_the_books_already_gone() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("verso-partial-delete-{}", std::process::id()));
+        let folder = root.join("Folder");
+        let locked = folder.join("locked");
+        std::fs::create_dir_all(&locked)?;
+        // "gone.epub" models a book removed before the delete stopped.
+        std::fs::write(locked.join("stays.epub"), b"book")?;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))?;
+        let book = |id: &str, path: PathBuf| super::super::Book {
+            id: id.into(),
+            path,
+            ..crate::library::selection_tests::book(0)
+        };
+        let index = LibraryIndex {
+            books: vec![book("gone", folder.join("gone.epub")), book("stays", locked.join("stays.epub"))],
+            ..Default::default()
+        };
+        let store = Store::at(root.join("state"));
+        let state = BookState { progress: 1200, ..Default::default() };
+        store.save_book("gone", &state)?;
+        store.save_book("stays", &state)?;
+        let deletion = delete_folder(&folder, &index, &store);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+        // Permissions don't stop root, so there is no partial delete to check.
+        if deletion.error.is_some() {
+            assert_eq!(deletion.books, [("gone".to_owned(), folder.join("gone.epub"))]);
+            assert_eq!(store.book("gone").progress, 0);
+            assert_eq!(store.book("stays").progress, 1200, "a book left in place keeps its progress");
+        }
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

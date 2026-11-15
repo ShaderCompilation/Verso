@@ -994,11 +994,12 @@ impl Books {
                 if self.folder_protected(&path) {
                     return;
                 }
-                match files::delete_folder(&path, &self.index, &self.store) {
-                    Ok(ids) => {
-                        for id in ids {
-                            self.states.remove(&id);
-                        }
+                let deletion = files::delete_folder(&path, &self.index, &self.store);
+                for (id, _) in &deletion.books {
+                    self.states.remove(id);
+                }
+                match deletion.error {
+                    None => {
                         let mut changes = self.library.remove_paths(vec![path.clone()]);
                         if let Some(parent) = path.parent().filter(|p| files::is_empty(p)) {
                             changes.extend(self.library.add_empty_folder(parent.to_owned()));
@@ -1006,10 +1007,23 @@ impl Books {
                         self.apply_changes(changes, cx);
                         cx.toast(format!("Deleted “{}”", collections::name(&path)), None);
                     }
-                    Err(e) => {
-                        // remove_dir_all can partially succeed: reconcile the view.
+                    Some(e) => {
+                        // remove_dir_all can stop partway. Drop the books already
+                        // gone now; the rescan settles subfolders and the rest.
+                        let removed = deletion.books.len();
+                        if removed > 0 {
+                            let changes =
+                                self.library.remove_paths(deletion.books.into_iter().map(|(_, p)| p).collect());
+                            self.apply_changes(changes, cx);
+                        }
                         self.library.rescan();
-                        cx.toast(format!("{e:#}"), None);
+                        cx.toast(
+                            match removed {
+                                0 => format!("{e:#}"),
+                                n => format!("{e:#}. {} removed before it stopped.", counted(n, "book")),
+                            },
+                            None,
+                        );
                     }
                 }
             }

@@ -215,7 +215,7 @@ impl Background {
     fn pass(&mut self, retry: bool) -> bool {
         let mut errors = Vec::new();
         self.set_status(true, true, &errors);
-        let mut checkpointed = false;
+        let mut checkpoint_index = None;
         let result = {
             let (channel, store) = (&self.channel, &self.store);
             // Checkpoints happen only when the scan found new files to read.
@@ -224,10 +224,20 @@ impl Background {
                     push_error(&mut errors, format!("Couldn't save library: {e}"));
                 }
                 channel.content(Snapshot { index: checkpoint.clone(), partial: true, revision: self.revision });
-                checkpointed = true;
+                checkpoint_index = Some(checkpoint.clone());
             })
         };
-        let Some(scan) = result else { return !self.channel.stopped() };
+        let checkpointed = checkpoint_index.is_some();
+        let Some(scan) = result else {
+            // A folder edit or shutdown cancelled the scan after it showed new
+            // books. Keep that index, which is already saved and published, so
+            // the edit applies to it and the restarted scan continues from it
+            // instead of hiding the books and reading them all again.
+            if let Some(checkpoint) = checkpoint_index {
+                self.index = checkpoint;
+            }
+            return !self.channel.stopped();
+        };
         log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
         errors.extend(scan.errors);
         if checkpointed || self.index != scan.index {
@@ -1164,6 +1174,62 @@ mod folder_tests {
     }
 
     #[test]
+    fn an_edit_cancelling_a_scan_keeps_the_books_it_already_showed() -> Result<()> {
+        use std::sync::OnceLock;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = std::env::temp_dir().join(format!("verso-folder-checkpoint-{}", std::process::id()));
+        let library = root.join("library");
+        std::fs::create_dir_all(&library)?;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        for name in ["a.epub", "b.epub", "c.epub"] {
+            std::fs::copy(&fixture, library.join(name))?;
+        }
+        let empty = files::create_folder(&library, "Empty")?;
+        let store = Store::at(root.join("state"));
+        // The waker consumes every publication. On the first checkpoint (new
+        // books shown with filename titles), it queues a folder edit, which
+        // cancels the scan before any metadata is read.
+        type SharedState = Arc<(Mutex<Shared>, Condvar)>;
+        let cell: Arc<OnceLock<SharedState>> = Arc::default();
+        let edited = Arc::new(AtomicBool::new(false));
+        let seen: Arc<Mutex<Vec<(bool, u64, usize)>>> = Arc::default();
+        let waker = {
+            let (cell, edited, seen, empty) = (cell.clone(), edited.clone(), seen.clone(), empty.clone());
+            Waker::new(move || {
+                let mut state = cell.wait().0.lock().unwrap();
+                state.status = None;
+                if let Some(snapshot) = state.latest.take() {
+                    seen.lock().unwrap().push((snapshot.partial, snapshot.revision, snapshot.index.books.len()));
+                    if snapshot.partial && !edited.swap(true, Ordering::SeqCst) {
+                        state.revision += 1;
+                        let revision = state.revision;
+                        state.changes.push((revision, PathChange::AddEmpty(empty.clone())));
+                    }
+                }
+            })
+        };
+        let worker = Worker::new(store.clone(), vec![library.clone()], waker);
+        cell.set(worker.shared.clone()).ok();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // The edit's own publication is the first complete one at its revision.
+        let first = loop {
+            if let Some(&(_, _, books)) = seen.lock().unwrap().iter().find(|(partial, r, _)| !partial && *r >= 1) {
+                break books;
+            }
+            assert!(Instant::now() < deadline, "the edit was never published");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(edited.load(Ordering::SeqCst));
+        assert_eq!(first, 3, "the cancelled scan's books stay visible");
+        drop(worker);
+        let saved = store.library();
+        assert_eq!(saved.books.len(), 3);
+        assert!(saved.empty_folders.contains(&empty));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn cancelled_fingerprints_are_told_apart_from_unreadable_files() -> Result<()> {
         // The identity pass retries only a cancelled read; a failed one is final.
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
@@ -1218,7 +1284,7 @@ mod folder_tests {
         let (home, home_revision) = worker.take_home().unwrap();
         assert_eq!(home_revision, revision);
         assert_eq!(home.resume().unwrap().book.path, renamed.join("book.epub"));
-        files::delete_folder(&renamed, &snapshot.index, &store)?;
+        assert!(files::delete_folder(&renamed, &snapshot.index, &store).error.is_none());
         let removed_revision = worker.remove_paths(vec![renamed])[0].0;
         while store.library().books.iter().any(|b| b.id == id) {
             assert!(Instant::now() < deadline);
