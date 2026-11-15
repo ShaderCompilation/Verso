@@ -144,6 +144,9 @@ impl Store {
                 // Older desktop defaults included `crates/verso/../..`.
                 // Normalize cached paths too, so a spelling change in the
                 // scan roots cannot be mistaken for a move/replacement.
+                for folder in &mut index.empty_folders {
+                    *folder = normalize(folder);
+                }
                 for book in &mut index.books {
                     book.path = normalize(&book.path);
                     if book.annotation_id.is_empty() {

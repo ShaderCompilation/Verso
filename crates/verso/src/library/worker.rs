@@ -2,7 +2,7 @@
 //! separately: status is small and always delivered, while an index is cloned,
 //! published and saved only after its content actually changed.
 use super::home::Summary;
-use super::{Book, Cover, LibraryIndex, Metadata, Stamp, assign_ids, covers, epub};
+use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
 use crate::store::{Store, book_id};
 use anyhow::Result;
@@ -34,6 +34,7 @@ impl Default for Status {
 pub struct Snapshot {
     pub index: LibraryIndex,
     pub partial: bool,
+    pub revision: u64,
 }
 #[derive(Default)]
 struct Shared {
@@ -45,12 +46,13 @@ struct Shared {
     latest: Option<Snapshot>,
     status: Option<Status>,
     home_requested: bool,
-    latest_home: Option<Summary>,
+    latest_home: Option<(Summary, u64)>,
     /// Book ids whose visible thumbnail failed to load, and those since repaired.
     repairs: Vec<String>,
     repaired: Vec<String>,
     /// Paths of deleted books to drop from the index.
-    removals: Vec<PathBuf>,
+    changes: Vec<(u64, PathChange)>,
+    revision: u64,
     /// A new folder list from Settings, used from the next pass.
     roots: Option<Vec<PathBuf>>,
 }
@@ -85,19 +87,19 @@ impl Channel {
     /// Scan and fingerprint reads block while a book is open; true on shutdown.
     fn yield_point(&self) -> bool {
         let mut state = self.lock();
-        while state.paused && !state.stop {
+        while state.paused && !state.stop && state.changes.is_empty() {
             state = self.wait(state);
         }
-        state.stop
+        state.stop || !state.changes.is_empty()
     }
     /// Cover and identity work also stop for a new scan request.
     /// A deletion also interrupts, and asks for the pass to run again after it.
     fn interrupted(&self) -> bool {
         let mut state = self.lock();
-        while state.paused && !state.stop && !state.requested && state.removals.is_empty() {
+        while state.paused && !state.stop && !state.requested && state.changes.is_empty() {
             state = self.wait(state);
         }
-        if !state.removals.is_empty() {
+        if !state.changes.is_empty() {
             state.requested = true;
         }
         state.stop || state.requested
@@ -113,8 +115,8 @@ impl Channel {
             self.waker.wake();
         }
     }
-    fn home(&self, summary: Summary) {
-        self.lock().latest_home = Some(summary);
+    fn home(&self, summary: Summary, revision: u64) {
+        self.lock().latest_home = Some((summary, revision));
         self.waker.wake();
     }
     fn take_home_request(&self) -> bool {
@@ -145,6 +147,7 @@ struct Background {
     /// keep the title cover instead of looping.
     attempted: HashSet<String>,
     startup: Instant,
+    revision: u64,
 }
 impl Background {
     fn run(mut self) {
@@ -157,7 +160,7 @@ impl Background {
                 while !state.stop
                     && !state.requested
                     && !state.home_requested
-                    && state.removals.is_empty()
+                    && state.changes.is_empty()
                     && (state.paused || state.repairs.is_empty())
                 {
                     state = self.channel.wait(state);
@@ -165,16 +168,20 @@ impl Background {
                 if state.stop {
                     break;
                 }
-                let removals = std::mem::take(&mut state.removals);
+                let changes = std::mem::take(&mut state.changes);
                 if let Some(roots) = state.roots.take() {
                     self.roots = roots;
                 }
                 drop(state);
-                self.remove(&removals);
+                let changed = !changes.is_empty();
+                self.change_paths(&changes);
                 let mut state = self.channel.lock();
                 (
                     std::mem::take(&mut state.retry),
-                    std::mem::take(&mut state.requested),
+                    // A newer edit may have interrupted a pass after its
+                    // requested flag was consumed. Every drained batch needs
+                    // its own completed pass, including the final status.
+                    std::mem::take(&mut state.requested) || changed,
                     std::mem::take(&mut state.home_requested),
                     !state.paused && !state.repairs.is_empty(),
                 )
@@ -198,6 +205,10 @@ impl Background {
                 self.last_errors = errors;
             }
         }
+        // File operations already happened on the UI thread. Persist their
+        // queued index edits even when shutdown interrupted the current pass.
+        let changes = std::mem::take(&mut self.channel.lock().changes);
+        self.change_paths(&changes);
     }
 
     /// One scan, cover and identity pass. Returns false on shutdown.
@@ -212,11 +223,11 @@ impl Background {
                 if let Err(e) = store.save_library(checkpoint) {
                     push_error(&mut errors, format!("Couldn't save library: {e}"));
                 }
-                channel.content(Snapshot { index: checkpoint.clone(), partial: true });
+                channel.content(Snapshot { index: checkpoint.clone(), partial: true, revision: self.revision });
                 checkpointed = true;
             })
         };
-        let Some(scan) = result else { return false };
+        let Some(scan) = result else { return !self.channel.stopped() };
         log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
         errors.extend(scan.errors);
         if checkpointed || self.index != scan.index {
@@ -327,11 +338,11 @@ impl Background {
 
     fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>) -> Next {
         let mut state = self.channel.lock();
-        while state.paused && !state.stop && !state.requested && state.removals.is_empty() {
+        while state.paused && !state.stop && !state.requested && state.changes.is_empty() {
             state = self.channel.wait(state);
         }
         // Removing shifts book indices, so the pass restarts after a deletion.
-        if !state.removals.is_empty() {
+        if !state.changes.is_empty() {
             state.requested = true;
         }
         if state.stop || state.requested {
@@ -344,40 +355,40 @@ impl Background {
         Next::Cover(visible.unwrap_or_else(|| *pending.first().unwrap()))
     }
 
-    /// Drops deleted books from the index, with their cached covers. No tombstone
-    /// is kept: the book's reading state was deleted too.
-    fn remove(&mut self, paths: &[PathBuf]) {
-        if paths.is_empty() {
+    fn change_paths(&mut self, changes: &[(u64, PathChange)]) {
+        if changes.is_empty() {
             return;
         }
-        let before = self.index.books.len();
-        let store = &self.store;
-        self.index.books.retain(|book| {
-            if !paths.contains(&book.path) {
-                return true;
-            }
-            let key = match &book.cover {
-                Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
-                Cover::Pending => covers::key(book),
-            };
-            match std::fs::remove_file(store.cover_path(&key)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    log::warn!("removing cover of {}: {e}", book.path.display())
+        for (revision, change) in changes {
+            if let PathChange::Remove(path) = change {
+                for book in self.index.books.iter().filter(|b| b.path.starts_with(path)) {
+                    if let Err(e) = self.store.remove_book(&book.id) {
+                        log::warn!("removing deleted reading state: {e}");
+                    }
+                    let key = match &book.cover {
+                        Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
+                        Cover::Pending => covers::key(book),
+                    };
+                    if let Err(e) = std::fs::remove_file(self.store.cover_path(&key))
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log::warn!("removing deleted cover: {e}");
+                    }
                 }
-                _ => {}
             }
-            false
-        });
-        log::info!("library: removed {} deleted books", before - self.index.books.len());
-        if self.index.books.len() == before {
-            return;
+            change.apply(&mut self.index);
+            self.revision = *revision;
         }
         self.unsaved = true;
         self.unpublished = true;
         let mut errors = Vec::new();
         self.save(&mut errors, "library");
         errors.iter().for_each(|e| log::warn!("{e}"));
-        self.rebuild_home();
+        // This also runs during shutdown, after cancellation was requested.
+        match self.store.rebuild_home_summary_until(&self.index, &|| false) {
+            Ok(summary) => self.channel.home(summary, self.revision),
+            Err(e) => log::warn!("rebuilding Home after file edits: {e:#}"),
+        }
         self.publish();
     }
     /// Records a displayed content change.
@@ -388,7 +399,7 @@ impl Background {
     }
     fn publish(&mut self) {
         if std::mem::take(&mut self.unpublished) {
-            self.channel.content(Snapshot { index: self.index.clone(), partial: false });
+            self.channel.content(Snapshot { index: self.index.clone(), partial: false, revision: self.revision });
         }
     }
     fn save(&mut self, errors: &mut Vec<String>, what: &str) {
@@ -411,14 +422,14 @@ impl Background {
     fn rebuild_home(&self) {
         let channel = &self.channel;
         match self.store.rebuild_home_summary_until(&self.index, &|| channel.stopped()) {
-            Ok(summary) => channel.home(summary),
+            Ok(summary) => channel.home(summary, self.revision),
             Err(_) if channel.stopped() => {}
             Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
         }
     }
     fn refresh_home_metadata(&self) {
         match self.store.refresh_home_metadata(&self.index) {
-            Ok(Some(summary)) => self.channel.home(summary),
+            Ok(Some(summary)) => self.channel.home(summary, self.revision),
             Ok(None) => self.rebuild_home(),
             Err(error) => log::warn!("refreshing Home metadata: {error:#}"),
         }
@@ -464,6 +475,7 @@ impl Worker {
                     last_errors: Vec::new(),
                     attempted: HashSet::new(),
                     startup,
+                    revision: 0,
                 }
                 .run()
             })
@@ -491,7 +503,7 @@ impl Worker {
         self.shared.0.lock().unwrap().home_requested = true;
         self.shared.1.notify_one();
     }
-    pub fn take_home(&self) -> Option<Summary> {
+    pub fn take_home(&self) -> Option<(Summary, u64)> {
         self.shared.0.lock().unwrap().latest_home.take()
     }
     /// While paused (a book is opening or open), scan, cover and identity work
@@ -500,11 +512,28 @@ impl Worker {
         self.shared.0.lock().unwrap().paused = paused;
         self.shared.1.notify_one();
     }
-    /// Drop a deleted book (by path) from the index and its cover cache, without
-    /// a rescan. Interrupts a running pass, which then starts again.
-    pub fn remove(&self, path: PathBuf) {
-        self.shared.0.lock().unwrap().removals.push(path);
+    pub fn change_paths(&self, changes: Vec<PathChange>) -> Vec<(u64, PathChange)> {
+        let mut state = self.shared.0.lock().unwrap();
+        let mut queued = Vec::new();
+        for change in changes {
+            state.revision += 1;
+            let item = (state.revision, change);
+            state.changes.push(item.clone());
+            queued.push(item);
+        }
+        // Wake/interrupt even a scan paused behind an open book.
+        state.requested = true;
         self.shared.1.notify_one();
+        queued
+    }
+    pub fn move_paths(&self, paths: Vec<(PathBuf, PathBuf)>) -> Vec<(u64, PathChange)> {
+        self.change_paths(paths.into_iter().map(|(from, to)| PathChange::Move(from, to)).collect())
+    }
+    pub fn remove_paths(&self, paths: Vec<PathBuf>) -> Vec<(u64, PathChange)> {
+        self.change_paths(paths.into_iter().map(PathChange::Remove).collect())
+    }
+    pub fn add_empty_folder(&self, path: PathBuf) -> Vec<(u64, PathChange)> {
+        self.change_paths(vec![PathChange::AddEmpty(path)])
     }
     pub fn prioritize(&self, ids: Vec<String>) {
         self.shared.0.lock().unwrap().priority = ids.into_iter().take(32).collect();
@@ -600,6 +629,7 @@ fn enumerate(
     cancelled: &impl Fn() -> bool,
     files: &mut Vec<PathBuf>,
     uncertain: &mut Vec<PathBuf>,
+    empty_folders: &mut Vec<PathBuf>,
     errors: &mut Vec<String>,
 ) {
     if cancelled() {
@@ -613,6 +643,7 @@ fn enumerate(
             return;
         }
     };
+    let mut empty = true;
     for item in read {
         if cancelled() {
             return;
@@ -620,13 +651,21 @@ fn enumerate(
         let item = match item {
             Ok(item) => item,
             Err(e) => {
+                empty = false;
                 uncertain.push(root.to_owned());
                 errors.push(format!("Couldn't enumerate {}: {e}", root.display()));
                 continue;
             }
         };
+        let name = item.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        empty = false;
         match item.file_type() {
-            Ok(kind) if kind.is_dir() => enumerate(&item.path(), cancelled, files, uncertain, errors),
+            Ok(kind) if kind.is_dir() && !name.to_string_lossy().ends_with(".sdr") => {
+                enumerate(&item.path(), cancelled, files, uncertain, empty_folders, errors)
+            }
             Ok(kind)
                 if kind.is_file() && item.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("epub")) =>
             {
@@ -638,6 +677,9 @@ fn enumerate(
                 errors.push(format!("Couldn't inspect {}: {e}", item.path().display()));
             }
         }
+    }
+    if empty {
+        empty_folders.push(root.to_owned());
     }
 }
 
@@ -651,9 +693,10 @@ pub fn scan_roots(
     let started = Instant::now();
     let mut paths = Vec::new();
     let mut uncertain = Vec::new();
+    let mut empty_folders = Vec::new();
     let mut errors = Vec::new();
     for root in roots {
-        enumerate(root, cancelled, &mut paths, &mut uncertain, &mut errors);
+        enumerate(root, cancelled, &mut paths, &mut uncertain, &mut empty_folders, &mut errors);
     }
     paths.sort();
     paths.dedup();
@@ -756,7 +799,16 @@ pub fn scan_roots(
     // A moved entry supersedes its unavailable old path.
     let available_ids: HashSet<_> = books.iter().filter(|b| b.available).map(|b| b.id.clone()).collect();
     books.retain(|b| b.available || !available_ids.contains(&b.id));
-    let mut index = LibraryIndex { books, ..LibraryIndex::default() };
+    empty_folders.extend(
+        previous
+            .empty_folders
+            .iter()
+            .filter(|p| roots.iter().any(|r| p.starts_with(r)) && uncertain.iter().any(|r| p.starts_with(r)))
+            .cloned(),
+    );
+    empty_folders.sort();
+    empty_folders.dedup();
+    let mut index = LibraryIndex { books, empty_folders, ..LibraryIndex::default() };
     // New books appear with filename titles before their metadata is read. An
     // unchanged or edit-only scan has nothing to show early.
     if !dirty.is_empty() {
@@ -970,7 +1022,7 @@ mod tests {
         let record = std::fs::read(root.join("state/books").join(format!("{}.json", book.id)))?;
         let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
         finished(&worker);
-        let migrated = worker.take_home().expect("a missing summary is rebuilt and published");
+        let (migrated, _) = worker.take_home().expect("a missing summary is rebuilt and published");
         assert!(migrated.complete && migrated.resume().is_some_and(|e| e.book.id == book.id));
         assert_eq!(store.home_summary(), Some(migrated));
         assert_eq!(std::fs::read(root.join("state/books").join(format!("{}.json", book.id)))?, record);
@@ -1063,6 +1115,128 @@ mod tests {
             worker.rescan();
         }
         drop(worker); // Does not block on an unconsumed result channel.
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    use crate::library::{collections::Collections, files};
+    #[test]
+    fn empty_rule_nested_hidden_sidecars_and_other_formats() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-empty-rule-{}", std::process::id()));
+        for path in ["nested/Empty", ".hidden/empty", "Book.sdr/empty", "PDF", "Dotfiles"] {
+            std::fs::create_dir_all(root.join(path))?;
+        }
+        std::fs::write(root.join("PDF/book.pdf"), b"pdf")?;
+        std::fs::write(root.join("Dotfiles/.hidden"), b"hidden")?;
+        std::fs::write(root.join(".hidden/book.epub"), b"hidden")?;
+        std::fs::write(root.join("Book.sdr/book.epub"), b"sidecar")?;
+        let scan = scan(&root, &Default::default(), false, &|| false, |_| {}).unwrap();
+        assert!(scan.index.books.is_empty());
+        assert_eq!(scan.index.empty_folders, [root.join("Dotfiles"), root.join("nested/Empty")]);
+        let tree = Collections::from_index(&scan.index, std::slice::from_ref(&root));
+        assert!(tree.folders.contains_key(&root.join("nested")));
+        assert!(!tree.folders.contains_key(&root.join("PDF")));
+        assert!(files::is_empty(&root.join("Dotfiles")));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn queued_mutations_interrupt_a_paused_scan_and_preserve_state_and_home() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-folder-queue-{}", std::process::id()));
+        let old = root.join("library/Old");
+        std::fs::create_dir_all(&old)?;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        std::fs::copy(&fixture, old.join("book.epub"))?;
+        let store = Store::at(root.join("state"));
+        let initial = scan(&root.join("library"), &Default::default(), false, &|| false, |_| {}).unwrap().index;
+        let id = initial.books[0].id.clone();
+        store.save_library(&initial)?;
+        store.save_book(
+            &id,
+            &crate::store::BookState {
+                position: crate::document::Position("anchor".into()),
+                last_opened: 1,
+                progress: 2500,
+                ..Default::default()
+            },
+        )?;
+        let worker = Worker::new(store.clone(), vec![root.join("library")], Waker::new(|| {}));
+        worker.pause(true);
+        // A mutation must wake the paused scan, rather than wait for resume.
+        let renamed = files::rename_folder(&old, "Renamed")?;
+        worker.move_paths(vec![(old.clone(), renamed.clone())]);
+        let empty = files::create_folder(&renamed, "Empty")?;
+        let queued = worker.add_empty_folder(empty.clone());
+        let revision = queued[0].0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut published = None;
+        while published.as_ref().is_none_or(|s: &Snapshot| s.revision < revision) {
+            if let Some(next) = worker.take() {
+                published = Some(next);
+            }
+            assert!(Instant::now() < deadline, "mutations blocked behind a paused scan");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let snapshot = published.unwrap();
+        assert_eq!(snapshot.index.books[0].id, id);
+        assert_eq!(snapshot.index.books[0].path, renamed.join("book.epub"));
+        assert!(snapshot.index.empty_folders.contains(&empty));
+        assert_eq!(store.book(&id).progress, 2500);
+        let (home, home_revision) = worker.take_home().unwrap();
+        assert_eq!(home_revision, revision);
+        assert_eq!(home.resume().unwrap().book.path, renamed.join("book.epub"));
+        files::delete_folder(&renamed, &snapshot.index, &store)?;
+        let removed_revision = worker.remove_paths(vec![renamed])[0].0;
+        while store.library().books.iter().any(|b| b.id == id) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker.pause(false);
+        // Drain through the completed restarted scan, which must keep removal.
+        loop {
+            if let Some(status) = worker.take_status()
+                && !status.working
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let final_snapshot = worker.take().unwrap();
+        assert!(final_snapshot.revision >= removed_revision);
+        assert!(final_snapshot.index.books.is_empty());
+        assert_eq!(final_snapshot.index.empty_folders, [root.join("library")]);
+        // Model a batch arriving after a pass consumed `requested`, then
+        // cancelled at enumeration. The remaining batch must still run a pass
+        // and publish an idle status even though the flag is already false.
+        let late = files::create_folder(&root.join("library"), "Late batch")?;
+        {
+            let mut state = worker.shared.0.lock().unwrap();
+            state.requested = false;
+            state.revision += 1;
+            let revision = state.revision;
+            state.changes.push((revision, PathChange::AddEmpty(late.clone())));
+        }
+        worker.shared.1.notify_one();
+        loop {
+            if let Some(status) = worker.take_status()
+                && !status.working
+                && store.library().empty_folders.contains(&late)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the final batch must complete its restarted scan");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let at_exit = files::create_folder(&root.join("library"), "At exit")?;
+        worker.add_empty_folder(at_exit.clone());
+        drop(worker);
+        assert!(store.library().empty_folders.contains(&at_exit), "shutdown commits queued operations");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

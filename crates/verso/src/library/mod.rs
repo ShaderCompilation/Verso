@@ -3,6 +3,7 @@
 pub mod collections;
 pub mod covers;
 pub mod epub;
+pub mod files;
 pub mod home;
 pub mod search;
 pub mod worker;
@@ -67,14 +68,71 @@ pub struct Book {
 pub struct LibraryIndex {
     pub version: u32,
     pub books: Vec<Book>,
+    #[serde(default)]
+    pub empty_folders: Vec<PathBuf>,
 }
 
 impl LibraryIndex {
     pub const VERSION: u32 = 1;
+
+    pub fn move_path(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        for book in &mut self.books {
+            rewrite_path(&mut book.path, from, to);
+        }
+        for folder in &mut self.empty_folders {
+            rewrite_path(folder, from, to);
+        }
+    }
+    pub fn remove_path(&mut self, path: &std::path::Path) {
+        self.books.retain(|b| !b.path.starts_with(path));
+        self.empty_folders.retain(|p| !p.starts_with(path));
+    }
+    pub fn add_empty_folder(&mut self, path: PathBuf) {
+        // A new child means its parent is no longer literally empty.
+        self.empty_folders.retain(|p| !path.starts_with(p));
+        if !self.empty_folders.contains(&path) {
+            self.empty_folders.push(path);
+            self.empty_folders.sort();
+        }
+    }
 }
 impl Default for LibraryIndex {
     fn default() -> Self {
-        Self { version: Self::VERSION, books: Vec::new() }
+        Self { version: Self::VERSION, books: Vec::new(), empty_folders: Vec::new() }
+    }
+}
+
+pub(crate) fn rewrite_path(path: &mut PathBuf, from: &std::path::Path, to: &std::path::Path) {
+    if let Ok(tail) = path.strip_prefix(from) {
+        *path = to.join(tail);
+    }
+}
+
+/// Ordered edits shared by the worker and the screen's older publications.
+#[derive(Clone, Debug)]
+pub enum PathChange {
+    Move(PathBuf, PathBuf),
+    Remove(PathBuf),
+    AddEmpty(PathBuf),
+}
+impl PathChange {
+    pub fn apply(&self, index: &mut LibraryIndex) {
+        match self {
+            Self::Move(from, to) => index.move_path(from, to),
+            Self::Remove(path) => index.remove_path(path),
+            Self::AddEmpty(path) => index.add_empty_folder(path.clone()),
+        }
+    }
+    pub fn apply_home(&self, home: &mut home::Summary) {
+        match self {
+            Self::Move(from, to) => {
+                for entry in &mut home.books {
+                    rewrite_path(&mut entry.book.path, from, to);
+                }
+            }
+            Self::Remove(path) => home.books.retain(|e| !e.book.path.starts_with(path)),
+            Self::AddEmpty(_) => {}
+        }
     }
 }
 

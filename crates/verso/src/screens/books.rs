@@ -6,9 +6,9 @@ use crate::document::{
 use crate::geom::{Point, Rect};
 use crate::gfx::{Family, HAlign, Icon};
 use crate::library::{
-    self, Book, Cover, LibraryIndex, Sort, Stamp,
+    self, Book, Cover, LibraryIndex, PathChange, Sort,
     collections::{self, Collections, Navigation, Tab},
-    covers,
+    covers, files,
     home::Summary,
     search::{self, Scope, SearchCache},
     worker::{Snapshot, Worker as LibraryWorker},
@@ -64,6 +64,108 @@ struct SearchSession {
     keyboard: Keyboard,
 }
 
+#[derive(Clone, Debug)]
+enum Target {
+    Book(String),
+    Folder(PathBuf),
+}
+
+#[derive(Clone)]
+enum NameOperation {
+    Create(PathBuf),
+    Rename(PathBuf),
+}
+enum NameEvent {
+    Submit,
+    Cancel,
+}
+struct NameSheet {
+    sheet: Sheet,
+    operation: NameOperation,
+    field: TextField,
+    keyboard: Keyboard,
+    submit: Button,
+    cancel: Button,
+    error: String,
+    error_rect: Rect,
+}
+impl NameSheet {
+    fn new(t: &Theme, screen: Rect, operation: NameOperation) -> Self {
+        let (title, label, value) = match &operation {
+            NameOperation::Create(_) => ("New folder", "Create", String::new()),
+            NameOperation::Rename(path) => ("Rename folder", "Rename", collections::name(path)),
+        };
+        let mut keyboard = Keyboard::default();
+        keyboard.set_submit(label);
+        keyboard.visible = true;
+        keyboard.place(screen, t);
+        // Reserve the tallest language keyboard, keeping the editor stationary
+        // while languages change and on the smaller simulator panels.
+        let height = (screen.bottom() - keyboard.rect().y + t.target + t.mm(50.0)).min(screen.h - t.top_bar);
+        let sheet = Sheet::open(title, height, screen, t);
+        let area = sheet.content(t);
+        let mut field = TextField::new("Folder name");
+        field.edit(&TextInput::Insert(value));
+        field.focused = true;
+        let landscape = screen.w > screen.h;
+        let field_w = if landscape { area.w * 3 / 5 - t.mm(3.0) } else { area.w };
+        field.place(Rect::new(area.x, area.y, field_w, t.target));
+        let error_rect =
+            Rect::new(area.x, area.y + t.target + t.mm(1.0), area.w, t.mm(if landscape { 6.0 } else { 7.0 }));
+        let y = error_rect.bottom() + t.mm(1.0);
+        let width = (area.w - t.mm(3.0)) / 2;
+        let mut submit = Button::new(label, ButtonKind::Primary);
+        submit.place(Rect::new(area.right() - width, y, width, t.button_h), t);
+        let mut cancel = Button::new("Cancel", ButtonKind::Secondary);
+        cancel.place(Rect::new(area.x, y, width, t.button_h), t);
+        if landscape {
+            let width = (area.w - field_w - 2 * t.mm(3.0)) / 2;
+            cancel.place(Rect::new(area.x + field_w + t.mm(3.0), area.y, width, t.target), t);
+            submit.place(Rect::new(area.right() - width, area.y, width, t.target), t);
+        }
+        Self { sheet, operation, field, keyboard, submit, cancel, error: String::new(), error_rect }
+    }
+    fn draw(&mut self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        self.field.draw(cx);
+        cx.paragraph(&self.error, cx.theme.caption, self.error_rect, HAlign::Left);
+        self.submit.draw(cx);
+        self.cancel.draw(cx);
+        self.keyboard.draw(cx);
+    }
+    fn edit(&mut self, input: &TextInput) -> Option<NameEvent> {
+        match input {
+            TextInput::Submit => return Some(NameEvent::Submit),
+            TextInput::Dismiss => {
+                self.keyboard.visible = false;
+                self.field.focused = false;
+            }
+            _ if self.field.focused && self.field.edit(input) => self.error.clear(),
+            _ => {}
+        }
+        None
+    }
+    fn on_gesture(&mut self, g: &Gesture, t: &Theme) -> Option<NameEvent> {
+        if self.keyboard.visible && self.keyboard.rect().contains(g.pos()) {
+            if let Some(input) = self.keyboard.on_gesture(g, t) {
+                return self.edit(&input);
+            }
+            return None;
+        }
+        if self.sheet.on_gesture(g) || self.cancel.on_gesture(g) {
+            return Some(NameEvent::Cancel);
+        }
+        if self.submit.on_gesture(g) {
+            return Some(NameEvent::Submit);
+        }
+        if self.field.on_gesture(g) {
+            self.field.focused = true;
+            self.keyboard.visible = true;
+        }
+        None
+    }
+}
+
 pub struct Books {
     screen: Rect,
     worker: Rc<Worker>,
@@ -77,12 +179,14 @@ pub struct Books {
     home_active: bool,
     home: Summary,
     pending_home: Option<Summary>,
+    pending_home_revision: u64,
     books: Vec<Book>,
     collections: Collections,
     folders: Vec<PathBuf>,
     navigation: Navigation,
     tabs: Segmented,
     back: IconButton,
+    new_folder: IconButton,
     path_rect: Rect,
     path_press: Press,
     states: HashMap<String, BookState>,
@@ -101,12 +205,13 @@ pub struct Books {
     continue_press: Press,
     header: Rect,
     status: Rect,
-    menu: Option<(String, PopupMenu)>,
+    menu: Option<(Target, PopupMenu)>,
+    name_sheet: Option<NameSheet>,
     details: Option<Details>,
     confirm: Option<ConfirmDelete>,
-    /// Books deleted this session (path and stamp), hidden from index and Home
-    /// updates the library worker published before it dropped them.
-    deleted: Vec<(PathBuf, Stamp)>,
+    /// Edits after a publication's revision are replayed in order. Acknowledged
+    /// publications are never patched twice, including rename chains and reuse.
+    changes: Vec<(u64, PathChange)>,
     jump: Option<PageJump>,
     touching: bool,
     pending: Option<Snapshot>,
@@ -178,12 +283,14 @@ impl Books {
             home_active: true,
             home,
             pending_home: None,
+            pending_home_revision: 0,
             books: Vec::new(),
             collections: Collections::default(),
             folders: Vec::new(),
             navigation,
             tabs,
             back: IconButton::new(Icon::ArrowLeft),
+            new_folder: IconButton::new(Icon::FolderPlus),
             path_rect: Rect::default(),
             path_press: Press::default(),
             states: HashMap::new(),
@@ -203,9 +310,10 @@ impl Books {
             header: Rect::default(),
             status: Rect::default(),
             menu: None,
+            name_sheet: None,
             details: None,
             confirm: None,
-            deleted: Vec::new(),
+            changes: Vec::new(),
             jump: None,
             touching: false,
             pending: None,
@@ -325,10 +433,11 @@ impl Books {
         };
         self.path_rect = if in_collections {
             self.back.place_at(Point::new(t.margin + t.target / 2, y + t.target / 2), t);
+            self.new_folder.place_at(Point::new(self.screen.right() - t.margin - t.target / 2, y + t.target / 2), t);
             Rect::new(
                 t.margin + t.target + t.mm(2.0),
                 y,
-                self.screen.w - 2 * t.margin - t.target - t.mm(2.0),
+                self.screen.w - 2 * t.margin - 2 * t.target - t.mm(2.0),
                 t.mm(12.0),
             )
         } else {
@@ -515,6 +624,7 @@ impl Books {
             || self.menu.is_some()
             || self.details.is_some()
             || self.confirm.is_some()
+            || self.name_sheet.is_some()
             || self.jump.is_some()
             || self.reader.is_some()
         {
@@ -522,7 +632,11 @@ impl Books {
         }
         if let Some(mut home) = self.pending_home.take()
             && {
-                home.books.retain(|e| !self.was_deleted(&e.book));
+                for (revision, change) in &self.changes {
+                    if *revision > self.pending_home_revision {
+                        change.apply_home(&mut home);
+                    }
+                }
                 self.home != home
             }
         {
@@ -537,7 +651,11 @@ impl Books {
             return;
         }
         if let Some(mut snapshot) = self.pending.take() {
-            snapshot.index.books.retain(|b| !self.was_deleted(b));
+            for (revision, change) in &self.changes {
+                if *revision > snapshot.revision {
+                    change.apply(&mut snapshot.index);
+                }
+            }
             let started = std::time::Instant::now();
             cx.redraw();
             self.index = snapshot.index;
@@ -683,7 +801,7 @@ impl Books {
     }
     fn returned(&mut self, cx: &mut EventCx) {
         self.library.pause(false);
-        self.pending_home = self.store.home_summary();
+        self.reload_home();
         if self.pending_home.as_ref().is_none_or(|summary| !summary.complete) {
             self.library.refresh_home();
         }
@@ -713,7 +831,7 @@ impl Books {
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
         let mut menu = PopupMenu::open(items, anchor, area, t);
         menu.set_enabled(2, !state.finished);
-        self.menu = Some((id, menu));
+        self.menu = Some((Target::Book(id), menu));
         self.continue_press = Press::default();
         self.grid.on_gesture(&Gesture::Cancel(anchor));
     }
@@ -730,7 +848,7 @@ impl Books {
         match self.store.save_book(id, &state) {
             Ok(()) => {
                 self.states.insert(id.to_owned(), state);
-                self.pending_home = self.store.home_summary();
+                self.reload_home();
                 self.library.refresh_home();
                 self.apply_pending(cx);
                 self.refresh(cx.theme);
@@ -739,8 +857,166 @@ impl Books {
             Err(e) => cx.toast(format!("Couldn't save book status: {e}"), None),
         }
     }
-    fn was_deleted(&self, book: &Book) -> bool {
-        self.deleted.iter().any(|(path, stamp)| &book.path == path && &book.stamp == stamp)
+    fn folder_protected(&self, path: &std::path::Path) -> bool {
+        self.roots.iter().any(|r| r.starts_with(path))
+    }
+    fn open_folder_menu(&mut self, path: PathBuf, anchor: Point, t: &Theme) {
+        let items = vec![
+            (Some(Icon::Folder), "Open".into()),
+            (Some(Icon::Info), "Details".into()),
+            (Some(Icon::Search), "Search in this folder".into()),
+            (Some(Icon::FolderPlus), "New folder…".into()),
+            (Some(Icon::Pencil), "Rename…".into()),
+            (Some(Icon::Trash), "Delete…".into()),
+        ];
+        let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
+        let mut menu = PopupMenu::open(items, anchor, area, t);
+        let protected = self.folder_protected(&path);
+        menu.set_enabled(4, !protected);
+        menu.set_enabled(5, !protected);
+        self.menu = Some((Target::Folder(path), menu));
+        self.grid.on_gesture(&Gesture::Cancel(anchor));
+    }
+    fn folder_details(&mut self, path: &std::path::Path, t: &Theme) {
+        let count = self.collections.folders.get(path).map_or(0, |f| f.count);
+        self.details = Some(Details::from_text(
+            t,
+            self.screen,
+            "Folder details",
+            format!(
+                "{}\n\n{}, including subfolders\n\n{}",
+                collections::name(path),
+                counted(count, "book"),
+                path.display()
+            ),
+        ));
+    }
+    fn start_name(&mut self, operation: NameOperation, t: &Theme) {
+        self.name_sheet = Some(NameSheet::new(t, self.screen, operation));
+    }
+    fn submit_name(&mut self, cx: &mut EventCx) {
+        let Some(sheet) = &self.name_sheet else { return };
+        let operation = sheet.operation.clone();
+        let name = sheet.field.value().to_owned();
+        let result = match &operation {
+            NameOperation::Create(parent) => files::create_folder(parent, &name),
+            NameOperation::Rename(path) => {
+                if self.folder_protected(path) {
+                    return;
+                }
+                files::rename_folder(path, &name)
+            }
+        };
+        match result {
+            Ok(path) => {
+                let (changes, message) = match operation {
+                    NameOperation::Create(_) => (self.library.add_empty_folder(path), "Folder created"),
+                    NameOperation::Rename(from) => (self.library.move_paths(vec![(from, path)]), "Folder renamed"),
+                };
+                self.name_sheet = None;
+                self.apply_changes(changes, cx);
+                cx.toast(message, None);
+            }
+            Err(e) => {
+                let sheet = self.name_sheet.as_mut().unwrap();
+                sheet.error = format!("{e:#}");
+                sheet.field.focused = true;
+                sheet.keyboard.visible = true;
+                cx.redraw();
+            }
+        }
+    }
+    fn apply_changes(&mut self, changes: Vec<(u64, PathChange)>, cx: &mut EventCx) {
+        self.prepare_browsing();
+        for (_, change) in &changes {
+            change.apply(&mut self.index);
+            change.apply_home(&mut self.home);
+            if let PathChange::Move(from, to) = change {
+                self.navigation.move_path(from, to);
+            }
+        }
+        self.changes.extend(changes);
+        self.collections = Collections::from_index(&self.index, &self.roots);
+        self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
+        self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
+        if let Some(search) = &mut self.search {
+            search.cache.sync(&self.index);
+        }
+        self.refresh(cx.theme);
+        self.save_navigation(cx);
+        cx.refresh(self.screen, RefreshMode::Full);
+    }
+    fn ask_delete_folder(&mut self, path: PathBuf, cx: &mut EventCx) {
+        if self.folder_protected(&path) {
+            return;
+        }
+        match files::count_contents(&path) {
+            Ok(contents) => {
+                let mut counts = counted(contents.books, "book");
+                if contents.books > 0 {
+                    counts.push_str(if contents.books == 1 {
+                        " and its reading progress"
+                    } else {
+                        " and their reading progress"
+                    });
+                }
+                if contents.other_files > 0 {
+                    counts.push_str(&format!(", {}", counted(contents.other_files, "other file")));
+                }
+                let message = format!(
+                    "“{}” and everything in it will be removed from this device: {counts}.",
+                    collections::name(&path)
+                );
+                self.confirm =
+                    Some(ConfirmDelete::new(cx.theme, self.screen, Target::Folder(path), "Delete folder?", message));
+            }
+            Err(e) => cx.toast(format!("{e:#}"), None),
+        }
+    }
+    fn delete_target(&mut self, target: Target, cx: &mut EventCx) {
+        match target {
+            Target::Book(id) => self.delete(&id, cx),
+            Target::Folder(path) => {
+                if self.folder_protected(&path) {
+                    return;
+                }
+                match files::delete_folder(&path, &self.index, &self.store) {
+                    Ok(ids) => {
+                        for id in ids {
+                            self.states.remove(&id);
+                        }
+                        let mut changes = self.library.remove_paths(vec![path.clone()]);
+                        if let Some(parent) = path.parent().filter(|p| files::is_empty(p)) {
+                            changes.extend(self.library.add_empty_folder(parent.to_owned()));
+                        }
+                        self.apply_changes(changes, cx);
+                        cx.toast(format!("Deleted “{}”", collections::name(&path)), None);
+                    }
+                    Err(e) => {
+                        // remove_dir_all can partially succeed: reconcile the view.
+                        self.library.rescan();
+                        cx.toast(format!("{e:#}"), None);
+                    }
+                }
+            }
+        }
+    }
+    /// Reload status changes from Store without accepting older cached paths.
+    fn reload_home(&mut self) {
+        self.pending_home = self.store.home_summary().map(|mut summary| {
+            if self.browsing_ready {
+                summary.books.retain_mut(|e| {
+                    if let Some(book) = self.index.books.iter().find(|b| b.id == e.book.id && b.available) {
+                        e.book.path = book.path.clone();
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            summary
+        });
+        self.pending_home_revision = self.changes.last().map_or(0, |(r, _)| *r);
     }
     /// Deletes the book file and its reading state. The library worker drops it
     /// from the index and removes its cached cover; this view updates at once.
@@ -757,21 +1033,13 @@ impl Books {
         if let Err(e) = self.store.remove_book(&book.id) {
             log::warn!("removing reading state of {}: {e}", book.path.display());
         }
-        self.library.remove(book.path.clone());
-        self.deleted.push((book.path.clone(), book.stamp.clone()));
+        let mut changes = self.library.remove_paths(vec![book.path.clone()]);
+        if let Some(parent) = book.path.parent().filter(|p| files::is_empty(p)) {
+            changes.extend(self.library.add_empty_folder(parent.to_owned()));
+        }
         self.states.remove(&book.id);
         self.home.books.retain(|e| e.book.id != book.id);
-        if self.browsing_ready {
-            self.index.books.retain(|b| b.path != book.path);
-            self.collections = Collections::from_index(&self.index, &self.roots);
-            self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
-            if let Some(search) = &mut self.search {
-                search.cache.sync(&self.index);
-            }
-        }
-        self.refresh(cx.theme);
-        self.save_navigation(cx);
-        cx.refresh(self.screen, RefreshMode::Full);
+        self.apply_changes(changes, cx);
         cx.toast(format!("Deleted “{}”", book.metadata.title), None);
     }
 }
@@ -886,6 +1154,7 @@ impl Screen for Books {
         if !self.is_home() && self.search.is_none() && self.navigation.tab == Tab::Collections {
             if self.navigation.folder.is_some() {
                 self.back.draw(cx);
+                self.new_folder.draw(cx);
             }
             let title =
                 self.navigation.folder.as_deref().map(collections::name).unwrap_or_else(|| "Library folders".into());
@@ -962,7 +1231,7 @@ impl Screen for Books {
                 let outline = Rect::new(r.x + t.mm(1.0), r.y + r.h / 4, r.w - t.mm(2.0), r.h / 2);
                 cx.icons.draw(cx.canvas, Icon::Folder, outline, INK);
                 cx.line(
-                    &counted(folder.count, "book"),
+                    &if folder.count == 0 { "Empty".into() } else { counted(folder.count, "book") },
                     t.body.gray(INK2),
                     Rect::new(r.x, outline.bottom() + t.mm(1.0), r.w, t.mm(5.0)),
                     HAlign::Center,
@@ -1024,6 +1293,8 @@ impl Screen for Books {
                 } else {
                     "No matching books. Try another title, author or filename.".into()
                 }
+            } else if self.navigation.tab == Tab::Collections && self.navigation.folder.is_some() {
+                "This folder is empty".into()
             } else if self.scanning {
                 format!(
                     "Finding books in {}…",
@@ -1071,6 +1342,9 @@ impl Screen for Books {
         if let Some(confirm) = &self.confirm {
             confirm.draw(cx);
         }
+        if let Some(sheet) = &mut self.name_sheet {
+            sheet.draw(cx);
+        }
         if !self.thumbnails.requests.is_empty() {
             self.library.repair(std::mem::take(&mut self.thumbnails.requests));
         }
@@ -1091,38 +1365,69 @@ impl Screen for Books {
         // Library controls own their press/capture state, including gestures
         // that return no action. Reader gestures invalidate independently.
         cx.redraw();
-        if let Some(confirm) = &mut self.confirm {
+        if let Some(sheet) = &mut self.name_sheet {
+            match sheet.on_gesture(&g, cx.theme) {
+                Some(NameEvent::Cancel) => self.name_sheet = None,
+                Some(NameEvent::Submit) => self.submit_name(cx),
+                None => {}
+            }
+        } else if let Some(confirm) = &mut self.confirm {
             if let Some(delete) = confirm.on_gesture(&g) {
-                let id = self.confirm.take().map(|c| c.id).unwrap_or_default();
+                let target = self.confirm.take().unwrap().target;
                 if delete {
-                    self.delete(&id, cx);
+                    self.delete_target(target, cx);
                 }
             }
         } else if let Some(details) = &mut self.details {
             if details.on_gesture(&g, cx) {
                 self.details = None;
             }
-        } else if let Some((id, menu)) = &mut self.menu {
+        } else if let Some((target, menu)) = &mut self.menu {
             let event = menu.on_gesture(&g, cx.theme);
             let delete_index = menu.items.len() - 1;
-            let id = id.clone();
+            let target = target.clone();
             if let Some(event) = event {
                 self.menu = None;
-                match event {
-                    MenuEvent::Chosen(0) => self.open(id, cx),
-                    MenuEvent::Chosen(1) => {
-                        if let Some(book) = self.book(&id) {
-                            self.details = Some(Details::new(cx.theme, self.screen, book, &self.store.book(&id)));
+                match (target, event) {
+                    (Target::Book(id), event) => match event {
+                        MenuEvent::Chosen(0) => self.open(id, cx),
+                        MenuEvent::Chosen(1) => {
+                            if let Some(book) = self.book(&id) {
+                                self.details = Some(Details::new(cx.theme, self.screen, book, &self.store.book(&id)));
+                            }
                         }
-                    }
-                    MenuEvent::Chosen(2) => self.mark(&id, true, cx),
-                    MenuEvent::Chosen(index) if index == delete_index => {
-                        if let Some(book) = self.book(&id) {
-                            self.confirm = Some(ConfirmDelete::new(cx.theme, self.screen, id.clone(), book));
+                        MenuEvent::Chosen(2) => self.mark(&id, true, cx),
+                        MenuEvent::Chosen(index) if index == delete_index => {
+                            if let Some(book) = self.book(&id) {
+                                let title: String = book.metadata.title.chars().take(160).collect();
+                                let message =
+                                    format!("“{title}” and its reading progress will be removed from this device.");
+                                self.confirm = Some(ConfirmDelete::new(
+                                    cx.theme,
+                                    self.screen,
+                                    Target::Book(id),
+                                    "Delete book?",
+                                    message,
+                                ));
+                            }
                         }
-                    }
-                    MenuEvent::Chosen(3) => self.mark(&id, false, cx),
-                    _ => {}
+                        MenuEvent::Chosen(3) => self.mark(&id, false, cx),
+                        _ => {}
+                    },
+                    (Target::Folder(path), event) => match event {
+                        MenuEvent::Chosen(0) => self.navigate(Some(path), cx),
+                        MenuEvent::Chosen(1) => self.folder_details(&path, cx.theme),
+                        MenuEvent::Chosen(2) => {
+                            self.navigate(Some(path.clone()), cx);
+                            self.toggle_search(cx);
+                            self.search.as_mut().unwrap().scope = Scope::Collection(path);
+                            self.refresh(cx.theme);
+                        }
+                        MenuEvent::Chosen(3) => self.start_name(NameOperation::Create(path), cx.theme),
+                        MenuEvent::Chosen(4) => self.start_name(NameOperation::Rename(path), cx.theme),
+                        MenuEvent::Chosen(5) => self.ask_delete_folder(path, cx),
+                        _ => {}
+                    },
                 }
             }
         } else if let Some(jump) = &mut self.jump {
@@ -1209,6 +1514,12 @@ impl Screen for Books {
                 return Action::None;
             }
             if !self.is_home() && self.search.is_none() && self.navigation.tab == Tab::Collections {
+                if let Some(path) = self.navigation.folder.clone()
+                    && self.new_folder.on_gesture(&g)
+                {
+                    self.start_name(NameOperation::Create(path), cx.theme);
+                    return Action::None;
+                }
                 if self.navigation.folder.is_some() && self.back.on_gesture(&g) {
                     let parent = self
                         .navigation
@@ -1267,18 +1578,7 @@ impl Screen for Books {
                 };
                 if let Some(path) = self.folders.get(i).cloned() {
                     if long {
-                        let count = self.collections.folders[&path].count;
-                        self.details = Some(Details::from_text(
-                            cx.theme,
-                            self.screen,
-                            "Collection",
-                            format!(
-                                "{}\n\n{count} books, including subfolders\n\n{}",
-                                collections::name(&path),
-                                path.display()
-                            ),
-                        ));
-                        self.grid.on_gesture(&Gesture::Cancel(g.pos()));
+                        self.open_folder_menu(path, g.pos(), cx.theme);
                     } else {
                         self.navigate(Some(path), cx);
                     }
@@ -1311,6 +1611,17 @@ impl Screen for Books {
         if let Some(reader) = &mut self.reader {
             return reader.on_text_input(input, cx);
         }
+        if let Some(sheet) = &mut self.name_sheet {
+            let event = sheet.edit(input);
+            if matches!(event, Some(NameEvent::Submit)) {
+                self.submit_name(cx);
+            }
+            cx.redraw();
+            return true;
+        }
+        if self.confirm.is_some() {
+            return true;
+        }
         if self.search.is_none() {
             return false;
         }
@@ -1342,8 +1653,13 @@ impl Screen for Books {
     }
     fn on_background(&mut self, cx: &mut EventCx) {
         self.apply_folder_changes(cx);
-        if let Some(home) = self.library.take_home() {
-            self.pending_home = Some(self.store.home_summary().unwrap_or(home));
+        if let Some((mut home, revision)) = self.library.take_home() {
+            // Reading records can change after the worker assembled this summary.
+            for entry in &mut home.books {
+                entry.status = (&self.store.book(&entry.book.id)).into();
+            }
+            self.pending_home = Some(home);
+            self.pending_home_revision = revision;
         }
         let repaired = self.library.take_repaired();
         if !repaired.is_empty() {
@@ -1519,7 +1835,7 @@ impl Details {
 
 /// "Delete book?" with Cancel and Delete. Nothing is removed until Delete.
 struct ConfirmDelete {
-    id: String,
+    target: Target,
     sheet: Sheet,
     message: String,
     text: Rect,
@@ -1527,8 +1843,8 @@ struct ConfirmDelete {
     delete: Button,
 }
 impl ConfirmDelete {
-    fn new(t: &Theme, screen: Rect, id: String, book: &Book) -> Self {
-        let sheet = Sheet::open("Delete book?", t.mm(52.0), screen, t);
+    fn new(t: &Theme, screen: Rect, target: Target, title: &str, message: String) -> Self {
+        let sheet = Sheet::open(title, t.mm(62.0).min(screen.h - t.top_bar), screen, t);
         let c = sheet.content(t);
         let buttons_y = c.bottom() - t.margin - t.button_h;
         let text = Rect { h: buttons_y - c.y - t.mm(3.0), ..c };
@@ -1537,9 +1853,7 @@ impl ConfirmDelete {
         cancel.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
         let mut delete = Button::new("Delete", ButtonKind::Primary).with_icon(Icon::Trash);
         delete.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
-        let title: String = book.metadata.title.chars().take(160).collect();
-        let message = format!("“{title}” and its reading progress will be removed from this device.");
-        Self { id, sheet, message, text, cancel, delete }
+        Self { target, sheet, message, text, cancel, delete }
     }
     fn draw(&self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
@@ -2367,6 +2681,140 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[test]
+    fn name_editor_and_folder_menu_fit_both_orientations_and_keyboards() {
+        for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167), (800, 600, 167)] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut sheet = NameSheet::new(&t, screen, NameOperation::Create("/books".into()));
+            for _ in 0..3 {
+                // The language key is at the left of the last row.
+                let p = Point::new(t.margin + t.target / 2, screen.bottom() - t.target / 3);
+                sheet.keyboard.on_gesture(&Gesture::Down(p), &t);
+                sheet.keyboard.on_gesture(&Gesture::Tap(p), &t);
+                assert!(
+                    sheet.submit.rect().bottom() <= sheet.keyboard.rect().y,
+                    "{w}x{h}: buttons {} keyboard {}",
+                    sheet.submit.rect().bottom(),
+                    sheet.keyboard.rect().y
+                );
+                assert!(sheet.cancel.rect().bottom() <= sheet.keyboard.rect().y);
+                assert!(sheet.error_rect.bottom() <= sheet.keyboard.rect().y);
+            }
+            let area = Rect { y: t.top_bar, h: screen.h - t.top_bar, ..screen };
+            let menu = PopupMenu::open(vec![(None, "Action".into()); 6], screen.center(), area, &t);
+            assert!(menu.rect().y >= area.y && menu.rect().bottom() <= screen.bottom() - t.margin);
+        }
+    }
+
+    #[test]
+    fn folder_name_errors_root_menu_and_stale_publications() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("folder-actions")?;
+        let library = root.join("library");
+        std::fs::create_dir_all(&library)?;
+        let mut settings = store.settings();
+        settings.library_folders = Some(vec![library.clone()]);
+        store.save_settings(&settings)?;
+        store.save_library(&LibraryIndex { empty_folders: vec![library.clone()], ..Default::default() })?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::Collections;
+            books.navigate(Some(library.clone()), cx);
+            books.open_folder_menu(library.clone(), Point::new(200, 600), &t);
+            let rect = books.menu.as_ref().unwrap().1.rect();
+            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 4 * t.row + t.row / 2);
+            tap(&mut books, rename, cx);
+            assert!(books.menu.is_some() && books.name_sheet.is_none(), "root rename is disabled");
+            let delete = Point::new(rename.x, rename.y + t.row);
+            tap(&mut books, delete, cx);
+            assert!(books.menu.is_some() && books.confirm.is_none(), "root delete is disabled");
+            books.menu = None;
+            let create = books.new_folder.rect().center();
+            tap(&mut books, create, cx);
+            assert!(books.name_sheet.is_some());
+            books.on_text_input(&TextInput::Insert(".hidden".into()), cx);
+            books.on_text_input(&TextInput::Submit, cx);
+            assert!(!books.name_sheet.as_ref().unwrap().error.is_empty());
+            books.on_text_input(&TextInput::Clear, cx);
+            books.on_text_input(&TextInput::Insert("Old".into()), cx);
+            books.on_text_input(&TextInput::Submit, cx);
+            assert!(books.name_sheet.is_none());
+            let old = library.join("Old");
+            assert!(books.folders.contains(&old));
+            let before = books.index.clone();
+            books.navigate(Some(old.clone()), cx);
+            books.start_name(NameOperation::Rename(old.clone()), &t);
+            books.on_text_input(&TextInput::Clear, cx);
+            books.on_text_input(&TextInput::Insert("New".into()), cx);
+            books.on_text_input(&TextInput::Submit, cx);
+            let new = library.join("New");
+            assert!(new.exists() && !old.exists());
+            assert_eq!(books.navigation.folder, Some(new.clone()));
+            books.pending = Some(Snapshot { index: before, ..Default::default() });
+            books.apply_pending(cx);
+            assert!(books.index.empty_folders.contains(&new));
+            assert!(!books.index.empty_folders.contains(&old));
+            let revision = books.changes.last().unwrap().0;
+            let acknowledged = books.index.clone();
+            books.pending = Some(Snapshot { index: acknowledged, revision, ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.navigation.folder, Some(new.clone()));
+            // Reuse Old after rename. An acknowledged snapshot must keep it.
+            books.start_name(NameOperation::Create(library.clone()), &t);
+            books.on_text_input(&TextInput::Insert("Old".into()), cx);
+            books.on_text_input(&TextInput::Submit, cx);
+            let revision = books.changes.last().unwrap().0;
+            books.pending = Some(Snapshot { index: books.index.clone(), revision, ..Default::default() });
+            books.apply_pending(cx);
+            assert!(books.index.empty_folders.contains(&old));
+            books.ask_delete_folder(new.clone(), cx);
+            let cancel = books.confirm.as_ref().unwrap().cancel.rect().center();
+            tap(&mut books, cancel, cx);
+            assert!(new.exists());
+            books.ask_delete_folder(new.clone(), cx);
+            let delete = books.confirm.as_ref().unwrap().delete.rect().center();
+            tap(&mut books, delete, cx);
+            assert!(!new.exists());
+            assert_eq!(books.navigation.folder, Some(library.clone()));
+            assert!(books.folders.contains(&old));
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_the_last_book_keeps_its_empty_folder() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("last-book")?;
+        let folder = root.join("Only");
+        std::fs::create_dir_all(&folder)?;
+        let path = folder.join("book.epub");
+        std::fs::write(&path, b"book")?;
+        let mut b = book(0);
+        b.path = path;
+        store.save_library(&LibraryIndex { books: vec![b], ..Default::default() })?;
+        let mut settings = store.settings();
+        settings.library_folders = Some(vec![root.clone()]);
+        store.save_settings(&settings)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::Collections;
+            books.navigate(Some(folder.clone()), cx);
+            books.delete("0", cx);
+            assert_eq!(books.navigation.folder, Some(folder.clone()));
+            assert_eq!(books.collections.folders[&folder].count, 0);
+            assert!(books.index.empty_folders.contains(&folder));
+            assert!(books.books.is_empty());
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn details_paginate_long_unicode_paths_without_losing_text() {
         let theme = Theme::for_dpi(167);

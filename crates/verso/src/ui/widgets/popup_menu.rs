@@ -17,6 +17,7 @@ pub enum MenuEvent {
 pub struct PopupMenu {
     pub items: Vec<(Option<Icon>, String)>,
     rect: Rect,
+    row_h: i32,
     pressed: Option<usize>,
     press: Press,
     /// A touch started outside the card.
@@ -32,7 +33,8 @@ impl PopupMenu {
         let m = theme.margin;
         let gap = theme.mm(2.0);
         let w = theme.mm(70.0).min(screen.w - 2 * m);
-        let h = theme.row * items.len() as i32 + 2 * theme.mm(1.0);
+        let row_h = theme.row.min((screen.h - 2 * m - 2 * theme.mm(1.0)) / items.len().max(1) as i32);
+        let h = row_h * items.len() as i32 + 2 * theme.mm(1.0);
         let centered = (anchor.x - w / 2).clamp(screen.x + m, screen.right() - m - w);
         let (below, above) = (anchor.y + gap, anchor.y - gap - h);
         let (x, y) = if below + h <= screen.bottom() - m {
@@ -46,7 +48,15 @@ impl PopupMenu {
             (x.clamp(screen.x + m, screen.right() - m - w), y)
         };
         let enabled = vec![true; items.len()];
-        Self { items, rect: Rect::new(x, y, w, h), pressed: None, press: Press::default(), outside: false, enabled }
+        Self {
+            items,
+            rect: Rect::new(x, y, w, h),
+            row_h,
+            pressed: None,
+            press: Press::default(),
+            outside: false,
+            enabled,
+        }
     }
 
     pub fn set_enabled(&mut self, item: usize, enabled: bool) {
@@ -68,7 +78,7 @@ impl PopupMenu {
         let top = self.rect.y + theme.mm(1.0);
         (0..self.items.len() as i32)
             .map(|k| {
-                Rect::new(self.rect.x + theme.border, top + k * theme.row, self.rect.w - 2 * theme.border, theme.row)
+                Rect::new(self.rect.x + theme.border, top + k * self.row_h, self.rect.w - 2 * theme.border, self.row_h)
             })
             .collect()
     }

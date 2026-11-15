@@ -25,6 +25,19 @@ pub struct Navigation {
     pub folder_pages: BTreeMap<PathBuf, usize>,
 }
 impl Navigation {
+    pub fn move_path(&mut self, from: &Path, to: &Path) {
+        if let Some(folder) = &mut self.folder {
+            super::rewrite_path(folder, from, to);
+        }
+        self.folder_pages = std::mem::take(&mut self.folder_pages)
+            .into_iter()
+            .map(|(mut path, page)| {
+                super::rewrite_path(&mut path, from, to);
+                (path, page)
+            })
+            .collect();
+    }
+
     pub fn sort(&self, fallback: Sort) -> Sort {
         match self.tab {
             Tab::AllBooks => self.all_sort,
@@ -98,6 +111,28 @@ impl Collections {
                     break;
                 }
                 let parent = folder.parent().expect("folder is beneath its absolute root");
+                node.parent = Some(parent.to_owned());
+                result.folders.entry(parent.to_owned()).or_default().children.insert(folder.to_owned());
+                folder = parent;
+            }
+        }
+        for path in &index.empty_folders {
+            let path = normalize(path);
+            let Some(root) = roots.iter().find(|r| path.starts_with(r)) else { continue };
+            if path.strip_prefix(root).unwrap().components().any(|part| {
+                let name = part.as_os_str().to_string_lossy();
+                name.starts_with('.') || name.ends_with(".sdr")
+            }) {
+                continue;
+            }
+            let mut folder = path.as_path();
+            loop {
+                let node = result.folders.entry(folder.to_owned()).or_default();
+                if folder == root {
+                    result.roots.insert(root.clone());
+                    break;
+                }
+                let parent = folder.parent().expect("folder beneath root");
                 node.parent = Some(parent.to_owned());
                 result.folders.entry(parent.to_owned()).or_default().children.insert(folder.to_owned());
                 folder = parent;
@@ -199,5 +234,43 @@ mod tests {
         let moved = Collections::from_index(&index, &roots);
         assert_eq!(moved.folders[Path::new("/b")].count, 2);
         assert!(!moved.folders.contains_key(Path::new("/a/Fiction")));
+    }
+}
+
+#[cfg(test)]
+mod folder_action_tests {
+    use super::*;
+    use crate::library::selection_tests::book;
+    #[test]
+    fn empty_ancestors_and_component_rewrites_keep_identities_and_pages() {
+        let mut b = book(42);
+        b.path = "/books/Tolkien/a.epub".into();
+        let mut index = LibraryIndex {
+            books: vec![b],
+            empty_folders: vec!["/books/Tolkien/nested/empty".into(), "/books/PDF".into()],
+            ..Default::default()
+        };
+        let tree = Collections::from_index(&index, &["/books".into()]);
+        assert_eq!(tree.folders[Path::new("/books/Tolkien/nested")].count, 0);
+        assert_eq!(tree.folders[Path::new("/books")].count, 1);
+        let mut nav = Navigation {
+            folder: Some("/books/Tolkien/nested".into()),
+            folder_pages: BTreeMap::from([("/books/Tolkien/nested".into(), 3), ("/books/Tolkien2".into(), 2)]),
+            ..Default::default()
+        };
+        index.move_path(Path::new("/books/Tolkien"), Path::new("/books/Renamed"));
+        nav.move_path(Path::new("/books/Tolkien"), Path::new("/books/Renamed"));
+        assert_eq!(index.books[0].id, "42");
+        assert_eq!(index.books[0].path, Path::new("/books/Renamed/a.epub"));
+        assert_eq!(nav.folder, Some("/books/Renamed/nested".into()));
+        assert_eq!(nav.folder_pages[Path::new("/books/Renamed/nested")], 3);
+        assert_eq!(nav.folder_pages[Path::new("/books/Tolkien2")], 2);
+        index.remove_path(Path::new("/books/Renamed"));
+        assert!(index.books.is_empty());
+        assert_eq!(index.empty_folders, [PathBuf::from("/books/PDF")]);
+        assert_eq!(
+            serde_json::from_str::<LibraryIndex>(r#"{"version":1,"books":[]}"#).unwrap(),
+            LibraryIndex::default()
+        );
     }
 }
