@@ -50,9 +50,10 @@ impl Books {
         if self.is_home() {
             return Vec::new();
         }
+        // Folders holding a library folder can be neither deleted nor moved.
         self.folders
             .iter()
-            .filter(|p| !self.roots.contains(p))
+            .filter(|p| !self.folder_protected(p))
             .cloned()
             .map(Target::Folder)
             .chain(self.books.iter().map(|b| Target::Book(b.id.clone())))
@@ -90,7 +91,7 @@ impl Books {
             .cloned()
             .map(Target::Folder)
             .or_else(|| self.grid_book(index).map(|b| Target::Book(b.id.clone())));
-        if let Some(target) = target.filter(|item| !matches!(item, Target::Folder(p) if self.roots.contains(p)))
+        if let Some(target) = target.filter(|item| !matches!(item, Target::Folder(p) if self.folder_protected(p)))
             && let Some(selection) = &mut self.selection
             && !selection.items.remove(&target)
         {
@@ -99,18 +100,20 @@ impl Books {
     }
     pub(super) fn draw_tick(&self, cx: &mut DrawCx, target: Target, cell: Rect) {
         let Some(selection) = &self.selection else { return };
-        if matches!(&target, Target::Folder(p) if self.roots.contains(p)) {
+        if matches!(&target, Target::Folder(p) if self.folder_protected(p)) {
             return;
         }
         let t = cx.theme;
         let size = t.mm(6.0);
         let r = Rect::new(cell.right() - size, cell.y, size, size);
-        cx.fill(r.inset(-t.mm(0.7)), PAPER);
+        let area = r.inset(-t.mm(0.7));
+        cx.fill(area, PAPER);
         cx.canvas.stroke_rounded_rect(r, t.mm(0.7) as f32, t.border as f32, INK);
         if selection.items.contains(&target) {
             cx.icon(Icon::Check, r, size - t.mm(1.0), INK);
         }
-        cx.hint(cell, RefreshMode::Fast);
+        // Only the box: a cover that loads meanwhile keeps its grayscale refresh.
+        cx.hint(area, RefreshMode::Fast);
     }
     pub(super) fn selection_controls(&mut self, g: &Gesture, cx: &mut EventCx) -> bool {
         let Some(selection) = &mut self.selection else { return false };
@@ -152,27 +155,10 @@ impl Books {
         if targets.is_empty() {
             return;
         }
-        if targets.iter().any(|t| matches!(t, Target::Folder(p) if self.folder_protected(p))) {
-            cx.toast("A selected folder contains a library folder and cannot be deleted", None);
-            return;
-        }
+        let has_folders = targets.iter().any(|t| matches!(t, Target::Folder(_)));
         match files::selection_contents(&self.delete_items(&targets)) {
             Ok(contents) => {
-                let mut parts = Vec::new();
-                if contents.books > 0 {
-                    parts.push(counted(contents.books, "book"));
-                }
-                if contents.folders > 0 {
-                    parts.push(counted(contents.folders, "folder"));
-                }
-                if contents.other_files > 0 {
-                    parts.push(counted(contents.other_files, "other file"));
-                }
-                let progress = if contents.books > 0 { ", including the books’ reading progress" } else { "" };
-                let message = format!(
-                    "{} will be removed from this device{progress}. Folders and everything in them will be deleted.",
-                    parts.join(", ")
-                );
+                let message = selection_delete_message(&contents, has_folders);
                 self.confirm = Some(ConfirmDelete::new(
                     cx.theme,
                     self.screen,
@@ -185,11 +171,20 @@ impl Books {
         }
     }
     pub(super) fn delete_selection(&mut self, targets: Vec<Target>, cx: &mut EventCx) {
+        // Selection already excludes these; roots can't change during a confirmation.
         if targets.iter().any(|t| matches!(t, Target::Folder(p) if self.folder_protected(p))) {
             return;
         }
+        let started = std::time::Instant::now();
         let items = self.delete_items(&targets);
         let result = files::delete_selection(&items, &self.index, &self.store);
+        log::info!(
+            "selection delete: {} items, {} failed, {} sidecar errors in {:?}",
+            items.len(),
+            result.errors.len(),
+            result.sidecar_errors.len(),
+            started.elapsed()
+        );
         self.selection = None;
         for id in &result.removed_books {
             self.states.remove(id);
@@ -201,13 +196,49 @@ impl Books {
         } else {
             cx.refresh(self.screen, RefreshMode::Full);
         }
+        let sidecars = result.sidecar_errors.len();
         if result.errors.is_empty() {
-            cx.toast(format!("Deleted {}", counted(result.deleted, "item")), None);
+            cx.toast(
+                match sidecars {
+                    0 => format!("Deleted {}", counted(result.deleted, "item")),
+                    n => format!(
+                        "Deleted {}, but couldn't remove KOReader data for {}",
+                        counted(result.deleted, "item"),
+                        counted(n, "book")
+                    ),
+                },
+                None,
+            );
         } else {
             // Rescan also settles empty subfolders left by partial remove_dir_all.
             self.library.rescan();
-            let report = format!("Deleted {} of {}:\n\n{}", result.deleted, items.len(), result.errors.join("\n\n"));
+            let mut report =
+                format!("Deleted {} of {}:\n\n{}", result.deleted, items.len(), result.errors.join("\n\n"));
+            if sidecars > 0 {
+                report.push_str("\n\nDeleted, but their KOReader data stayed behind:\n\n");
+                report.push_str(&result.sidecar_errors.join("\n\n"));
+            }
             self.details = Some(Details::from_text(cx.theme, self.screen, "Deletion incomplete", report));
         }
+    }
+}
+
+/// Names what a selection delete removes, counting what is inside its folders.
+pub(super) fn selection_delete_message(contents: &files::Contents, has_folders: bool) -> String {
+    let mut parts = Vec::new();
+    if contents.books > 0 {
+        let progress = if contents.books == 1 { "its" } else { "their" };
+        parts.push(format!("{} and {progress} reading progress", counted(contents.books, "book")));
+    }
+    if contents.folders > 0 {
+        parts.push(counted(contents.folders, "folder"));
+    }
+    if contents.other_files > 0 {
+        parts.push(counted(contents.other_files, "other file"));
+    }
+    if has_folders {
+        format!("The selection and everything in its folders will be removed from this device: {}.", parts.join(", "))
+    } else {
+        format!("{} will be removed from this device.", parts.join(", "))
     }
 }

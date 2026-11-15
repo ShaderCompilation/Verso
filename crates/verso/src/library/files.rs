@@ -159,17 +159,21 @@ pub fn selection_contents(items: &[DeleteItem]) -> Result<Contents> {
     Ok(total)
 }
 
+#[derive(Default)]
 pub struct BatchDeletion {
     pub deleted: usize,
     pub removed_books: Vec<String>,
     pub changes: Vec<super::PathChange>,
     pub errors: Vec<String>,
+    /// Deleted books whose KOReader sidecar stayed behind. Like a single book
+    /// delete, these count as deleted: the book itself is gone.
+    pub sidecar_errors: Vec<String>,
 }
 /// Continue after failures and return one index batch, including books already
 /// removed by a partially failed folder deletion. Parents are checked only after
 /// all items, so deleting their last children keeps them visible immediately.
 pub fn delete_selection(items: &[DeleteItem], index: &LibraryIndex, store: &Store) -> BatchDeletion {
-    let mut result = BatchDeletion { deleted: 0, removed_books: Vec::new(), changes: Vec::new(), errors: Vec::new() };
+    let mut result = BatchDeletion::default();
     let mut parents = std::collections::BTreeSet::new();
     for item in items {
         let path = item.path();
@@ -182,9 +186,15 @@ pub fn delete_selection(items: &[DeleteItem], index: &LibraryIndex, store: &Stor
                 _ => {
                     result.changes.push(super::PathChange::Remove(path.to_owned()));
                     result.removed_books.push(id.clone());
-                    let sidecar_error = delete_sidecar(path).err();
-                    let state_error = store.remove_book(id).err();
-                    sidecar_error.or(state_error)
+                    if let Err(e) = delete_sidecar(path) {
+                        log::warn!("deleting sidecar of {}: {e:#}", path.display());
+                        result.sidecar_errors.push(format!("{}: {e:#}", path.display()));
+                    }
+                    // The worker retries this for every removed book.
+                    if let Err(e) = store.remove_book(id) {
+                        log::warn!("removing reading state of {}: {e:#}", path.display());
+                    }
+                    None
                 }
             },
             DeleteItem::Folder(path) => {
@@ -257,7 +267,14 @@ mod tests {
         std::fs::write(root.join("good.epub"), b"book")?;
         std::fs::create_dir_all(root.join("Folder"))?;
         std::fs::write(root.join("Folder/nested.epub"), b"book")?;
-        let mut books: Vec<_> = ["blocked.epub", "good.epub", "Folder/nested.epub"]
+        // A sidecar that can't be removed: its locked folder holds a file.
+        std::fs::write(root.join("kept.epub"), b"book")?;
+        let locked = root.join("kept.sdr/locked");
+        std::fs::create_dir_all(&locked)?;
+        std::fs::write(locked.join("metadata.lua"), b"data")?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))?;
+        let mut books: Vec<_> = ["blocked.epub", "good.epub", "Folder/nested.epub", "kept.epub"]
             .iter()
             .enumerate()
             .map(|(i, path)| {
@@ -271,17 +288,23 @@ mod tests {
             store.save_book(&book.id, &BookState { progress: 5200, ..Default::default() })?;
         }
         let mut index = LibraryIndex { books: books.clone(), ..Default::default() };
+        let kept = books.pop().unwrap();
         let items = vec![
             DeleteItem::book(&books.remove(0)),
             DeleteItem::Folder(root.join("Folder")),
             DeleteItem::book(&books.remove(0)),
+            DeleteItem::book(&kept),
         ];
-        assert_eq!(selection_contents(&items)?, Contents { books: 3, folders: 1, other_files: 0 });
+        assert_eq!(selection_contents(&items)?, Contents { books: 4, folders: 1, other_files: 0 });
         let result = delete_selection(&items, &index, &store);
-        assert_eq!(result.deleted, 2);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))?;
+        assert_eq!(result.deleted, 3, "a book whose sidecar stayed behind is still deleted");
         assert_eq!(result.errors.len(), 1);
         assert!(result.errors[0].contains("blocked.epub"));
-        assert_eq!(result.removed_books.len(), 2);
+        assert_eq!(result.sidecar_errors.len(), 1);
+        assert!(result.sidecar_errors[0].contains("kept.epub"));
+        assert!(!root.join("kept.epub").exists());
+        assert_eq!(result.removed_books.len(), 3);
         for change in result.changes {
             change.apply(&mut index);
         }
@@ -290,6 +313,7 @@ mod tests {
         assert_eq!(store.book("0").progress, 5200);
         assert_eq!(store.book("1").progress, 0);
         assert_eq!(store.book("2").progress, 0);
+        assert_eq!(store.book("3").progress, 0);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

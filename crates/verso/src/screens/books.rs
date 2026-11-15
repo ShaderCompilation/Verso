@@ -907,7 +907,7 @@ impl Books {
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
         let mut menu = PopupMenu::open(items, anchor, area, t);
         let protected = self.folder_protected(&path);
-        menu.set_enabled(3, !self.roots.contains(&path));
+        menu.set_enabled(3, !protected);
         menu.set_enabled(5, !protected);
         menu.set_enabled(6, !protected);
         self.menu = Some((Target::Folder(path), menu));
@@ -1375,9 +1375,11 @@ impl Screen for Books {
             if self.grid.pressed() == Some(i) {
                 cx.canvas.stroke_rounded_rect(cover, t.radius, (2 * t.border) as f32, INK);
                 cx.hint(cover, RefreshMode::Fast);
-            } else {
-                cx.hint(cover, if self.selection.is_some() { RefreshMode::Fast } else { RefreshMode::Ui });
+            } else if self.selection.is_none() {
+                cx.hint(cover, RefreshMode::Ui);
             }
+            // While selecting, the cover takes the default grayscale mode; a
+            // Ui hint would override the fast tick box drawn over its corner.
             let y = cover.bottom() + t.mm(1.0);
             cx.line(&book.metadata.title, t.button, Rect::new(cell.x, y, cell.w, t.mm(4.0)), HAlign::Left);
             let state = self.states.get(&book.id).cloned().unwrap_or_default();
@@ -1483,11 +1485,16 @@ impl Screen for Books {
                 None => {}
             }
         } else if let Some(confirm) = &mut self.confirm {
-            if let Some(delete) = confirm.on_gesture(&g) {
-                let target = self.confirm.take().unwrap().target;
-                if delete {
+            match confirm.on_gesture(&g) {
+                // A selection can be large: show "Deleting…" first, then delete
+                // in `run_pending_work` once that frame is on screen.
+                Some(true) if matches!(confirm.target, DeleteRequest::Selection(_)) => confirm.start_working(),
+                Some(true) => {
+                    let target = self.confirm.take().unwrap().target;
                     self.delete_target(target, cx);
                 }
+                Some(false) => self.confirm = None,
+                None => {}
             }
         } else if let Some(details) = &mut self.details {
             if details.on_gesture(&g, cx) {
@@ -1771,6 +1778,15 @@ impl Screen for Books {
     fn busy(&self) -> bool {
         self.reader.as_ref().map_or(self.working, Screen::busy)
     }
+    fn has_pending_work(&self) -> bool {
+        self.reader.is_none() && self.confirm.as_ref().is_some_and(|c| c.working)
+    }
+    fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
+        if let Some(confirm) = self.confirm.take_if(|c| c.working) {
+            self.delete_target(confirm.target, cx);
+        }
+        Action::None
+    }
     fn deadline(&self) -> Option<std::time::Instant> {
         self.reader.as_ref().and_then(Screen::deadline)
     }
@@ -1980,6 +1996,8 @@ struct ConfirmDelete {
     text: Rect,
     cancel: Button,
     delete: Button,
+    /// Delete was chosen; the deletion runs after this frame is shown.
+    working: bool,
 }
 impl ConfirmDelete {
     fn new(t: &Theme, screen: Rect, target: DeleteRequest, title: &str, message: String) -> Self {
@@ -1992,7 +2010,17 @@ impl ConfirmDelete {
         cancel.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
         let mut delete = Button::new("Delete", ButtonKind::Primary).with_icon(Icon::Trash);
         delete.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
-        Self { target, sheet, message, text, cancel, delete }
+        Self { target, sheet, message, text, cancel, delete, working: false }
+    }
+    fn start_working(&mut self) {
+        let count = match &self.target {
+            DeleteRequest::Selection(targets) => targets.len(),
+            DeleteRequest::Item(_) => 1,
+        };
+        self.message = format!("Deleting {}…", counted(count, "item"));
+        self.cancel.enabled = false;
+        self.delete.enabled = false;
+        self.working = true;
     }
     fn draw(&self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
@@ -2003,6 +2031,9 @@ impl ConfirmDelete {
     }
     /// Some(true) to delete, Some(false) to close without deleting.
     fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
+        if self.working {
+            return None;
+        }
         if self.sheet.on_gesture(g) || self.cancel.on_gesture(g) {
             return Some(false);
         }
@@ -2202,10 +2233,107 @@ mod tests {
             books.refresh(&t);
             books.start_selection(Target::Book("0".into()), cx);
             assert!(books.selection.is_none(), "Home has no selection");
+            // A folder holding a library folder can be neither deleted nor
+            // moved, so it is never selectable, by menu, tap or Select all.
+            books.home_active = false;
+            books.navigation.tab = Tab::Collections;
+            books.navigate(Some("/books/Fiction".into()), cx);
+            let nested = PathBuf::from("/books/Fiction/Nested");
+            assert!(books.folders.contains(&nested));
+            books.roots.push(nested.join("Deep"));
+            books.open_folder_menu(nested.clone(), Point::new(190, 650), &t);
+            let menu = &books.menu.as_ref().unwrap().1;
+            let row = menu.items.iter().position(|(_, label)| label == "Select").unwrap();
+            let p = Point::new(menu.rect().center().x, menu.rect().y + t.mm(1.0) + row as i32 * t.row + t.row / 2);
+            tap(&mut books, p, cx);
+            assert!(books.menu.is_some() && books.selection.is_none(), "Select is disabled");
+            books.menu = None;
+            books.start_selection(Target::Folder(nested.clone()), cx);
+            assert!(books.selection.is_none());
+            books.roots.pop();
         });
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn scans_end_selection_only_when_they_move_the_folder() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("selection-scan")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::Collections;
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            books.start_selection(Target::Book("0".into()), cx);
+            books.toggle_selection(1);
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 2);
+            // A scan that drops one selected book keeps the rest selected.
+            let mut index = store.library();
+            index.books.retain(|b| b.id != "0");
+            books.pending = Some(Snapshot { index: index.clone(), ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.navigation.folder, Some("/books/Fiction/Nested".into()));
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 1);
+            // A scan that removes the folder moves to the nearest shown ancestor
+            // (the emptied Fiction root is hidden too) and ends selection.
+            index.books.retain(|b| !b.path.starts_with("/books/Fiction/Nested"));
+            books.pending = Some(Snapshot { index, ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.navigation.folder, Some("/books".into()));
+            assert!(books.selection.is_none());
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selection_ticks_refresh_fast_without_covering_the_cover() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("selection-hints")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        books.navigation.tab = Tab::AllBooks;
+        books.refresh(&t);
+        let cell = books.grid.cells()[0].1;
+        let cover = Point::new(cell.center().x, cell.y + cell.h / 3);
+        let tick = Point::new(cell.right() - t.mm(3.0), cell.y + t.mm(3.0));
+        let mut draw = |books: &mut Books| {
+            let mut hints = Vec::new();
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+            let mode = |p: Point| hints.iter().filter(|h| h.rect.contains(p)).map(|h| h.mode).max();
+            (mode(cover), mode(tick))
+        };
+        assert_eq!(draw(&mut books), (Some(RefreshMode::Ui), Some(RefreshMode::Ui)));
+        with_cx(&t, screen, |cx| books.start_selection(Target::Book(books.books[0].id.clone()), cx));
+        // A cover that loads while selecting gets the default grayscale mode.
+        assert_eq!(draw(&mut books), (None, Some(RefreshMode::Fast)));
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selection_delete_messages_name_what_is_removed() {
+        let message = |books, folders, other_files, has_folders| {
+            selection::selection_delete_message(&files::Contents { books, folders, other_files }, has_folders)
+        };
+        assert_eq!(message(1, 0, 0, false), "1 book and its reading progress will be removed from this device.");
+        assert_eq!(message(3, 0, 0, false), "3 books and their reading progress will be removed from this device.");
+        assert_eq!(
+            message(0, 2, 0, true),
+            "The selection and everything in its folders will be removed from this device: 2 folders."
+        );
+        assert_eq!(
+            message(1, 1, 3, true),
+            "The selection and everything in its folders will be removed from this device: \
+             1 book and its reading progress, 1 folder, 3 other files."
+        );
     }
 
     #[test]
@@ -2244,13 +2372,26 @@ mod tests {
             let delete = books.selection.as_ref().unwrap().delete.rect().center();
             tap(&mut books, delete, cx);
             let confirm = books.confirm.as_ref().unwrap();
-            assert!(confirm.message.contains("2 books, 2 folders, 1 other file"));
+            assert_eq!(
+                confirm.message,
+                "The selection and everything in its folders will be removed from this device: \
+                 2 books and their reading progress, 2 folders, 1 other file."
+            );
             let cancel = confirm.cancel.rect().center();
             tap(&mut books, cancel, cx);
             assert!(folder.exists() && books.selection.is_some());
             tap(&mut books, delete, cx);
             let delete = books.confirm.as_ref().unwrap().delete.rect().center();
             tap(&mut books, delete, cx);
+            // The sheet shows progress first; deleting waits for that frame.
+            let confirm = books.confirm.as_ref().unwrap();
+            assert!(confirm.working && confirm.message == "Deleting 2 items…");
+            assert!(books.has_pending_work() && folder.exists());
+            let cancel = confirm.cancel.rect().center();
+            tap(&mut books, cancel, cx);
+            assert!(books.confirm.is_some(), "the sheet ignores touches while deleting");
+            books.run_pending_work(cx);
+            assert!(!books.has_pending_work());
             assert!(books.selection.is_none() && books.confirm.is_none());
             assert!(!folder.exists() && !library.join("loose.epub").exists());
             assert!(books.index.books.is_empty());
