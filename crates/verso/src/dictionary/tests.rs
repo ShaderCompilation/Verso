@@ -498,6 +498,24 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
 }
 
 #[test]
+fn base_form_count_ignores_case_variants_of_one_headword() -> Result<()> {
+    let f = Fixture::new();
+    f.install(false, false)?;
+    let mut backend = f.backend()?;
+    // `apple` and `Apple` are one base form, shown with all three entries.
+    let (text, count) = backend.lookup_forms(&forms::candidates("apples").unwrap(), &|| true)?;
+    assert_eq!(count, 1);
+    assert_eq!(text, "apple\n\na lowercase entry\n\nApple\n\nA fruit.\n\nApple\n\nA tree.");
+    // Case variants don't use up the cap either.
+    let candidates =
+        forms::Candidates { possessive: None, exceptions: vec!["apple", "café", "слово"], rules: Vec::new() };
+    let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
+    assert_eq!(count, 3);
+    assert!(text.ends_with("Слово\n\nРусское определение."), "{text}");
+    Ok(())
+}
+
+#[test]
 fn base_forms_cancel_between_candidates_before_reading_definitions() -> Result<()> {
     use std::cell::Cell;
     let f = Fixture::new();

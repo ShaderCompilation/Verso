@@ -17,14 +17,23 @@ use std::sync::{
     mpsc,
 };
 
+/// How a base-form definition was found, for the line above it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseForms {
+    /// The query as submitted, which the lookup field may no longer show.
+    pub query: String,
+    /// Distinct base forms shown, from one to three.
+    pub count: usize,
+}
+
 /// The outcome of a lookup. Discovery problems are not states: they arrive as
 /// `Reply::warnings` next to whatever the working sources found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     Definition {
         text: String,
-        /// Display provenance, e.g. `Base form of “thunders”`; absent for exact hits.
-        from: Option<String>,
+        /// Present only when the definition is for base forms of the query.
+        base_forms: Option<BaseForms>,
     },
     Missing,
     Disabled,
@@ -131,7 +140,7 @@ impl Inner {
         selected: Option<String>,
         current: &impl Fn() -> bool,
     ) -> (Option<String>, State) {
-        let dictionaries = &mut self.catalog.dictionaries;
+        let dictionaries = &self.catalog.dictionaries;
         if dictionaries.is_empty() {
             return (None, State::Missing);
         }
@@ -139,96 +148,92 @@ impl Inner {
             return (None, State::Disabled);
         }
         let requested = selected.filter(|s| dictionaries.iter().any(|d| d.id == *s && !d.disabled));
-        let mut candidates = None;
         let mut outcomes = vec![None; dictionaries.len()];
-        let backend = &mut self.backend;
-        let cache = self.store.dictionary_cache();
-        for base_forms in [false, true] {
+        if let Some(found) = self.search(query, None, requested.as_deref(), &mut outcomes, current) {
+            return found;
+        }
+        if current()
+            && let Some(forms) = forms::candidates(query)
+        {
             let started = std::time::Instant::now();
-            if base_forms {
-                if !current() {
-                    break;
-                }
-                candidates = forms::candidates(query);
-                if candidates.is_none() {
-                    break;
-                }
-            }
-            let mut definition = None;
-            for (i, dictionary) in dictionaries
-                .iter_mut()
-                .enumerate()
-                .filter(|(_, d)| !d.disabled && requested.as_ref().is_none_or(|s| d.id == *s))
-            {
-                if !current() {
-                    break;
-                }
-                if base_forms && matches!(outcomes[i], Some(State::Error(_))) {
-                    continue;
-                }
-                let lookup = (|| -> anyhow::Result<(String, usize)> {
-                    if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
-                        // Release the old index and eight-block cache before opening another.
-                        *backend = None;
-                        *backend = Some((dictionary.id.clone(), Backend::open(&dictionary.path, &cache, current)?));
-                    }
-                    let backend = &mut backend.as_mut().unwrap().1;
-                    if base_forms {
-                        let forms = candidates.as_ref().unwrap();
-                        backend.lookup_forms(forms, current)
-                    } else {
-                        Ok((backend.lookup(query)?, 0))
-                    }
-                })();
-                let state = match lookup {
-                    Ok((text, count)) => {
-                        dictionary.error = None;
-                        if text.is_empty() {
-                            State::NoResult
-                        } else {
-                            let from = base_forms.then(|| {
-                                let plural = if count > 1 { "s" } else { "" };
-                                format!("Base form{plural} of “{query}”")
-                            });
-                            State::Definition { text, from }
-                        }
-                    }
-                    Err(e) => {
-                        if !current() {
-                            break;
-                        }
-                        let error = format!("{e:#}");
-                        dictionary.error = Some(error.clone());
-                        State::Error(error)
-                    }
-                };
-                if matches!(state, State::Definition { .. }) {
-                    definition = Some((Some(dictionary.id.clone()), state));
-                    break;
-                }
-                outcomes[i] = Some(state);
-            }
-            if let Some(forms) = &candidates {
-                let candidate_count =
-                    usize::from(forms.possessive.is_some()) + forms.exceptions.len() + forms.rules.len();
-                log::debug!(
-                    "dictionary base-form pass: {:?}, {candidate_count} generated candidates",
-                    started.elapsed()
-                );
-            }
-            if let Some(result) = definition {
-                return result;
+            let found = self.search(query, Some(&forms), requested.as_deref(), &mut outcomes, current);
+            log::debug!("dictionary base-form pass: {:?}, {} generated candidates", started.elapsed(), forms.count());
+            if let Some(found) = found {
+                return found;
             }
         }
         // Keep each dictionary's final outcome in preference order. A readable
         // dictionary with no result wins over an error, as in the exact-only lookup.
         let mut fallback = None;
-        for (dictionary, state) in dictionaries.iter().zip(outcomes).filter_map(|(d, s)| s.map(|s| (d, s))) {
+        for (dictionary, state) in self.catalog.dictionaries.iter().zip(outcomes).filter_map(|(d, s)| s.map(|s| (d, s)))
+        {
             if fallback.is_none() || matches!(&fallback, Some((_, State::Error(_)))) && state == State::NoResult {
                 fallback = Some((dictionary.id.clone(), state));
             }
         }
         fallback.map_or((None, State::NoResult), |(id, state)| (Some(id), state))
+    }
+    /// One pass over the enabled (or requested) dictionaries in preference
+    /// order, for the exact query or, with `forms`, its base forms. Returns the
+    /// first definition and records every other outcome by catalog position.
+    /// The base-form pass skips dictionaries that failed in the exact pass.
+    fn search(
+        &mut self,
+        query: &str,
+        forms: Option<&forms::Candidates>,
+        requested: Option<&str>,
+        outcomes: &mut [Option<State>],
+        current: &impl Fn() -> bool,
+    ) -> Option<(Option<String>, State)> {
+        let backend = &mut self.backend;
+        let cache = self.store.dictionary_cache();
+        for (i, dictionary) in self
+            .catalog
+            .dictionaries
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, d)| !d.disabled && requested.is_none_or(|s| d.id == s))
+        {
+            if !current() {
+                break;
+            }
+            if forms.is_some() && matches!(outcomes[i], Some(State::Error(_))) {
+                continue;
+            }
+            // The text, plus the base-form count for a base-form lookup.
+            let lookup = (|| -> anyhow::Result<(String, Option<usize>)> {
+                if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
+                    // Release the old index and eight-block cache before opening another.
+                    *backend = None;
+                    *backend = Some((dictionary.id.clone(), Backend::open(&dictionary.path, &cache, current)?));
+                }
+                let backend = &mut backend.as_mut().unwrap().1;
+                match forms {
+                    Some(forms) => backend.lookup_forms(forms, current).map(|(text, count)| (text, Some(count))),
+                    None => backend.lookup(query).map(|text| (text, None)),
+                }
+            })();
+            outcomes[i] = Some(match lookup {
+                Ok((text, _)) if text.is_empty() => {
+                    dictionary.error = None;
+                    State::NoResult
+                }
+                Ok((text, count)) => {
+                    dictionary.error = None;
+                    let base_forms = count.map(|count| BaseForms { query: query.to_owned(), count });
+                    return Some((Some(dictionary.id.clone()), State::Definition { text, base_forms }));
+                }
+                Err(e) => {
+                    if !current() {
+                        break;
+                    }
+                    let error = format!("{e:#}");
+                    dictionary.error = Some(error.clone());
+                    State::Error(error)
+                }
+            });
+        }
+        None
     }
 
     fn reply(&self, id: u64, selected: Option<String>, state: Option<State>) -> Reply {

@@ -132,6 +132,12 @@ pub(super) struct Candidates {
     /// after collecting exception hits.
     pub rules: Vec<String>,
 }
+impl Candidates {
+    /// Every generated candidate, for diagnostics.
+    pub fn count(&self) -> usize {
+        usize::from(self.possessive.is_some()) + self.exceptions.len() + self.rules.len()
+    }
+}
 
 /// Accept only a single ASCII word, allowing a straight or curly possessive
 /// ending. The byte limit applies to the original query, before stripping.

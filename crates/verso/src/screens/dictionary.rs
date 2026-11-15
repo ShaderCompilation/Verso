@@ -153,10 +153,11 @@ impl Lookup {
             return "Looking up…".into();
         }
         let message = match &self.state {
-            State::Definition { text, from } => match from {
-                Some(from) => format!("{from}\n\n{text}"),
-                None => text.clone(),
-            },
+            State::Definition { text, base_forms: None } => text.clone(),
+            State::Definition { text, base_forms: Some(forms) } => {
+                let plural = if forms.count > 1 { "s" } else { "" };
+                format!("Base form{plural} of “{}”\n\n{text}", forms.query)
+            }
             State::Missing => "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
             State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
             State::NoResult => "No definition found. Tap the query to edit it, or try another dictionary.".into(),
@@ -446,6 +447,7 @@ impl SelectionActions {
 mod tests {
     use super::*;
     use crate::{
+        dictionary::worker::BaseForms,
         platform::{TextInput, Waker},
         store::Store,
     };
@@ -505,16 +507,17 @@ mod tests {
         assert!(matches!(&lookup.state, State::Definition { text, .. } if text.contains("meaning")));
         let exact_message = lookup.message();
         assert_eq!(exact_message, "Hello\n\nmeaning");
-        for (from, text) in [
-            ("Base form of “thunders”", "thunder\n\nA loud sound."),
-            ("Base forms of “axes”", "axis\n\nA line.\n\naxe\n\nA tool."),
+        for (query, count, from, text) in [
+            ("thunders", 1, "Base form of “thunders”", "thunder\n\nA loud sound."),
+            ("axes", 2, "Base forms of “axes”", "axis\n\nA line.\n\naxe\n\nA tool."),
         ] {
-            lookup.state = State::Definition { text: text.into(), from: Some(from.into()) };
+            let base_forms = Some(BaseForms { query: query.into(), count });
+            lookup.state = State::Definition { text: text.into(), base_forms };
             assert_eq!(lookup.message(), format!("{from}\n\n{text}"));
         }
         lookup.state = State::NoResult;
         assert!(!lookup.message().contains("Base form"));
-        lookup.state = State::Definition { text: exact_message, from: None };
+        lookup.state = State::Definition { text: exact_message, base_forms: None };
         assert!(!lookup.message().contains("Base form"));
         // Source warnings accompany results; same-name copies show their source.
         lookup.warnings = vec!["/gone is not available.".into()];

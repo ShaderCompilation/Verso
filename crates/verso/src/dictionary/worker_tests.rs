@@ -219,21 +219,24 @@ fn exact_pass_precedes_base_forms_and_selected_dictionary_still_tries_forms() {
     install(&f.join("dictionaries/b.ifo"), "B", "thunders");
     let reply = f.lookup("thunders");
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-    assert_eq!(reply.state, Some(State::Definition { text: "thunders\n\nB text".into(), from: None }));
+    assert_eq!(reply.state, Some(State::Definition { text: "thunders\n\nB text".into(), base_forms: None }));
     let id = f.worker.lookup("thunders".into(), Some("a.ifo".into()), false);
     let reply = f.reply(id).0;
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
     assert_eq!(
         reply.state,
-        Some(State::Definition { text: "thunder\n\nA text".into(), from: Some("Base form of “thunders”".into()) })
+        Some(State::Definition {
+            text: "thunder\n\nA text".into(),
+            base_forms: Some(BaseForms { query: "thunders".into(), count: 1 })
+        })
     );
     // Both passes use the same enabled filter.
     f.worker.change("b.ifo".into(), false);
     let reply = f.lookup("thunders");
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
-    assert!(matches!(reply.state, Some(State::Definition { from: Some(_), .. })));
+    assert!(matches!(reply.state, Some(State::Definition { base_forms: Some(_), .. })));
     let reply = f.lookup("thunder");
-    assert!(matches!(reply.state, Some(State::Definition { from: None, .. })));
+    assert!(matches!(reply.state, Some(State::Definition { base_forms: None, .. })));
 }
 
 #[test]
@@ -243,7 +246,9 @@ fn forms_search_dictionary_order_and_passages_get_no_base_forms() {
     install(&f.join("dictionaries/b.ifo"), "B", "thunder");
     let reply = f.lookup("THUNDERS");
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
-    assert!(matches!(reply.state, Some(State::Definition { from: Some(ref from), .. }) if from.contains("THUNDERS")));
+    assert!(
+        matches!(reply.state, Some(State::Definition { base_forms: Some(ref forms), .. }) if forms.query == "THUNDERS")
+    );
     for query in ["two thunders", "thunders\n", "привет", "café"] {
         assert_eq!(f.lookup(query).state, Some(State::NoResult), "{query:?}");
     }
@@ -280,11 +285,11 @@ fn error_and_no_result_fallback_remain_in_preference_order_across_passes() {
     fs::write(f.join("dictionaries/a.idx"), b"broken").unwrap();
     let reply = f.lookup("thunders");
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-    assert!(matches!(reply.state, Some(State::Definition { from: Some(_), .. })));
+    assert!(matches!(reply.state, Some(State::Definition { base_forms: Some(_), .. })));
 }
 
 #[test]
-fn cancellation_publishes_nothing() {
+fn lookup_cancelled_before_it_starts_publishes_nothing() {
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
     // Gate the thread at its catalog wake so cancellation is deterministic,
@@ -329,6 +334,45 @@ fn single_dictionary_reuses_its_backend_for_both_passes() {
     let f = Fixture::new();
     let path = f.join("dictionaries/a.ifo");
     install(&path, "A", "thunder");
+    let mut inner = inner(&f);
+    assert_eq!(inner.lookup("other", None, &|| true).1, State::NoResult);
+    // The cached backend has everything needed. Reopening during either pass
+    // would fail because its metadata is no longer on disk.
+    fs::remove_file(path).unwrap();
+    let (selected, state) = inner.lookup("thunders", None, &|| true);
+    assert_eq!(selected.as_deref(), Some("a.ifo"));
+    assert!(matches!(state, State::Definition { base_forms: Some(_), .. }));
+}
+
+#[test]
+fn cancellation_at_any_point_returns_no_definition_and_marks_no_errors() {
+    use std::cell::Cell;
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "other");
+    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
+    let mut inner = inner(&f);
+    // Cancel at the nth check, through index building, both passes, the
+    // dictionary switches and every base-form candidate, until one completes.
+    // The worker drops whatever a cancelled lookup returns; it must not
+    // return a definition or record cancellation as a dictionary error.
+    for n in 0.. {
+        assert!(n < 1000, "the lookup never completed");
+        let checks = Cell::new(0);
+        let current = || {
+            checks.set(checks.get() + 1);
+            checks.get() <= n
+        };
+        let (_, state) = inner.lookup("thunders", None, &current);
+        if checks.get() <= n {
+            assert!(matches!(state, State::Definition { base_forms: Some(_), .. }), "{state:?}");
+            break;
+        }
+        assert!(!matches!(state, State::Definition { .. }), "cancelled at check {n}: {state:?}");
+        assert!(inner.catalog.dictionaries.iter().all(|d| d.error.is_none()), "cancelled at check {n}");
+    }
+}
+
+fn inner(f: &Fixture) -> Inner {
     let mut inner = Inner {
         store: f.store.clone(),
         prefs_path: f.store.dictionary_preferences(),
@@ -340,11 +384,5 @@ fn single_dictionary_reuses_its_backend_for_both_passes() {
         save_error: None,
     };
     assert!(inner.discover(&|| true));
-    assert_eq!(inner.lookup("other", None, &|| true).1, State::NoResult);
-    // The cached backend has everything needed. Reopening during either pass
-    // would fail because its metadata is no longer on disk.
-    fs::remove_file(path).unwrap();
-    let (selected, state) = inner.lookup("thunders", None, &|| true);
-    assert_eq!(selected.as_deref(), Some("a.ifo"));
-    assert!(matches!(state, State::Definition { from: Some(_), .. }));
+    inner
 }

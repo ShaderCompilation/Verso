@@ -138,6 +138,13 @@ pub fn merged_preferences(dictionaries: &[Dictionary], previous: Vec<Preference>
     merged
 }
 
+/// Entries collected by a base-form lookup and the base forms that added any.
+#[derive(Default)]
+struct FormHits {
+    entries: Vec<(String, u64, u32)>,
+    forms: usize,
+}
+
 pub struct Backend {
     index: Index,
     definitions: Definitions,
@@ -156,42 +163,50 @@ impl Backend {
         let entries = self.index.find(query)?;
         self.render(entries)
     }
-    /// Returns the rendered entries and their distinct headword count.
+    /// Returns the rendered entries and how many base forms they cover, at
+    /// most three. A base form is a candidate word, so case variants of one
+    /// headword (`hope`, `Hope`) count once.
     fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(String, usize)> {
-        let mut entries = Vec::new();
-        let mut headwords = Vec::new();
-        let candidates = forms
-            .possessive
-            .iter()
-            .map(String::as_str)
-            .chain(forms.exceptions.iter().copied())
-            .chain(forms.rules.iter().map(String::as_str));
-        let possessive_count = usize::from(forms.possessive.is_some());
-        let rules_start = possessive_count + forms.exceptions.len();
-        for (i, candidate) in candidates.enumerate() {
-            ensure!(current(), "Lookup cancelled");
-            let found = self.index.find(candidate)?;
-            let hit = !found.is_empty();
-            for entry in found {
-                if entries.iter().any(|(_, offset, size)| *offset == entry.1 && *size == entry.2) {
-                    continue;
-                }
-                if !headwords.contains(&entry.0) {
-                    if headwords.len() == 3 {
-                        continue;
-                    }
-                    headwords.push(entry.0.clone());
-                }
-                entries.push(entry);
+        const MAX_FORMS: usize = 3;
+        let mut hits = FormHits::default();
+        'search: {
+            // An intact possessive is sufficient.
+            if let Some(word) = &forms.possessive
+                && self.add_form(&mut hits, word, current)?
+            {
+                break 'search;
             }
-            // A possessive hit is sufficient; rules contribute only their first hit.
-            if hit && (i < possessive_count || i >= rules_start) || headwords.len() == 3 {
-                break;
+            for word in &forms.exceptions {
+                self.add_form(&mut hits, word, current)?;
+                if hits.forms == MAX_FORMS {
+                    break 'search;
+                }
+            }
+            // Only the first rule with an entry counts.
+            for word in &forms.rules {
+                if self.add_form(&mut hits, word, current)? {
+                    break;
+                }
             }
         }
         ensure!(current(), "Lookup cancelled");
-        let count = headwords.len();
-        Ok((self.render(entries)?, count))
+        Ok((self.render(hits.entries)?, hits.forms))
+    }
+    /// Adds the entries for `word` that aren't shown yet; `true` if the
+    /// dictionary has the word, even when every entry was already shown.
+    fn add_form(&mut self, hits: &mut FormHits, word: &str, current: &impl Fn() -> bool) -> Result<bool> {
+        ensure!(current(), "Lookup cancelled");
+        let found = self.index.find(word)?;
+        let hit = !found.is_empty();
+        let shown = hits.entries.len();
+        for entry in found {
+            // A repeated lemma or a synonym sharing a definition span adds nothing.
+            if !hits.entries.iter().any(|(_, offset, size)| *offset == entry.1 && *size == entry.2) {
+                hits.entries.push(entry);
+            }
+        }
+        hits.forms += usize::from(hits.entries.len() > shown);
+        Ok(hit)
     }
     fn render(&mut self, entries: Vec<(String, u64, u32)>) -> Result<String> {
         let mut output = String::new();
