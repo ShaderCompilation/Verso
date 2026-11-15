@@ -8,7 +8,8 @@ const MAX_QUERY_BYTES: usize = 64;
 /// here may also be in WordNet's list.
 const SUPPLEMENT: &[(&str, &[&str])] = &[("being", &["be"]), ("does", &["do"]), ("doing", &["do"])];
 
-/// Function words and fixed adverbs whose suffixes give misleading guesses.
+/// Function words, fixed adverbs, archaic auxiliaries and interjections whose
+/// suffixes give misleading guesses.
 /// Sorted for binary search; possessives and curated exceptions still apply.
 const NO_RULES: &[&str] = &[
     "aboard",
@@ -17,6 +18,7 @@ const NO_RULES: &[&str] = &[
     "afterward",
     "against",
     "ahead",
+    "alas",
     "almost",
     "altogether",
     "always",
@@ -37,6 +39,7 @@ const NO_RULES: &[&str] = &[
     "downward",
     "during",
     "either",
+    "erst",
     "ever",
     "everything",
     "far",
@@ -50,6 +53,7 @@ const NO_RULES: &[&str] = &[
     "furthest",
     "had",
     "has",
+    "hast",
     "henceforward",
     "her",
     "hereafter",
@@ -101,6 +105,7 @@ const NO_RULES: &[&str] = &[
     "upward",
     "versus",
     "was",
+    "wast",
     "whatever",
     "whatsoever",
     "whenever",
@@ -119,7 +124,6 @@ const NO_RULES: &[&str] = &[
     "would",
     "yes",
     "yonder",
-    "your",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -236,7 +240,8 @@ mod tests {
     #[test]
     fn function_words_skip_rules_after_normalization() {
         for word in [
-            "his", "her", "and", "nor", "yes", "against", "this", "must", "always", "perhaps", "whereas", "HIS", "ThIs",
+            "his", "her", "and", "nor", "yes", "against", "this", "must", "always", "perhaps", "whereas", "alas",
+            "hast", "wast", "erst", "HIS", "ThIs",
         ] {
             assert!(candidates(word).unwrap().rules.is_empty(), "{word}");
         }
@@ -274,6 +279,7 @@ mod tests {
             ("ours", "our"),
             ("yours", "your"),
             ("its", "it"),
+            ("your", "you"),
         ] {
             assert_eq!(candidates(word).unwrap().rules, [expected], "{word}");
         }
