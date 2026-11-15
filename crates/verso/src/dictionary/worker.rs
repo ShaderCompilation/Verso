@@ -4,7 +4,9 @@
 //! `rescan`) reads the folder configuration and scans every source. A
 //! cancelled scan publishes nothing and leaves the catalog stale, so a later
 //! request scans again; a stale catalog is never sent to the UI.
-use super::{Backend, Catalog, Dictionary, Preference, Source, SourceStatus, discover_catalog, merged_preferences};
+use super::{
+    Backend, Catalog, Dictionary, Preference, Source, SourceStatus, discover_catalog, forms, merged_preferences,
+};
 use crate::{
     platform::Waker,
     store::{Store, atomic, default_dictionary_folders},
@@ -19,7 +21,11 @@ use std::sync::{
 /// `Reply::warnings` next to whatever the working sources found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
-    Definition(String),
+    Definition {
+        text: String,
+        /// Display provenance, e.g. `Base form of “thunders”`; absent for exact hits.
+        from: Option<String>,
+    },
     Missing,
     Disabled,
     NoResult,
@@ -133,46 +139,98 @@ impl Inner {
             return (None, State::Disabled);
         }
         let requested = selected.filter(|s| dictionaries.iter().any(|d| d.id == *s && !d.disabled));
-        let mut fallback = None;
+        let mut candidates = None;
+        let mut outcomes = vec![None; dictionaries.len()];
         let backend = &mut self.backend;
         let cache = self.store.dictionary_cache();
-        for dictionary in
-            dictionaries.iter_mut().filter(|d| !d.disabled && requested.as_ref().is_none_or(|s| d.id == *s))
-        {
-            if !current() {
-                break;
+        for base_forms in [false, true] {
+            let started = std::time::Instant::now();
+            if base_forms {
+                if !current() {
+                    break;
+                }
+                candidates = forms::candidates(query);
+                if candidates.is_none() {
+                    break;
+                }
             }
-            let lookup = (|| -> anyhow::Result<String> {
-                if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
-                    // Release the old index and eight-block cache before opening another.
-                    *backend = None;
-                    *backend = Some((dictionary.id.clone(), Backend::open(&dictionary.path, &cache, current)?));
+            let mut definition = None;
+            for (i, dictionary) in dictionaries
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, d)| !d.disabled && requested.as_ref().is_none_or(|s| d.id == *s))
+            {
+                if !current() {
+                    break;
                 }
-                backend.as_mut().unwrap().1.lookup(query)
-            })();
-            let state = match lookup {
-                Ok(text) => {
-                    dictionary.error = None;
-                    if text.is_empty() { State::NoResult } else { State::Definition(text) }
+                if base_forms && matches!(outcomes[i], Some(State::Error(_))) {
+                    continue;
                 }
-                Err(e) => {
-                    if !current() {
-                        break;
+                let lookup = (|| -> anyhow::Result<(String, usize)> {
+                    if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
+                        // Release the old index and eight-block cache before opening another.
+                        *backend = None;
+                        *backend = Some((dictionary.id.clone(), Backend::open(&dictionary.path, &cache, current)?));
                     }
-                    let error = format!("{e:#}");
-                    dictionary.error = Some(error.clone());
-                    State::Error(error)
+                    let backend = &mut backend.as_mut().unwrap().1;
+                    if base_forms {
+                        let forms = candidates.as_ref().unwrap();
+                        backend.lookup_forms(forms, current)
+                    } else {
+                        Ok((backend.lookup(query)?, 0))
+                    }
+                })();
+                let state = match lookup {
+                    Ok((text, count)) => {
+                        dictionary.error = None;
+                        if text.is_empty() {
+                            State::NoResult
+                        } else {
+                            let from = base_forms.then(|| {
+                                let plural = if count > 1 { "s" } else { "" };
+                                format!("Base form{plural} of “{query}”")
+                            });
+                            State::Definition { text, from }
+                        }
+                    }
+                    Err(e) => {
+                        if !current() {
+                            break;
+                        }
+                        let error = format!("{e:#}");
+                        dictionary.error = Some(error.clone());
+                        State::Error(error)
+                    }
+                };
+                if matches!(state, State::Definition { .. }) {
+                    definition = Some((Some(dictionary.id.clone()), state));
+                    break;
                 }
-            };
-            if matches!(state, State::Definition(_)) {
-                return (Some(dictionary.id.clone()), state);
+                outcomes[i] = Some(state);
             }
+            if let Some(forms) = &candidates {
+                let candidate_count =
+                    usize::from(forms.possessive.is_some()) + forms.exceptions.len() + forms.rules.len();
+                log::debug!(
+                    "dictionary base-form pass: {:?}, {candidate_count} generated candidates",
+                    started.elapsed()
+                );
+            }
+            if let Some(result) = definition {
+                return result;
+            }
+        }
+        // Keep each dictionary's final outcome in preference order. A readable
+        // dictionary with no result wins over an error, as in the exact-only lookup.
+        let mut fallback = None;
+        for (dictionary, state) in dictionaries.iter().zip(outcomes).filter_map(|(d, s)| s.map(|s| (d, s))) {
             if fallback.is_none() || matches!(&fallback, Some((_, State::Error(_)))) && state == State::NoResult {
                 fallback = Some((dictionary.id.clone(), state));
             }
         }
         fallback.map_or((None, State::NoResult), |(id, state)| (Some(id), state))
     }
+
     fn reply(&self, id: u64, selected: Option<String>, state: Option<State>) -> Reply {
         Reply {
             id,

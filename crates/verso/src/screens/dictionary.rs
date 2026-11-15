@@ -148,6 +148,22 @@ impl Lookup {
         }
         message
     }
+    fn message(&self) -> String {
+        if self.pending {
+            return "Looking up…".into();
+        }
+        let message = match &self.state {
+            State::Definition { text, from } => match from {
+                Some(from) => format!("{from}\n\n{text}"),
+                None => text.clone(),
+            },
+            State::Missing => "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
+            State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
+            State::NoResult => "No definition found. Tap the query to edit it, or try another dictionary.".into(),
+            State::Error(e) => format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."),
+        };
+        self.with_warnings(message)
+    }
     pub fn busy(&self) -> bool {
         self.pending
     }
@@ -345,18 +361,7 @@ impl Lookup {
         self.next.draw(cx);
         self.find.draw(cx);
         if self.pages.is_empty() {
-            let message = if self.pending {
-                "Looking up…".to_owned()
-            } else {
-                match &self.state {
-            State::Definition(text) => text.clone(),
-            State::Missing => "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
-            State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
-            State::NoResult => "No definition found. Tap the query to edit it, or try another dictionary.".into(),
-            State::Error(e) => format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."),
-        }
-            };
-            let message = if self.pending { message } else { self.with_warnings(message) };
+            let message = self.message();
             self.pages = cx.text.pages(&message, t.body, self.body.w, self.body.h);
             self.pager.set(0, self.pages.len());
         }
@@ -497,7 +502,20 @@ mod tests {
             }
         };
         wait(&mut lookup, &mut cx);
-        assert!(matches!(&lookup.state, State::Definition(text) if text.contains("meaning")));
+        assert!(matches!(&lookup.state, State::Definition { text, .. } if text.contains("meaning")));
+        let exact_message = lookup.message();
+        assert_eq!(exact_message, "Hello\n\nmeaning");
+        for (from, text) in [
+            ("Base form of “thunders”", "thunder\n\nA loud sound."),
+            ("Base forms of “axes”", "axis\n\nA line.\n\naxe\n\nA tool."),
+        ] {
+            lookup.state = State::Definition { text: text.into(), from: Some(from.into()) };
+            assert_eq!(lookup.message(), format!("{from}\n\n{text}"));
+        }
+        lookup.state = State::NoResult;
+        assert!(!lookup.message().contains("Base form"));
+        lookup.state = State::Definition { text: exact_message, from: None };
+        assert!(!lookup.message().contains("Base form"));
         // Source warnings accompany results; same-name copies show their source.
         lookup.warnings = vec!["/gone is not available.".into()];
         assert!(lookup.with_warnings("text".into()).ends_with("problems:\n• /gone is not available."));

@@ -14,8 +14,8 @@ pub(super) struct Candidates {
     pub possessive: Option<String>,
     /// All curated lemmas, in source order.
     pub exceptions: Vec<&'static str>,
-    /// Ordered, unique guesses, used only when no exception lemma has an
-    /// entry; then only the first rule with an entry counts.
+    /// Ordered, unique guesses; only the first rule with an entry counts,
+    /// after collecting exception hits.
     pub rules: Vec<String>,
 }
 

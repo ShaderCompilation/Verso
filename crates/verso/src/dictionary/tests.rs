@@ -20,16 +20,23 @@ impl Fixture {
         self.0.join("dictionaries/test.ifo")
     }
     fn install(&self, wide: bool, compressed: bool) -> Result<()> {
+        self.install_words(
+            wide,
+            compressed,
+            &[
+                ("Apple", "A fruit."),
+                ("Apple", "A tree."),
+                ("apple", "a lowercase entry"),
+                ("café", "<p>Coffee &amp; cake</p><p>Another paragraph.</p>"),
+                ("Слово", "Русское определение."),
+            ],
+        )
+    }
+    fn install_words(&self, wide: bool, compressed: bool, words: &[(&str, &str)]) -> Result<()> {
         fs::create_dir_all(self.0.join("dictionaries"))?;
         let mut idx = Vec::new();
         let mut data = Vec::new();
-        for (word, meaning) in [
-            ("Apple", "A fruit."),
-            ("Apple", "A tree."),
-            ("apple", "a lowercase entry"),
-            ("café", "<p>Coffee &amp; cake</p><p>Another paragraph.</p>"),
-            ("Слово", "Русское определение."),
-        ] {
+        for (word, meaning) in words {
             idx.extend_from_slice(word.as_bytes());
             idx.push(0);
             if wide {
@@ -43,7 +50,8 @@ impl Fixture {
         fs::write(
             self.path(),
             format!(
-                "StarDict's dict ifo file\nversion=3.0.0\nbookname=Test dictionary\nwordcount=5\nsynwordcount=1\nidxfilesize={}\nidxoffsetbits={}\nsametypesequence=h\n",
+                "StarDict's dict ifo file\nversion=3.0.0\nbookname=Test dictionary\nwordcount={}\nsynwordcount=1\nidxfilesize={}\nidxoffsetbits={}\nsametypesequence=h\n",
+                words.len(),
                 idx.len(),
                 if wide { 64 } else { 32 }
             ),
@@ -271,7 +279,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
     loop {
         let r = receive()?;
         if r.id == latest {
-            assert!(matches!(r.state, Some(State::Definition(_))));
+            assert!(matches!(r.state, Some(State::Definition { .. })));
             break;
         }
     }
@@ -416,5 +424,93 @@ fn replacing_either_metadata_variant_invalidates_cache() -> Result<()> {
     fs::write(f.path(), text)?;
     assert!(f.backend()?.lookup("FRUIT")?.contains("A fruit."));
     assert_ne!(f.cache_files()?[0].1, compressed[0].1);
+    Ok(())
+}
+
+#[test]
+fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Result<()> {
+    for compressed in [false, true] {
+        let f = Fixture::new();
+        f.install_words(
+            false,
+            compressed,
+            &[
+                ("axe", "A tool."),
+                ("axis", "A line."),
+                ("child", "A young person."),
+                ("go", "Move."),
+                ("hop", "Jump."),
+                ("hope", "Expect."),
+                ("kiss", "Touch with lips."),
+                ("run", "Move fast."),
+                ("study", "Learn."),
+                ("thunder", "A loud sound."),
+                ("tree", "A plant."),
+                ("us", "A pronoun."),
+                ("use", "Employ."),
+            ],
+        )?;
+        let mut backend = f.backend()?;
+        for (query, expected) in [
+            ("uses", vec!["use"]),
+            ("hoping", vec!["hope"]),
+            ("axes", vec!["axis", "axe"]),
+            ("thunders", vec!["thunder"]),
+            ("studies", vec!["study"]),
+            ("running", vec!["run"]),
+            ("went", vec!["go"]),
+            ("kissed", vec!["kiss"]),
+            ("trees", vec!["tree"]),
+            ("children’s", vec!["child"]),
+            ("tree's", vec!["tree"]),
+        ] {
+            assert_eq!(backend.lookup(query)?, "", "exact lookup of {query}");
+            let (text, count) = backend.lookup_forms(&forms::candidates(query).unwrap(), &|| true)?;
+            let headwords: Vec<_> = text.split("\n\n").step_by(2).collect();
+            assert_eq!(headwords, expected, "{query}");
+            assert_eq!(count, expected.len(), "{query}");
+        }
+        // The intact possessive wins even if more exceptions/rules exist.
+        let candidates = forms::Candidates {
+            possessive: Some("tree".into()),
+            exceptions: vec!["child"],
+            rules: vec!["thunder".into()],
+        };
+        let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
+        assert_eq!((text.as_str(), count), ("tree\n\nA plant.", 1));
+        // Repeated lemmas and a synonym sharing a definition span do not count
+        // twice; collect all exceptions before the first rule, capped at three.
+        let candidates = forms::Candidates {
+            possessive: None,
+            exceptions: vec!["axe", "axe", "fruit", "axis", "child"],
+            rules: vec!["thunder".into()],
+        };
+        let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
+        assert_eq!(count, 3);
+        assert_eq!(text, "axe\n\nA tool.\n\naxis\n\nA line.\n\nchild\n\nA young person.");
+        // A rule matching a span already returned by an exception is still
+        // the first rule hit, so later rule hits must not be added.
+        let candidates =
+            forms::Candidates { possessive: None, exceptions: vec!["use"], rules: vec!["use".into(), "us".into()] };
+        assert_eq!(backend.lookup_forms(&candidates, &|| true)?, ("use\n\nEmploy.".into(), 1));
+    }
+    Ok(())
+}
+
+#[test]
+fn base_forms_cancel_between_candidates_before_reading_definitions() -> Result<()> {
+    use std::cell::Cell;
+    let f = Fixture::new();
+    f.install(false, false)?;
+    let mut backend = f.backend()?;
+    let checks = Cell::new(0);
+    let current = || {
+        let n = checks.get();
+        checks.set(n + 1);
+        n < 1
+    };
+    let candidates = forms::Candidates { possessive: None, exceptions: vec!["Apple", "missing"], rules: Vec::new() };
+    assert!(backend.lookup_forms(&candidates, &current).is_err());
+    assert_eq!(checks.get(), 2);
     Ok(())
 }

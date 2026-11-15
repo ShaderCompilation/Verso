@@ -2,7 +2,6 @@
 //! beside app state. Only the worker opens dictionaries.
 mod dictzip;
 mod discovery;
-#[allow(dead_code)] // Candidate generator is connected to lookup in word-forms Phase 2.
 mod forms;
 mod index;
 mod text;
@@ -155,6 +154,46 @@ impl Backend {
     }
     pub fn lookup(&mut self, query: &str) -> Result<String> {
         let entries = self.index.find(query)?;
+        self.render(entries)
+    }
+    /// Returns the rendered entries and their distinct headword count.
+    fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(String, usize)> {
+        let mut entries = Vec::new();
+        let mut headwords = Vec::new();
+        let candidates = forms
+            .possessive
+            .iter()
+            .map(String::as_str)
+            .chain(forms.exceptions.iter().copied())
+            .chain(forms.rules.iter().map(String::as_str));
+        let possessive_count = usize::from(forms.possessive.is_some());
+        let rules_start = possessive_count + forms.exceptions.len();
+        for (i, candidate) in candidates.enumerate() {
+            ensure!(current(), "Lookup cancelled");
+            let found = self.index.find(candidate)?;
+            let hit = !found.is_empty();
+            for entry in found {
+                if entries.iter().any(|(_, offset, size)| *offset == entry.1 && *size == entry.2) {
+                    continue;
+                }
+                if !headwords.contains(&entry.0) {
+                    if headwords.len() == 3 {
+                        continue;
+                    }
+                    headwords.push(entry.0.clone());
+                }
+                entries.push(entry);
+            }
+            // A possessive hit is sufficient; rules contribute only their first hit.
+            if hit && (i < possessive_count || i >= rules_start) || headwords.len() == 3 {
+                break;
+            }
+        }
+        ensure!(current(), "Lookup cancelled");
+        let count = headwords.len();
+        Ok((self.render(entries)?, count))
+    }
+    fn render(&mut self, entries: Vec<(String, u64, u32)>) -> Result<String> {
         let mut output = String::new();
         for (word, offset, size) in entries {
             let data = self.definitions.read(offset, size)?;

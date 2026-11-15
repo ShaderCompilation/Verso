@@ -133,7 +133,7 @@ fn source_problems_are_warnings_next_to_working_lookups() {
     f.store.save_dictionary_folders(&[f.join("gone"), f.join("locked")]).unwrap();
     let reply = f.lookup("word");
     fs::set_permissions(f.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(matches!(&reply.state, Some(State::Definition(t)) if t.contains("Native text")));
+    assert!(matches!(&reply.state, Some(State::Definition { text: t, .. }) if t.contains("Native text")));
     assert!(reply.dictionaries.iter().any(|d| d.name == "broken" && d.error.is_some()), "broken stays listed");
     assert!(reply.warnings[0].contains("gone") && reply.warnings[0].contains("not available"));
     if !readable {
@@ -145,7 +145,7 @@ fn source_problems_are_warnings_next_to_working_lookups() {
     fs::write(f.join("dictionary-folders.json"), b"{broken").unwrap();
     f.worker.invalidate();
     let reply = f.lookup("word");
-    assert!(matches!(reply.state, Some(State::Definition(_))));
+    assert!(matches!(reply.state, Some(State::Definition { .. })));
     assert_eq!(reply.sources.len(), 1);
     assert!(reply.warnings[0].contains("only Verso's folder"), "{:?}", reply.warnings);
 
@@ -164,7 +164,7 @@ fn invalidation_cancels_in_flight_work_and_drops_removed_sources() {
     install(&f.join("dictionaries/n.ifo"), "Native", "native");
     install(&f.join("ext/e.ifo"), "External", "word");
     f.store.save_dictionary_folders(&[f.join("ext")]).unwrap();
-    assert!(matches!(f.lookup("word").state, Some(State::Definition(t)) if t.contains("External")));
+    assert!(matches!(f.lookup("word").state, Some(State::Definition { text: t, .. }) if t.contains("External")));
     // A lookup in flight when the folder is removed must not be published
     // after the new catalog, nor answer from the removed source.
     let stale = f.worker.lookup("word".into(), None, true);
@@ -210,4 +210,141 @@ fn preferences_survive_source_removal_and_re_adding() {
     assert_eq!(names(&reply), ["Native", "B", "A"]);
     let flags: Vec<_> = reply.dictionaries.iter().map(|d| d.disabled).collect();
     assert_eq!(flags, [true, false, true]);
+}
+
+#[test]
+fn exact_pass_precedes_base_forms_and_selected_dictionary_still_tries_forms() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    install(&f.join("dictionaries/b.ifo"), "B", "thunders");
+    let reply = f.lookup("thunders");
+    assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+    assert_eq!(reply.state, Some(State::Definition { text: "thunders\n\nB text".into(), from: None }));
+    let id = f.worker.lookup("thunders".into(), Some("a.ifo".into()), false);
+    let reply = f.reply(id).0;
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    assert_eq!(
+        reply.state,
+        Some(State::Definition { text: "thunder\n\nA text".into(), from: Some("Base form of “thunders”".into()) })
+    );
+    // Both passes use the same enabled filter.
+    f.worker.change("b.ifo".into(), false);
+    let reply = f.lookup("thunders");
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    assert!(matches!(reply.state, Some(State::Definition { from: Some(_), .. })));
+    let reply = f.lookup("thunder");
+    assert!(matches!(reply.state, Some(State::Definition { from: None, .. })));
+}
+
+#[test]
+fn forms_search_dictionary_order_and_passages_get_no_base_forms() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
+    let reply = f.lookup("THUNDERS");
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    assert!(matches!(reply.state, Some(State::Definition { from: Some(ref from), .. }) if from.contains("THUNDERS")));
+    for query in ["two thunders", "thunders\n", "привет", "café"] {
+        assert_eq!(f.lookup(query).state, Some(State::NoResult), "{query:?}");
+    }
+}
+
+#[test]
+fn error_and_no_result_fallback_remain_in_preference_order_across_passes() {
+    for query in ["absent", "thunders", "two words"] {
+        let f = Fixture::new();
+        install(&f.join("dictionaries/a.ifo"), "A", "other");
+        install(&f.join("dictionaries/b.ifo"), "B", "other");
+        fs::write(f.join("dictionaries/a.idx"), b"broken").unwrap();
+        let reply = f.lookup(query);
+        assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+        assert_eq!(reply.state, Some(State::NoResult), "{query}");
+        assert!(reply.dictionaries[0].error.is_some(), "exact-pass errors remain visible");
+        // An explicitly selected broken dictionary reports its error.
+        let reply = f.reply(f.worker.lookup(query.into(), Some("a.ifo".into()), false)).0;
+        assert!(matches!(reply.state, Some(State::Error(_))));
+        // A no-result before an error keeps the same priority.
+        f.worker.change("b.ifo".into(), true);
+        let reply = f.lookup(query);
+        assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+        assert_eq!(reply.state, Some(State::NoResult));
+        fs::write(f.join("dictionaries/b.idx"), b"broken").unwrap();
+        let reply = f.reply(f.worker.lookup(query.into(), None, true)).0;
+        assert_eq!(reply.selected.as_deref(), Some("b.ifo"), "first error wins if all fail");
+        assert!(matches!(reply.state, Some(State::Error(_))));
+    }
+    // An exact-pass error does not prevent a later base-form hit.
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
+    fs::write(f.join("dictionaries/a.idx"), b"broken").unwrap();
+    let reply = f.lookup("thunders");
+    assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+    assert!(matches!(reply.state, Some(State::Definition { from: Some(_), .. })));
+}
+
+#[test]
+fn cancellation_publishes_nothing() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    // Gate the thread at its catalog wake so cancellation is deterministic,
+    // rather than racing a very short fixture lookup against the test thread.
+    let (woke, wake) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let blocked = Mutex::new(blocked);
+    let worker = Worker::new(
+        f.store.clone(),
+        Waker::new(move || {
+            woke.send(()).unwrap();
+            blocked.lock().unwrap().recv().unwrap();
+        }),
+    );
+    worker.catalog(false);
+    wake.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(worker.receive().is_some());
+    worker.lookup("thunders".into(), None, false);
+    worker.cancel();
+    release.send(()).unwrap();
+    worker.flush().unwrap();
+    assert!(worker.receive().is_none());
+    assert!(wake.try_recv().is_err(), "a cancelled lookup never wakes the UI");
+}
+
+#[test]
+fn base_form_read_error_is_reported_unless_another_dictionary_has_no_result() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    // The exact query misses without reading this malformed definition.
+    fs::write(f.join("dictionaries/a.dict"), [0xff; 6]).unwrap();
+    let reply = f.lookup("thunders");
+    assert!(matches!(reply.state, Some(State::Error(_))), "the base-form failure is not a no-result");
+    install(&f.join("dictionaries/b.ifo"), "B", "other");
+    let reply = f.reply(f.worker.lookup("thunders".into(), None, true)).0;
+    assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+    assert_eq!(reply.state, Some(State::NoResult));
+}
+
+#[test]
+fn single_dictionary_reuses_its_backend_for_both_passes() {
+    let f = Fixture::new();
+    let path = f.join("dictionaries/a.ifo");
+    install(&path, "A", "thunder");
+    let mut inner = Inner {
+        store: f.store.clone(),
+        prefs_path: f.store.dictionary_preferences(),
+        preferences: Vec::new(),
+        catalog: Catalog::default(),
+        warnings: Vec::new(),
+        fresh: false,
+        backend: None,
+        save_error: None,
+    };
+    assert!(inner.discover(&|| true));
+    assert_eq!(inner.lookup("other", None, &|| true).1, State::NoResult);
+    // The cached backend has everything needed. Reopening during either pass
+    // would fail because its metadata is no longer on disk.
+    fs::remove_file(path).unwrap();
+    let (selected, state) = inner.lookup("thunders", None, &|| true);
+    assert_eq!(selected.as_deref(), Some("a.ifo"));
+    assert!(matches!(state, State::Definition { from: Some(_), .. }));
 }
