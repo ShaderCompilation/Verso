@@ -304,8 +304,10 @@ impl Builder {
             for c in word.chars().filter(|c| !c.is_control()) {
                 self.newline = false;
                 if self.space {
-                    let joined = self.spans.last().is_some_and(|s| s.style == word_style);
-                    self.push(' ', if joined { word_style } else { style });
+                    // A space between differently styled runs keeps only
+                    // their shared styles: no underline before a link.
+                    let previous = self.spans.last().map_or(word_style, |s| s.style);
+                    self.push(' ', previous.intersection(word_style));
                     self.space = false;
                 }
                 self.push(if c == '》' { ')' } else { c }, word_style);
@@ -590,6 +592,14 @@ mod tests {
         let b = parse("<a name='x'>anchor</a> <a href='y'>link</a>", b'h');
         assert_eq!(style_at(&b, "anchor"), Style::default());
         assert_eq!(style_at(&b, "link"), Style::LINK);
+        // Collapsed spaces between runs keep only the shared styles, so a
+        // link's underline starts at its first letter.
+        let b = parse("such as a  <kref>lamp</kref>  or <b>firm <i>soft</i></b>", b'x');
+        validate(&b);
+        assert_eq!(lines(&b), "such as a lamp or firm soft");
+        assert_eq!(style_at(&b, " lamp"), Style::default());
+        assert_eq!(style_at(&b, " or"), Style::default());
+        assert_eq!(style_at(&b, " soft"), Style::BOLD);
     }
     #[test]
     fn html_pango_scripts_and_entities() {

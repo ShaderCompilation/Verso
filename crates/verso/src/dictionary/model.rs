@@ -38,6 +38,9 @@ impl Style {
     pub fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
+    pub fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
 }
 impl Block {
     pub fn plain(text: impl Into<String>) -> Self {

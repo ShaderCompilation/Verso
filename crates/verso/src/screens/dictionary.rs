@@ -132,6 +132,9 @@ pub struct Lookup {
     selected: Option<String>,
     state: State,
     pages: Option<StyledPagination>,
+    /// When the current pagination started and the layout time spent on it,
+    /// for the completion debug log.
+    layout_timing: (std::time::Instant, std::time::Duration),
     layout_error: Option<String>,
     pager: Pager,
     manager_pager: Pager,
@@ -211,6 +214,7 @@ impl Lookup {
             selected: None,
             state: State::NoResult,
             pages: None,
+            layout_timing: (std::time::Instant::now(), std::time::Duration::ZERO),
             layout_error: None,
             pager,
             manager_pager,
@@ -248,7 +252,10 @@ impl Lookup {
     pub fn on_idle(&mut self, text: &mut TextRenderer) -> bool {
         let Some(pages) = self.pages.as_mut().filter(|p| !p.is_complete()) else { return false };
         let had_next = self.pager.page + 1 < pages.pages().len();
-        if let Err(e) = text.paginate_styled_step(pages) {
+        let started = std::time::Instant::now();
+        let step = text.paginate_styled_step(pages);
+        self.layout_timing.1 += started.elapsed();
+        if let Err(e) = step {
             self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
             self.pages = None;
             self.pager.set(0, 1);
@@ -259,9 +266,11 @@ impl Lookup {
         self.pager.incomplete = !pages.is_complete();
         if pages.is_complete() {
             log::debug!(
-                "dictionary pagination complete: {} pages, {} pieces",
+                "dictionary pagination complete: {} pages, {} pieces, layout {:?}, wall {:?}",
                 pages.pages().len(),
-                pages.paragraphs().len()
+                pages.paragraphs().len(),
+                self.layout_timing.1,
+                self.layout_timing.0.elapsed()
             );
         }
         pages.is_complete() || !had_next && self.pager.page + 1 < pages.pages().len()
@@ -465,12 +474,13 @@ impl Lookup {
         self.find.draw(cx);
         if self.pages.is_none() && self.layout_error.is_none() {
             let started = std::time::Instant::now();
-            let result =
-                StyledPagination::new(content(&self.state, self.pending, &self.warnings, t), self.body.w, self.body.h)
-                    .and_then(|mut pages| {
-                        cx.text.paginate_styled_until(&mut pages, 1)?;
-                        Ok(pages)
-                    });
+            let blocks = content(&self.state, self.pending, &self.warnings, t);
+            let bytes: usize =
+                blocks.iter().map(|b| if let StyledBlock::Paragraph(p) = b { p.text.len() } else { 0 }).sum();
+            let result = StyledPagination::new(blocks, self.body.w, self.body.h).and_then(|mut pages| {
+                cx.text.paginate_styled_until(&mut pages, 1)?;
+                Ok(pages)
+            });
             match result {
                 Ok(pages) => {
                     self.pager.set(0, pages.pages().len());
@@ -483,7 +493,13 @@ impl Lookup {
                     self.pager.incomplete = false;
                 }
             }
-            log::debug!("dictionary first page pagination: {:?}", started.elapsed());
+            self.layout_timing = (started, started.elapsed());
+            log::debug!(
+                "dictionary first page pagination: {:?}, {bytes} text bytes, {} pages, complete {}",
+                self.layout_timing.1,
+                self.pages.as_ref().map_or(0, |p| p.pages().len()),
+                self.pages.as_ref().is_some_and(StyledPagination::is_complete)
+            );
         }
         if let Some(pages) = &mut self.pages {
             let started = std::time::Instant::now();
