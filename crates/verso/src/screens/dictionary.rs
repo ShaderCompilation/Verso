@@ -1,11 +1,13 @@
 //! Lookup is an overlay over the unchanged cached book page.
 use crate::{
     dictionary::{
-        BlockKind, Dictionary, Source, Style,
+        Block, BlockKind, Dictionary, Source, Style,
         worker::{State, Worker},
     },
     geom::Rect,
-    gfx::{HAlign, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, TextRenderer, TextStyle},
+    gfx::{
+        HAlign, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, TextRenderer, TextStyle, Weight,
+    },
     platform::TextInput,
     screens::EventCx,
     ui::{
@@ -17,13 +19,54 @@ use crate::{
 };
 use std::rc::Rc;
 
+const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
+                       then open Dictionaries and tap Rescan.";
+const DISABLED: &str = "All dictionaries are disabled. Open Dictionaries to enable one.";
+const NO_RESULT: &str = "No definition found. Tap the query to edit it, or try another dictionary.";
+const UNREADABLE_HINT: &str = "Try another dictionary, or replace its files and tap Rescan.";
+/// Nesting levels that indent; deeper blocks stay at the last level.
+const MAX_DEPTH: u8 = 4;
+
+/// The renderer's flags for a dictionary span style.
+fn span_style(style: Style) -> SpanStyle {
+    [
+        (Style::BOLD, SpanStyle::BOLD),
+        (Style::ITALIC, SpanStyle::ITALIC),
+        (Style::MUTED, SpanStyle::MUTED),
+        (Style::PHONETIC, SpanStyle::PHONETIC),
+        (Style::LINK, SpanStyle::UNDERLINE),
+    ]
+    .into_iter()
+    .filter(|(from, _)| style.contains(*from))
+    .fold(SpanStyle::default(), |all, (_, to)| all.union(to))
+}
+
+fn plain(text: String, base: TextStyle) -> StyledBlock {
+    StyledBlock::Paragraph(StyledParagraph { text, spans: Vec::new(), base, muted: INK2, indent: 0.0 })
+}
+
+/// A text or heading block with its styles and indentation.
+fn styled(block: &Block, t: &Theme) -> StyledBlock {
+    let spans = block
+        .spans
+        .iter()
+        .map(|span| StyledSpan { bytes: span.start as usize..span.end as usize, style: span_style(span.style) })
+        .collect();
+    let base =
+        if block.kind == BlockKind::Heading { t.dictionary_body.weight(Weight::SemiBold) } else { t.dictionary_body };
+    StyledBlock::Paragraph(StyledParagraph {
+        text: block.text.clone(),
+        spans,
+        base,
+        muted: INK2,
+        indent: (i32::from(block.depth.min(MAX_DEPTH)) * t.dictionary_indent) as f32,
+    })
+}
+
 /// All visible content shares one pagination, including provenance and errors.
 fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<StyledBlock> {
-    let paragraph = |text: String, base: TextStyle| {
-        StyledBlock::Paragraph(StyledParagraph { text, spans: Vec::new(), base, muted: INK2, indent: 0.0 })
-    };
     if pending {
-        return vec![paragraph("Looking up…".into(), t.body)];
+        return vec![plain("Looking up…".into(), t.body)];
     }
     let gap = t.dictionary_body.line_height() / 2.0;
     let rule = || StyledBlock::Rule { space: gap, thickness: t.hairline, gray: LINE };
@@ -32,53 +75,32 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
         State::Definition { entries, base_forms } => {
             if let Some(forms) = base_forms {
                 let plural = if forms.count > 1 { "s" } else { "" };
-                blocks.push(paragraph(format!("Base form{plural} of “{}”", forms.query), t.small.gray(INK2)));
+                blocks.push(plain(format!("Base form{plural} of “{}”", forms.query), t.small.gray(INK2)));
                 blocks.push(StyledBlock::Gap(gap));
             }
             for (i, entry) in entries.iter().enumerate() {
-                if i > 0 { blocks.push(rule()); }
-                blocks.push(paragraph(entry.headword.clone(), t.dictionary_headword));
-                for block in &entry.blocks {
-                    match block.kind {
-                        BlockKind::Gap => blocks.push(StyledBlock::Gap(gap)),
-                        BlockKind::Rule => blocks.push(rule()),
-                        BlockKind::Text | BlockKind::Heading => {
-                            let spans = block.spans.iter().map(|span| {
-                                let mut style = SpanStyle::default();
-                                for (from, to) in [
-                                    (Style::BOLD, SpanStyle::BOLD),
-                                    (Style::ITALIC, SpanStyle::ITALIC),
-                                    (Style::MUTED, SpanStyle::MUTED),
-                                    (Style::PHONETIC, SpanStyle::PHONETIC),
-                                    (Style::LINK, SpanStyle::UNDERLINE),
-                                ] {
-                                    if span.style.contains(from) { style = style.union(to); }
-                                }
-                                StyledSpan { bytes: span.start as usize..span.end as usize, style }
-                            }).collect();
-                            let base = if block.kind == BlockKind::Heading {
-                                t.dictionary_body.weight(crate::gfx::Weight::SemiBold)
-                            } else { t.dictionary_body };
-                            blocks.push(StyledBlock::Paragraph(StyledParagraph {
-                                text: block.text.clone(), spans, base, muted: INK2,
-                                indent: (block.depth.min(4) as i32 * t.dictionary_indent) as f32,
-                            }));
-                        }
-                    }
+                if i > 0 {
+                    blocks.push(rule());
                 }
+                blocks.push(plain(entry.headword.clone(), t.dictionary_headword));
+                blocks.extend(entry.blocks.iter().map(|block| match block.kind {
+                    BlockKind::Gap => StyledBlock::Gap(gap),
+                    BlockKind::Rule => rule(),
+                    BlockKind::Text | BlockKind::Heading => styled(block, t),
+                }));
             }
         }
-        State::Missing => blocks.push(paragraph("No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(), t.body)),
-        State::Disabled => blocks.push(paragraph("All dictionaries are disabled. Open Dictionaries to enable one.".into(), t.body)),
-        State::NoResult => blocks.push(paragraph("No definition found. Tap the query to edit it, or try another dictionary.".into(), t.body)),
-        State::Error(e) => blocks.push(paragraph(format!("Couldn't read this dictionary.\n\n{e}\n\nTry another dictionary, or replace its files and tap Rescan."), t.body)),
+        State::Missing => blocks.push(plain(MISSING.into(), t.body)),
+        State::Disabled => blocks.push(plain(DISABLED.into(), t.body)),
+        State::NoResult => blocks.push(plain(NO_RESULT.into(), t.body)),
+        State::Error(e) => {
+            blocks.push(plain(format!("Couldn't read this dictionary.\n\n{e}\n\n{UNREADABLE_HINT}"), t.body));
+        }
     }
     if !warnings.is_empty() {
         blocks.push(StyledBlock::Gap(gap));
-        blocks.push(paragraph("Some dictionary folders had problems:".into(), t.body));
-        for warning in warnings {
-            blocks.push(paragraph(format!("• {warning}"), t.body));
-        }
+        blocks.push(plain("Some dictionary folders had problems:".into(), t.body));
+        blocks.extend(warnings.iter().map(|warning| plain(format!("• {warning}"), t.body)));
     }
     blocks
 }
@@ -569,10 +591,8 @@ mod tests {
             ui::gesture::Direction,
         };
         let t = Theme::for_dpi(300);
-        let worker = Rc::new(Worker::new(
-            Store::at(std::env::temp_dir().join(format!("verso-styled-lookup-{}", std::process::id()))),
-            Waker::new(|| {}),
-        ));
+        let root = std::env::temp_dir().join(format!("verso-styled-lookup-{}", std::process::id()));
+        let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
         for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
             let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None);
             lookup.pending = false;
@@ -672,6 +692,9 @@ mod tests {
             lookup.on_gesture(&swipe(Direction::Left), &mut cx);
             assert_eq!(second, draw(&mut lookup, &mut canvas, &mut text, &mut icons));
         }
+        // The worker may still be writing its first reply's preferences.
+        drop(worker);
+        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 

@@ -325,7 +325,10 @@ impl App {
         if self.asleep {
             return;
         }
-        if let Some(screen) = self.stack.last_mut().filter(|s| s.has_idle_work()) {
+        // A pending redraw (usually input) is presented before more layout.
+        if !self.needs_redraw
+            && let Some(screen) = self.stack.last_mut().filter(|s| s.has_idle_work())
+        {
             self.needs_redraw |= screen.on_idle(&mut self.text);
         }
         if self.wake_cleanup.is_some_and(|due| now >= due) {
@@ -928,11 +931,17 @@ mod tests {
         app.on_tick(Instant::now());
         assert_eq!(remaining.get(), 2);
         assert!(app.frame().is_empty(), "cache-only progress needs no drawing");
+        app.needs_redraw = true;
+        app.on_tick(Instant::now());
+        assert_eq!(remaining.get(), 2, "a pending redraw (e.g. a page turn) is drawn before more layout");
+        app.frame();
+        assert!(!app.needs_redraw);
         app.on_sleep();
         assert!(app.deadline().is_none());
         app.on_tick(Instant::now());
         assert_eq!(remaining.get(), 2);
         app.on_wake();
+        app.frame();
         app.on_tick(Instant::now());
         assert_eq!(remaining.get(), 1);
         app.frame();
