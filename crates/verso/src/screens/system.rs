@@ -1,18 +1,21 @@
-//! Settings (reading, library folders, device) and the small system prompts
+//! Settings (reading, library and dictionary folders, device) and the small system prompts
 //! shared by the library and USB notification.
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
-use crate::platform::{ssh, wifi};
+use crate::platform::{Waker, ssh, wifi};
+use crate::screens::dictionary_folders::DictionaryFolders;
 use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
-use crate::ui::widgets::{Button, ButtonKind, IconButton, Pager, PagerEvent, Segmented, Sheet, Toggle, TopBar};
+use crate::ui::widgets::{
+    Button, ButtonKind, IconButton, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, Toggle, TopBar,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -39,6 +42,8 @@ pub struct SystemSettings {
     tabs: Segmented,
     tab: Tab,
     store: Store,
+    /// For the dictionary-folder screen's catalog worker.
+    waker: Waker,
     screen: Rect,
     content: Rect,
     /// The top of the area below the tabs.
@@ -51,7 +56,10 @@ pub struct SystemSettings {
     // Display
     orientation: Segmented,
     flash: Segmented,
-    // Library
+    // Library: folders on the left, dictionaries below or (landscape) right.
+    library: Rect,
+    dictionaries: Rect,
+    dictionary_entry: List,
     folders: Vec<PathBuf>,
     removes: Vec<IconButton>,
     folder_row: i32,
@@ -81,7 +89,7 @@ pub struct SystemSettings {
     dev_top: i32,
 }
 impl SystemSettings {
-    pub fn new(t: &Theme, screen: Rect, store: Store) -> Self {
+    pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
         let mut top = TopBar::new("Settings", true);
         top.show_battery = true;
         top.place(screen, t);
@@ -111,6 +119,28 @@ impl SystemSettings {
         add_folder.place(Rect::new(content.x, 0, content.w, t.button_h), t);
         let mut folder_pager = Pager::new(1);
         folder_pager.place(Rect::new(content.x, content.bottom() - t.mm(11.0), content.w, t.mm(11.0)), t);
+        // The dictionary entry: a section label and one row. Landscape is too
+        // short for it below the library folders.
+        let entry_h = t.mm(8.0) + t.row2;
+        let (library, dictionaries) = if screen.w > screen.h {
+            let gap = t.mm(10.0);
+            let w = (content.w - gap) / 2;
+            let right = Rect { x: content.right() - w, w, ..content };
+            // The folder pager stays under the folders.
+            folder_pager.place(Rect { w, ..folder_pager.rect() }, t);
+            (Rect { w, ..content }, Rect { y: body, h: entry_h, ..right })
+        } else {
+            let y = folder_pager.rect().y - t.mm(2.0) - entry_h;
+            (content, Rect { y, h: entry_h, ..content })
+        };
+        let mut dictionary_entry = List::new(vec![
+            Row::new("Dictionary folders").sub("Where Verso looks for StarDict dictionaries").chevron(),
+        ]);
+        let entry_row = Rect::new(screen.x, dictionaries.y + t.mm(8.0), screen.w, t.row2);
+        let entry_row =
+            if screen.w > screen.h { Rect { x: dictionaries.x, w: dictionaries.w, ..entry_row } } else { entry_row };
+        let pad = if screen.w > screen.h { 0 } else { t.margin };
+        dictionary_entry.place(entry_row, t.row2, pad);
 
         // Landscape is too short for the developer section below the rest.
         let (device_left, device_right) = if screen.w > screen.h {
@@ -139,6 +169,7 @@ impl SystemSettings {
             tab: Tab::Reading,
             settings_seen: store.settings_saves(),
             store,
+            waker,
             screen,
             content,
             body,
@@ -146,6 +177,9 @@ impl SystemSettings {
             zones_preview,
             orientation,
             flash,
+            library,
+            dictionaries,
+            dictionary_entry,
             folders: Vec::new(),
             removes: Vec::new(),
             folder_row: t.row,
@@ -295,9 +329,11 @@ impl SystemSettings {
         self.body + t.mm(8.0)
     }
 
-    /// Rows that fit above the add button, note and pager.
+    /// Rows that fit above the add button, note and pager (and, in portrait,
+    /// the dictionary entry).
     fn folders_per_page(&self, t: &Theme) -> usize {
-        let space = self.folder_pager.rect().y - t.mm(26.0) - self.folders_top(t);
+        let bottom = if self.library.w == self.content.w { self.dictionaries.y } else { self.folder_pager.rect().y };
+        let space = bottom - t.mm(26.0) - self.folders_top(t);
         (space / self.folder_row).max(1) as usize
     }
 
@@ -311,16 +347,16 @@ impl SystemSettings {
         let top = self.folders_top(t);
         let range = self.visible_folders(t);
         for (k, i) in range.clone().enumerate() {
-            let row = Rect::new(self.content.x, top + k as i32 * self.folder_row, self.content.w, self.folder_row);
+            let row = Rect::new(self.library.x, top + k as i32 * self.folder_row, self.library.w, self.folder_row);
             self.removes[i].place(Rect::new(row.right() - t.target + t.mm(2.0), row.y, t.target, row.h));
         }
         let y = top + range.len() as i32 * self.folder_row + t.mm(4.0);
-        self.add_folder.place(Rect::new(self.content.x, y, self.content.w, t.button_h), t);
+        self.add_folder.place(Rect::new(self.library.x, y, self.library.w, t.button_h), t);
     }
 
     fn draw_library(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.content;
+        let c = self.library;
         cx.section_label("Library folders", Rect::new(c.x, self.body, c.w, t.mm(8.0)));
         let top = self.folders_top(t);
         for (k, i) in self.visible_folders(t).enumerate() {
@@ -341,6 +377,9 @@ impl SystemSettings {
         let y = self.add_folder.rect().bottom() + t.mm(3.0);
         cx.paragraph(note, t.small.gray(INK2), Rect::new(c.x, y, c.w, t.mm(14.0)), HAlign::Left);
         self.folder_pager.draw(cx);
+        let d = self.dictionaries;
+        cx.section_label("Dictionaries", Rect::new(d.x, d.y, d.w, t.mm(8.0)));
+        self.dictionary_entry.draw(cx);
     }
 
     fn library_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
@@ -353,6 +392,14 @@ impl SystemSettings {
         {
             self.place_folders(cx.theme);
             return Action::None;
+        }
+        if let Some(ListEvent::Tapped(_)) = self.dictionary_entry.on_gesture(g) {
+            return Action::Push(Box::new(DictionaryFolders::new(
+                cx.theme,
+                self.screen,
+                self.store.clone(),
+                self.waker.clone(),
+            )));
         }
         if self.add_folder.on_gesture(g) {
             return Action::Push(Box::new(FolderPicker::new(

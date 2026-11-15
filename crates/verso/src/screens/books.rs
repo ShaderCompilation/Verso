@@ -1150,6 +1150,7 @@ impl Screen for Books {
                     cx.theme,
                     self.screen,
                     self.store.clone(),
+                    self.worker.waker(),
                 )));
             }
             if self.search_action.on_gesture(&g) {
@@ -1451,7 +1452,8 @@ impl Screen for Books {
     }
 }
 
-struct Details {
+/// A sheet of paged plain text, e.g. book details or a full folder path.
+pub(crate) struct Details {
     sheet: Sheet,
     pager: Pager,
     pages: Vec<String>,
@@ -1472,7 +1474,7 @@ impl Details {
         );
         Self::from_text(t, screen, "Book details", content)
     }
-    fn from_text(t: &Theme, screen: Rect, title: &str, content: String) -> Self {
+    pub(crate) fn from_text(t: &Theme, screen: Rect, title: &str, content: String) -> Self {
         let sheet = Sheet::open(title, screen.h * 3 / 4, screen, t);
         let area = sheet.content(t);
         let mut pager = Pager::new(1);
@@ -1480,7 +1482,7 @@ impl Details {
         let text = Rect { h: area.h - t.mm(13.0), ..area };
         Self { sheet, pager, pages: Vec::new(), content, text }
     }
-    fn draw(&mut self, cx: &mut DrawCx) {
+    pub(crate) fn draw(&mut self, cx: &mut DrawCx) {
         if self.pages.is_empty() {
             self.pages = detail_pages(cx.text, &self.content, cx.theme.body, self.text);
             self.pager.set(0, self.pages.len());
@@ -1492,7 +1494,8 @@ impl Details {
         }
         self.pager.draw(cx);
     }
-    fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> bool {
+    /// True when the sheet should close.
+    pub(crate) fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> bool {
         if self.sheet.on_gesture(g) {
             return true;
         }

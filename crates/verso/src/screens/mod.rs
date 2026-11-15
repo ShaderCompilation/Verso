@@ -5,6 +5,7 @@
 pub mod books;
 pub mod contents;
 pub mod dictionary;
+pub mod dictionary_folders;
 pub mod folders;
 pub mod gallery;
 pub mod reader;

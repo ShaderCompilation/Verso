@@ -8,6 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// KOReader's standard StarDict folder, the Kindle default and the Settings preset.
 pub const KOREADER_DICTIONARY_FOLDER: &str = "/mnt/us/koreader/data/dict";
@@ -17,6 +18,9 @@ const MAX_BYTES: u64 = 64 * 1024;
 const FILE: &str = "dictionary-folders.json";
 // One writer per process, also across independent Store handles for one root.
 static WRITE: Mutex<()> = Mutex::new(());
+/// Counts save attempts in this process, so screens and retained dictionary
+/// workers can notice a change without rereading the file.
+static SAVES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize)]
 struct Record {
@@ -52,7 +56,14 @@ impl Store {
     pub fn save_dictionary_folders(&self, folders: &[PathBuf]) -> Result<()> {
         let folders = clean(folders.iter().cloned())?;
         let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
-        atomic(&self.root.join(FILE), &Record { version: VERSION, folders })
+        let result = atomic(&self.root.join(FILE), &Record { version: VERSION, folders });
+        SAVES.fetch_add(1, Ordering::Relaxed);
+        result
+    }
+    /// Changes whenever the folder list was saved (or a save was attempted);
+    /// compare to notice edits.
+    pub fn dictionary_folder_saves() -> u64 {
+        SAVES.load(Ordering::Relaxed)
     }
 }
 

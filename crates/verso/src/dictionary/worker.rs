@@ -266,7 +266,6 @@ impl Worker {
     }
     /// The dictionaries and source status without a query, e.g. for Settings
     /// before any book is open. `rescan` forces a fresh discovery.
-    #[allow(dead_code)] // used by Settings in Phase 4 of the folders follow-up
     pub fn catalog(&self, rescan: bool) -> u64 {
         let id = self.next_id();
         let _ = self.tx.send(Command::Catalog { id, rescan });
@@ -274,7 +273,6 @@ impl Worker {
     }
     /// The folder configuration changed: cancels work in flight, releases the
     /// open dictionary and rediscovers on the next request.
-    #[allow(dead_code)] // used by Settings in Phase 4 of the folders follow-up
     pub fn invalidate(&self) {
         self.latest.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(Command::Invalidate);

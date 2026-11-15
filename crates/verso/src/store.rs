@@ -1,5 +1,4 @@
 //! Small, versioned JSON records. Rename replaces a complete file atomically.
-#[allow(dead_code)] // read by the worker and Settings in later phases
 mod dictionary_folders;
 mod home;
 pub mod position;
@@ -9,10 +8,9 @@ use crate::library::{LibraryIndex, Sort};
 pub use crate::platform::Orientation;
 pub use crate::reader::TapZones;
 use anyhow::{Context, Result};
-#[allow(unused_imports)] // used by the worker and Settings in later phases
 pub use dictionary_folders::{
-    DictionaryFolders, KOREADER_DICTIONARY_FOLDER, MAX_DICTIONARY_FOLDERS, default_dictionary_folders,
-    find_dictionary_folder, with_dictionary_folder, without_dictionary_folder,
+    KOREADER_DICTIONARY_FOLDER, MAX_DICTIONARY_FOLDERS, default_dictionary_folders, find_dictionary_folder,
+    with_dictionary_folder, without_dictionary_folder,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;

@@ -1,5 +1,6 @@
-//! Choosing a library folder: browse subfolders from the user storage root
-//! and add the one on screen. Settings lists and removes folders.
+//! Choosing a folder: browse subfolders from the user storage root and add
+//! the one on screen. What adding means (library or dictionary folders) is
+//! up to a [`FolderTarget`]; Settings lists and removes folders.
 use std::path::{Path, PathBuf};
 
 use crate::geom::Rect;
@@ -67,10 +68,55 @@ fn subfolders(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(folders)
 }
 
+/// What the picker does with the folder on screen.
+pub trait FolderTarget {
+    /// Whether `folder` can be added, and the note shown above the button.
+    fn check(&self, folder: &Path) -> (bool, String);
+    /// Saves `folder`. `Ok` carries the toast and closes the picker; `Err`
+    /// carries the toast and keeps it open.
+    fn add(&mut self, folder: &Path) -> Result<String, String>;
+}
+
+/// Library folders, saved in `settings.json`.
+pub struct LibraryFolders {
+    pub store: Store,
+    pub folders: Vec<PathBuf>,
+}
+impl LibraryFolders {
+    /// The folder list with `folder` added, if it isn't covered yet.
+    fn addition(&self, folder: &Path) -> Option<Vec<PathBuf>> {
+        if Store::library_folders_overridden() {
+            return None;
+        }
+        with_folder(&self.folders, folder)
+    }
+}
+impl FolderTarget for LibraryFolders {
+    fn check(&self, folder: &Path) -> (bool, String) {
+        if Store::library_folders_overridden() {
+            (false, "Library folders are set by VERSO_BOOKS.".into())
+        } else if self.addition(folder).is_some() {
+            (true, "Books in this folder and its subfolders will appear in your library.".into())
+        } else {
+            (false, "This folder is already in your library.".into())
+        }
+    }
+    fn add(&mut self, folder: &Path) -> Result<String, String> {
+        let Some(folders) = self.addition(folder) else { return Err("This folder is already in your library.".into()) };
+        match self.store.save_library_folders(folders) {
+            Ok(()) => Ok(format!("Added {}", display_folder(folder))),
+            Err(e) => {
+                log::error!("saving library folders: {e:#}");
+                Err("Couldn’t save library folders".into())
+            }
+        }
+    }
+}
+
 pub struct FolderPicker {
     top: TopBar,
-    store: Store,
-    folders: Vec<PathBuf>,
+    target: Box<dyn FolderTarget>,
+    note_text: String,
     root: PathBuf,
     current: PathBuf,
     /// The list's first row goes up a level (unless at the root).
@@ -86,11 +132,17 @@ pub struct FolderPicker {
 }
 
 impl FolderPicker {
+    /// Adds a library folder.
     pub fn new(t: &Theme, screen: Rect, store: Store, folders: Vec<PathBuf>) -> Self {
-        Self::at(t, screen, store, folders, browse_root(), browse_start())
+        Self::with_target(t, screen, Box::new(LibraryFolders { store, folders }))
     }
 
-    fn at(t: &Theme, screen: Rect, store: Store, folders: Vec<PathBuf>, root: PathBuf, start: PathBuf) -> Self {
+    /// Adds the chosen folder through `target`.
+    pub fn with_target(t: &Theme, screen: Rect, target: Box<dyn FolderTarget>) -> Self {
+        Self::at(t, screen, target, browse_root(), browse_start())
+    }
+
+    pub(crate) fn at(t: &Theme, screen: Rect, target: Box<dyn FolderTarget>, root: PathBuf, start: PathBuf) -> Self {
         let mut top = TopBar::new("Add folder", true);
         top.place(screen, t);
         let content = screen.split_top(t.top_bar).1.inset_xy(t.margin, 0);
@@ -105,8 +157,8 @@ impl FolderPicker {
         let start = if start.starts_with(&root) { start } else { root.clone() };
         let mut this = Self {
             top,
-            store,
-            folders,
+            target,
+            note_text: String::new(),
             root,
             current: start,
             up: false,
@@ -149,25 +201,7 @@ impl FolderPicker {
         self.list.place(self.list_rect, t.row, t.margin);
         let pages = self.list.paging().pages();
         self.pager.set(0, pages);
-        self.add.enabled = self.addition().is_some();
-    }
-
-    /// The folder list with the current folder added, if it isn't covered yet.
-    fn addition(&self) -> Option<Vec<PathBuf>> {
-        if Store::library_folders_overridden() {
-            return None;
-        }
-        with_folder(&self.folders, &self.current)
-    }
-
-    fn note(&self) -> &'static str {
-        if Store::library_folders_overridden() {
-            "Library folders are set by VERSO_BOOKS."
-        } else if self.add.enabled {
-            "Books in this folder and its subfolders will appear in your library."
-        } else {
-            "This folder is already in your library."
-        }
+        (self.add.enabled, self.note_text) = self.target.check(&self.current);
     }
 }
 
@@ -185,7 +219,7 @@ impl Screen for FolderPicker {
         }
         self.list.draw(cx);
         self.pager.draw(cx);
-        cx.paragraph(self.note(), t.small.gray(INK2), self.note, HAlign::Left);
+        cx.paragraph(&self.note_text, t.small.gray(INK2), self.note, HAlign::Left);
         self.add.draw(cx);
     }
 
@@ -213,17 +247,16 @@ impl Screen for FolderPicker {
             self.open(next, cx.theme);
             return Action::None;
         }
-        if self.add.on_gesture(&g)
-            && let Some(folders) = self.addition()
-        {
-            return match self.store.save_library_folders(folders) {
-                Ok(()) => {
-                    cx.toast(format!("Added {}", display_folder(&self.current)), None);
+        if self.add.on_gesture(&g) {
+            return match self.target.add(&self.current) {
+                Ok(toast) => {
+                    cx.toast(toast, None);
                     Action::Pop
                 }
-                Err(e) => {
-                    log::error!("saving library folders: {e:#}");
-                    cx.toast("Couldn’t save library folders", None);
+                Err(toast) => {
+                    cx.toast(toast, None);
+                    // Show why, e.g. the folder was added meanwhile.
+                    (self.add.enabled, self.note_text) = self.target.check(&self.current);
                     Action::None
                 }
             };
@@ -258,7 +291,9 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let store = Store::at(root.join(".data"));
         let folders = vec![root.join("documents")];
-        let mut picker = FolderPicker::at(&t, screen, store, folders, root.clone(), PathBuf::from("/elsewhere"));
+        let target = LibraryFolders { store: store.clone(), folders: folders.clone() };
+        let library = LibraryFolders { store, folders };
+        let mut picker = FolderPicker::at(&t, screen, Box::new(target), root.clone(), PathBuf::from("/elsewhere"));
         assert_eq!(picker.current, root, "a start outside the root falls back to it");
         assert!(!picker.up);
         let names: Vec<_> = picker.list.rows.iter().map(|r| r.label.clone()).collect();
@@ -270,7 +305,7 @@ mod tests {
         let names: Vec<_> = picker.list.rows.iter().map(|r| r.label.clone()).collect();
         assert_eq!(names.len(), 3, "up row, then A and b: {names:?}");
         assert!(names[0].starts_with("Up to ") && names[1] == "A" && names[2] == "b");
-        assert_eq!(picker.addition(), Some(vec![root.join("documents"), root.join("books")]));
+        assert_eq!(library.addition(&picker.current), Some(vec![root.join("documents"), root.join("books")]));
         picker.open(root.join("missing"), &t);
         assert!(picker.error.is_some() && picker.entries.is_empty());
         std::fs::remove_dir_all(root)?;

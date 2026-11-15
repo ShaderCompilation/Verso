@@ -54,6 +54,9 @@ pub struct Reader {
     opened_at: Option<Instant>,
     selection: SelectionState,
     dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
+    /// `Store::dictionary_folder_saves` the dictionary worker has seen. When
+    /// folders change in Settings, the next lookup rediscovers.
+    dictionary_folders_seen: u64,
     search: Session,
     search_bar: Option<SearchBar>,
     search_redraw: Option<Instant>,
@@ -125,6 +128,7 @@ impl Reader {
             opened_at: Some(Instant::now()),
             selection: SelectionState::default(),
             dictionary: None,
+            dictionary_folders_seen: Store::dictionary_folder_saves(),
             search: Session::default(),
             search_bar: None,
             search_redraw: None,
@@ -246,6 +250,13 @@ impl Reader {
         }
     }
     fn lookup(&mut self, query: &str, cx: &mut EventCx) {
+        let saves = Store::dictionary_folder_saves();
+        if saves != self.dictionary_folders_seen {
+            self.dictionary_folders_seen = saves;
+            if let Some(worker) = &self.dictionary {
+                worker.invalidate();
+            }
+        }
         let service = self.dictionary.get_or_insert_with(|| {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
         });
@@ -1092,6 +1103,74 @@ impl Screen for Reader {
 mod tests {
     use super::*;
     use crate::store::BookState;
+
+    #[test]
+    fn a_retained_reader_rediscovers_after_dictionary_folders_change() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-reader-dictionary-folders-{}", std::process::id()));
+        let install = |dir: &std::path::Path, name: &str| -> std::io::Result<()> {
+            std::fs::create_dir_all(dir)?;
+            let path = dir.join(name);
+            std::fs::write(
+                path.with_extension("ifo"),
+                format!(
+                    "StarDict's dict ifo file\nversion=2.4.2\nbookname={name}\nwordcount=1\nidxfilesize=14\nsametypesequence=m\n"
+                ),
+            )?;
+            std::fs::write(path.with_extension("idx"), b"Hello\0\0\0\0\0\0\0\0\x07")?;
+            std::fs::write(path.with_extension("dict"), b"meaning")
+        };
+        let store = Store::at(root.join("data"));
+        store.save_dictionary_folders(&[])?;
+        install(&store.dictionary_dir(), "native")?;
+        install(&root.join("koreader"), "external")?;
+        let screen = Rect::new(0, 0, 600, 800);
+        let theme = Theme::for_dpi(150);
+        let mut r = Reader::new(
+            screen,
+            Rc::new(Worker::stub()),
+            store.clone(),
+            "book".into(),
+            1,
+            Settings::default(),
+            Vec::new(),
+            Position::default(),
+        );
+        let (mut toast, mut forced, mut redraw) = (None, Vec::new(), false);
+        let mut cx = EventCx {
+            theme: &theme,
+            screen,
+            now: Instant::now(),
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut redraw,
+        };
+        let catalog = |r: &Reader| {
+            let worker = r.dictionary.as_ref().unwrap();
+            let id = worker.catalog(false);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(reply) = worker.receive().filter(|reply| reply.id == id) {
+                    let mut names: Vec<_> = reply.dictionaries.into_iter().map(|d| d.name).collect();
+                    names.sort();
+                    return names;
+                }
+                assert!(Instant::now() < deadline, "no catalog");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        r.lookup("Hello", &mut cx);
+        assert_eq!(catalog(&r), ["native"]);
+        // Settings (stacked above the retained reader) adds a folder.
+        store.save_dictionary_folders(&[root.join("koreader")])?;
+        assert_eq!(catalog(&r), ["native"], "the worker alone keeps its fresh catalog");
+        r.lookup("Hello", &mut cx);
+        assert_eq!(catalog(&r), ["external", "native"], "the next lookup uses the new folders");
+        drop(r);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn selection_composes_on_canvas_and_dismissal_or_sleep_restores_cached_pixels() {

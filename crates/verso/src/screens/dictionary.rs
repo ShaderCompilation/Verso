@@ -505,7 +505,9 @@ mod tests {
         assert_eq!(lookup.title(&lookup.catalog[0]), lookup.catalog[0].name);
         let mut copy = lookup.catalog[0].clone();
         copy.name = lookup.catalog[1].name.clone();
+        lookup.catalog.push(copy.clone());
         assert_eq!(lookup.title(&copy), format!("{} · Verso", copy.name));
+        lookup.catalog.pop();
         assert_eq!(copy.location(&lookup.sources), format!("Verso · {}", copy.id));
         let initial = lookup.selected.clone();
         lookup.cycle(1);

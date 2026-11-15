@@ -208,7 +208,7 @@ fn run() -> Result<()> {
             let name = opts.screen.as_deref();
             app.relayout(&info, orientation, |theme, rect| {
                 let root = start_screen(name, theme, rect, worker.clone()).expect("checked at startup");
-                let settings = screens::system::SystemSettings::new(theme, rect, store::Store::new());
+                let settings = screens::system::SystemSettings::new(theme, rect, store::Store::new(), worker.waker());
                 vec![root, Box::new(settings.on_display_tab())]
             });
             continue;
