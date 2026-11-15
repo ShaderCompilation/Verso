@@ -238,6 +238,9 @@ impl Backend {
             }
             blocks.truncate(keep);
             blocks.retain(|b| !matches!(b.kind, BlockKind::Text | BlockKind::Heading) || !b.text.is_empty());
+            while omitted && blocks.last().is_some_and(|b| b.kind == BlockKind::Gap) {
+                blocks.pop();
+            }
             output.push(Entry { headword: word, blocks });
             if omitted {
                 break;

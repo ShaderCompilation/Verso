@@ -200,7 +200,7 @@ impl Inner {
             if forms.is_some() && matches!(outcomes[i], Some(State::Error(_))) {
                 continue;
             }
-            // The text, plus the base-form count for a base-form lookup.
+            // The entries, plus the base-form count for a base-form lookup.
             let lookup = (|| -> anyhow::Result<(Vec<Entry>, Option<usize>)> {
                 if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
                     // Release the old index and eight-block cache before opening another.
@@ -218,10 +218,10 @@ impl Inner {
                     dictionary.error = None;
                     State::NoResult
                 }
-                Ok((text, count)) => {
+                Ok((entries, count)) => {
                     dictionary.error = None;
                     let base_forms = count.map(|count| BaseForms { query: query.to_owned(), count });
-                    return Some((Some(dictionary.id.clone()), State::Definition { entries: text, base_forms }));
+                    return Some((Some(dictionary.id.clone()), State::Definition { entries, base_forms }));
                 }
                 Err(e) => {
                     if !current() {

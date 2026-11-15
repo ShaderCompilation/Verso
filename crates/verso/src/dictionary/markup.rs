@@ -1,6 +1,48 @@
 //! A forgiving, streaming tag reader. No DOM, CSS engine or external resources.
 use super::{Block, BlockKind, Span, Style, text::entities};
 
+/// Elements that never have content or a closing tag.
+fn void(name: &str) -> bool {
+    matches!(
+        name,
+        "br" | "hr"
+            | "img"
+            | "input"
+            | "meta"
+            | "link"
+            | "wbr"
+            | "source"
+            | "embed"
+            | "param"
+            | "track"
+            | "area"
+            | "col"
+            | "base"
+            | "keygen"
+    )
+}
+/// IPA letters Literata lacks; a word containing one is set as phonetic.
+fn ipa(c: char) -> bool {
+    matches!(c, '\u{0250}'..='\u{02af}' | 'ː' | 'ˈ' | 'ˌ')
+}
+fn black(value: &str) -> bool {
+    let value: String = value.trim_end_matches("!important").chars().filter(|c| !c.is_whitespace()).collect();
+    matches!(
+        value.as_str(),
+        "" | "black"
+            | "#000"
+            | "#000f"
+            | "#000000"
+            | "#000000ff"
+            | "rgb(0,0,0)"
+            | "inherit"
+            | "initial"
+            | "unset"
+            | "currentcolor"
+            | "windowtext"
+    )
+}
+
 struct Tag<'a> {
     name: String,
     attrs: Vec<(String, String)>,
@@ -37,7 +79,7 @@ impl<'a> Tag<'a> {
             return None;
         }
         let name = body[..n].to_ascii_lowercase();
-        let empty = body.ends_with('/') || matches!(name.as_str(), "br" | "hr" | "img" | "input" | "meta" | "link");
+        let empty = body.ends_with('/') || void(&name);
         let mut attrs = Vec::new();
         body = &body[n..];
         while !body.trim_start().is_empty() {
@@ -82,26 +124,34 @@ impl<'a> Tag<'a> {
             "b" | "strong" => Style::BOLD,
             "i" | "em" | "cite" | "var" | "ex" => Style::ITALIC,
             "c" | "abr" | "co" | "small" => Style::MUTED,
-            "kref" | "iref" | "a" => Style::LINK,
+            "kref" | "iref" => Style::LINK,
+            "a" if self.attr("href").is_some() => Style::LINK,
             "tr" if kind == b'x' => Style::PHONETIC,
             _ => Style::default(),
         };
         let mut apply = |key: &str, value: &str| {
             let value = value.trim().to_ascii_lowercase();
             match key.trim() {
-                "font-weight" | "weight"
+                "font-weight" | "weight" | "font_weight"
                     if matches!(value.as_str(), "bold" | "semibold" | "heavy" | "ultrabold")
                         || value.parse::<u16>().is_ok_and(|v| v >= 600) =>
                 {
                     s = s.union(Style::BOLD)
                 }
-                "font-style" | "style" if value == "italic" || value == "oblique" => s = s.union(Style::ITALIC),
-                "color" | "foreground"
-                    if !matches!(value.as_str(), "black" | "#000" | "#000000" | "rgb(0,0,0)" | "rgb(0, 0, 0)")
-                        && !value.is_empty() =>
-                {
-                    s = s.union(Style::MUTED)
+                "font-style" | "style" | "font_style" if value == "italic" || value == "oblique" => {
+                    s = s.union(Style::ITALIC)
                 }
+                // Pango font descriptions, such as `font="Serif Bold Italic 12"`.
+                "font" | "font_desc" => {
+                    for word in value.split_whitespace() {
+                        match word {
+                            "bold" | "semi-bold" | "semibold" | "heavy" | "ultra-bold" => s = s.union(Style::BOLD),
+                            "italic" | "oblique" => s = s.union(Style::ITALIC),
+                            _ => (),
+                        }
+                    }
+                }
+                "color" | "foreground" | "fgcolor" if !black(&value) => s = s.union(Style::MUTED),
                 _ => (),
             }
         };
@@ -137,6 +187,7 @@ impl<'a> Tag<'a> {
                 | "ol"
                 | "hr"
         ) || self.name == "tr" && kind != b'x'
+            || self.name == "k" && kind == b'x'
     }
     fn indent(&self) -> bool {
         matches!(self.name.as_str(), "blockquote" | "dd" | "ul" | "ol" | "li")
@@ -153,6 +204,29 @@ struct Frame {
     boundary: bool,
     content: usize,
     script: Option<(usize, usize, bool)>,
+}
+/// HTML end tags that may be left out: an open `li`, `dd`/`dt` or `p` that a
+/// new element closes. Returns the stack index to close at.
+fn implied_end(stack: &[Frame], name: &str) -> Option<usize> {
+    let targets: &[&str] = match name {
+        "li" => &["li"],
+        "dd" | "dt" => &["dd", "dt"],
+        "p" | "div" | "blockquote" | "ul" | "ol" | "dl" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "hr" | "table"
+        | "pre" => &["p"],
+        _ => return None,
+    };
+    for (i, f) in stack.iter().enumerate().rev() {
+        if targets.contains(&f.name.as_str()) {
+            return Some(i);
+        }
+        // A list item may contain paragraphs and divs; a paragraph contains
+        // only inline elements. Anything else ends the search.
+        let passable = !f.boundary || targets[0] != "p" && matches!(f.name.as_str(), "p" | "div");
+        if !passable || matches!(f.name.as_str(), "ul" | "ol" | "dl" | "table" | "td" | "th") {
+            return None;
+        }
+    }
+    None
 }
 #[derive(Default)]
 struct Builder {
@@ -198,35 +272,64 @@ impl Builder {
             self.spans.push(Span { start, end, style });
         }
     }
-    fn append(&mut self, text: &str, mut style: Style, lines: bool) {
-        if text.chars().any(|c| matches!(c, '\u{0250}'..='\u{02af}' | 'ː' | 'ˈ' | 'ˌ')) {
-            style = style.union(Style::PHONETIC);
-        }
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        for c in text.chars() {
-            if c == '\n' && lines {
-                if self.newline {
-                    self.special(BlockKind::Gap);
+    fn append(&mut self, text: &str, style: Style, lines: bool) {
+        let normalized;
+        let mut rest = if text.contains('\r') {
+            normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            normalized.as_str()
+        } else {
+            text
+        };
+        while let Some(c) = rest.chars().next() {
+            if c.is_whitespace() {
+                if c == '\n' && lines {
+                    if self.newline {
+                        self.special(BlockKind::Gap);
+                    } else {
+                        self.flush();
+                    }
+                    self.newline = true;
                 } else {
-                    self.flush();
+                    self.space = !self.text.is_empty();
                 }
-                self.newline = true;
-            } else if c.is_whitespace() {
-                self.space = !self.text.is_empty();
-            } else if !c.is_control() {
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+            let n = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let (word, after) = rest.split_at(n);
+            rest = after;
+            // Phonetic per word, so one transcription doesn't switch a whole
+            // paragraph or plain-text field to the phonetic face.
+            let word_style = if word.chars().any(ipa) { style.union(Style::PHONETIC) } else { style };
+            for c in word.chars().filter(|c| !c.is_control()) {
                 self.newline = false;
                 if self.space {
-                    self.push(' ', style);
+                    let joined = self.spans.last().is_some_and(|s| s.style == word_style);
+                    self.push(' ', if joined { word_style } else { style });
                     self.space = false;
                 }
-                self.push(if c == '》' { ')' } else { c }, style);
+                self.push(if c == '》' { ')' } else { c }, word_style);
                 self.content += 1;
             }
         }
     }
+    /// Close `stack[i]` and everything opened inside it.
+    fn close(&mut self, stack: &mut Vec<Frame>, i: usize) {
+        if stack[i..].iter().any(|f| f.boundary) {
+            self.flush();
+            if stack[i].content == self.content {
+                self.special(BlockKind::Gap);
+            }
+        }
+        stack.truncate(i);
+        self.depth = stack.last().map_or(0, |f| f.depth);
+        self.heading = stack.last().is_some_and(|f| f.heading);
+    }
 }
-// Look ahead only within this element, to discard an audio label or convert a
-// simple superscript. Nested markup is otherwise handled by the normal stack.
+// Look ahead only within this element, to hide it, discard an audio label or
+// convert a simple superscript. Nested markup is otherwise handled by the
+// normal stack. Scans stop at a 33rd nested opener, which keeps repeated
+// unclosed elements from rescanning a whole field each time.
 fn element_end<'a>(source: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
     let mut rest = source;
     let mut depth = 1usize;
@@ -253,16 +356,21 @@ fn element_end<'a>(source: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
     }
     None
 }
+/// Digits, signs and parentheses only: these exist in Literata (signs fall
+/// back to Inter). Letters such as `st` in `1<sup>st</sup>` stay as text.
 fn script(text: &str, sub: bool) -> Option<String> {
-    let from = if sub { "0123456789+-=()aehijklmnoprstuvx" } else { "0123456789+-=()abcdefghijklmnoprstuvwxyz" };
     let to = if sub {
-        "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ"
+        "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎"
     } else {
-        "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ"
+        "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾"
     };
     text.chars()
         .map(|c| {
-            if c.is_whitespace() { Some(c) } else { from.chars().position(|a| a == c).and_then(|i| to.chars().nth(i)) }
+            if c.is_whitespace() {
+                Some(c)
+            } else {
+                "0123456789+-=()".chars().position(|a| a == c).and_then(|i| to.chars().nth(i))
+            }
         })
         .collect()
 }
@@ -272,32 +380,37 @@ fn parse(source: &str, kind: u8) -> Vec<Block> {
     normalize(&mut blocks);
     blocks
 }
+/// `first_k` is true until an entry shows content; only a `<k>` before any
+/// content is the index headword and dropped.
 pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Block> {
     let mut out = Builder::default();
     let mut stack: Vec<Frame> = Vec::new();
-    let mut hidden: Option<(String, usize)> = None;
     let markup = matches!(kind, b'h' | b'x' | b'g');
+    // HTML collapses newlines; XDXF, Pango and plain text break lines on them.
+    let lines = kind != b'h';
     let mut rest = source;
     while !rest.is_empty() {
         if markup && rest.starts_with("<!--") {
             rest = rest.find("-->").map_or("", |i| &rest[i + 3..]);
             continue;
         }
+        if markup && let Some(body) = rest.strip_prefix("<![CDATA[") {
+            let n = body.find("]]>").unwrap_or(body.len());
+            out.append(&body[..n], stack.last().map_or(Style::default(), |f| f.style), lines);
+            rest = body.get(n + 3..).unwrap_or("");
+            continue;
+        }
+        // `<!DOCTYPE …>` and `<?xml …?>` declarations.
+        if markup
+            && (rest.starts_with("<!") || rest.starts_with("<?"))
+            && rest[2..].starts_with(|c: char| c.is_ascii_alphabetic())
+            && let Some(end) = rest.bytes().take(16384).position(|b| b == b'>')
+        {
+            rest = &rest[end + 1..];
+            continue;
+        }
         if markup && let Some(tag) = Tag::read(rest) {
             rest = tag.rest;
-            if let Some((name, depth)) = hidden.as_mut() {
-                if *name == tag.name {
-                    if tag.closing {
-                        *depth -= 1;
-                    } else if !tag.empty {
-                        *depth += 1;
-                    }
-                }
-                if *depth == 0 {
-                    hidden = None;
-                }
-                continue;
-            }
             if !tag.closing {
                 if matches!(tag.name.as_str(), "abr" | "c")
                     && let Some((_, after)) = element_end(rest, &tag.name)
@@ -306,16 +419,23 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
                     rest = after;
                     continue;
                 }
-                let drop_k =
-                    tag.name == "k" && kind == b'x' && *first_k && (tag.empty || element_end(rest, "k").is_some());
-                if drop_k {
-                    *first_k = false;
-                }
-                if tag.hidden() || drop_k {
-                    if !tag.empty {
-                        hidden = Some((tag.name, 1));
+                let headword = tag.name == "k" && kind == b'x' && *first_k && out.content == 0;
+                if (tag.hidden() || headword) && !tag.empty {
+                    // Hide only a closed element: an unclosed one would
+                    // swallow the rest of the field, so drop just its tag.
+                    if let Some((_, after)) = element_end(rest, &tag.name) {
+                        *first_k &= !headword;
+                        rest = after;
+                        continue;
                     }
+                }
+                if tag.hidden() {
                     continue;
+                }
+                if kind == b'h'
+                    && let Some(i) = implied_end(&stack, &tag.name)
+                {
+                    out.close(&mut stack, i);
                 }
                 if tag.name == "br" {
                     if !out.flush() {
@@ -380,15 +500,7 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
                         offset += before.len_utf8() as u32;
                     }
                 }
-                if stack[i..].iter().any(|f| f.boundary) {
-                    out.flush();
-                    if stack[i].content == out.content {
-                        out.special(BlockKind::Gap);
-                    }
-                }
-                stack.truncate(i);
-                out.depth = stack.last().map_or(0, |f| f.depth);
-                out.heading = stack.last().is_some_and(|f| f.heading);
+                out.close(&mut stack, i);
             }
             if tag.closing && matches!(tag.name.as_str(), "td" | "th") {
                 out.space = !out.text.is_empty();
@@ -397,19 +509,14 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
         }
         let first = rest.chars().next().unwrap().len_utf8();
         let n = if markup { rest[first..].find('<').map_or(rest.len(), |i| i + first) } else { rest.len() };
-        if hidden.is_none() {
-            out.append(
-                &entities(&rest[..n]),
-                stack.last().map_or(Style::default(), |f| f.style),
-                kind != b'h' && kind != b'g',
-            );
-        }
+        out.append(&entities(&rest[..n]), stack.last().map_or(Style::default(), |f| f.style), lines);
         rest = &rest[n..];
     }
     out.flush();
     while out.blocks.last().is_some_and(|b| b.kind == BlockKind::Gap) {
         out.blocks.pop();
     }
+    *first_k &= out.content == 0;
     out.blocks
 }
 pub(super) fn normalize(blocks: &mut [Block]) {
@@ -434,6 +541,9 @@ mod tests {
         let i = b.text.find(text).unwrap() as u32;
         b.spans.iter().find(|s| s.start <= i && i < s.end).unwrap().style
     }
+    fn depths(blocks: &[Block]) -> Vec<u8> {
+        blocks.iter().map(|b| b.depth).collect()
+    }
     fn validate(blocks: &[Block]) {
         for b in blocks {
             let mut end = 0;
@@ -450,11 +560,12 @@ mod tests {
     fn styles_structure_and_audio() {
         let b = parse(XDXF, b'x');
         validate(&b);
-        assert_eq!(lines(&b), "sample¹noun\n1) A bold nested sense.\nA strong example.\nother\nˈsɑːmpəl rarelater");
-        assert_eq!(b.iter().map(|b| b.depth).collect::<Vec<_>>(), [0, 1, 2, 1, 0]);
+        assert_eq!(lines(&b), "sample¹noun\n1) A bold nested sense.\nA strong example.\nother\nˈsɑːmpəl rare\nlater");
+        assert_eq!(depths(&b), [0, 1, 2, 1, 0, 0]);
         for (text, style) in [
             ("sample", Style::BOLD),
             ("noun", Style::MUTED),
+            ("1)", Style::MUTED),
             ("nested", Style::BOLD.union(Style::ITALIC)),
             ("strong", Style::BOLD.union(Style::ITALIC)),
             ("other", Style::LINK),
@@ -472,22 +583,41 @@ mod tests {
         );
         assert_eq!(lines(&parse("<k>first</k><k>second</k>", b'x')), "second");
         assert_eq!(lines(&parse("<k>html headword</k>", b'h')), "html headword");
+        // A `<k>` after content is a later headword, kept on its own line.
+        assert_eq!(lines(&parse("<blockquote>intro</blockquote><k>real</k>text", b'x')), "intro\nreal\ntext");
+        assert_eq!(lines(&parse("<k/><k>first</k>text", b'x')), "text");
+        // Only a link with a target is styled as one.
+        let b = parse("<a name='x'>anchor</a> <a href='y'>link</a>", b'h');
+        assert_eq!(style_at(&b, "anchor"), Style::default());
+        assert_eq!(style_at(&b, "link"), Style::LINK);
     }
     #[test]
     fn html_pango_scripts_and_entities() {
         let b = parse(HTML, b'h');
         validate(&b);
+        assert_eq!(lines(&b), "Origins\nA styled quotation\nlabel 10⁻¹⁸ H₂O Q?reference\n\none two");
         assert_eq!(b[0].kind, BlockKind::Heading);
+        assert_eq!(b[3].kind, BlockKind::Rule);
         assert!(style_at(&b, "quotation").contains(Style::BOLD.union(Style::ITALIC).union(Style::MUTED)));
+        assert!(style_at(&b, "label").contains(Style::MUTED));
         assert!(style_at(&b, "reference").contains(Style::LINK));
-        assert!(b.iter().any(|b| b.kind == BlockKind::Rule));
-        assert!(lines(&b).contains("10⁻¹⁸ H₂O Q?reference"));
-        assert!(lines(&b).ends_with("one two"));
         let b = parse(PANGO, b'g');
         validate(&b);
         assert!(style_at(&b, "Жёлтый").contains(Style::BOLD.union(Style::ITALIC).union(Style::MUTED)));
         assert!(!style_at(&b, "black").contains(Style::MUTED));
-        assert_eq!(lines(&parse("a<sup><b>1</b></sup> 10<sup>-18</sup> <sup>Q?</sup>", b'h')), "a¹ 10⁻¹⁸ Q?");
+        let b = parse(
+            "<span fgcolor='#333' font_weight='bold'>a</span> <span font_style='italic'>b</span> <span font='Serif Bold Italic 12'>c</span> <span color='inherit'>d</span> <span style='color: rgb(0, 0, 0) !important'>e</span>",
+            b'g',
+        );
+        assert_eq!(style_at(&b, "a"), Style::MUTED.union(Style::BOLD));
+        assert_eq!(style_at(&b, "b"), Style::ITALIC);
+        assert_eq!(style_at(&b, "c"), Style::BOLD.union(Style::ITALIC));
+        assert_eq!(style_at(&b, "d"), Style::default());
+        assert_eq!(style_at(&b, "e"), Style::default());
+        assert_eq!(
+            lines(&parse("a<sup><b>1</b></sup> 10<sup>-18</sup> <sup>Q?</sup> 1<sup>st</sup> x<sub>i</sub>", b'h')),
+            "a¹ 10⁻¹⁸ Q? 1st xi"
+        );
         assert_eq!(lines(&parse("&NotEqualTilde; &#x416; &unknown; &lt;b&gt;", b'h')), "≂̸ Ж &unknown; <b>");
     }
     #[test]
@@ -498,8 +628,10 @@ mod tests {
         );
         assert_eq!(lines(&parse("one\n two\n\n\nthree\n", b'x')), "one\ntwo\n\nthree");
         assert_eq!(lines(&parse("one\n two\n\nthree", b'h')), "one two three");
+        assert_eq!(lines(&parse("<span>one\ntwo</span>\n\nthree", b'g')), "one\ntwo\n\nthree");
         assert_eq!(lines(&parse("<def>one</def>\n<def>two</def>", b'x')), "one\ntwo");
         assert_eq!(lines(&parse("one\t two\r\n\r\nthree <b>literal</b>", b'm')), "one two\n\nthree <b>literal</b>");
+        assert_eq!(lines(&parse("one<br>two<br><br>three", b'h')), "one\ntwo\n\nthree");
         assert_eq!(
             lines(&parse(
                 "a<script>hidden<script>nested</script>hidden</script><style>bad</style><audio>bad</audio><video>bad</video><iframe>bad</iframe><object>bad</object><img src='ignored'>b",
@@ -507,22 +639,42 @@ mod tests {
             )),
             "ab"
         );
+        assert_eq!(
+            lines(&parse("<!DOCTYPE html><?xml version='1.0'?><![CDATA[a <b> c]]> <!x and <?", b'h')),
+            "a <b> c <!x and <?"
+        );
+    }
+    #[test]
+    fn phonetic_style_marks_only_words_with_ipa() {
+        let b = parse("line one\nsay [ˈset] twice\nline three", b'm');
+        validate(&b);
+        assert_eq!(style_at(&b, "line one"), Style::default());
+        assert_eq!(style_at(&b, "say "), Style::default());
+        assert_eq!(style_at(&b, "[ˈset]"), Style::PHONETIC);
+        assert_eq!(style_at(&b, " twice"), Style::default());
+        let b = parse("<i>ˈsɑː mpəl and</i>", b'h');
+        assert_eq!(style_at(&b, "ˈsɑː mpəl"), Style::ITALIC.union(Style::PHONETIC));
+        assert_eq!(style_at(&b, " and"), Style::ITALIC);
     }
     #[test]
     fn malformed_markup_keeps_text_and_bounds_stack() {
-        for source in [
-            "<b>one<i>two</b>three</i>",
-            "<b>one<i>two three",
-            "one < two <i>three",
-            "one < two > three",
-            "one <broken",
-            "<odd>one</odd>two</stray>three",
+        for (source, expected) in [
+            ("<b>one<i>two</b>three</i>", "onetwothree"),
+            ("<b>one<i>two three", "onetwo three"),
+            ("one < two <i>three", "one < two three"),
+            ("one < two > three", "one < two > three"),
+            ("one <broken", "one <broken"),
+            ("<odd>one</odd>two</stray>three", "onetwothree"),
+            // Unclosed hidden elements drop only their tag.
+            ("before <rref>x.wav definition text", "before x.wav definition text"),
+            ("<a href='sound://x'>UK</a> kept <a href='sound://y'>audio text", "kept audio text"),
+            ("one <script>if (a < b) two", "one if (a < b) two"),
+            ("<k>unclosed headword text", "unclosed headword text"),
         ] {
-            let b = parse(source, b'h');
+            let kind = if source.contains("rref") || source.contains("<k>") { b'x' } else { b'h' };
+            let b = parse(source, kind);
             validate(&b);
-            let text = lines(&b);
-            assert!(text.contains("one"), "{source}: {text}");
-            assert!(text.contains("two") || text.contains("broken"), "{source}: {text}");
+            assert_eq!(lines(&b), expected, "{source}");
         }
         let source = format!("{}Ж{}tail", "<b>".repeat(40), "</b>".repeat(40));
         let b = parse(&source, b'x');
@@ -530,29 +682,43 @@ mod tests {
         assert_eq!(lines(&b), "Жtail");
         assert_eq!(style_at(&b, "tail"), Style::default());
         let b = parse("<blockquote><blockquote>x</blockquote>y</blockquote>z", b'x');
-        assert_eq!(b.iter().map(|b| b.depth).collect::<Vec<_>>(), [2, 1, 0]);
+        assert_eq!(depths(&b), [2, 1, 0]);
+    }
+    #[test]
+    fn html_implied_end_tags_and_void_elements() {
+        let b = parse("<ul><li>one<li>two<p>para<li>three<ul><li>inner</ul></ul>after", b'h');
+        assert_eq!(lines(&b), "one\ntwo\npara\nthree\ninner\nafter");
+        assert_eq!(depths(&b), [2, 2, 2, 2, 4, 0]);
+        let b = parse("<dl><dt>term<dd>meaning<dt>next<dd>more</dl>", b'h');
+        assert_eq!(depths(&b), [0, 1, 0, 1]);
+        // Unclosed paragraphs don't fill the stack and stop styling.
+        let source = (0..40).map(|i| format!("<p>para{i}")).collect::<String>() + "<b>bold</b>";
+        let b = parse(&source, b'h');
+        assert_eq!(b.len(), 40);
+        assert_eq!(style_at(&b, "bold"), Style::BOLD);
+        let b = parse(&format!("{}<b>bold</b>", "<wbr><source src=a><embed><col>".repeat(10)), b'h');
+        assert_eq!(style_at(&b, "bold"), Style::BOLD);
+        // XDXF is XML: no implied end tags.
+        assert_eq!(depths(&parse("<blockquote>a<blockquote>b</blockquote></blockquote>", b'x')), [0, 1]);
     }
     #[test]
     fn fixture_glyphs_are_covered_after_substitution() {
-        use cosmic_text::fontdb;
-        let mut db = fontdb::Database::new();
-        for data in [
-            include_bytes!("../../../../assets/fonts/Inter-Regular.ttf").as_slice(),
-            include_bytes!("../../../../assets/fonts/Literata-Regular.ttf").as_slice(),
-        ] {
-            db.load_font_data(data.to_vec());
-        }
+        use cosmic_text::skrifa::{FontRef, MetadataProvider};
+        let covered = |data: &[u8], c: char| FontRef::new(data).unwrap().charmap().map(c).is_some();
+        let inter = include_bytes!("../../../../assets/fonts/Inter-Regular.ttf").as_slice();
+        let literata = include_bytes!("../../../../assets/fonts/Literata-Regular.ttf").as_slice();
+        // Definitions are set in Literata; phonetic words and these signs,
+        // which Literata lacks, come from Inter.
+        let inter_only = "⁺⁻⁼₊₋₌";
         for (fixture, kind) in [(XDXF, b'x'), (HTML, b'h'), (PANGO, b'g')] {
-            for c in parse(fixture, kind).iter().flat_map(|b| b.text.chars()).filter(|c| !c.is_whitespace()) {
-                assert!(
-                    db.faces().any(|f| db
-                        .with_face_data(f.id, |data, index| {
-                            use cosmic_text::skrifa::MetadataProvider;
-                            cosmic_text::skrifa::FontRef::from_index(data, index).unwrap().charmap().map(c).is_some()
-                        })
-                        .unwrap_or(false)),
-                    "missing {c}"
-                );
+            for b in parse(fixture, kind) {
+                for s in &b.spans {
+                    for c in b.text[s.start as usize..s.end as usize].chars().filter(|c| !c.is_whitespace()) {
+                        let font =
+                            if s.style.contains(Style::PHONETIC) || inter_only.contains(c) { inter } else { literata };
+                        assert!(covered(font, c), "missing {c}");
+                    }
+                }
             }
         }
     }

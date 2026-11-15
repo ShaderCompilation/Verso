@@ -95,7 +95,7 @@ mod tests {
         ] {
             assert!(definition(data, sequence).is_err(), "{data:?}, {sequence}");
         }
-        assert_eq!(plain(b"<k>first</k><blockquote>one</blockquote>\0<k>later</k>two", "xx")?, "one\n\nlatertwo");
+        assert_eq!(plain(b"<k>first</k><blockquote>one</blockquote>\0<k>later</k>two", "xx")?, "one\n\nlater\ntwo");
         Ok(())
     }
 }

@@ -561,6 +561,12 @@ fn combined_output_is_capped_on_utf8_boundaries_with_an_omission_notice() -> Res
     f.install_words(false, false, &[("word", &prefix), ("word", "<p>Ж</p><p>tail</p>")])?;
     let clipped = f.backend()?.lookup("word")?;
     assert_eq!(clipped[1].blocks, vec![Block::plain("[Further entries omitted]")]);
+    // No gap is left between the retained text and the notice.
+    let f = Fixture::new();
+    f.install_words(false, false, &[("word", &prefix[1..]), ("word", "<p>a</p><p></p><p>Ж</p>")])?;
+    let clipped = f.backend()?.lookup("word")?;
+    let texts: Vec<_> = clipped[1].blocks.iter().map(|b| (b.kind, b.text.as_str())).collect();
+    assert_eq!(texts, [(BlockKind::Text, "a"), (BlockKind::Text, "[Further entries omitted]")]);
     for b in blocks {
         for s in &b.spans {
             assert!(s.start < s.end && s.end as usize <= b.text.len());
