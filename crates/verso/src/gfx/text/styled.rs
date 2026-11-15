@@ -1,7 +1,9 @@
 //! Bounded rich-text layout, independent of dictionary content and screen state.
 //!
-//! Pagination owns UTF-8 continuation paragraphs and lightweight line records,
-//! never their layouts. Only drawing populates its separate four-layout cache.
+//! Pagination owns its input blocks and keeps only lightweight line records,
+//! never layouts. It runs incrementally, one piece of at most 16 KiB at a time,
+//! so the first page can be drawn before a long entry is finished. Only
+//! drawing populates its separate four-layout cache.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::ops::Range;
@@ -10,7 +12,6 @@ use anyhow::{Result, ensure};
 use cosmic_text::{BidiParagraphs, LayoutRun};
 
 use super::*;
-use crate::ui::theme::INK2;
 
 pub const MAX_PARAGRAPH_BYTES: usize = 16 * 1024;
 const DRAW_CACHE_LIMIT: usize = 4;
@@ -46,6 +47,8 @@ pub struct StyledParagraph {
     pub text: String,
     pub spans: Vec<StyledSpan>,
     pub base: TextStyle,
+    /// Gray of `MUTED` spans (the theme's `ink2`); other spans use `base.gray`.
+    pub muted: u8,
     /// Pixels from the left edge, applied to every wrapped line.
     pub indent: f32,
 }
@@ -59,8 +62,8 @@ pub enum StyledBlock {
 
 #[derive(Clone, Debug)]
 pub struct StyledLine {
-    /// Bytes in the continuation paragraph, including intervening whitespace
-    /// and hard breaks. These ranges partition its text exactly.
+    /// Bytes in the piece's text, including intervening whitespace and hard
+    /// breaks. These ranges partition its text exactly.
     pub bytes: Range<usize>,
     pub height: f32,
 }
@@ -72,12 +75,15 @@ pub struct ParagraphLayout {
     pub lines: Vec<StyledLine>,
 }
 
+/// One bounded piece of a source paragraph, as laid out during pagination.
+/// The text itself stays in the pagination's blocks.
 pub struct PaginatedParagraph {
-    pub paragraph: StyledParagraph,
-    /// Index in the original list of blocks, before splitting.
+    /// Index in the original list of blocks.
     pub block: usize,
-    /// Bytes in that original paragraph.
+    /// Bytes in that paragraph. Pieces of one paragraph are contiguous and
+    /// meet only at wrapped line boundaries.
     pub source_bytes: Range<usize>,
+    /// Lines of the piece, relative to `source_bytes.start`.
     pub lines: Vec<StyledLine>,
 }
 
@@ -85,7 +91,7 @@ pub struct PaginatedParagraph {
 pub struct PageParagraph {
     /// Index into `StyledPagination::paragraphs()`.
     pub paragraph: usize,
-    /// Wrapped line range in that continuation paragraph.
+    /// Wrapped line range in that piece.
     pub lines: Range<usize>,
     pub y: f32,
 }
@@ -97,23 +103,131 @@ pub struct StyledPage {
 }
 
 pub struct StyledPagination {
+    blocks: Vec<StyledBlock>,
     paragraphs: Vec<PaginatedParagraph>,
+    /// Finished pages only; the one being filled is `page`.
     pages: Vec<StyledPage>,
     width: i32,
     height: i32,
-    // Belongs to this immutable pagination so layouts cannot outlive or refer
-    // to changed source text. Independent of TextRenderer's UI cache.
+    // Where pagination resumes: the next block, the byte offset inside it,
+    // the merged gap still pending and the page being filled.
+    next_block: usize,
+    next_byte: usize,
+    gap: f32,
+    page: StyledPage,
+    complete: bool,
+    // Belongs to this immutable input so layouts cannot outlive or refer to
+    // changed source text. Independent of TextRenderer's UI cache.
     layouts: VecDeque<(usize, Buffer)>,
     missing_logged: Vec<bool>,
 }
 
 impl StyledPagination {
+    /// Validate the whole input up front, without shaping anything. Pages
+    /// are made by `TextRenderer::paginate_styled_step` and `_until`.
+    pub fn new(blocks: Vec<StyledBlock>, width: i32, height: i32) -> Result<Self> {
+        ensure!(width > 0 && height > 0, "page dimensions must be positive");
+        for block in &blocks {
+            match block {
+                StyledBlock::Gap(space) => ensure!(space.is_finite() && *space >= 0.0, "invalid gap height"),
+                StyledBlock::Paragraph(paragraph) => {
+                    paragraph.validate(width as f32)?;
+                    ensure!(paragraph.base.line_height() <= height as f32, "page is shorter than one text line");
+                }
+            }
+        }
+        let mut pagination = Self {
+            blocks,
+            paragraphs: Vec::new(),
+            pages: Vec::new(),
+            width,
+            height,
+            next_block: 0,
+            next_byte: 0,
+            gap: 0.0,
+            page: StyledPage::default(),
+            complete: false,
+            layouts: VecDeque::new(),
+            missing_logged: Vec::new(),
+        };
+        pagination.skip_gaps();
+        Ok(pagination)
+    }
+
+    /// Finished pages. The list grows until `is_complete()`.
     pub fn pages(&self) -> &[StyledPage] {
         &self.pages
     }
 
     pub fn paragraphs(&self) -> &[PaginatedParagraph] {
         &self.paragraphs
+    }
+
+    /// Whether every block is paginated, so `pages()` is final.
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// The bounded paragraph shaped for `paragraphs()[index]`.
+    pub fn piece(&self, index: usize) -> StyledParagraph {
+        let piece = &self.paragraphs[index];
+        source(&self.blocks, piece.block).slice(piece.source_bytes.clone())
+    }
+
+    /// Merge gaps up to the next paragraph, and finish when none is left.
+    fn skip_gaps(&mut self) {
+        while let Some(StyledBlock::Gap(space)) = self.blocks.get(self.next_block) {
+            self.gap = self.gap.max(*space);
+            self.next_block += 1;
+        }
+        if self.next_block == self.blocks.len() && !self.complete {
+            // Trailing gaps disappear; an empty input still has one page.
+            if !self.page.paragraphs.is_empty() || self.pages.is_empty() {
+                self.finish_page();
+            }
+            self.complete = true;
+        }
+    }
+
+    fn finish_page(&mut self) {
+        self.pages.push(std::mem::take(&mut self.page));
+        self.missing_logged.push(false);
+    }
+
+    /// Place a piece's lines by height; the pending gap goes before its first
+    /// line unless that line starts a page.
+    fn place(&mut self, piece: PaginatedParagraph) -> Result<()> {
+        let index = self.paragraphs.len();
+        let height = self.height as f32;
+        for (line, record) in piece.lines.iter().enumerate() {
+            ensure!(record.height <= height, "page is shorter than one text line");
+            let space = if self.page.paragraphs.is_empty() { 0.0 } else { self.gap };
+            if self.page.height + space + record.height > height {
+                self.finish_page();
+            } else {
+                self.page.height += space;
+            }
+            self.gap = 0.0;
+            if let Some(last) = self.page.paragraphs.last_mut().filter(|last| last.paragraph == index) {
+                last.lines.end = line + 1;
+            } else {
+                self.page.paragraphs.push(PageParagraph {
+                    paragraph: index,
+                    lines: line..line + 1,
+                    y: self.page.height,
+                });
+            }
+            self.page.height += record.height;
+        }
+        self.paragraphs.push(piece);
+        Ok(())
+    }
+}
+
+fn source(blocks: &[StyledBlock], block: usize) -> &StyledParagraph {
+    match &blocks[block] {
+        StyledBlock::Paragraph(paragraph) => paragraph,
+        StyledBlock::Gap(_) => unreachable!("pieces always come from paragraphs"),
     }
 }
 
@@ -152,7 +266,7 @@ impl StyledParagraph {
                 (start < end).then(|| StyledSpan { bytes: start - bytes.start..end - bytes.start, style: span.style })
             })
             .collect();
-        Self { text: self.text[bytes].to_owned(), spans, base: self.base, indent: self.indent }
+        Self { text: self.text[bytes].to_owned(), spans, base: self.base, muted: self.muted, indent: self.indent }
     }
 }
 
@@ -162,6 +276,10 @@ impl TextRenderer {
     pub fn layout_styled_paragraph(&mut self, paragraph: &StyledParagraph, width: f32) -> Result<ParagraphLayout> {
         paragraph.validate(width)?;
         ensure!(paragraph.text.len() <= MAX_PARAGRAPH_BYTES, "paragraph exceeds the 16 KiB shaping limit");
+        Ok(self.shape_styled(paragraph, width))
+    }
+
+    fn shape_styled(&mut self, paragraph: &StyledParagraph, width: f32) -> ParagraphLayout {
         let base = paragraph.base;
         let family = match base.family {
             Family::Book(i) => self.book_families.get(i as usize).map(String::as_str).unwrap_or("Literata"),
@@ -177,7 +295,7 @@ impl TextRenderer {
             } else {
                 fontdb::Weight::NORMAL
             };
-            let gray = if style.contains(SpanStyle::MUTED) { INK2 } else { base.gray };
+            let gray = if style.contains(SpanStyle::MUTED) { paragraph.muted } else { base.gray };
             Attrs::new()
                 .family(CtFamily::Name(if phonetic { "Inter" } else { family }))
                 .weight(weight)
@@ -223,97 +341,79 @@ impl TextRenderer {
         for i in 1..lines.len() {
             lines[i - 1].bytes.end = lines[i].bytes.start;
         }
-        Ok(ParagraphLayout { buffer, lines })
+        ParagraphLayout { buffer, lines }
     }
 
-    /// Paginate by line height while holding at most one temporary layout.
-    /// Oversized paragraphs become UTF-8 continuations with clipped spans.
-    /// A rect shorter than one line returns an error instead of overflowing.
-    pub fn paginate_styled(&mut self, blocks: &[StyledBlock], width: i32, height: i32) -> Result<StyledPagination> {
-        ensure!(width > 0 && height > 0, "page dimensions must be positive");
-        let mut result = StyledPagination {
-            paragraphs: Vec::new(),
-            pages: Vec::new(),
-            width,
-            height,
-            layouts: VecDeque::new(),
-            missing_logged: Vec::new(),
-        };
-        let mut page = StyledPage::default();
-        let mut gap = 0.0f32;
-        for (block, input) in blocks.iter().enumerate() {
-            let paragraph = match input {
-                StyledBlock::Gap(space) => {
-                    ensure!(space.is_finite() && *space >= 0.0, "invalid gap height");
-                    // Consecutive gaps merge; page-edge gaps disappear.
-                    gap = gap.max(*space);
-                    continue;
-                }
-                StyledBlock::Paragraph(paragraph) => paragraph,
-            };
-            paragraph.validate(width as f32)?;
-            let mut start = 0;
-            loop {
-                let end = chunk_end(&paragraph.text, start);
-                let continuation = paragraph.slice(start..end);
-                let ParagraphLayout { buffer, lines } = self.layout_styled_paragraph(&continuation, width as f32)?;
-                // Release the full layout before starting the next chunk.
-                drop(buffer);
-                let index = result.paragraphs.len();
-                for (line, record) in lines.iter().enumerate() {
-                    ensure!(record.height <= height as f32, "page is shorter than one text line");
-                    let space = if page.paragraphs.is_empty() { 0.0 } else { gap };
-                    if page.height + space + record.height > height as f32 {
-                        result.pages.push(std::mem::take(&mut page));
-                    } else {
-                        page.height += space;
-                    }
-                    gap = 0.0;
-                    if let Some(last) = page.paragraphs.last_mut().filter(|last| last.paragraph == index) {
-                        last.lines.end = line + 1;
-                    } else {
-                        page.paragraphs.push(PageParagraph { paragraph: index, lines: line..line + 1, y: page.height });
-                    }
-                    page.height += record.height;
-                }
-                result.paragraphs.push(PaginatedParagraph {
-                    paragraph: continuation,
-                    block,
-                    source_bytes: start..end,
-                    lines,
-                });
-                if end == paragraph.text.len() {
-                    break;
-                }
-                start = end;
-            }
-        }
-        if !page.paragraphs.is_empty() || result.pages.is_empty() {
-            result.pages.push(page);
-        }
-        result.missing_logged.resize(result.pages.len(), false);
-        Ok(result)
+    /// Paginate everything at once. Screens showing long entries should use
+    /// `StyledPagination::new` with `paginate_styled_until` instead.
+    pub fn paginate_styled(&mut self, blocks: Vec<StyledBlock>, width: i32, height: i32) -> Result<StyledPagination> {
+        let mut pagination = StyledPagination::new(blocks, width, height)?;
+        self.paginate_styled_until(&mut pagination, usize::MAX)?;
+        Ok(pagination)
     }
 
-    /// Draw a page at the same width/height used for pagination. Only its
-    /// continuation paragraphs are shaped, reusing at most four layouts.
+    /// Continue until at least `pages` pages are finished or the input ends.
+    /// `paginate_styled_until(p, page + 1)` makes `page` drawable.
+    pub fn paginate_styled_until(&mut self, pagination: &mut StyledPagination, pages: usize) -> Result<()> {
+        while pagination.pages.len() < pages && self.paginate_styled_step(pagination)? {}
+        Ok(())
+    }
+
+    /// Shape and place the next piece of at most 16 KiB, holding one
+    /// temporary layout. Returns whether input remains.
+    pub fn paginate_styled_step(&mut self, pagination: &mut StyledPagination) -> Result<bool> {
+        if pagination.complete {
+            return Ok(false);
+        }
+        let (block, start) = (pagination.next_block, pagination.next_byte);
+        let source = source(&pagination.blocks, block);
+        let len = source.text.len();
+        let cut = chunk_end(&source.text, start);
+        let ParagraphLayout { buffer, mut lines } =
+            self.layout_styled_paragraph(&source.slice(start..cut), pagination.width as f32)?;
+        // Release the full layout before placing lines or shaping more.
+        drop(buffer);
+        // A cut inside a line may end that line early. Wrapping is greedy, so
+        // the earlier lines are final; the last one starts the next piece.
+        let mut end = cut;
+        if cut < len && lines.len() > 1 && lines.last().is_some_and(|line| line.bytes.start > 0) {
+            end = start + lines.pop().unwrap().bytes.start;
+        }
+        pagination.place(PaginatedParagraph { block, source_bytes: start..end, lines })?;
+        if end == len {
+            pagination.next_block += 1;
+            pagination.next_byte = 0;
+            pagination.skip_gaps();
+        } else {
+            pagination.next_byte = end;
+        }
+        Ok(!pagination.complete)
+    }
+
+    /// Draw a finished page laid out at `rect`'s size, the size used for
+    /// pagination. Ink is limited to `clip`, so accents and descenders that
+    /// reach past the first or last line can stay visible when the caller
+    /// allows some margin. Only the page's pieces are shaped, reusing at most
+    /// four layouts.
     pub fn draw_styled_page(
         &mut self,
         canvas: &mut Canvas,
         pagination: &mut StyledPagination,
         page: usize,
         rect: Rect,
+        clip: Rect,
         hairline: i32,
     ) -> Result<()> {
         ensure!(
             rect.w == pagination.width && rect.h == pagination.height,
             "page rect differs from pagination dimensions"
         );
-        ensure!(page < pagination.pages.len(), "page index out of range");
+        ensure!(page < pagination.pages.len(), "page is not paginated yet");
         ensure!(hairline > 0, "underline hairline must be positive");
         let mut missing = BTreeSet::new();
         for part in &pagination.pages[page].paragraphs {
-            let paragraph = &pagination.paragraphs[part.paragraph].paragraph;
+            let piece = &pagination.paragraphs[part.paragraph];
+            let paragraph = source(&pagination.blocks, piece.block);
             let buffer = if let Some(at) = pagination.layouts.iter().position(|(index, _)| *index == part.paragraph) {
                 pagination.layouts.remove(at).unwrap().1
             } else {
@@ -321,7 +421,8 @@ impl TextRenderer {
                 if pagination.layouts.len() == DRAW_CACHE_LIMIT {
                     pagination.layouts.pop_front();
                 }
-                self.layout_styled_paragraph(paragraph, rect.w as f32)?.buffer
+                let text = paragraph.slice(piece.source_bytes.clone());
+                self.layout_styled_paragraph(&text, rect.w as f32)?.buffer
             };
             let mut top = None;
             for run in buffer.layout_runs().skip(part.lines.start).take(part.lines.len()) {
@@ -339,10 +440,10 @@ impl TextRenderer {
                     let (gx, gy) = (phys.x + p.left, phys.y - p.top);
                     let gray = (glyph.metadata >> 8) as u8;
                     match image.content {
-                        SwashContent::Mask => canvas.blend_mask(gx, gy, p.width, p.height, &image.data, gray, rect),
+                        SwashContent::Mask => canvas.blend_mask(gx, gy, p.width, p.height, &image.data, gray, clip),
                         SwashContent::Color => {
                             let alpha: Vec<_> = image.data.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
-                            canvas.blend_mask(gx, gy, p.width, p.height, &alpha, gray, rect);
+                            canvas.blend_mask(gx, gy, p.width, p.height, &alpha, gray, clip);
                         }
                         SwashContent::SubpixelMask => {}
                     }
@@ -355,7 +456,7 @@ impl TextRenderer {
                     let left = (x + left).floor() as i32;
                     let right = (x + right).ceil() as i32;
                     let line = Rect::new(left, underline_y.min(bottom - thickness), right - left, thickness);
-                    if let Some(line) = line.intersect(&rect) {
+                    if let Some(line) = line.intersect(&clip) {
                         canvas.fill_rect(line, gray);
                     }
                 }
@@ -372,16 +473,16 @@ impl TextRenderer {
     }
 }
 
+/// Where the piece starting at `start` is cut before shaping: at most 16 KiB
+/// later, on a character boundary and never inside CRLF. The paginator then
+/// moves the cut back to the start of the last wrapped line.
 fn chunk_end(text: &str, start: usize) -> usize {
     let mut end = (start + MAX_PARAGRAPH_BYTES).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    if end < text.len()
-        && let Some((space, ch)) = text[start..end].char_indices().rfind(|(_, ch)| ch.is_whitespace())
-        && space > MAX_PARAGRAPH_BYTES / 2
-    {
-        end = start + space + ch.len_utf8();
+    if text[..end].ends_with('\r') && text[end..].starts_with('\n') && end - 1 > start {
+        end -= 1;
     }
     end
 }
@@ -410,12 +511,12 @@ fn underlines(run: &LayoutRun<'_>) -> Vec<(f32, f32, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::{INK, PAPER};
+    use crate::ui::theme::{INK, INK2, PAPER};
 
     const BODY: TextStyle = TextStyle::new(24.0, Weight::Regular, Family::Serif);
 
     fn paragraph(text: &str) -> StyledParagraph {
-        StyledParagraph { text: text.into(), spans: Vec::new(), base: BODY, indent: 0.0 }
+        StyledParagraph { text: text.into(), spans: Vec::new(), base: BODY, muted: INK2, indent: 0.0 }
     }
 
     fn styled(text: &str, style: SpanStyle) -> StyledParagraph {
@@ -427,15 +528,18 @@ mod tests {
     }
 
     fn draw(renderer: &mut TextRenderer, p: StyledParagraph) -> Canvas {
-        let mut pages = renderer.paginate_styled(&[StyledBlock::Paragraph(p)], 600, 120).unwrap();
+        let mut pages = renderer.paginate_styled(vec![StyledBlock::Paragraph(p)], 600, 120).unwrap();
         let mut canvas = Canvas::new(620, 140);
-        renderer.draw_styled_page(&mut canvas, &mut pages, 0, Rect::new(10, 10, 600, 120), 2).unwrap();
+        let rect = Rect::new(10, 10, 600, 120);
+        renderer.draw_styled_page(&mut canvas, &mut pages, 0, rect, rect, 2).unwrap();
         canvas
     }
 
     /// Read pages in order and reconstruct each original paragraph's bytes.
     /// Contiguous line ranges are also the only boundaries pages can use.
-    fn assert_partition(blocks: &[StyledBlock], pagination: &StyledPagination) {
+    fn assert_partition(pagination: &StyledPagination) {
+        assert!(pagination.is_complete());
+        let blocks = &pagination.blocks;
         let mut recovered = vec![String::new(); blocks.len()];
         let mut next_line = vec![0; pagination.paragraphs.len()];
         for page in pagination.pages() {
@@ -443,12 +547,13 @@ mod tests {
             let mut bottom = 0.0;
             for part in &page.paragraphs {
                 let p = &pagination.paragraphs()[part.paragraph];
+                let text = &source(blocks, p.block).text[p.source_bytes.clone()];
                 assert_eq!(part.lines.start, next_line[part.paragraph]);
                 next_line[part.paragraph] = part.lines.end;
                 assert!(part.y >= bottom);
                 for line in &p.lines[part.lines.clone()] {
                     assert_eq!(recovered[p.block].len(), p.source_bytes.start + line.bytes.start);
-                    recovered[p.block].push_str(&p.paragraph.text[line.bytes.clone()]);
+                    recovered[p.block].push_str(&text[line.bytes.clone()]);
                 }
                 bottom = part.y + p.lines[part.lines.clone()].iter().map(|l| l.height).sum::<f32>();
             }
@@ -461,6 +566,18 @@ mod tests {
         }
         for (p, end) in pagination.paragraphs().iter().zip(next_line) {
             assert_eq!(end, p.lines.len());
+            assert_eq!(p.lines.last().unwrap().bytes.end, p.source_bytes.len());
+        }
+    }
+
+    /// Every piece, shaped again for drawing, wraps exactly as recorded.
+    fn assert_pieces_rewrap(renderer: &mut TextRenderer, pagination: &StyledPagination) {
+        for (i, p) in pagination.paragraphs().iter().enumerate() {
+            let layout = renderer.layout_styled_paragraph(&pagination.piece(i), pagination.width as f32).unwrap();
+            assert_eq!(
+                layout.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>(),
+                p.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>()
+            );
         }
     }
 
@@ -476,16 +593,10 @@ mod tests {
             " \n\n\n \t\n".into(),
             "".into(),
         ] {
-            let blocks = [StyledBlock::Paragraph(styled(&text, SpanStyle::ITALIC))];
-            let pagination = renderer.paginate_styled(&blocks, 210, 150).unwrap();
-            assert_partition(&blocks, &pagination);
-            for p in pagination.paragraphs() {
-                let layout = renderer.layout_styled_paragraph(&p.paragraph, 210.0).unwrap();
-                assert_eq!(
-                    layout.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>(),
-                    p.lines.iter().map(|l| l.bytes.clone()).collect::<Vec<_>>()
-                );
-            }
+            let blocks = vec![StyledBlock::Paragraph(styled(&text, SpanStyle::ITALIC))];
+            let pagination = renderer.paginate_styled(blocks, 210, 150).unwrap();
+            assert_partition(&pagination);
+            assert_pieces_rewrap(&mut renderer, &pagination);
         }
     }
 
@@ -503,14 +614,16 @@ mod tests {
                 StyledBlock::Gap(8.0),
             ]);
         }
-        let pagination = renderer.paginate_styled(&blocks, 360, 230).unwrap();
-        assert_partition(&blocks, &pagination);
+        let pagination = renderer.paginate_styled(blocks.clone(), 360, 230).unwrap();
+        assert_partition(&pagination);
         assert!(pagination.pages().len() > 12);
         assert!(pagination.pages().iter().all(|p| p.paragraphs.first().unwrap().y == 0.0));
-        assert!(renderer.paginate_styled(&blocks, 360, 20).is_err());
-        let empty = renderer.paginate_styled(&[], 360, 230).unwrap();
+        assert!(renderer.paginate_styled(blocks, 360, 20).is_err());
+        let empty = renderer.paginate_styled(Vec::new(), 360, 230).unwrap();
         assert_eq!(empty.pages().len(), 1);
         assert_eq!(empty.pages()[0].height, 0.0);
+        let gaps = renderer.paginate_styled(vec![StyledBlock::Gap(5.0)], 360, 230).unwrap();
+        assert_eq!(gaps.pages().len(), 1);
     }
 
     #[test]
@@ -524,15 +637,14 @@ mod tests {
             assert_eq!(run.glyphs.first().unwrap().x, 0.0);
             assert!(run.line_w <= 210.0 - p.indent);
         }
-        let mut pagination = renderer.paginate_styled(&[StyledBlock::Paragraph(p)], 210, 150).unwrap();
+        let mut pagination = renderer.paginate_styled(vec![StyledBlock::Paragraph(p)], 210, 150).unwrap();
         let mut canvas = Canvas::new(260, 200);
         let rect = Rect::new(10, 15, 210, 150);
         for page in 0..pagination.pages().len() {
             canvas.fill(PAPER);
-            renderer.draw_styled_page(&mut canvas, &mut pagination, page, rect, 2).unwrap();
+            renderer.draw_styled_page(&mut canvas, &mut pagination, page, rect, rect, 2).unwrap();
             let content = &pagination.pages()[page];
             for part in &content.paragraphs {
-                let p = &pagination.paragraphs()[part.paragraph];
                 for line in 0..part.lines.len() {
                     let y = rect.y as usize + part.y as usize + line * BODY.line_height() as usize;
                     let left = (0..260)
@@ -542,7 +654,7 @@ mod tests {
                         .unwrap();
                     assert!((47..=49).contains(&left), "line {line} starts at {left}");
                 }
-                assert!(p.paragraph.indent == 37.0);
+                assert_eq!(pagination.piece(part.paragraph).indent, 37.0);
             }
             for (i, pixel) in canvas.gray_data().iter().enumerate() {
                 if i % 260 < 47 || i % 260 >= 220 || i / 260 < 15 || i / 260 >= 165 {
@@ -550,6 +662,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_wider_clip_keeps_accents_above_the_first_line() {
+        let mut renderer = TextRenderer::new();
+        let mut p = paragraph("Ǻ Å É");
+        p.base = BODY.size(38.0);
+        let mut pagination = renderer.paginate_styled(vec![StyledBlock::Paragraph(p)], 300, 100).unwrap();
+        let rect = Rect::new(10, 20, 300, 100);
+        let ink_above = |clip: Rect, renderer: &mut TextRenderer, pagination: &mut StyledPagination| {
+            let mut canvas = Canvas::new(320, 140);
+            renderer.draw_styled_page(&mut canvas, pagination, 0, rect, clip, 1).unwrap();
+            canvas.gray_data()[..20 * 320].iter().any(|&pixel| pixel < PAPER)
+        };
+        assert!(!ink_above(rect, &mut renderer, &mut pagination));
+        assert!(ink_above(Rect::new(0, 0, 320, 140), &mut renderer, &mut pagination));
     }
 
     #[test]
@@ -606,6 +734,11 @@ mod tests {
             let expected = INK2 as f32 + black as f32 * (255 - INK2) as f32 / 255.0;
             assert!((muted as f32 - expected).abs() <= 1.0);
         }
+        // The muted gray comes from the paragraph, not a fixed theme value.
+        let mut lighter = styled("Hamburg", SpanStyle::MUTED);
+        lighter.muted = 0x80;
+        let canvas = draw(&mut renderer, lighter);
+        assert_eq!(canvas.gray_data().iter().min(), Some(&0x80));
     }
 
     #[test]
@@ -650,24 +783,85 @@ mod tests {
     }
 
     #[test]
-    fn oversized_paragraphs_split_styles_without_byte_gaps() {
+    fn oversized_paragraphs_split_at_the_lines_of_the_whole_paragraph() {
         let mut renderer = TextRenderer::new();
-        for text in ["café definition слова ".repeat(1900), "Ж".repeat(18000)] {
+        for text in ["café definition слова ".repeat(1900), "Ж".repeat(18000), "word ".repeat(4000)] {
             let mut p = styled(&text, SpanStyle::ITALIC.union(SpanStyle::MUTED));
             p.indent = 28.0;
             assert!(renderer.layout_styled_paragraph(&p, 400.0).is_err());
-            let blocks = [StyledBlock::Paragraph(p)];
-            let pagination = renderer.paginate_styled(&blocks, 400, 300).unwrap();
+            // Shaping the whole paragraph is only allowed here, as a reference.
+            let whole: Vec<_> = renderer.shape_styled(&p, 400.0).lines.into_iter().map(|l| l.bytes).collect();
+            let pagination = renderer.paginate_styled(vec![StyledBlock::Paragraph(p)], 400, 300).unwrap();
             assert!(pagination.paragraphs().len() > 1);
-            assert_partition(&blocks, &pagination);
-            for p in pagination.paragraphs() {
-                assert!(p.paragraph.text.len() <= MAX_PARAGRAPH_BYTES);
-                assert_eq!(p.paragraph.indent, 28.0);
-                assert_eq!(p.paragraph.spans.len(), 1);
-                assert_eq!(p.paragraph.spans[0].bytes, 0..p.paragraph.text.len());
-                assert_eq!(p.paragraph.spans[0].style, SpanStyle::ITALIC.union(SpanStyle::MUTED));
+            assert_partition(&pagination);
+            assert_pieces_rewrap(&mut renderer, &pagination);
+            // No piece boundary adds a short line: the pieces' lines are
+            // exactly the lines of the unsplit paragraph.
+            let pieces: Vec<_> = pagination
+                .paragraphs()
+                .iter()
+                .flat_map(|p| {
+                    p.lines.iter().map(|l| l.bytes.start + p.source_bytes.start..l.bytes.end + p.source_bytes.start)
+                })
+                .collect();
+            assert_eq!(pieces, whole);
+            for i in 0..pagination.paragraphs().len() {
+                let piece = pagination.piece(i);
+                assert!(piece.text.len() <= MAX_PARAGRAPH_BYTES);
+                assert_eq!(piece.indent, 28.0);
+                assert_eq!(piece.spans.len(), 1);
+                assert_eq!(piece.spans[0].bytes, 0..piece.text.len());
+                assert_eq!(piece.spans[0].style, SpanStyle::ITALIC.union(SpanStyle::MUTED));
             }
         }
+    }
+
+    #[test]
+    fn cuts_never_split_crlf_or_utf8() {
+        let mut text = "x".repeat(MAX_PARAGRAPH_BYTES - 1);
+        text.push_str("\r\nnext");
+        assert_eq!(chunk_end(&text, 0), MAX_PARAGRAPH_BYTES - 1);
+        let text = "Ж".repeat(MAX_PARAGRAPH_BYTES);
+        assert!(text.is_char_boundary(chunk_end(&text, 0)));
+        assert_eq!(chunk_end("\r\n", 1), 2);
+    }
+
+    #[test]
+    fn incremental_pagination_shows_the_first_page_early_and_matches_the_whole() {
+        let mut renderer = TextRenderer::new();
+        let blocks: Vec<_> = (0..40)
+            .flat_map(|i| {
+                [
+                    StyledBlock::Paragraph(styled(&format!("Sense {i} "), SpanStyle::BOLD)),
+                    StyledBlock::Paragraph(paragraph(&"Long definition text. ".repeat(900))),
+                    StyledBlock::Gap(10.0),
+                ]
+            })
+            .collect();
+        let whole = renderer.paginate_styled(blocks.clone(), 400, 300).unwrap();
+        let mut pagination = StyledPagination::new(blocks, 400, 300).unwrap();
+        assert!(pagination.pages().is_empty() && !pagination.is_complete());
+        renderer.paginate_styled_until(&mut pagination, 1).unwrap();
+        assert!(!pagination.pages().is_empty() && !pagination.is_complete());
+        assert!(pagination.paragraphs().len() <= 2, "only the first blocks were shaped");
+        let mut canvas = Canvas::new(400, 300);
+        let rect = Rect::new(0, 0, 400, 300);
+        renderer.draw_styled_page(&mut canvas, &mut pagination, 0, rect, rect, 1).unwrap();
+        let unfinished = pagination.pages().len();
+        assert!(renderer.draw_styled_page(&mut canvas, &mut pagination, unfinished, rect, rect, 1).is_err());
+        while renderer.paginate_styled_step(&mut pagination).unwrap() {}
+        assert!(pagination.is_complete());
+        assert!(!renderer.paginate_styled_step(&mut pagination).unwrap());
+        assert_partition(&pagination);
+        let lines = |p: &StyledPagination| {
+            p.pages()
+                .iter()
+                .map(|page| page.paragraphs.iter().map(|part| part.lines.clone()).collect())
+                .collect::<Vec<Vec<_>>>()
+        };
+        assert_eq!(lines(&pagination), lines(&whole));
+        assert_eq!(pagination.missing_logged.len(), pagination.pages().len());
+        assert!(pagination.missing_logged[0]);
     }
 
     #[test]
@@ -683,23 +877,24 @@ mod tests {
                 style: SpanStyle::BOLD.union(SpanStyle::ITALIC),
             })
             .collect();
-        let blocks = [StyledBlock::Paragraph(p)];
+        let blocks = vec![StyledBlock::Paragraph(p)];
         let start = std::time::Instant::now();
-        let mut pagination = renderer.paginate_styled(&blocks, 600, 500).unwrap();
+        let mut pagination = renderer.paginate_styled(blocks, 600, 500).unwrap();
         eprintln!("1 MiB styled pagination: {:?}, {} pages", start.elapsed(), pagination.pages().len());
-        assert_partition(&blocks, &pagination);
+        assert_partition(&pagination);
         assert!(pagination.pages().len() > 100);
         assert!(pagination.paragraphs().len() >= 64);
         assert!(pagination.layouts.is_empty());
         assert!(renderer.layouts.is_empty());
         let mut canvas = Canvas::new(600, 500);
+        let rect = Rect::new(0, 0, 600, 500);
         for index in (0..pagination.paragraphs().len()).step_by(3) {
             let page = pagination
                 .pages()
                 .iter()
                 .position(|page| page.paragraphs.iter().any(|part| part.paragraph == index))
                 .unwrap();
-            renderer.draw_styled_page(&mut canvas, &mut pagination, page, Rect::new(0, 0, 600, 500), 1).unwrap();
+            renderer.draw_styled_page(&mut canvas, &mut pagination, page, rect, rect, 1).unwrap();
             assert!(pagination.layouts.len() <= DRAW_CACHE_LIMIT);
         }
         assert!(renderer.layouts.is_empty());
@@ -709,9 +904,10 @@ mod tests {
     fn drawing_only_shapes_visible_paragraphs_and_missing_glyphs_are_page_scoped() {
         let mut renderer = TextRenderer::new();
         let blocks: Vec<_> = (0..12).map(|_| StyledBlock::Paragraph(paragraph("word \u{10ffff} \u{10ffff}"))).collect();
-        let mut pagination = renderer.paginate_styled(&blocks, 300, 60).unwrap();
+        let mut pagination = renderer.paginate_styled(blocks, 300, 60).unwrap();
         let mut canvas = Canvas::new(300, 60);
-        renderer.draw_styled_page(&mut canvas, &mut pagination, 2, Rect::new(0, 0, 300, 60), 1).unwrap();
+        let rect = Rect::new(0, 0, 300, 60);
+        renderer.draw_styled_page(&mut canvas, &mut pagination, 2, rect, rect, 1).unwrap();
         let visible: Vec<_> = pagination.pages()[2].paragraphs.iter().map(|part| part.paragraph).collect();
         assert_eq!(pagination.layouts.len(), visible.len());
         assert!(pagination.layouts.iter().all(|(index, _)| visible.contains(index)));
@@ -727,7 +923,7 @@ mod tests {
         assert_eq!(missing, BTreeSet::from(['\u{10ffff}']));
         let first = canvas.gray_data().to_vec();
         canvas.fill(PAPER);
-        renderer.draw_styled_page(&mut canvas, &mut pagination, 2, Rect::new(0, 0, 300, 60), 1).unwrap();
+        renderer.draw_styled_page(&mut canvas, &mut pagination, 2, rect, rect, 1).unwrap();
         assert_eq!(first, canvas.gray_data());
         assert_eq!(pagination.missing_logged.iter().filter(|&&logged| logged).count(), 1);
     }
@@ -743,10 +939,13 @@ mod tests {
             StyledSpan { bytes: 0..1, style: SpanStyle::ITALIC },
         ];
         assert!(renderer.layout_styled_paragraph(&p, 200.0).is_err());
+        // Bad input anywhere fails before any shaping.
+        let blocks = vec![StyledBlock::Paragraph(paragraph("fine")), StyledBlock::Paragraph(p.clone())];
+        assert!(StyledPagination::new(blocks, 200, 200).is_err());
         p.spans.clear();
         p.indent = 200.0;
         assert!(renderer.layout_styled_paragraph(&p, 200.0).is_err());
-        assert!(renderer.paginate_styled(&[], 0, 200).is_err());
-        assert!(renderer.paginate_styled(&[StyledBlock::Gap(f32::NAN)], 200, 200).is_err());
+        assert!(renderer.paginate_styled(Vec::new(), 0, 200).is_err());
+        assert!(renderer.paginate_styled(vec![StyledBlock::Gap(f32::NAN)], 200, 200).is_err());
     }
 }

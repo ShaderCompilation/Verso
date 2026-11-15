@@ -16,8 +16,9 @@ use cosmic_text::{
 use super::Canvas;
 use crate::geom::Rect;
 
-// Phase 2 provides the API; the dictionary screen adopts it in Phase 3.
-#[allow(dead_code)]
+// Phase 2 provides the API and tests use all of it; the dictionary screen
+// adopts it in Phase 3, which removes this allow.
+#[cfg_attr(not(test), allow(dead_code))]
 pub mod styled;
 
 const INTER_REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/Inter-Regular.ttf");
@@ -435,6 +436,20 @@ mod tests {
         assert!(bold > regular, "semibold should be wider: {bold} vs {regular}");
         let serif = t.width("Verso", STYLE.family(Family::Serif));
         assert!((serif - regular).abs() > 1.0, "Literata should differ from Inter");
+        for weight in [fontdb::Weight::NORMAL, fontdb::Weight::SEMIBOLD] {
+            let mut shape = |style| {
+                let mut buffer = Buffer::new(&mut t.fonts, Metrics::new(40.0, 50.0));
+                let attrs = Attrs::new().family(CtFamily::Name("Literata")).weight(weight).style(style);
+                buffer.set_text("Verso office", &attrs, Shaping::Advanced, None);
+                buffer.shape_until_scroll(&mut t.fonts, false);
+                let run = buffer.layout_runs().next().unwrap();
+                (run.line_w, run.glyphs.iter().map(|g| (g.font_id, g.glyph_id)).collect::<Vec<_>>())
+            };
+            let (upright_w, upright) = shape(fontdb::Style::Normal);
+            let (italic_w, italic) = shape(fontdb::Style::Italic);
+            assert!((upright_w - italic_w).abs() > 1.0, "italic {weight:?} should have its own advances");
+            assert!(upright.iter().zip(&italic).all(|(a, b)| a.0 != b.0), "italic {weight:?} should use its own face");
+        }
     }
 
     #[test]
