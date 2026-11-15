@@ -29,13 +29,14 @@ pub enum Icon {
     Folder,
     FolderPlus,
     Pencil,
+    SquareCheck,
     Search,
     Trash,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 19] = [
+    pub const ALL: [Icon; 20] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -53,6 +54,7 @@ impl Icon {
         Icon::Folder,
         Icon::FolderPlus,
         Icon::Pencil,
+        Icon::SquareCheck,
         Icon::Search,
         Icon::Trash,
     ];
@@ -76,6 +78,7 @@ impl Icon {
             Icon::Search => include_str!("../../../../assets/icons/search.svg"),
             Icon::Folder => include_str!("../../../../assets/icons/folder.svg"),
             Icon::FolderPlus => include_str!("../../../../assets/icons/folder-plus.svg"),
+            Icon::SquareCheck => include_str!("../../../../assets/icons/square-check.svg"),
             Icon::Pencil => include_str!("../../../../assets/icons/pencil.svg"),
             Icon::Trash => include_str!("../../../../assets/icons/trash-2.svg"),
         }

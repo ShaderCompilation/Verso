@@ -124,6 +124,101 @@ pub fn delete_folder(path: &Path, index: &LibraryIndex, store: &Store) -> Deleti
     Deletion { books, error }
 }
 
+/// A batch uses filesystem paths captured by the confirmation; it never deletes
+/// newly discovered items merely because a list changed in the meantime.
+#[derive(Clone, Debug)]
+pub enum DeleteItem {
+    Book { id: String, path: PathBuf },
+    Folder(PathBuf),
+}
+impl DeleteItem {
+    pub fn book(book: &super::Book) -> Self {
+        Self::Book { id: book.id.clone(), path: book.path.clone() }
+    }
+    fn path(&self) -> &Path {
+        match self {
+            Self::Book { path, .. } => path,
+            Self::Folder(path) => path,
+        }
+    }
+}
+
+pub fn selection_contents(items: &[DeleteItem]) -> Result<Contents> {
+    let mut total = Contents::default();
+    for item in items {
+        match item {
+            DeleteItem::Book { .. } => total.books += 1,
+            DeleteItem::Folder(path) => {
+                let contents = count_contents(path)?;
+                total.books += contents.books;
+                total.folders += contents.folders + 1;
+                total.other_files += contents.other_files;
+            }
+        }
+    }
+    Ok(total)
+}
+
+pub struct BatchDeletion {
+    pub deleted: usize,
+    pub removed_books: Vec<String>,
+    pub changes: Vec<super::PathChange>,
+    pub errors: Vec<String>,
+}
+/// Continue after failures and return one index batch, including books already
+/// removed by a partially failed folder deletion. Parents are checked only after
+/// all items, so deleting their last children keeps them visible immediately.
+pub fn delete_selection(items: &[DeleteItem], index: &LibraryIndex, store: &Store) -> BatchDeletion {
+    let mut result = BatchDeletion { deleted: 0, removed_books: Vec::new(), changes: Vec::new(), errors: Vec::new() };
+    let mut parents = std::collections::BTreeSet::new();
+    for item in items {
+        let path = item.path();
+        if let Some(parent) = path.parent() {
+            parents.insert(parent.to_owned());
+        }
+        let error = match item {
+            DeleteItem::Book { id, .. } => match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(anyhow::Error::from(e)),
+                _ => {
+                    result.changes.push(super::PathChange::Remove(path.to_owned()));
+                    result.removed_books.push(id.clone());
+                    let sidecar_error = delete_sidecar(path).err();
+                    let state_error = store.remove_book(id).err();
+                    sidecar_error.or(state_error)
+                }
+            },
+            DeleteItem::Folder(path) => {
+                let deletion = delete_folder(path, index, store);
+                result.removed_books.extend(deletion.books.iter().map(|(id, _)| id.clone()));
+                if deletion.error.is_none() {
+                    result.changes.push(super::PathChange::Remove(path.clone()));
+                } else {
+                    result.changes.extend(deletion.books.into_iter().map(|(_, p)| super::PathChange::Remove(p)));
+                    result.changes.extend(
+                        index
+                            .empty_folders
+                            .iter()
+                            .filter(|p| p.starts_with(path))
+                            .filter(|p| {
+                                std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                            })
+                            .cloned()
+                            .map(super::PathChange::Remove),
+                    );
+                }
+                deletion.error
+            }
+        };
+        if let Some(error) = error {
+            result.errors.push(format!("{}: {error:#}", path.display()));
+        } else {
+            result.deleted += 1;
+        }
+    }
+    result.changes.extend(parents.into_iter().filter(|p| is_empty(p)).map(super::PathChange::AddEmpty));
+    result
+}
+
 /// KOReader keeps a book's progress and highlights in `Name.sdr` beside it.
 pub fn sidecar(book: &Path) -> PathBuf {
     book.with_extension("sdr")
@@ -154,6 +249,50 @@ mod tests {
     use crate::document::Position;
     use crate::library::worker::scan;
     use crate::store::BookState;
+
+    #[test]
+    fn batch_delete_continues_after_failure_and_keeps_survivor_progress() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-batch-delete-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("blocked.epub"))?;
+        std::fs::write(root.join("good.epub"), b"book")?;
+        std::fs::create_dir_all(root.join("Folder"))?;
+        std::fs::write(root.join("Folder/nested.epub"), b"book")?;
+        let mut books: Vec<_> = ["blocked.epub", "good.epub", "Folder/nested.epub"]
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let mut book = crate::library::selection_tests::book(i);
+                book.path = root.join(path);
+                book
+            })
+            .collect();
+        let store = Store::at(root.join("state"));
+        for book in &books {
+            store.save_book(&book.id, &BookState { progress: 5200, ..Default::default() })?;
+        }
+        let mut index = LibraryIndex { books: books.clone(), ..Default::default() };
+        let items = vec![
+            DeleteItem::book(&books.remove(0)),
+            DeleteItem::Folder(root.join("Folder")),
+            DeleteItem::book(&books.remove(0)),
+        ];
+        assert_eq!(selection_contents(&items)?, Contents { books: 3, folders: 1, other_files: 0 });
+        let result = delete_selection(&items, &index, &store);
+        assert_eq!(result.deleted, 2);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("blocked.epub"));
+        assert_eq!(result.removed_books.len(), 2);
+        for change in result.changes {
+            change.apply(&mut index);
+        }
+        assert_eq!(index.books.len(), 1);
+        assert_eq!(index.books[0].id, "0");
+        assert_eq!(store.book("0").progress, 5200);
+        assert_eq!(store.book("1").progress, 0);
+        assert_eq!(store.book("2").progress, 0);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn names_operations_counts_and_reading_identity() -> Result<()> {

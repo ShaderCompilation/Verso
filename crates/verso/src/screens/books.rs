@@ -28,6 +28,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+mod selection;
+use selection::Selection;
+
 /// Decoded covers for the visible view only. A cache file that fails to load is
 /// not retried on every redraw: the title cover is shown and the library worker
 /// is asked once to repair it. A repair reply allows one more load.
@@ -64,7 +67,7 @@ struct SearchSession {
     keyboard: Keyboard,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Target {
     Book(String),
     Folder(PathBuf),
@@ -209,6 +212,7 @@ pub struct Books {
     name_sheet: Option<NameSheet>,
     details: Option<Details>,
     confirm: Option<ConfirmDelete>,
+    selection: Option<Selection>,
     /// Edits after a publication's revision are replayed in order. Acknowledged
     /// publications are never patched twice, including rename chains and reuse.
     changes: Vec<(u64, PathChange)>,
@@ -317,6 +321,7 @@ impl Books {
             name_sheet: None,
             details: None,
             confirm: None,
+            selection: None,
             changes: Vec::new(),
             index_revision: 0,
             worker_home_revision: 0,
@@ -484,6 +489,7 @@ impl Books {
         if let Some(search) = &mut self.search {
             search.page = self.pager.page;
         }
+        self.retain_selection();
         self.prioritize();
         // Only the visible grid plus continue card retain decoded images.
         let keys: HashSet<_> = self
@@ -599,6 +605,7 @@ impl Books {
         })
     }
     fn navigate(&mut self, folder: Option<PathBuf>, cx: &mut EventCx) {
+        self.end_selection(cx);
         let started = std::time::Instant::now();
         self.home_active = false;
         self.prepare_browsing();
@@ -622,6 +629,7 @@ impl Books {
         let roots = self.store.library_folders();
         if roots != self.roots {
             log::info!("library folders changed: {roots:?}");
+            self.end_selection(cx);
             self.roots = roots.clone();
             self.library.set_roots(roots);
             self.scanning = true;
@@ -688,6 +696,9 @@ impl Books {
                 self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
                 self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
             }
+            if old_folder != self.navigation.folder {
+                self.end_selection(cx);
+            }
             let page = self.pager.page;
             self.pager.page = self.search.as_ref().map_or_else(|| self.navigation.page(), |s| s.page);
             self.refresh(cx.theme);
@@ -712,6 +723,7 @@ impl Books {
         }
     }
     fn toggle_search(&mut self, cx: &mut EventCx) {
+        self.end_selection(cx);
         if self.search.take().is_some() {
             self.search_action.icon = Icon::Search;
             self.top.title = if self.home_active { "Home" } else { "Library" }.into();
@@ -760,6 +772,7 @@ impl Books {
             search.keyboard.visible = false;
             search.field.focused = false;
         } else if search.field.edit(input) {
+            self.selection = None;
             let started = std::time::Instant::now();
             search.folded = search::fold(search.field.value().trim());
             self.pager.page = 0;
@@ -844,6 +857,9 @@ impl Books {
         if !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
             items.push((None, "Remove from continue reading".into()));
         }
+        if !self.is_home() {
+            items.push((Some(Icon::SquareCheck), "Select".into()));
+        }
         items.push((Some(Icon::Trash), "Delete…".into()));
         // Keep the top bar readable; on a short screen the menu opens beside the book.
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
@@ -883,6 +899,7 @@ impl Books {
             (Some(Icon::Folder), "Open".into()),
             (Some(Icon::Info), "Details".into()),
             (Some(Icon::Search), "Search in this folder".into()),
+            (Some(Icon::SquareCheck), "Select".into()),
             (Some(Icon::FolderPlus), "New folder…".into()),
             (Some(Icon::Pencil), "Rename…".into()),
             (Some(Icon::Trash), "Delete…".into()),
@@ -890,8 +907,9 @@ impl Books {
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
         let mut menu = PopupMenu::open(items, anchor, area, t);
         let protected = self.folder_protected(&path);
-        menu.set_enabled(4, !protected);
+        menu.set_enabled(3, !self.roots.contains(&path));
         menu.set_enabled(5, !protected);
+        menu.set_enabled(6, !protected);
         self.menu = Some((Target::Folder(path), menu));
         self.grid.on_gesture(&Gesture::Cancel(anchor));
     }
@@ -981,13 +999,25 @@ impl Books {
         match files::count_contents(&path) {
             Ok(contents) => {
                 let message = folder_delete_message(&collections::name(&path), &contents);
-                self.confirm =
-                    Some(ConfirmDelete::new(cx.theme, self.screen, Target::Folder(path), "Delete folder?", message));
+                self.confirm = Some(ConfirmDelete::new(
+                    cx.theme,
+                    self.screen,
+                    DeleteRequest::Item(Target::Folder(path)),
+                    "Delete folder?",
+                    message,
+                ));
             }
             Err(e) => cx.toast(format!("{e:#}"), None),
         }
     }
-    fn delete_target(&mut self, target: Target, cx: &mut EventCx) {
+    fn delete_target(&mut self, request: DeleteRequest, cx: &mut EventCx) {
+        let target = match request {
+            DeleteRequest::Item(target) => target,
+            DeleteRequest::Selection(targets) => {
+                self.delete_selection(targets, cx);
+                return;
+            }
+        };
         match target {
             Target::Book(id) => self.delete(&id, cx),
             Target::Folder(path) => {
@@ -1200,11 +1230,15 @@ impl Screen for Books {
             return;
         }
         let t = cx.theme;
-        self.top.draw(cx);
-        self.rescan.draw(cx);
-        self.exit.draw(cx);
-        self.search_action.draw(cx);
-        self.settings_action.draw(cx);
+        if let Some(selection) = &mut self.selection {
+            selection.draw(cx);
+        } else {
+            self.top.draw(cx);
+            self.rescan.draw(cx);
+            self.exit.draw(cx);
+            self.search_action.draw(cx);
+            self.settings_action.draw(cx);
+        }
         if let Some(search) = &mut self.search {
             search.field.draw(cx);
             search.all.draw(cx);
@@ -1329,6 +1363,7 @@ impl Screen for Books {
                     cx.canvas.stroke_rounded_rect(r, t.radius, (2 * t.border) as f32, INK);
                     cx.hint(r, RefreshMode::Fast);
                 }
+                self.draw_tick(cx, Target::Folder(path.clone()), cell);
                 continue;
             }
             let book = &self.books[i - self.folders.len()];
@@ -1341,7 +1376,7 @@ impl Screen for Books {
                 cx.canvas.stroke_rounded_rect(cover, t.radius, (2 * t.border) as f32, INK);
                 cx.hint(cover, RefreshMode::Fast);
             } else {
-                cx.hint(cover, RefreshMode::Ui);
+                cx.hint(cover, if self.selection.is_some() { RefreshMode::Fast } else { RefreshMode::Ui });
             }
             let y = cover.bottom() + t.mm(1.0);
             cx.line(&book.metadata.title, t.button, Rect::new(cell.x, y, cell.w, t.mm(4.0)), HAlign::Left);
@@ -1360,6 +1395,7 @@ impl Screen for Books {
                 Rect::new(cell.right() - status_w, y + t.mm(4.0), status_w, t.mm(4.0)),
                 HAlign::Right,
             );
+            self.draw_tick(cx, Target::Book(book.id.clone()), cell);
         }
         if !self.is_home() && self.books.is_empty() && self.folders.is_empty() {
             let message = if let Some(search) = &self.search {
@@ -1460,9 +1496,14 @@ impl Screen for Books {
         } else if let Some((target, menu)) = &mut self.menu {
             let event = menu.on_gesture(&g, cx.theme);
             let delete_index = menu.items.len() - 1;
+            let select_index = menu.items.iter().position(|(_, label)| label == "Select");
             let target = target.clone();
             if let Some(event) = event {
                 self.menu = None;
+                if matches!(event, MenuEvent::Chosen(i) if Some(i) == select_index) {
+                    self.start_selection(target, cx);
+                    return Action::None;
+                }
                 match (target, event) {
                     (Target::Book(id), event) => match event {
                         MenuEvent::Chosen(0) => self.open(id, cx),
@@ -1480,7 +1521,7 @@ impl Screen for Books {
                                 self.confirm = Some(ConfirmDelete::new(
                                     cx.theme,
                                     self.screen,
-                                    Target::Book(id),
+                                    DeleteRequest::Item(Target::Book(id)),
                                     "Delete book?",
                                     message,
                                 ));
@@ -1498,9 +1539,9 @@ impl Screen for Books {
                             self.search.as_mut().unwrap().scope = Scope::Collection(path);
                             self.refresh(cx.theme);
                         }
-                        MenuEvent::Chosen(3) => self.start_name(NameOperation::Create(path), cx.theme),
-                        MenuEvent::Chosen(4) => self.start_name(NameOperation::Rename(path), cx.theme),
-                        MenuEvent::Chosen(5) => self.ask_delete_folder(path, cx),
+                        MenuEvent::Chosen(4) => self.start_name(NameOperation::Create(path), cx.theme),
+                        MenuEvent::Chosen(5) => self.start_name(NameOperation::Rename(path), cx.theme),
+                        MenuEvent::Chosen(6) => self.ask_delete_folder(path, cx),
                         _ => {}
                     },
                 }
@@ -1525,7 +1566,10 @@ impl Screen for Books {
                 self.edit_search(&input, cx);
             }
         } else {
-            if self.settings_action.on_gesture(&g) {
+            if self.selection_controls(&g, cx) {
+                return Action::None;
+            }
+            if self.selection.is_none() && self.settings_action.on_gesture(&g) {
                 return Action::Push(Box::new(crate::screens::system::SystemSettings::new(
                     cx.theme,
                     self.screen,
@@ -1533,7 +1577,7 @@ impl Screen for Books {
                     self.worker.waker(),
                 )));
             }
-            if self.search_action.on_gesture(&g) {
+            if self.selection.is_none() && self.search_action.on_gesture(&g) {
                 self.toggle_search(cx);
                 self.apply_pending(cx);
                 return Action::None;
@@ -1553,6 +1597,7 @@ impl Screen for Books {
                     None
                 };
                 if let Some(scope) = scope {
+                    self.selection = None;
                     search.scope = scope;
                     self.pager.page = 0;
                     self.refresh(cx.theme);
@@ -1560,12 +1605,13 @@ impl Screen for Books {
                     return Action::None;
                 }
             }
-            if self.exit.on_gesture(&g) {
+            if self.selection.is_none() && self.exit.on_gesture(&g) {
                 return Action::Pop;
             }
             if self.search.is_none()
                 && let Some(selected) = self.tabs.on_gesture(&g)
             {
+                self.end_selection(cx);
                 if !self.is_home() {
                     self.navigation.set_page(self.pager.page);
                     self.navigation.set_sort(self.selected_sort());
@@ -1596,6 +1642,10 @@ impl Screen for Books {
                     return Action::None;
                 }
                 if self.navigation.folder.is_some() && self.back.on_gesture(&g) {
+                    if self.selection.is_some() {
+                        self.end_selection(cx);
+                        return Action::None;
+                    }
                     let parent = self
                         .navigation
                         .folder
@@ -1616,7 +1666,7 @@ impl Screen for Books {
                     return Action::None;
                 }
             }
-            if self.rescan.on_gesture(&g) {
+            if self.selection.is_none() && self.rescan.on_gesture(&g) {
                 self.library.rescan();
                 self.scanning = true;
                 self.working = true;
@@ -1651,6 +1701,13 @@ impl Screen for Books {
                     GridEvent::Tapped(i) => (i, false),
                     GridEvent::LongPressed(i) => (i, true),
                 };
+                if self.selection.is_some() {
+                    if !long {
+                        self.toggle_selection(i);
+                    }
+                    self.apply_pending(cx);
+                    return Action::None;
+                }
                 if let Some(path) = self.folders.get(i).cloned() {
                     if long {
                         self.open_folder_menu(path, g.pos(), cx.theme);
@@ -1911,8 +1968,13 @@ impl Details {
 }
 
 /// "Delete book?" with Cancel and Delete. Nothing is removed until Delete.
+enum DeleteRequest {
+    Item(Target),
+    Selection(Vec<Target>),
+}
+
 struct ConfirmDelete {
-    target: Target,
+    target: DeleteRequest,
     sheet: Sheet,
     message: String,
     text: Rect,
@@ -1920,7 +1982,7 @@ struct ConfirmDelete {
     delete: Button,
 }
 impl ConfirmDelete {
-    fn new(t: &Theme, screen: Rect, target: Target, title: &str, message: String) -> Self {
+    fn new(t: &Theme, screen: Rect, target: DeleteRequest, title: &str, message: String) -> Self {
         let sheet = Sheet::open(title, t.mm(62.0).min(screen.h - t.top_bar), screen, t);
         let c = sheet.content(t);
         let buttons_y = c.bottom() - t.margin - t.button_h;
@@ -2072,6 +2134,152 @@ mod tests {
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
     }
+    #[test]
+    fn selection_across_pages_and_ending_rules() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("selection")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::AllBooks;
+            books.refresh(&t);
+            let first = Target::Book(books.books[0].id.clone());
+            books.open_menu(books.books[0].id.clone(), Point::new(190, 650), &t);
+            let menu = &books.menu.as_ref().unwrap().1;
+            let row = menu.items.iter().position(|(_, label)| label == "Select").unwrap();
+            let p = Point::new(menu.rect().center().x, menu.rect().y + t.mm(1.0) + row as i32 * t.row + t.row / 2);
+            tap(&mut books, p, cx);
+            assert!(books.selection.as_ref().unwrap().items.contains(&first));
+            let all = books.selection.as_ref().unwrap().all.rect().center();
+            tap(&mut books, all, cx);
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 22);
+            books.go_to_page(2, cx);
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 22);
+            let p = books.grid.cells()[0].1.center();
+            tap(&mut books, p, cx);
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 21);
+            books.on_gesture(Gesture::Down(p), cx);
+            books.on_gesture(Gesture::LongPress(p), cx);
+            books.on_gesture(Gesture::End(p), cx);
+            assert!(books.menu.is_none() && books.reader.is_none());
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 21);
+            let tab = Point::new(books.tabs.rect().x + books.tabs.rect().w / 2, books.tabs.rect().center().y);
+            tap(&mut books, tab, cx);
+            assert!(books.selection.is_none());
+            books.navigate(None, cx);
+            books.start_selection(Target::Folder("/books".into()), cx);
+            assert!(books.selection.is_none(), "library roots cannot be selected");
+            books.navigate(Some("/books".into()), cx);
+            books.start_selection(Target::Book("20".into()), cx);
+            let p = books.back.rect().center();
+            tap(&mut books, p, cx);
+            assert!(books.selection.is_none());
+            assert_eq!(books.navigation.folder, Some("/books".into()), "Back cancels before navigating");
+            books.start_selection(Target::Book("20".into()), cx);
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            assert!(books.selection.is_none());
+            books.start_selection(Target::Book("0".into()), cx);
+            books.toggle_search(cx);
+            assert!(books.selection.is_none());
+            books.on_text_input(&TextInput::Submit, cx);
+            books.start_selection(Target::Book("0".into()), cx);
+            books.edit_search(&TextInput::Insert("Title".into()), cx);
+            assert!(books.selection.is_none(), "query changes end selection");
+            books.start_selection(Target::Book("0".into()), cx);
+            let p = books.search.as_ref().unwrap().current.rect().center();
+            tap(&mut books, p, cx);
+            assert!(books.selection.is_none(), "scope changes end selection");
+            books.start_selection(Target::Book("0".into()), cx);
+            let all = books.selection.as_ref().unwrap().all.rect().center();
+            tap(&mut books, all, cx);
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 20, "Select all uses the whole scoped result");
+            books.toggle_search(cx);
+            books.start_selection(Target::Book("0".into()), cx);
+            let p = books.selection.as_ref().unwrap().cancel.rect().center();
+            tap(&mut books, p, cx);
+            assert!(books.selection.is_none());
+            books.home_active = true;
+            books.refresh(&t);
+            books.start_selection(Target::Book("0".into()), cx);
+            assert!(books.selection.is_none(), "Home has no selection");
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_selection_delete_confirms_once_and_batches_updates() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("selection-delete")?;
+        let library = root.join("Library");
+        let folder = library.join("Folder");
+        std::fs::create_dir_all(folder.join("Empty"))?;
+        std::fs::write(folder.join("nested.epub"), b"book")?;
+        std::fs::write(folder.join("paper.pdf"), b"other")?;
+        std::fs::write(library.join("loose.epub"), b"book")?;
+        let mut nested = book(0);
+        nested.path = folder.join("nested.epub");
+        let mut loose = book(1);
+        loose.path = library.join("loose.epub");
+        store.save_library(&LibraryIndex {
+            books: vec![nested, loose],
+            empty_folders: vec![folder.join("Empty")],
+            ..Default::default()
+        })?;
+        let mut settings = store.settings();
+        settings.library_folders = Some(vec![library.clone()]);
+        store.save_settings(&settings)?;
+        for id in ["0", "1"] {
+            store.save_book(id, &BookState { progress: 3500, ..Default::default() })?;
+        }
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            books.navigation.tab = Tab::Collections;
+            books.navigate(Some(library.clone()), cx);
+            books.start_selection(Target::Folder(folder.clone()), cx);
+            let all = books.selection.as_ref().unwrap().all.rect().center();
+            tap(&mut books, all, cx);
+            let delete = books.selection.as_ref().unwrap().delete.rect().center();
+            tap(&mut books, delete, cx);
+            let confirm = books.confirm.as_ref().unwrap();
+            assert!(confirm.message.contains("2 books, 2 folders, 1 other file"));
+            let cancel = confirm.cancel.rect().center();
+            tap(&mut books, cancel, cx);
+            assert!(folder.exists() && books.selection.is_some());
+            tap(&mut books, delete, cx);
+            let delete = books.confirm.as_ref().unwrap().delete.rect().center();
+            tap(&mut books, delete, cx);
+            assert!(books.selection.is_none() && books.confirm.is_none());
+            assert!(!folder.exists() && !library.join("loose.epub").exists());
+            assert!(books.index.books.is_empty());
+            assert_eq!(store.book("0").progress, 0);
+            assert_eq!(store.book("1").progress, 0);
+            assert!(books.index.empty_folders.contains(&library));
+            let stale = store.library();
+            books.pending = Some(Snapshot { index: stale, ..Default::default() });
+            books.apply_pending(cx);
+            assert!(books.index.books.is_empty(), "older snapshots cannot restore a batch delete");
+            let blocked = library.join("blocked.epub");
+            std::fs::create_dir(&blocked).unwrap();
+            let mut survivor = book(2);
+            survivor.path = blocked;
+            books.index.books.push(survivor);
+            books.collections = Collections::from_index(&books.index, &books.roots);
+            store.save_book("2", &BookState { progress: 1700, ..Default::default() }).unwrap();
+            books.refresh(&t);
+            books.start_selection(Target::Book("2".into()), cx);
+            books.delete_selection(vec![Target::Book("2".into())], cx);
+            assert!(books.details.as_ref().unwrap().content.starts_with("Deleted 0 of 1:"));
+            assert_eq!(store.book("2").progress, 1700);
+            assert!(books.index.books.iter().any(|b| b.id == "2"));
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn home_is_summary_only_and_defers_updates_under_touch_and_details() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("home-lazy")?;
@@ -2447,7 +2655,7 @@ mod tests {
                 books.open_menu("0".into(), Point::new(600, 600), &t);
                 let menu = &books.menu.as_ref().unwrap().1;
                 assert_eq!(menu.items.iter().any(|(_, label)| label == "Remove from continue reading"), can_remove);
-                assert_eq!(menu.items.len(), if can_remove { 5 } else { 4 });
+                assert_eq!(menu.items.len(), if can_remove { 6 } else { 5 });
                 let rect = menu.rect();
                 let delete =
                     Point::new(rect.center().x, rect.y + t.mm(1.0) + (menu.items.len() as i32 - 1) * t.row + t.row / 2);
@@ -2490,8 +2698,11 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         let item = |books: &Books| {
-            let menu = books.menu.as_ref().unwrap().1.rect();
-            Point::new(menu.center().x, menu.y + t.mm(1.0) + 3 * t.row + t.row / 2)
+            let menu = &books.menu.as_ref().unwrap().1;
+            Point::new(
+                menu.rect().center().x,
+                menu.rect().y + t.mm(1.0) + (menu.items.len() as i32 - 1) * t.row + t.row / 2,
+            )
         };
         with_cx(&t, screen, |cx| {
             assert!(books.books.iter().any(|b| b.id == "0"));
@@ -2801,7 +3012,7 @@ mod tests {
             books.navigate(Some(library.clone()), cx);
             books.open_folder_menu(library.clone(), Point::new(200, 600), &t);
             let rect = books.menu.as_ref().unwrap().1.rect();
-            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 4 * t.row + t.row / 2);
+            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 5 * t.row + t.row / 2);
             tap(&mut books, rename, cx);
             assert!(books.menu.is_some() && books.name_sheet.is_none(), "root rename is disabled");
             let delete = Point::new(rename.x, rename.y + t.row);
