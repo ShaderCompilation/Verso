@@ -304,10 +304,16 @@ impl Background {
             let book = &self.index.books[i];
             if book.available && book.fingerprint.is_empty() && !book.fingerprint_attempted {
                 let channel = &self.channel;
-                let value = fingerprint(&book.path, &|| channel.yield_point()).unwrap_or_default();
+                let result = fingerprint(&book.path, &|| channel.yield_point());
+                // Shutdown and queued folder edits cancel the read. Leave the
+                // book unattempted so the restarted pass hashes it again.
+                if result.as_ref().is_err_and(|e| e.is::<Cancelled>()) {
+                    interrupted = true;
+                    break;
+                }
                 let book = &mut self.index.books[i];
-                book.fingerprint = value;
-                book.fingerprint_attempted = !self.channel.stopped();
+                book.fingerprint = result.unwrap_or_default();
+                book.fingerprint_attempted = true;
                 self.unsaved = true;
                 fingerprinted += 1;
                 if fingerprinted % SAVE_EVERY == 0 {
@@ -610,12 +616,24 @@ fn stamp(meta: &std::fs::Metadata) -> Result<Stamp> {
     let modified = meta.modified()?.duration_since(UNIX_EPOCH).unwrap_or_default();
     Ok(Stamp { size: meta.len(), modified_secs: modified.as_secs(), modified_nanos: modified.subsec_nanos() })
 }
+/// A fingerprint read stopped by shutdown or a queued edit, not by the file.
+#[derive(Debug)]
+struct Cancelled;
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("scan cancelled")
+    }
+}
+impl std::error::Error for Cancelled {}
+
 fn fingerprint(path: &Path, cancelled: &impl Fn() -> bool) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     loop {
-        anyhow::ensure!(!cancelled(), "scan cancelled");
+        if cancelled() {
+            return Err(Cancelled.into());
+        }
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
@@ -1142,6 +1160,16 @@ mod folder_tests {
         assert!(!tree.folders.contains_key(&root.join("PDF")));
         assert!(files::is_empty(&root.join("Dotfiles")));
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_fingerprints_are_told_apart_from_unreadable_files() -> Result<()> {
+        // The identity pass retries only a cancelled read; a failed one is final.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        assert!(fingerprint(&fixture, &|| true).unwrap_err().is::<Cancelled>());
+        assert!(!fingerprint(Path::new("/missing/book.epub"), &|| false).unwrap_err().is::<Cancelled>());
+        assert!(!fingerprint(&fixture, &|| false)?.is_empty());
         Ok(())
     }
 

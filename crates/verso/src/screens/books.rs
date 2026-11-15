@@ -212,6 +212,10 @@ pub struct Books {
     /// Edits after a publication's revision are replayed in order. Acknowledged
     /// publications are never patched twice, including rename chains and reuse.
     changes: Vec<(u64, PathChange)>,
+    /// Worker revisions behind the applied index and the newest worker Home.
+    /// Edits at or below both are acknowledged and dropped from `changes`.
+    index_revision: u64,
+    worker_home_revision: u64,
     jump: Option<PageJump>,
     touching: bool,
     pending: Option<Snapshot>,
@@ -314,6 +318,8 @@ impl Books {
             details: None,
             confirm: None,
             changes: Vec::new(),
+            index_revision: 0,
+            worker_home_revision: 0,
             jump: None,
             touching: false,
             pending: None,
@@ -346,7 +352,17 @@ impl Books {
         }
         let snapshot = self.pending.take();
         let complete = snapshot.as_ref().is_none_or(|s| !s.partial);
-        self.index = snapshot.map_or_else(|| self.store.library(), |s| s.index);
+        let (mut index, revision) = snapshot.map_or_else(|| (self.store.library(), 0), |s| (s.index, s.revision));
+        // Before browsing, only Home deletions can be queued. Their removals
+        // are idempotent, so replaying them over the saved index is safe even
+        // when the worker already saved them.
+        for (r, change) in &self.changes {
+            if *r > revision {
+                change.apply(&mut index);
+            }
+        }
+        self.index = index;
+        self.index_revision = revision;
         let started = std::time::Instant::now();
         self.collections = Collections::from_index(&self.index, &self.roots);
         log::info!(
@@ -659,6 +675,8 @@ impl Books {
             let started = std::time::Instant::now();
             cx.redraw();
             self.index = snapshot.index;
+            self.index_revision = snapshot.revision;
+            self.prune_changes();
             self.collections = Collections::from_index(&self.index, &self.roots);
             if let Some(search) = &mut self.search {
                 search.cache.sync(&self.index);
@@ -908,6 +926,11 @@ impl Books {
             }
         };
         match result {
+            // An unchanged name: nothing moved, so there is nothing to rescan.
+            Ok(path) if matches!(&operation, NameOperation::Rename(from) if *from == path) => {
+                self.name_sheet = None;
+                cx.redraw();
+            }
             Ok(path) => {
                 let (changes, message) = match operation {
                     NameOperation::Create(_) => (self.library.add_empty_folder(path), "Folder created"),
@@ -926,21 +949,26 @@ impl Books {
             }
         }
     }
+    /// Applies queued edits to this view. A Home delete before browsing leaves
+    /// the index unloaded; `prepare_browsing` replays the edits when it loads.
     fn apply_changes(&mut self, changes: Vec<(u64, PathChange)>, cx: &mut EventCx) {
-        self.prepare_browsing();
         for (_, change) in &changes {
-            change.apply(&mut self.index);
             change.apply_home(&mut self.home);
+            if self.browsing_ready {
+                change.apply(&mut self.index);
+            }
             if let PathChange::Move(from, to) = change {
                 self.navigation.move_path(from, to);
             }
         }
         self.changes.extend(changes);
-        self.collections = Collections::from_index(&self.index, &self.roots);
-        self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
-        self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
-        if let Some(search) = &mut self.search {
-            search.cache.sync(&self.index);
+        if self.browsing_ready {
+            self.collections = Collections::from_index(&self.index, &self.roots);
+            self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
+            self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
+            if let Some(search) = &mut self.search {
+                search.cache.sync(&self.index);
+            }
         }
         self.refresh(cx.theme);
         self.save_navigation(cx);
@@ -952,21 +980,7 @@ impl Books {
         }
         match files::count_contents(&path) {
             Ok(contents) => {
-                let mut counts = counted(contents.books, "book");
-                if contents.books > 0 {
-                    counts.push_str(if contents.books == 1 {
-                        " and its reading progress"
-                    } else {
-                        " and their reading progress"
-                    });
-                }
-                if contents.other_files > 0 {
-                    counts.push_str(&format!(", {}", counted(contents.other_files, "other file")));
-                }
-                let message = format!(
-                    "“{}” and everything in it will be removed from this device: {counts}.",
-                    collections::name(&path)
-                );
+                let message = folder_delete_message(&collections::name(&path), &contents);
                 self.confirm =
                     Some(ConfirmDelete::new(cx.theme, self.screen, Target::Folder(path), "Delete folder?", message));
             }
@@ -1016,7 +1030,14 @@ impl Books {
             }
             summary
         });
-        self.pending_home_revision = self.changes.last().map_or(0, |(r, _)| *r);
+        // Browsing patched paths from the index, which has every edit. Before
+        // browsing, the saved summary may predate a Home deletion: replay all,
+        // which only holds idempotent removals then.
+        self.pending_home_revision = if self.browsing_ready { self.changes.last().map_or(0, |(r, _)| *r) } else { 0 };
+    }
+    fn prune_changes(&mut self) {
+        let acknowledged = self.index_revision.min(self.worker_home_revision);
+        self.changes.retain(|(r, _)| *r > acknowledged);
     }
     /// Deletes the book file and its reading state. The library worker drops it
     /// from the index and removes its cached cover; this view updates at once.
@@ -1030,6 +1051,12 @@ impl Books {
             return;
         }
         log::info!("deleted {}", book.path.display());
+        // The confirmation promises the reading progress goes too, and a
+        // leftover sidecar would hide a folder this delete just emptied.
+        let sidecar_error = files::delete_sidecar(&book.path).err();
+        if let Some(e) = &sidecar_error {
+            log::warn!("deleting sidecar of {}: {e:#}", book.path.display());
+        }
         if let Err(e) = self.store.remove_book(&book.id) {
             log::warn!("removing reading state of {}: {e}", book.path.display());
         }
@@ -1040,7 +1067,13 @@ impl Books {
         self.states.remove(&book.id);
         self.home.books.retain(|e| e.book.id != book.id);
         self.apply_changes(changes, cx);
-        cx.toast(format!("Deleted “{}”", book.metadata.title), None);
+        cx.toast(
+            match sidecar_error {
+                None => format!("Deleted “{}”", book.metadata.title),
+                Some(_) => format!("Deleted “{}”, but couldn't remove its KOReader data", book.metadata.title),
+            },
+            None,
+        );
     }
 }
 fn status(state: &BookState) -> String {
@@ -1051,6 +1084,34 @@ fn status(state: &BookState) -> String {
     } else {
         format!("{}%", state.progress.min(10000) / 100)
     }
+}
+/// A folder holding only empty folders is not itself "Empty".
+fn folder_subtitle(folder: &collections::Folder) -> String {
+    match (folder.count, folder.children.len()) {
+        (0, 0) => "Empty".into(),
+        (0, children) => counted(children, "folder"),
+        (count, _) => counted(count, "book"),
+    }
+}
+/// Names what a folder delete would lose: books with their progress, and other
+/// files such as PDFs and Kindle books. An empty tree says so instead of "0 books".
+fn folder_delete_message(name: &str, contents: &files::Contents) -> String {
+    if contents.books == 0 && contents.other_files == 0 {
+        return match contents.folders {
+            0 => format!("The empty folder “{name}” will be removed from this device."),
+            1 => format!("“{name}” and the empty folder in it will be removed from this device."),
+            n => format!("“{name}” and the {n} empty folders in it will be removed from this device."),
+        };
+    }
+    let mut parts = Vec::new();
+    if contents.books > 0 {
+        let progress = if contents.books == 1 { "its" } else { "their" };
+        parts.push(format!("{} and {progress} reading progress", counted(contents.books, "book")));
+    }
+    if contents.other_files > 0 {
+        parts.push(counted(contents.other_files, "other file"));
+    }
+    format!("“{name}” and everything in it will be removed from this device: {}.", parts.join(", "))
 }
 fn counted(count: usize, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
@@ -1231,7 +1292,7 @@ impl Screen for Books {
                 let outline = Rect::new(r.x + t.mm(1.0), r.y + r.h / 4, r.w - t.mm(2.0), r.h / 2);
                 cx.icons.draw(cx.canvas, Icon::Folder, outline, INK);
                 cx.line(
-                    &if folder.count == 0 { "Empty".into() } else { counted(folder.count, "book") },
+                    &folder_subtitle(folder),
                     t.body.gray(INK2),
                     Rect::new(r.x, outline.bottom() + t.mm(1.0), r.w, t.mm(5.0)),
                     HAlign::Center,
@@ -1660,6 +1721,8 @@ impl Screen for Books {
             }
             self.pending_home = Some(home);
             self.pending_home_revision = revision;
+            self.worker_home_revision = revision;
+            self.prune_changes();
         }
         let repaired = self.library.take_repaired();
         if !repaired.is_empty() {
@@ -2761,6 +2824,11 @@ mod tests {
             books.pending = Some(Snapshot { index: acknowledged, revision, ..Default::default() });
             books.apply_pending(cx);
             assert_eq!(books.navigation.folder, Some(new.clone()));
+            // Submitting the unchanged name closes the sheet and queues nothing.
+            let queued = books.changes.len();
+            books.start_name(NameOperation::Rename(new.clone()), &t);
+            books.on_text_input(&TextInput::Submit, cx);
+            assert!(books.name_sheet.is_none() && books.changes.len() == queued);
             // Reuse Old after rename. An acknowledged snapshot must keep it.
             books.start_name(NameOperation::Create(library.clone()), &t);
             books.on_text_input(&TextInput::Insert("Old".into()), cx);
@@ -2779,6 +2847,15 @@ mod tests {
             assert!(!new.exists());
             assert_eq!(books.navigation.folder, Some(library.clone()));
             assert!(books.folders.contains(&old));
+            // Once the index and a worker Home both carry the edits, drop them.
+            let latest = books.changes.last().unwrap().0;
+            books.worker_home_revision = latest - 1;
+            books.pending = Some(Snapshot { index: books.index.clone(), revision: latest, ..Default::default() });
+            books.apply_pending(cx);
+            assert_eq!(books.changes.iter().map(|(r, _)| *r).collect::<Vec<_>>(), [latest]);
+            books.worker_home_revision = latest;
+            books.prune_changes();
+            assert!(books.changes.is_empty());
         });
         drop(books);
         std::fs::remove_dir_all(root)?;
@@ -2792,6 +2869,9 @@ mod tests {
         std::fs::create_dir_all(&folder)?;
         let path = folder.join("book.epub");
         std::fs::write(&path, b"book")?;
+        // KOReader's sidecar would otherwise keep the folder non-empty.
+        std::fs::create_dir(folder.join("book.sdr"))?;
+        std::fs::write(folder.join("book.sdr/metadata.epub.lua"), b"progress")?;
         let mut b = book(0);
         b.path = path;
         store.save_library(&LibraryIndex { books: vec![b], ..Default::default() })?;
@@ -2805,6 +2885,7 @@ mod tests {
             books.navigation.tab = Tab::Collections;
             books.navigate(Some(folder.clone()), cx);
             books.delete("0", cx);
+            assert!(!folder.join("book.sdr").exists(), "the sidecar goes with its book");
             assert_eq!(books.navigation.folder, Some(folder.clone()));
             assert_eq!(books.collections.folders[&folder].count, 0);
             assert!(books.index.empty_folders.contains(&folder));
@@ -2813,6 +2894,62 @@ mod tests {
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn home_delete_before_browsing_defers_the_index_and_replays_on_load() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-delete")?;
+        let book = store.library().books.into_iter().find(|b| b.id == "20").unwrap();
+        store.select_home_book(&book);
+        store.save_book(&book.id, &BookState { last_opened: 7, progress: 1000, ..Default::default() })?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let on_home = |books: &Books| books.home.books.iter().any(|e| e.book.id == book.id);
+        with_cx(&t, screen, |cx| {
+            assert!(on_home(&books));
+            books.delete(&book.id, cx);
+            assert!(!books.browsing_ready && books.index.books.is_empty(), "Home deletes don't load the index");
+            assert!(!on_home(&books));
+            // The stub worker never saves, like a worker that hasn't caught up.
+            assert!(store.library().books.iter().any(|b| b.id == book.id));
+            books.reload_home();
+            books.apply_pending(cx);
+            assert!(!on_home(&books), "a saved summary predating the delete is patched");
+            books.prepare_browsing();
+            assert!(books.browsing_ready);
+            assert!(!books.index.books.iter().any(|b| b.id == book.id));
+            assert_eq!(books.index.books.len(), 21);
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn folder_delete_messages_and_subtitles_name_what_is_inside() {
+        let message = |books, folders, other_files| {
+            folder_delete_message("Tolkien", &files::Contents { books, folders, other_files })
+        };
+        assert_eq!(message(0, 0, 0), "The empty folder “Tolkien” will be removed from this device.");
+        assert_eq!(message(0, 1, 0), "“Tolkien” and the empty folder in it will be removed from this device.");
+        assert_eq!(message(0, 3, 0), "“Tolkien” and the 3 empty folders in it will be removed from this device.");
+        assert_eq!(
+            message(1, 0, 0),
+            "“Tolkien” and everything in it will be removed from this device: 1 book and its reading progress."
+        );
+        assert_eq!(
+            message(12, 2, 3),
+            "“Tolkien” and everything in it will be removed from this device: \
+             12 books and their reading progress, 3 other files."
+        );
+        assert_eq!(message(0, 1, 1), "“Tolkien” and everything in it will be removed from this device: 1 other file.");
+        let mut folder = collections::Folder::default();
+        assert_eq!(folder_subtitle(&folder), "Empty");
+        folder.children.insert("/books/Tolkien/nested".into());
+        assert_eq!(folder_subtitle(&folder), "1 folder");
+        folder.count = 2;
+        assert_eq!(folder_subtitle(&folder), "2 books");
     }
 
     #[test]

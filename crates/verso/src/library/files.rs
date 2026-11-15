@@ -43,12 +43,23 @@ pub struct Contents {
     pub folders: usize,
     pub other_files: usize,
 }
+/// What a delete confirmation names. Hidden entries and KOReader sidecars are
+/// deleted with the folder but not counted: sidecars are the books' reading
+/// progress, and "other files" should point at PDFs and Kindle books.
 pub fn count_contents(path: &Path) -> Result<Contents> {
     let mut result = Contents::default();
     fn walk(path: &Path, result: &mut Contents) -> Result<()> {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
             if entry.file_type()?.is_dir() {
+                if name.ends_with(".sdr") {
+                    continue;
+                }
                 result.folders += 1;
                 walk(&entry.path(), result)?;
             } else if entry.file_type()?.is_file()
@@ -76,6 +87,22 @@ pub fn delete_folder(path: &Path, index: &LibraryIndex, store: &Store) -> Result
         }
     }
     Ok(ids)
+}
+
+/// KOReader keeps a book's progress and highlights in `Name.sdr` beside it.
+pub fn sidecar(book: &Path) -> PathBuf {
+    book.with_extension("sdr")
+}
+
+/// Removes a deleted book's KOReader sidecar, if it has one.
+pub fn delete_sidecar(book: &Path) -> Result<()> {
+    let path = sidecar(book);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path).context("Couldn't remove KOReader data"),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("Couldn't remove KOReader data"),
+    }
 }
 
 /// Dotfiles do not make a folder nonempty. Any visible entry, including a
@@ -111,8 +138,12 @@ mod tests {
         std::fs::write(folder.join("paper.pdf"), b"pdf")?;
         std::fs::create_dir(folder.join("Book.sdr"))?;
         std::fs::write(folder.join("Book.sdr/metadata.epub.lua"), b"progress")?;
+        std::fs::write(folder.join(".DS_Store"), b"hidden")?;
+        std::fs::create_dir(folder.join(".git"))?;
+        std::fs::write(folder.join(".git/config"), b"hidden")?;
         let contents = count_contents(&folder)?;
-        assert_eq!(contents, Contents { books: 1, folders: 2, other_files: 2 });
+        // Sidecars and hidden entries are deleted but not named in the message.
+        assert_eq!(contents, Contents { books: 1, folders: 1, other_files: 1 });
         let store = Store::at(root.join("state"));
         let state = BookState { position: Position("exact-anchor".into()), progress: 4200, ..Default::default() };
         store.save_book("7", &state)?;
@@ -132,6 +163,24 @@ mod tests {
         index.remove_path(&renamed);
         assert!(index.books.is_empty() && !renamed.exists());
         assert_eq!(store.book("7").progress, 0);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sidecars_are_removed_with_their_book_only() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-sidecar-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Book.sdr"))?;
+        std::fs::write(root.join("Book.sdr/metadata.epub.lua"), b"progress")?;
+        std::fs::create_dir_all(root.join("Other.sdr"))?;
+        assert_eq!(sidecar(&root.join("Book.epub")), root.join("Book.sdr"));
+        delete_sidecar(&root.join("Book.epub"))?;
+        assert!(!root.join("Book.sdr").exists() && root.join("Other.sdr").exists());
+        delete_sidecar(&root.join("Missing.epub"))?;
+        // A plain file with the sidecar's name is not KOReader data.
+        std::fs::write(root.join("Note.sdr"), b"file")?;
+        delete_sidecar(&root.join("Note.epub"))?;
+        assert!(root.join("Note.sdr").exists());
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
