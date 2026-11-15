@@ -133,7 +133,9 @@ fn source_problems_are_warnings_next_to_working_lookups() {
     f.store.save_dictionary_folders(&[f.join("gone"), f.join("locked")]).unwrap();
     let reply = f.lookup("word");
     fs::set_permissions(f.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(matches!(&reply.state, Some(State::Definition { text: t, .. }) if t.contains("Native text")));
+    assert!(
+        matches!(&reply.state, Some(State::Definition { entries: t, .. }) if t.iter().any(|e| e.blocks.iter().any(|b| b.text.contains("Native text"))))
+    );
     assert!(reply.dictionaries.iter().any(|d| d.name == "broken" && d.error.is_some()), "broken stays listed");
     assert!(reply.warnings[0].contains("gone") && reply.warnings[0].contains("not available"));
     if !readable {
@@ -164,7 +166,9 @@ fn invalidation_cancels_in_flight_work_and_drops_removed_sources() {
     install(&f.join("dictionaries/n.ifo"), "Native", "native");
     install(&f.join("ext/e.ifo"), "External", "word");
     f.store.save_dictionary_folders(&[f.join("ext")]).unwrap();
-    assert!(matches!(f.lookup("word").state, Some(State::Definition { text: t, .. }) if t.contains("External")));
+    assert!(
+        matches!(f.lookup("word").state, Some(State::Definition { entries: t, .. }) if t.iter().any(|e| e.blocks.iter().any(|b| b.text.contains("External"))))
+    );
     // A lookup in flight when the folder is removed must not be published
     // after the new catalog, nor answer from the removed source.
     let stale = f.worker.lookup("word".into(), None, true);
@@ -219,14 +223,26 @@ fn exact_pass_precedes_base_forms_and_selected_dictionary_still_tries_forms() {
     install(&f.join("dictionaries/b.ifo"), "B", "thunders");
     let reply = f.lookup("thunders");
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-    assert_eq!(reply.state, Some(State::Definition { text: "thunders\n\nB text".into(), base_forms: None }));
+    assert_eq!(
+        reply.state,
+        Some(State::Definition {
+            entries: vec![Entry {
+                headword: "thunders".into(),
+                blocks: super::super::text::definition(b"B text", "m").unwrap()
+            }],
+            base_forms: None
+        })
+    );
     let id = f.worker.lookup("thunders".into(), Some("a.ifo".into()), false);
     let reply = f.reply(id).0;
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
     assert_eq!(
         reply.state,
         Some(State::Definition {
-            text: "thunder\n\nA text".into(),
+            entries: vec![Entry {
+                headword: "thunder".into(),
+                blocks: super::super::text::definition(b"A text", "m").unwrap()
+            }],
             base_forms: Some(BaseForms { query: "thunders".into(), count: 1 })
         })
     );

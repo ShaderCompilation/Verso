@@ -5,7 +5,7 @@
 //! cancelled scan publishes nothing and leaves the catalog stale, so a later
 //! request scans again; a stale catalog is never sent to the UI.
 use super::{
-    Backend, Catalog, Dictionary, Preference, Source, SourceStatus, discover_catalog, forms, merged_preferences,
+    Backend, Catalog, Dictionary, Entry, Preference, Source, SourceStatus, discover_catalog, forms, merged_preferences,
 };
 use crate::{
     platform::Waker,
@@ -31,7 +31,7 @@ pub struct BaseForms {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
     Definition {
-        text: String,
+        entries: Vec<Entry>,
         /// Present only when the definition is for base forms of the query.
         base_forms: Option<BaseForms>,
     },
@@ -201,7 +201,7 @@ impl Inner {
                 continue;
             }
             // The text, plus the base-form count for a base-form lookup.
-            let lookup = (|| -> anyhow::Result<(String, Option<usize>)> {
+            let lookup = (|| -> anyhow::Result<(Vec<Entry>, Option<usize>)> {
                 if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
                     // Release the old index and eight-block cache before opening another.
                     *backend = None;
@@ -221,7 +221,7 @@ impl Inner {
                 Ok((text, count)) => {
                     dictionary.error = None;
                     let base_forms = count.map(|count| BaseForms { query: query.to_owned(), count });
-                    return Some((Some(dictionary.id.clone()), State::Definition { text, base_forms }));
+                    return Some((Some(dictionary.id.clone()), State::Definition { entries: text, base_forms }));
                 }
                 Err(e) => {
                     if !current() {

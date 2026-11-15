@@ -142,6 +142,15 @@ fn dictzip(data: &[u8], chunk: usize) -> Result<Vec<u8>> {
     assert_eq!(check, data);
     Ok(out)
 }
+// Compare readable content in the existing storage/cache tests; parser tests
+// below inspect block kinds, depth and style ranges separately.
+fn contents(entries: &[Entry]) -> String {
+    entries
+        .iter()
+        .flat_map(|e| std::iter::once(e.headword.as_str()).chain(e.blocks.iter().map(|b| b.text.as_str())))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 #[test]
 fn offsets_compression_homographs_unicode_synonyms_and_cache_reopen() -> Result<()> {
     for wide in [false, true] {
@@ -149,17 +158,17 @@ fn offsets_compression_homographs_unicode_synonyms_and_cache_reopen() -> Result<
             let f = Fixture::new();
             f.install(wide, compressed)?;
             let mut backend = f.backend()?;
-            let exact = backend.lookup("apple")?;
+            let exact = contents(&backend.lookup("apple")?);
             assert!(exact.starts_with("apple\n\na lowercase entry"));
             assert!(exact.contains("A fruit.") && exact.contains("A tree."));
-            assert!(backend.lookup("FRUIT")?.contains("Apple\n\nA fruit."));
-            assert!(backend.lookup("СЛОВО")?.contains("Русское определение."));
-            assert!(backend.lookup("CAFE\u{301}")?.contains("Coffee & cake\n\nAnother paragraph."));
-            assert!(backend.lookup("missing")?.is_empty());
+            assert!(contents(&backend.lookup("FRUIT")?).contains("Apple\n\nA fruit."));
+            assert!(contents(&backend.lookup("СЛОВО")?).contains("Русское определение."));
+            assert!(contents(&backend.lookup("CAFE\u{301}")?).contains("Coffee & cake\n\nAnother paragraph."));
+            assert!(contents(&backend.lookup("missing")?).is_empty());
             let stamps: Vec<_> =
                 fs::read_dir(f.0.join("cache"))?.map(|e| e.unwrap().metadata().unwrap().modified().unwrap()).collect();
             drop(backend);
-            assert!(f.backend()?.lookup("Apple")?.contains("A tree."));
+            assert!(contents(&f.backend()?.lookup("Apple")?).contains("A tree."));
             let restored: Vec<_> =
                 fs::read_dir(f.0.join("cache"))?.map(|e| e.unwrap().metadata().unwrap().modified().unwrap()).collect();
             assert_eq!(stamps, restored, "valid disk index is reused");
@@ -186,7 +195,7 @@ fn reads_beyond_four_gib_without_mapping_definitions() -> Result<()> {
             idx.len()
         ),
     )?;
-    assert_eq!(f.backend()?.lookup("word")?, "word\n\nlarge offset");
+    assert_eq!(contents(&f.backend()?.lookup("word")?), "word\n\nlarge offset");
     Ok(())
 }
 #[test]
@@ -245,7 +254,7 @@ fn malformed_truncated_and_cancelled_sources_fail_without_publishing_cache() -> 
     f.install(false, false)?;
     assert!(Backend::open(&f.path(), &f.0.join("cache"), &|| false).is_err());
     assert!(fs::read_dir(f.0.join("cache"))?.next().is_none());
-    assert!(f.backend()?.lookup("Apple")?.contains("A fruit."));
+    assert!(contents(&f.backend()?.lookup("Apple")?).contains("A fruit."));
     Ok(())
 }
 #[test]
@@ -327,8 +336,8 @@ fn compressed_metadata_alone_with_plain_and_compressed_companions() -> Result<()
         assert_eq!(found[0].path, gz);
         assert_eq!(found[0].id, "test.ifo", "same ID as a plain .ifo install");
         let mut backend = Backend::open(&gz, &f.0.join("cache"), &|| true)?;
-        assert!(backend.lookup("FRUIT")?.contains("Apple\n\nA fruit."));
-        assert!(backend.lookup("apple")?.starts_with("apple\n\na lowercase entry"));
+        assert!(contents(&backend.lookup("FRUIT")?).contains("Apple\n\nA fruit."));
+        assert!(contents(&backend.lookup("apple")?).starts_with("apple\n\na lowercase entry"));
     }
     Ok(())
 }
@@ -400,13 +409,13 @@ fn corrupt_truncated_and_oversized_compressed_metadata_fail_per_dictionary() -> 
 fn replacing_either_metadata_variant_invalidates_cache() -> Result<()> {
     let f = Fixture::new();
     f.install(false, true)?;
-    assert!(f.backend()?.lookup("Apple")?.contains("A tree."));
+    assert!(contents(&f.backend()?.lookup("Apple")?).contains("A tree."));
     let plain = f.cache_files()?;
     assert_eq!(plain.len(), 1);
     // Plain -> compressed: the cache file is reused by name but rebuilt.
     let gz = f.gzip_ifo(false)?;
     let open = || Backend::open(&gz, &f.0.join("cache"), &|| true);
-    assert!(open()?.lookup("Apple")?.contains("A tree."));
+    assert!(contents(&open()?.lookup("Apple")?).contains("A tree."));
     let compressed = f.cache_files()?;
     assert_eq!(compressed.len(), 1);
     assert_eq!(compressed[0].0, plain[0].0);
@@ -422,7 +431,7 @@ fn replacing_either_metadata_variant_invalidates_cache() -> Result<()> {
     assert!(open().is_err(), "stale cache is not reused after replacement");
     // Back to plain metadata rebuilds again.
     fs::write(f.path(), text)?;
-    assert!(f.backend()?.lookup("FRUIT")?.contains("A fruit."));
+    assert!(contents(&f.backend()?.lookup("FRUIT")?).contains("A fruit."));
     assert_ne!(f.cache_files()?[0].1, compressed[0].1);
     Ok(())
 }
@@ -464,9 +473,9 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
             ("children’s", vec!["child"]),
             ("tree's", vec!["tree"]),
         ] {
-            assert_eq!(backend.lookup(query)?, "", "exact lookup of {query}");
+            assert_eq!(contents(&backend.lookup(query)?), "", "exact lookup of {query}");
             let (text, count) = backend.lookup_forms(&forms::candidates(query).unwrap(), &|| true)?;
-            let headwords: Vec<_> = text.split("\n\n").step_by(2).collect();
+            let headwords: Vec<_> = text.iter().map(|e| e.headword.as_str()).collect();
             assert_eq!(headwords, expected, "{query}");
             assert_eq!(count, expected.len(), "{query}");
         }
@@ -477,7 +486,7 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
             rules: vec!["thunder".into()],
         };
         let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
-        assert_eq!((text.as_str(), count), ("tree\n\nA plant.", 1));
+        assert_eq!((contents(&text).as_str(), count), ("tree\n\nA plant.", 1));
         // Repeated lemmas and a synonym sharing a definition span do not count
         // twice; collect all exceptions before the first rule, capped at three.
         let candidates = forms::Candidates {
@@ -487,12 +496,13 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
         };
         let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
         assert_eq!(count, 3);
-        assert_eq!(text, "axe\n\nA tool.\n\naxis\n\nA line.\n\nchild\n\nA young person.");
+        assert_eq!(contents(&text), "axe\n\nA tool.\n\naxis\n\nA line.\n\nchild\n\nA young person.");
         // A rule matching a span already returned by an exception is still
         // the first rule hit, so later rule hits must not be added.
         let candidates =
             forms::Candidates { possessive: None, exceptions: vec!["use"], rules: vec!["use".into(), "us".into()] };
-        assert_eq!(backend.lookup_forms(&candidates, &|| true)?, ("use\n\nEmploy.".into(), 1));
+        let (entries, count) = backend.lookup_forms(&candidates, &|| true)?;
+        assert_eq!((contents(&entries), count), ("use\n\nEmploy.".into(), 1));
     }
     Ok(())
 }
@@ -505,13 +515,13 @@ fn base_form_count_ignores_case_variants_of_one_headword() -> Result<()> {
     // `apple` and `Apple` are one base form, shown with all three entries.
     let (text, count) = backend.lookup_forms(&forms::candidates("apples").unwrap(), &|| true)?;
     assert_eq!(count, 1);
-    assert_eq!(text, "apple\n\na lowercase entry\n\nApple\n\nA fruit.\n\nApple\n\nA tree.");
+    assert_eq!(contents(&text), "apple\n\na lowercase entry\n\nApple\n\nA fruit.\n\nApple\n\nA tree.");
     // Case variants don't use up the cap either.
     let candidates =
         forms::Candidates { possessive: None, exceptions: vec!["apple", "café", "слово"], rules: Vec::new() };
     let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
     assert_eq!(count, 3);
-    assert!(text.ends_with("Слово\n\nРусское определение."), "{text}");
+    assert!(contents(&text).ends_with("Слово\n\nРусское определение."), "{text:?}");
     Ok(())
 }
 
@@ -530,5 +540,32 @@ fn base_forms_cancel_between_candidates_before_reading_definitions() -> Result<(
     let candidates = forms::Candidates { possessive: None, exceptions: vec!["Apple", "missing"], rules: Vec::new() };
     assert!(backend.lookup_forms(&candidates, &current).is_err());
     assert_eq!(checks.get(), 2);
+    Ok(())
+}
+
+#[test]
+fn combined_output_is_capped_on_utf8_boundaries_with_an_omission_notice() -> Result<()> {
+    let f = Fixture::new();
+    let meaning = "<b>Ж</b>".repeat(100_000);
+    // A record stays under 1 MiB; six homographs exceed the combined limit.
+    f.install_words(false, false, &[("word", meaning.as_str()); 6])?;
+    let entries = f.backend()?.lookup("word")?;
+    assert_eq!(entries.len(), 6);
+    let blocks: Vec<_> = entries.iter().flat_map(|e| &e.blocks).collect();
+    assert!(blocks.iter().map(|b| b.text.len()).sum::<usize>() <= 1024 * 1024);
+    assert_eq!(blocks.last().unwrap().text, "[Further entries omitted]");
+    // When a multibyte character cannot fit, later ASCII blocks must not
+    // sneak into the retained prefix.
+    let f = Fixture::new();
+    let prefix = "x".repeat(1024 * 1024 - "[Further entries omitted]".len() - 1);
+    f.install_words(false, false, &[("word", &prefix), ("word", "<p>Ж</p><p>tail</p>")])?;
+    let clipped = f.backend()?.lookup("word")?;
+    assert_eq!(clipped[1].blocks, vec![Block::plain("[Further entries omitted]")]);
+    for b in blocks {
+        for s in &b.spans {
+            assert!(s.start < s.end && s.end as usize <= b.text.len());
+            assert!(b.text.is_char_boundary(s.start as usize) && b.text.is_char_boundary(s.end as usize));
+        }
+    }
     Ok(())
 }

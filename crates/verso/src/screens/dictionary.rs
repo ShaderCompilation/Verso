@@ -1,7 +1,7 @@
 //! Lookup is an overlay over the unchanged cached book page.
 use crate::{
     dictionary::{
-        Dictionary, Source,
+        Dictionary, Entry, Source,
         worker::{State, Worker},
     },
     geom::Rect,
@@ -16,6 +16,22 @@ use crate::{
     },
 };
 use std::rc::Rc;
+
+/// Temporary Phase 1 projection; styled layout replaces this in Phase 3.
+fn preview(entries: &[Entry]) -> String {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut text = entry.headword.clone();
+            for block in &entry.blocks {
+                text.push('\n');
+                text.push_str(&block.text);
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 
 pub enum LookupEvent {
     Close,
@@ -153,10 +169,12 @@ impl Lookup {
             return "Looking up…".into();
         }
         let message = match &self.state {
-            State::Definition { text, base_forms: None } => text.clone(),
-            State::Definition { text, base_forms: Some(forms) } => {
-                let plural = if forms.count > 1 { "s" } else { "" };
-                format!("Base form{plural} of “{}”\n\n{text}", forms.query)
+            State::Definition { entries, base_forms } => {
+                let text = preview(entries);
+                if let Some(forms) = base_forms {
+                    let plural = if forms.count > 1 { "s" } else { "" };
+                    format!("Base form{plural} of “{}”\n\n{text}", forms.query)
+                } else { text }
             }
             State::Missing => "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, then open Dictionaries and tap Rescan.".into(),
             State::Disabled => "All dictionaries are disabled. Open Dictionaries to enable one.".into(),
@@ -363,12 +381,21 @@ impl Lookup {
         self.find.draw(cx);
         if self.pages.is_empty() {
             let message = self.message();
+            let started = std::time::Instant::now();
             self.pages = cx.text.pages(&message, t.body, self.body.w, self.body.h);
+            log::debug!(
+                "dictionary pagination: {:?}, {} text bytes, {} pages",
+                started.elapsed(),
+                message.len(),
+                self.pages.len()
+            );
             self.pager.set(0, self.pages.len());
         }
         let page = self.pages[self.pager.page].trim_end();
+        let started = std::time::Instant::now();
         let height = cx.text.measure(page, t.body, Some(self.body.w as f32)).1.ceil() as i32;
         cx.text.draw(cx.canvas, page, t.body, Rect { h: height.min(self.body.h), ..self.body }, HAlign::Left);
+        log::debug!("dictionary page draw: {:?}, {} text bytes", started.elapsed(), page.len());
         self.pager.draw(cx);
         self.keyboard.draw(cx);
     }
@@ -504,20 +531,31 @@ mod tests {
             }
         };
         wait(&mut lookup, &mut cx);
-        assert!(matches!(&lookup.state, State::Definition { text, .. } if text.contains("meaning")));
+        assert!(matches!(&lookup.state, State::Definition { entries, .. } if preview(entries).contains("meaning")));
         let exact_message = lookup.message();
-        assert_eq!(exact_message, "Hello\n\nmeaning");
+        assert_eq!(exact_message, "Hello\nmeaning");
         for (query, count, from, text) in [
             ("thunders", 1, "Base form of “thunders”", "thunder\n\nA loud sound."),
             ("axes", 2, "Base forms of “axes”", "axis\n\nA line.\n\naxe\n\nA tool."),
         ] {
             let base_forms = Some(BaseForms { query: query.into(), count });
-            lookup.state = State::Definition { text: text.into(), base_forms };
+            let parts: Vec<_> = text.split("\n\n").collect();
+            let entries = parts
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| Entry { headword: pair[0].into(), blocks: vec![crate::dictionary::Block::plain(pair[1])] })
+                .collect::<Vec<_>>();
+            let text = preview(&entries);
+            lookup.state = State::Definition { entries, base_forms };
             assert_eq!(lookup.message(), format!("{from}\n\n{text}"));
         }
         lookup.state = State::NoResult;
         assert!(!lookup.message().contains("Base form"));
-        lookup.state = State::Definition { text: exact_message, base_forms: None };
+        lookup.state = State::Definition {
+            entries: vec![Entry { headword: "Hello".into(), blocks: vec![crate::dictionary::Block::plain("meaning")] }],
+            base_forms: None,
+        };
         assert!(!lookup.message().contains("Base form"));
         // Source warnings accompany results; same-name copies show their source.
         lookup.warnings = vec!["/gone is not available.".into()];

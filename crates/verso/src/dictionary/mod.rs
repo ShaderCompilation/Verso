@@ -2,8 +2,11 @@
 //! beside app state. Only the worker opens dictionaries.
 mod dictzip;
 mod discovery;
+mod entities;
 mod forms;
 mod index;
+mod markup;
+mod model;
 mod text;
 pub mod worker;
 
@@ -11,6 +14,7 @@ use anyhow::{Context, Result, ensure};
 use dictzip::Definitions;
 pub use discovery::{Catalog, Source, SourceStatus, discover_catalog};
 use index::Index;
+pub use model::{Block, BlockKind, Entry, Span, Style};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -159,14 +163,14 @@ impl Backend {
         let index = Index::open(path, cache, &info, definitions.len, current)?;
         Ok(Self { index, definitions, types: info.types })
     }
-    pub fn lookup(&mut self, query: &str) -> Result<String> {
+    pub fn lookup(&mut self, query: &str) -> Result<Vec<Entry>> {
         let entries = self.index.find(query)?;
         self.render(entries)
     }
     /// Returns the rendered entries and how many base forms they cover, at
     /// most three. A base form is a candidate word, so case variants of one
     /// headword (`hope`, `Hope`) count once.
-    fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(String, usize)> {
+    fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(Vec<Entry>, usize)> {
         const MAX_FORMS: usize = 3;
         let mut hits = FormHits::default();
         'search: {
@@ -208,21 +212,39 @@ impl Backend {
         hits.forms += usize::from(hits.entries.len() > shown);
         Ok(hit)
     }
-    fn render(&mut self, entries: Vec<(String, u64, u32)>) -> Result<String> {
-        let mut output = String::new();
+    fn render(&mut self, entries: Vec<(String, u64, u32)>) -> Result<Vec<Entry>> {
+        const LIMIT: usize = 1024 * 1024;
+        const NOTICE: &str = "[Further entries omitted]";
+        let mut output = Vec::new();
+        let mut bytes = 0;
+        let mut omitted = false;
         for (word, offset, size) in entries {
             let data = self.definitions.read(offset, size)?;
-            let definition = text::definition(&data, &self.types)?;
-            if !output.is_empty() {
-                output.push_str("\n\n");
+            let mut blocks = text::definition(&data, &self.types)?;
+            // Reserve room for a notice so the combined block text, including
+            // that notice, never exceeds the cap. Clip on a character boundary.
+            let mut keep = blocks.len();
+            for (i, block) in blocks.iter_mut().enumerate() {
+                let available = (LIMIT - NOTICE.len()).saturating_sub(bytes);
+                if block.text.len() > available {
+                    block.truncate(available);
+                    omitted = true;
+                    keep = i + 1;
+                }
+                bytes += block.text.len();
+                if omitted {
+                    break;
+                }
             }
-            output.push_str(&word);
-            output.push_str("\n\n");
-            output.push_str(&definition);
-            if output.len() > 1024 * 1024 {
-                output.push_str("\n\n[Further entries omitted]");
+            blocks.truncate(keep);
+            blocks.retain(|b| !matches!(b.kind, BlockKind::Text | BlockKind::Heading) || !b.text.is_empty());
+            output.push(Entry { headword: word, blocks });
+            if omitted {
                 break;
             }
+        }
+        if omitted {
+            output.last_mut().unwrap().blocks.push(Block::plain(NOTICE));
         }
         Ok(output)
     }
