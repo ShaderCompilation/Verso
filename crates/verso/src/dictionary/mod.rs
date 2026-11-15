@@ -2,6 +2,8 @@
 //! beside app state. Only the worker opens dictionaries.
 mod dictzip;
 mod discovery;
+#[allow(dead_code)] // Candidate generator is connected to lookup in word-forms Phase 2.
+mod forms;
 mod index;
 mod text;
 pub mod worker;
