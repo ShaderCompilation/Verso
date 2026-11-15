@@ -2,6 +2,7 @@
 use super::*;
 use crate::ui::widgets::Toggle;
 use files::{ClashChoice, MoveItem, MoveOutcome};
+use std::path::Path;
 
 pub(super) struct Carry {
     items: Vec<MoveItem>,
@@ -32,12 +33,16 @@ pub(super) struct ClashSheet {
     keep: Button,
 }
 impl ClashSheet {
-    fn new(t: &Theme, screen: Rect, item: &MoveItem) -> Self {
+    fn new(t: &Theme, screen: Rect, item: &MoveItem, destination: &Path) -> Self {
         let sheet = Sheet::open("Name already taken", t.mm(65.0), screen, t);
         let c = sheet.content(t);
         let text = Rect::new(c.x, c.y, c.w, t.mm(17.0));
         let message = match item {
             MoveItem::Book(path) => format!("“{}” or its KOReader data already exists here.", collections::name(path)),
+            // A plain file can take a folder's name too.
+            MoveItem::Folder(path) if path.file_name().is_some_and(|n| !destination.join(n).is_dir()) => {
+                format!("“{}” already exists here.", collections::name(path))
+            }
             MoveItem::Folder(path) => format!("A folder named “{}” already exists here.", collections::name(path)),
         };
         let all_label = Rect::new(c.x, text.bottom() + t.mm(2.0), c.w - t.mm(15.0), t.target);
@@ -159,7 +164,7 @@ impl Books {
         while let Some(item) = carry.items.get(paste.next) {
             match item.move_to(&paste.destination, once.take().or(paste.choice)) {
                 Ok(MoveOutcome::Clash) => {
-                    self.clash = Some(ClashSheet::new(cx.theme, self.screen, item));
+                    self.clash = Some(ClashSheet::new(cx.theme, self.screen, item, &paste.destination));
                     return;
                 }
                 Ok(MoveOutcome::Skipped) => paste.skipped += 1,
@@ -208,7 +213,8 @@ impl Books {
             cx.toast(format!("Moved {} of {total}", paste.moved), None);
             self.details = Some(Details::from_text(cx.theme, self.screen, "Move incomplete", report));
         } else if end == PasteEnd::Cancelled {
-            cx.toast(format!("Moved {} of {total} · rest left in place", paste.moved), None);
+            let skipped = if paste.skipped > 0 { format!(" · {} skipped", paste.skipped) } else { String::new() };
+            cx.toast(format!("Moved {} of {total}{skipped} · rest left in place", paste.moved), None);
         } else {
             let suffix = if paste.skipped > 0 { format!(" · {} skipped", paste.skipped) } else { String::new() };
             cx.toast(format!("Moved {}{suffix}", counted(paste.moved, "item")), None);
@@ -457,6 +463,35 @@ mod tests {
             assert_eq!(store.library().books.iter().find(|e| e.id == "0").unwrap().path, dest.join("A.epub"));
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+    #[test]
+    fn a_plain_file_clash_and_earlier_skips_are_reported() -> anyhow::Result<()> {
+        let (mut b, _store, root, t, screen) = fixture("file-clash")?;
+        let dest = root.join("Library/Destination");
+        std::fs::write(dest.join("B.epub"), b"existing")?;
+        std::fs::write(dest.join("Tree"), b"a file, not a folder")?;
+        with_cx(&t, screen, |cx| {
+            let tree = root.join("Library/Source/Tree");
+            b.start_move(
+                vec![
+                    Target::Book("0".into()),
+                    Target::Book("1".into()),
+                    Target::Folder(tree),
+                    Target::Book("2".into()),
+                ],
+                cx,
+            );
+            b.navigate(Some(dest.clone()), cx);
+            b.start_paste(cx);
+            assert!(b.clash.is_some(), "B.epub clashes");
+            b.continue_paste(Some((ClashChoice::Skip, false)), cx);
+            assert_eq!(b.clash.as_ref().expect("Tree clashes").message, "“Tree” already exists here.");
+            tap(&mut b, Point::new(screen.x + 4, screen.y + 4), cx);
+            assert_eq!(cx.toast.as_ref().unwrap().text, "Moved 1 of 4 · 1 skipped · rest left in place");
+        });
+        drop(b);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
