@@ -8,8 +8,6 @@ abode abide
 aboideaux aboideau
 aboiteaux aboiteau
 abought aby
-about-shipped about-ship
-about-shipping about-ship
 abscissae abscissa
 abutted abut
 abutting abut
@@ -29,12 +27,9 @@ acidified acidify
 acini acinus
 acquitted acquit
 acquitting acquit
-acre-feet acre-foot
 acromia acromion
 actiniae actinia
 actinozoa actinozoan
-ad-libbed ad-lib
-ad-libbing ad-lib
 addenda addendum
 addrest address
 adenocarcinomata adenocarcinoma
@@ -48,16 +43,11 @@ aecidia aecidium
 aerified aerify
 aerobia aerobium
 after after
-agents-general agent-general
 aggiornamenti aggiornamento
 agnomina agnomen
 agones agon
 agorae agora
 agouties agouti
-aides-de-camp aide-de-camp
-aides-memoire aide-memoire
-aids-de-camp aid-de-camp
-air-dried air-dry
 airdropped airdrop
 airdropping airdrop
 airier airy
@@ -66,14 +56,12 @@ alae ala
 alewives alewife
 alkalies alkali
 alkalified alkalify
-all-arounder all-arounder
 allied ally
 allodia allodium
 allotted allot
 allotting allot
 alluvia alluvium
 alodia alodium
-alto-relievos alto-relievo alto-rilievo
 altocumuli altocumulus
 altostrati altostratus
 alulae alula
@@ -179,7 +167,6 @@ archesporia archesporium
 archipelagoes archipelago
 arcked arc
 arcking arc
-arcs-boutants arc-boutant
 are be
 areolae areola
 argali argali
@@ -220,7 +207,6 @@ atmolyses atmolysis
 atria atrium
 atrophied atrophy
 attacker attacker
-attorneys-at-law attorney-at-law
 auditoria auditorium
 aurae aura
 aurar eyir eyrir
@@ -231,7 +217,6 @@ auspices auspex auspice
 autocatalyses autocatalysis
 autochthones autochthon
 automata automaton
-autos-da-fe auto-da-fe
 averred aver
 averring aver
 avitaminoses avitaminosis
@@ -240,13 +225,9 @@ awoken awake
 axes ax axis
 axillae axilla
 babied baby
-baby-sat baby-sit
-baby-sitting baby-sit
 bacchantes bacchant bacchante
 bacchii bacchius
 bacilli bacillus
-back-pedalled back-pedal
-back-pedalling back-pedal
 backbit backbite
 backbitten backbite
 backer backer
@@ -259,7 +240,6 @@ bagged bag
 baggier baggy
 baggiest baggy
 bagging bag
-bains-marie bain-marie
 balkier balky
 balkiest balky
 ballistae ballista
@@ -316,7 +296,6 @@ beatified beatify
 beautified beautify
 beaux beau
 became become
-beches-de-mer beche-de-mer
 bed bed
 bedded bed
 bedding bed
@@ -352,8 +331,6 @@ behooves behoof
 bejewelled bejewel
 bejewelling bejewel
 bellied belly
-belly-flopped belly-flop
-belly-flopping belly-flop
 belying belie
 bendier bendy
 bendiest bendy
@@ -393,14 +370,11 @@ bigger big
 biggest big
 bijoux bijou
 bilboes bilbo
-billets-doux billet-doux
 billfishes billfish
 bimboes bimbo
 bing bing
 binned bin
 binning bin
-bird-dogged bird-dog
-bird-dogging bird-dog
 bisectrices bisectrix
 bit bite
 bitchier bitchy
@@ -451,8 +425,6 @@ blowzier blowzy
 blowziest blowzy
 blubbed blub
 blubbing blub
-blue-pencilled blue-pencil
-blue-pencilling blue-pencil
 bluefishes bluefish
 bluer blue
 bluest blue
@@ -462,9 +434,6 @@ boarfishes boarfish
 bobbed bob
 bobbing bob
 bodied body
-bogged-down bog-down
-bogging-down bog-down
-bogs-down bog-down
 bok boschbok
 boleti boletus
 bolivares bolivar
@@ -477,8 +446,6 @@ boniest bony
 bonitoes bonito
 bonnier bonny
 bonniest bonny
-booby-trapped booby-trap
-booby-trapping booby-trap
 booklice booklouse
 bookshelves bookshelf
 bootlegged bootleg
@@ -501,7 +468,6 @@ botargoes botargo
 botchier botchy
 botchiest botchy
 bother bother
-bottle-fed bottle-feed
 bought buy
 bouncier bouncy
 bounciest bouncy
@@ -525,7 +491,6 @@ bravadoes bravado
 bravoes bravo
 brawnier brawny
 brawniest brawny
-breast-fed breast-feed
 breathier breathy
 breathiest breathy
 bred breed
@@ -548,7 +513,6 @@ bronchi bronchus
 brooder brooder
 broodier broody
 broodiest broody
-brothers-in-law brother-in-law
 brought bring
 browbeaten browbeat
 brutified brutify
@@ -680,7 +644,6 @@ carolling carol
 carpi carpus
 carpogonia carpogonium
 carried carry
-carryings-on carrying-on
 caryopses caryopsis
 caryopsides caryopsis
 casefied casefy
@@ -711,7 +674,6 @@ cavefishes cavefish
 cavetti cavetto
 cavilled cavil
 cavilling cavil
-cavo-rilievi cavo-rilievo
 ceca cecum
 cellae cella
 cembali cembalo
@@ -761,13 +723,11 @@ cheerier cheery
 cheeriest cheery
 cheesier cheesy
 cheesiest cheesy
-chefs-d'ouvre chef-d'ouvre
 chelae chela
 chelicerae chelicera
 cherubim cherub
 chestier chesty
 chestiest chesty
-chevaux-de-frise cheval-de-frise
 chevied chivy
 chevies chivy
 chevying chivy
@@ -898,15 +858,6 @@ clumsier clumsy
 clumsiest clumsy
 clung cling
 clypei clypeus
-co-opted coopt
-co-opting coopt
-co-opts coopts
-co-ordinate coordinate
-co-ordinated coordinate
-co-ordinates coordinate
-co-ordinating coordinate
-co-starred co-star
-co-starring co-star
 coagula coagulum
 coalfishes coalfish
 cocci coccus
@@ -987,7 +938,6 @@ controlled control
 controlling control
 conversazioni conversazione
 convolvuli convolvulus
-cooks-general cook-general
 copied copy
 copped cop
 copping cop
@@ -1023,8 +973,6 @@ counterplotted counterplot
 counterplotting counterplot
 countersank countersink
 countersunk countersink
-court-martialled court-martial
-court-martialling court-martial
 courtlier courtly
 courtliest courtly
 couteaux couteau
@@ -1103,7 +1051,6 @@ cudgelled cudgel
 cudgelling cudgel
 culices culex
 culpae culpa
-culs-de-sac cul-de-sac
 culti cultus
 cumuli cumulus
 cumulonimbi cumulonimbus
@@ -1160,7 +1107,6 @@ dandified dandify
 dapped dap
 dapping dap
 data datum
-daughters-in-law daughter-in-law
 daymio daimio
 daymios daimio
 deadlier deadly
@@ -1183,10 +1129,6 @@ declassified declassify
 decontrolled decontrol
 decontrolling decontrol
 decried decry
-deep-freeze deepfreeze
-deep-freezed deepfreeze
-deep-freezes deepfreeze
-deep-fried deep-fry
 deeper deeply
 deferred defer
 deferring defer
@@ -1259,7 +1201,6 @@ differentiae differentia
 digging dig
 dignified dignify
 dilettanti dilettante
-dilly-dallied dilly-dally
 diluvia diluvium
 dimer dimer
 dimmed dim
@@ -1278,7 +1219,6 @@ dipped dip
 dippier dippy
 dippiest dippy
 dipping dip
-directors-general director-general
 dirtied dirty
 dirtier dirty
 dirtiest dirty
@@ -1470,8 +1410,6 @@ edified edify
 eerier eerie
 eeriest eerie
 effluvia effluvium
-ego-tripped ego-trip
-ego-tripping ego-trip
 eidola eidolon
 eisegeses eisegesis
 eisteddfodau eisteddfod
@@ -1618,13 +1556,11 @@ fanciest fancy
 fanned fan
 fanning fan
 fantasied fantasy
-farmers-general farmer-general
 faroese faroese
 farragoes farrago
 farther far
 fasciae fascia
 fasciculi fasciculus
-fathers-in-law father-in-law
 fatsoes fatso
 fatted fat
 fatter fat
@@ -1672,7 +1608,6 @@ fideicommissa fideicommissum
 fieldmice fieldmouse
 figged fig
 figging fig
-figs. fig.
 fila filum
 filariiae filaria
 filefishes filefish
@@ -1681,14 +1616,10 @@ filmiest filmy
 filthier filthy
 filthiest filthy
 fimbriae fimbria
-fine-drawn fine-draw
-fine-drew fine-draw
 finned fin
 finnier finny
 finniest finny
 finning fin
-first-rater first-rater
-first-stringer first-stringer
 fishes fish
 fishier fishy
 fishiest fishy
@@ -1738,8 +1669,6 @@ fleshier fleshy
 fleshiest fleshy
 fleshlier fleshly
 fleshliest fleshly
-fleurs-de-lis fleur-de-lis
-fleurs-de-lys fleur-de-lys
 flew fly
 flightier flighty
 flightiest flighty
@@ -1749,8 +1678,6 @@ flimsier flimsy
 flimsiest flimsy
 flintier flinty
 flintiest flinty
-flip-flopped flip-flop
-flip-flopping flip-flop
 flipped flip
 flipping flip
 flitted flit
@@ -1768,11 +1695,9 @@ floppier floppy
 floppiest floppy
 flopping flop
 florae flora
-floreant. floreat
 florilegia florilegium
 flossier flossy
 flossiest flossy
-flowers-de-luce flower-de-luce
 flown fly
 flubbed flub
 flubbing flub
@@ -1810,11 +1735,9 @@ forbidden forbid
 forbidding forbid
 forbore forbear
 forborne forbear
-force-fed force-feed
 forceps forceps
 fordid fordo
 fordone fordo
-fore-and-after fore-and-after
 foredid foredo
 foredone foredo
 forefeet forefoot
@@ -1875,7 +1798,6 @@ freakier freaky
 freakiest freaky
 freer free
 freest free
-freeze-dried freeze-dry
 frena frenum
 frenchier frenchy
 frenchiest frenchy
@@ -2015,12 +1937,7 @@ genera genus
 generatrices generatrix
 geneses genesis
 genii genius
-genned-up gen-up
-genning-up gen-up
-gens-up gen-up
 gentes gens
-gentlemen-at-arms gentleman-at-arms
-gentlemen-farmers gentleman-farmer
 genua genu
 genus genus
 germina germen
@@ -2096,7 +2013,6 @@ godlier godly
 godliest godly
 goer goer
 goes go
-goings-over going-over
 goldfishes goldfish
 gollied golly
 gomphoses gomphosis
@@ -2112,8 +2028,6 @@ goofier goofy
 goofiest goofy
 gooier gooey
 gooiest gooey
-goose-stepped goose-step
-goose-stepping goose-step
 goosefishes goosefish
 goosier goosy
 goosiest goosy
@@ -2135,7 +2049,6 @@ graffiti graffito
 grainier grainy
 grainiest grainy
 grandchildren grandchild
-grants-in-aid grant-in-aid
 granulomata granuloma
 grassier grassy
 grassiest grassy
@@ -2149,7 +2062,6 @@ greasiest greasy
 greedier greedy
 greediest greedy
 grew grow
-grig-gris gris-gris
 grimmer grim
 grimmest grim
 grinned grin
@@ -2255,8 +2167,6 @@ hammiest hammy
 hamming ham
 hamstrung hamstring
 hamuli hamulus
-hand-knitted hand-knit
-hand-knitting hand-knit
 handfed handfeed
 handicapped handicap
 handicapping handicap
@@ -2264,7 +2174,6 @@ handier handy
 handiest handy
 handselled handsel
 handselling handsel
-hangers-on hanger-on
 haphtaroth haphtarah
 happier happy
 happiest happy
@@ -2306,7 +2215,6 @@ hedgehopped hedgehop
 hedgehopping hedgehop
 heftier hefty
 heftiest hefty
-heirs-at-law heir-at-law
 held hold
 heldentenore heldentenor
 helices helix
@@ -2322,7 +2230,6 @@ hemodialyses hemodialysis
 hemolyses hemolysis
 hemoptyses hemoptysis
 hendecahedra hendecahedron
-hens-and-chickens hen-and-chickens
 hepper hep
 heppest hep
 heraclidae heraclid
@@ -2344,8 +2251,6 @@ hiccupping hiccup
 hid hide
 hidden hide
 hieracosphinges hieracosphinx
-high-hatted high-hat
-high-hatting high-hat
 hila hilum
 hili hilus
 himatia himation
@@ -2366,8 +2271,6 @@ hobbing hob
 hobnobbed hobnob
 hobnobbing hobnob
 hoboes hobo
-hocus-pocussed hocus-pocus
-hocus-pocussing hocus-pocus
 hocussed hocus
 hocussing hocus
 hogfishes hogfish
@@ -2485,7 +2388,6 @@ inkiest inky
 inlaid inlay
 innuendoes innuendo
 inocula inoculum
-inquisitors-general inquisitor-general
 insectaria insectarium
 insetting inset
 insider insider
@@ -2536,7 +2438,6 @@ jabbing jab
 jackeroos jackaroo jackeroo
 jackfishes jackfish
 jackknives jackknife
-jacks-in-the-box jack-in-the-box
 jagged jag
 jaggier jaggy
 jaggiest jaggy
@@ -2560,7 +2461,6 @@ jellyfishes jellyfish
 jemmied jemmy
 jerkier jerky
 jerkiest jerky
-jerry-built jerry-build
 jetted jet
 jetting jet
 jewelfishes jewelfish
@@ -2579,8 +2479,6 @@ jitterbugging jitterbug
 jobbed job
 jobbing job
 joes jo joe
-jog-trotted jog-trot
-jog-trotting jog-trot
 jogged jog
 jogging jog
 jointer jointer
@@ -2590,8 +2488,6 @@ jolliest jolly
 jollified jollify
 jotted jot
 jotting jot
-joy-ridden joy-ride
-joy-rode joy-ride
 joypopped joypop
 joypopping joypop
 jugged jug
@@ -2626,7 +2522,6 @@ killifishes killifish
 kindlier kindly
 kindliest kindly
 kingfishes kingfish
-kings-of-arms king-of-arms
 kinkier kinky
 kinkiest kinky
 kipped kip
@@ -2649,9 +2544,6 @@ knotting knot
 known know
 knurlier knurly
 knurliest knurly
-ko'd ko
-ko'ing ko
-ko's ko
 kohlrabies kohlrabi
 kookier kooky
 kookiest kooky
@@ -2672,7 +2564,6 @@ lactobacilli lactobacillus
 lacunae lacuna
 lacunaria lacunar
 laden lade
-ladies-in-waiting lady-in-waiting
 ladyfied ladify
 ladyfies ladify
 ladyfying ladify
@@ -2733,8 +2624,6 @@ leer leer
 leerier leery
 leeriest leery
 left leave
-left-hander left-hander
-left-winger left-winger
 leges lex
 leggier leggy
 leggiest leggy
@@ -2828,7 +2717,6 @@ loricae lorica
 lost lose
 lotted lot
 lotting lot
-loups-garous loup-garou
 lousier lousy
 lousiest lousy
 lovelier lovely
@@ -2857,7 +2745,6 @@ lustier lusty
 lustiest lusty
 lustra lustre
 lying lie
-lyings-in lying-in
 lymphangitides lymphangitis
 lymphomata lymphoma
 lymphopoieses lymphopoiesis
@@ -2866,8 +2753,6 @@ lyttae lytta
 maare maar
 macaronies macaroni
 maccaronies maccaroni
-machine-gunned machine-gun
-machine-gunning machine-gun
 machzorim machzor
 macronuclei macronucleus
 macrosporangia macrosporangium
@@ -2931,11 +2816,9 @@ marshiest marshy
 marsupia marsupium
 marvelled marvel
 marvelling marvel
-marvels-of-peru marvel-of-peru
 masses mass masse
 massier massy
 massiest massy
-masters-at-arms master-at-arms
 matrices matrix
 matted mat
 matter matter
@@ -2972,9 +2855,6 @@ melismata melisma
 mementoes memento
 memoranda memorandum
 men man
-men-at-arms man-at-arms
-men-o'-war man-of-war
-men-of-war man-of-war
 menisci meniscus
 menservants manservant
 menstrua menstruum
@@ -3087,7 +2967,6 @@ monopodia monopodium
 monoptera monopteron
 monopteroi monopteros
 monsignori monsignor
-monts-de-piete mont-de-piete
 moodier moody
 moodiest moody
 mooncalves mooncalf
@@ -3111,7 +2990,6 @@ moshavim moshav
 moslim moslem
 moslims moslem
 mosquitoes mosquito
-mothers-in-law mother-in-law
 mothier mothy
 mothiest mothy
 mottoes motto
@@ -3225,8 +3103,6 @@ nibbing nib
 nibelungen nibelung
 nickelled nickel
 nickelling nickel
-nid-nodded nid-nod
-nid-nodding nid-nod
 nidi nidus
 nidified nidify
 nielli niello
@@ -3251,9 +3127,6 @@ noes no
 noisier noisy
 noisiest noisy
 nomina nomen
-non-prossed non-pros
-non-prosses non-pros
-non-prossing non-pros
 nonplussed nonplus
 nonplusses nonplus
 nonplussing nonplus
@@ -3308,7 +3181,6 @@ offer off offer
 offsetting offset
 oilier oily
 oiliest oily
-old-timer old-timer
 oldwives oldwife
 olea oleum
 oliver oliver
@@ -3507,13 +3379,11 @@ parentheses parenthesis
 parerga parergon
 parhelia parhelion
 parietes paries
-paris-mutuels pari-mutuel
 parkier parky
 parkiest parky
 parodied parody
 parried parry
 parrotfishes parrotfish
-part-timer part-timer
 partaken partake
 partook partake
 parulides parulis
@@ -3522,7 +3392,6 @@ pasquilled pasquinade
 pasquilling pasquinade
 pasquils pasquinade
 passer passer
-passers-by passer-by
 paster paster
 pastier pasty
 pastiest pasty
@@ -3614,7 +3483,6 @@ phalli phallus
 phantasied phantasy
 pharynges pharynx
 phenomena phenomenon
-phi-phenomena phi-phenomenon
 philodendra philodendron
 phlyctenae phlyctaena phlyctena
 phonier phony
@@ -3634,7 +3502,6 @@ pickier picky
 pickiest picky
 picnicked picnic
 picnicking picnic
-pieds-a-terre pied-a-terre
 pigfishes pigfish
 pigged pig
 piggier piggy
@@ -3643,7 +3510,6 @@ pigging pig
 pilea pileum
 pilei pileus
 pilloried pillory
-pinch-hitting pinch-hit
 pineta pinetum
 pinfishes pinfish
 pinier piny
@@ -3658,8 +3524,6 @@ pipped pip
 pipping pip
 pirogi pirog
 piscinae piscina
-pistol-whipped pistol-whip
-pistol-whipping pistol-whip
 pistolled pistol
 pistolling pistol
 pitapatted pitapat
@@ -3808,7 +3672,6 @@ privateer privateer
 privier privy
 priviest privy
 proboscides proboscis
-proces-verbaux proces-verbal
 prodded prod
 prodding prod
 proglottides proglottid proglottis
@@ -3893,8 +3756,6 @@ pushier pushy
 pushiest pushy
 pussier pussy
 pussiest pussy
-put-putted put-put
-put-putting put-put
 putamina putamen
 putrefied putrefy
 putti putto
@@ -3927,8 +3788,6 @@ queenlier queenly
 queenliest queenly
 queried query
 quezales quezal
-quick-froze quick-freeze
-quick-frozen quick-freeze
 quickstepped quickstep
 quickstepping quickstep
 quinquennia quinquennium
@@ -3985,9 +3844,6 @@ raunchier raunchy
 raunchiest raunchy
 ravelled ravel
 ravelling ravel
-razor-cutting razor-cut
-re-trod re-tread
-re-trodden re-tread
 readier ready
 readiest ready
 reales real
@@ -4011,8 +3867,6 @@ rectrices rectrix
 recurred recur
 recurring recur
 red red
-red-pencilled red-pencil
-red-pencilling red-pencil
 redded red redd
 redder red
 reddest red
@@ -4113,8 +3967,6 @@ ridden ride
 ridding rid
 rigged rig
 rigging rig
-right-hander right-hander
-right-winger right-winger
 rigidified rigidify
 rilievi rilievo
 rimae rima
@@ -4135,7 +3987,6 @@ riven rive
 roaster roaster
 robbed rob
 robbing rob
-robes-de-chambre robe-de-chambre
 rockfishes rockfish
 rockier rocky
 rockiest rocky
@@ -4143,7 +3994,6 @@ rode ride
 roilier roily
 roiliest roily
 roma rom
-romans-fleuves roman-fleuve
 rondeaux rondeau
 rookier rooky
 rookiest rooky
@@ -4160,8 +4010,6 @@ rostella rostellum
 rostra rostrum
 rotted rot
 rotting rot
-rough-dried rough-dry
-rough-hewn rough-hew
 rouleaux rouleau
 rove reeve
 rowdier rowdy
@@ -4175,7 +4023,6 @@ ruddiest ruddy
 rugae ruga
 rumina rumen
 rung ring
-runners-up runner-up
 runnier runny
 runniest runny
 running run
@@ -4327,10 +4174,8 @@ scyphistomae scyphistoma
 scyphozoa scyphozoan
 seamier seamy
 seamiest seamy
-second-rater second-rater
 seconder seconder
 secondi secondo
-secretaries-general secretary-general
 seed seed
 seedier seedy
 seediest seedy
@@ -4445,8 +4290,6 @@ shrank shrink
 shredded shred
 shredding shred
 shrewmice shrewmouse
-shrink-wrapped shrink-wrap
-shrink-wrapping shrink-wrap
 shrivelled shrivel
 shrivelling shrivel
 shriven shrive
@@ -4498,13 +4341,10 @@ simulacra simulacrum
 sincipita sinciput
 sinfonie sinfonia
 singing sing singe
-single-stepped single-step
-single-stepping single-step
 sinned sin
 sinning sin
 sipped sip
 sipping sip
-sisters-in-law sister-in-law
 sistra sistrum
 sitting sit
 situlae situla
@@ -4516,21 +4356,16 @@ sketchiest sketchy
 sketted sket
 sketting sket
 skewer skewer
-ski'd ski
 skidded skid
 skidding skid
 skimmed skim
 skimming skim
 skimpier skimpy
 skimpiest skimpy
-skin-popped skin-pop
-skin-popping skin-pop
 skinned skin
 skinnier skinny
 skinniest skinny
 skinning skin
-skinny-dipped skinny-dip
-skinny-dipping skinny-dip
 skipped skip
 skipping skip
 skivvied skivvy
@@ -4657,8 +4492,6 @@ sobbing sob
 socmen socman sokeman
 sodded sod
 sodding sod
-soft-pedalled soft-pedal
-soft-pedalling soft-pedal
 soggier soggy
 soggiest soggy
 sola solum
@@ -4674,7 +4507,6 @@ soli solo
 solidi solidus
 solidified solidify
 somata soma
-sons-in-law son-in-law
 sonsier sonsy
 sonsiest sonsy
 soothsaid soothsay
@@ -4736,7 +4568,6 @@ spiffiest spiffy
 spikier spiky
 spikiest spiky
 spilt spill
-spin-dried spin-dry
 spindlier spindly
 spindliest spindly
 spinier spiny
@@ -4759,7 +4590,6 @@ spongier spongy
 spongiest spongy
 spookier spooky
 spookiest spooky
-spoon-fed spoon-feed
 spoonier spoony
 spooniest spoony
 sporangia sporangium
@@ -4819,7 +4649,6 @@ stagier stagy
 stagiest stagy
 stalkier stalky
 stalkiest stalky
-stall-fed stall-feed
 stamina stamen
 staminodia staminodium
 stank stink
@@ -5091,7 +4920,6 @@ tallaisim tallith
 tallied tally
 tallithes tallith
 tallitoth tallith
-tally-ho'd tally-ho
 tammied tammy
 tangier tangy
 tangiest tangy
@@ -5172,7 +5000,6 @@ tetraskelia tetraskelion
 thalamencephala thalamencephalon
 thalami thalamus
 thalli thallus
-theatres-in-the-round theatre-in-the-round
 thecae theca
 therses thyrse
 thesauri thesaurus
@@ -5183,7 +5010,6 @@ thinned thin
 thinner thin
 thinnest thin
 thinning thin
-third-rater third-rater
 thirstier thirsty
 thirstiest thirsty
 tholoi tholos
@@ -5346,7 +5172,6 @@ trogging trog
 tropaeola tropaeolum
 trotted trot
 trotting trot
-trous-de-loup trou-de-loup
 trousseaux trousseau
 trowelled trowel
 trowelling trowel
@@ -5371,8 +5196,6 @@ tupping tup
 turfier turfy
 turfiest turfy
 turves turf
-tut-tutted tut-tut
-tut-tutting tut-tut
 tweedier tweedy
 tweediest tweedy
 twigged twig
@@ -5572,7 +5395,6 @@ viatica viaticum
 viatores viator
 vibracula vibraculum
 vibrissae vibrissa
-vice-chairman vice-chairman
 victualled victual
 victualling victual
 viewier viewy
@@ -5610,7 +5432,6 @@ wadsetted wadset
 wadsetting wadset
 wagged wag
 wagging wag
-wagons-lits wagon-lit
 wahhabis wahabi wahhabi
 wanderjahre wanderjahr
 wanned wan
@@ -5625,7 +5446,6 @@ was be
 washier washy
 washiest washy
 waster waster
-water-ski'd water-ski
 wavier wavy
 waviest wavy
 waxier waxy
@@ -5680,13 +5500,10 @@ whimsier whimsy
 whimsiest whimsy
 whinnied whinny
 whipped whip
-whippers-in whipper-in
 whipping whip
 whipsawn whipsaw
 whirred whir
 whirring whir
-whistle-stopped whistle-stop
-whistle-stopping whistle-stop
 whitefishes whitefish
 whizzed whiz
 whizzes whiz
@@ -5706,8 +5523,6 @@ wilier wily
 wiliest wily
 windier windy
 windiest windy
-window-shopped window-shop
-window-shopping window-shop
 winier winy
 winiest winy
 winning win

@@ -3,15 +3,19 @@
 
 const EXCEPTIONS: &str = include_str!("../../../../assets/wordforms/english-exceptions.txt");
 const MAX_QUERY_BYTES: usize = 64;
+/// Common forms WordNet doesn't list, where the rules alone would pick the
+/// wrong word (`does → doe`, `doing → doe`, `being → bee`). Sorted; no form
+/// here may also be in WordNet's list.
+const SUPPLEMENT: &[(&str, &[&str])] = &[("being", &["be"]), ("does", &["do"]), ("doing", &["do"])];
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Candidates {
     /// Try this as an exact word before exceptions or rules.
     pub possessive: Option<String>,
-    /// All curated lemmas, in source order; borrowed from the embedded text.
+    /// All curated lemmas, in source order.
     pub exceptions: Vec<&'static str>,
-    /// Ordered, unique guesses. Kept separate even when also in exceptions:
-    /// the first matching rule must still stop the subsequent rule search.
+    /// Ordered, unique guesses, used only when no exception lemma has an
+    /// entry; then only the first rule with an entry counts.
     pub rules: Vec<String>,
 }
 
@@ -25,8 +29,11 @@ pub(super) fn candidates(query: &str) -> Option<Candidates> {
     let stripped = lower
         .strip_suffix("'s")
         .or_else(|| lower.strip_suffix("’s"))
-        .or_else(|| lower.strip_suffix("s'").map(|_| &lower[..lower.len() - 1]))
-        .or_else(|| lower.strip_suffix("s’").map(|_| &lower[..lower.len() - '’'.len_utf8()]));
+        // A plural possessive needs a word before its `s`: a bare `s'` is not one.
+        .or_else(|| lower.strip_suffix("s'").filter(|before| !before.is_empty()).map(|_| &lower[..lower.len() - 1]))
+        .or_else(|| {
+            lower.strip_suffix("s’").filter(|before| !before.is_empty()).map(|_| &lower[..lower.len() - '’'.len_utf8()])
+        });
     let word = stripped.unwrap_or(&lower);
     if word.is_empty() || !word.bytes().all(|b| b.is_ascii_alphabetic()) {
         return None;
@@ -53,6 +60,11 @@ pub(super) fn candidates(query: &str) -> Option<Candidates> {
         ("est", ""),
     ] {
         if let Some(stem) = word.strip_suffix(suffix) {
+            // A one-letter stem makes a two-letter `y` word that is usually an
+            // abbreviation (dies → dy, lies → ly); the `s`/`d` rules find die/lie.
+            if replacement == "y" && stem.len() < 2 {
+                continue;
+            }
             push_rule(&mut rules, format!("{stem}{replacement}"));
             // Preserve the intact stem first: kissed -> kiss, never just kis.
             if replacement.is_empty() && matches!(suffix, "ed" | "ing" | "er" | "est") {
@@ -63,11 +75,11 @@ pub(super) fn candidates(query: &str) -> Option<Candidates> {
             }
         }
     }
-    Some(Candidates {
-        possessive: stripped.map(str::to_owned),
-        exceptions: exception_lemmas(EXCEPTIONS, word).map(|s| s.split(' ').collect()).unwrap_or_default(),
-        rules,
-    })
+    let exceptions = match exception_lemmas(EXCEPTIONS, word) {
+        Some(lemmas) => lemmas.split(' ').collect(),
+        None => SUPPLEMENT.iter().find(|(form, _)| *form == word).map_or_else(Vec::new, |(_, lemmas)| lemmas.to_vec()),
+    };
+    Some(Candidates { possessive: stripped.map(str::to_owned), exceptions, rules })
 }
 
 fn push_rule(rules: &mut Vec<String>, word: String) {
@@ -116,6 +128,21 @@ mod tests {
     }
 
     #[test]
+    fn y_rules_need_a_stem_of_two_letters() {
+        for (word, expected) in [
+            ("dies", vec!["die", "di"]),
+            ("died", vec!["die", "di"]),
+            ("lies", vec!["lie", "li"]),
+            ("ties", vec!["tie", "ti"]),
+            ("pier", vec!["pie", "pi"]),
+            ("spies", vec!["spy", "spie", "spi"]),
+            ("dried", vec!["dry", "drie", "dri"]),
+        ] {
+            assert_eq!(candidates(word).unwrap().rules, expected, "{word}");
+        }
+    }
+
+    #[test]
     fn restored_e_precedes_bare_stripping() {
         for (word, expected) in [
             ("hoping", vec!["hope", "hop"]),
@@ -144,8 +171,29 @@ mod tests {
 
     #[test]
     fn irregulars_keep_all_lemmas_in_source_order() {
-        for (word, expected) in [("went", vec!["go"]), ("knelt", vec!["kneel"]), ("axes", vec!["ax", "axis"])] {
+        for (word, expected) in [
+            ("went", vec!["go"]),
+            ("knelt", vec!["kneel"]),
+            ("axes", vec!["ax", "axis"]),
+            ("dying", vec!["die"]),
+            // Supplement entries, missing from WordNet.
+            ("does", vec!["do"]),
+            ("DOING", vec!["do"]),
+            ("being", vec!["be"]),
+        ] {
             assert_eq!(candidates(word).unwrap().exceptions, expected, "{word}");
+        }
+    }
+
+    #[test]
+    fn supplement_is_sorted_and_adds_only_forms_wordnet_lacks() {
+        for pair in SUPPLEMENT.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "unsorted or duplicate: {}", pair[1].0);
+        }
+        for (form, lemmas) in SUPPLEMENT {
+            assert!(form.bytes().all(|b| b.is_ascii_lowercase()), "{form}");
+            assert!(!lemmas.is_empty(), "{form}");
+            assert_eq!(exception_lemmas(EXCEPTIONS, form), None, "{form} is now in WordNet's list");
         }
     }
 
@@ -191,6 +239,9 @@ mod tests {
             "john'",
             "'s",
             "’s",
+            "s'",
+            "s’",
+            "S'",
             "john's's",
         ] {
             assert!(candidates(word).is_none(), "{word:?}");
@@ -226,6 +277,8 @@ mod tests {
         for line in EXCEPTIONS.lines() {
             let (form, lemmas) = line.split_once(' ').expect("form and lemmas");
             assert!(form > previous, "unsorted or duplicate form: {form}");
+            // Only plain-letter forms can pass the gate; lemmas may keep punctuation.
+            assert!(form.bytes().all(|b| b.is_ascii_lowercase()), "unreachable form: {form}");
             previous = form;
             let mut seen = Vec::new();
             for token in line.split(' ') {

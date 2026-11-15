@@ -18,7 +18,9 @@ def generate(source: Path) -> str:
             if len(fields) < 2:
                 raise ValueError(f"{name}.exc:{number}: expected a form and at least one lemma")
             form, *lemmas = fields
-            if "_" in form:
+            # The runtime gate only passes plain letters, so punctuated forms
+            # (multi-word `_`, `ad-libbed`, `o'clock`) could never be looked up.
+            if not (form.isascii() and form.isalpha()):
                 continue
             lemmas = [lemma for lemma in lemmas if "_" not in lemma]
             if not lemmas:
