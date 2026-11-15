@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 mod moving;
 mod selection;
-use moving::{Carry, ClashSheet};
+use moving::{Carry, ClashSheet, PasteEnd};
 use selection::Selection;
 
 /// Decoded covers for the visible view only. A cache file that fails to load is
@@ -1510,7 +1510,7 @@ impl Screen for Books {
                 self.clash = None;
                 match answer {
                     Some(choice) => self.continue_paste(Some(choice), cx),
-                    None => self.finish_paste(Some("Paste cancelled; remaining items stayed in place".into()), cx),
+                    None => self.finish_paste(PasteEnd::Cancelled, cx),
                 }
             }
         } else if let Some(confirm) = &mut self.confirm {

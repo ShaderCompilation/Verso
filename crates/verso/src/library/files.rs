@@ -357,18 +357,60 @@ fn move_book_with(
     let outcome = move_target(path, destination, true, choice)?;
     let MoveOutcome::Moved(target) = &outcome else { return Ok(outcome) };
     let data = sidecar(path);
-    let has_data = occupied(&data)?;
+    // Decide before touching anything, so a failed read changes nothing.
+    // A plain file with the sidecar's name is not KOReader data and stays.
+    enum Data {
+        None,
+        Whole,
+        Own(Vec<PathBuf>),
+    }
+    let plan = if !std::fs::symlink_metadata(&data).is_ok_and(|m| m.is_dir()) {
+        Data::None
+    } else if sidecar_shared(path)? {
+        Data::Own(own_metadata(path)?)
+    } else {
+        Data::Whole
+    };
     rename(path, target).context("Couldn't move book")?;
-    if has_data && let Err(error) = rename(&data, &sidecar(target)) {
+    let moved_data = match &plan {
+        Data::None => Ok(()),
+        Data::Own(files) if files.is_empty() => Ok(()),
+        Data::Whole => rename(&data, &sidecar(target)).map_err(Into::into),
+        Data::Own(files) => move_into_new_dir(files, &sidecar(target), &mut rename),
+    };
+    if let Err(error) = moved_data {
         if let Err(rollback) = rename(target, path) {
             bail!(
                 "Couldn't move KOReader data: {error}; couldn't restore book: {rollback}. Book is at {}",
                 target.display()
             );
         }
-        bail!("Couldn't move KOReader data; book restored: {error}");
+        bail!("Couldn't move KOReader data; book restored: {error:#}");
     }
     Ok(outcome)
+}
+/// Moves a shared sidecar's files belonging to one book into a new sidecar.
+/// On failure, files already moved go back and the new folder is removed.
+fn move_into_new_dir(
+    files: &[PathBuf],
+    dir: &Path,
+    rename: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    std::fs::create_dir(dir)?;
+    let mut moved: Vec<(&Path, PathBuf)> = Vec::new();
+    for from in files {
+        let to = dir.join(from.file_name().context("Unnamed KOReader file")?);
+        if let Err(error) = rename(from, &to) {
+            let restored = moved.iter().rev().all(|(from, to)| rename(to, from).is_ok());
+            if restored {
+                let _ = std::fs::remove_dir(dir);
+                return Err(error.into());
+            }
+            bail!("{error}; some KOReader files stayed in {}", dir.display());
+        }
+        moved.push((from, to));
+    }
+    Ok(())
 }
 pub fn move_folder(path: &Path, destination: &Path, choice: Option<ClashChoice>) -> Result<MoveOutcome> {
     let outcome = move_target(path, destination, false, choice)?;
@@ -383,11 +425,55 @@ pub fn sidecar(book: &Path) -> PathBuf {
     book.with_extension("sdr")
 }
 
-/// Removes a deleted book's KOReader sidecar, if it has one.
+/// KOReader names a sidecar after the file name without its extension, so
+/// `Book.epub` and `Book.pdf` in one folder share `Book.sdr`, each keeping its
+/// own `metadata.<ext>.lua` there. Works whether or not the book still exists.
+fn sidecar_shared(book: &Path) -> Result<bool> {
+    let (Some(parent), Some(name), Some(stem)) = (book.parent(), book.file_name(), book.file_stem()) else {
+        return Ok(false);
+    };
+    let own = sidecar(book);
+    for entry in std::fs::read_dir(parent)? {
+        let path = entry?.path();
+        if path.file_name() != Some(name) && path != own && path.extension().is_some() && path.file_stem() == Some(stem)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// This book's files in its sidecar: `metadata.<ext>.lua` and its `.old` backup.
+fn own_metadata(book: &Path) -> Result<Vec<PathBuf>> {
+    let Some(ext) = book.extension().and_then(|e| e.to_str()) else { return Ok(Vec::new()) };
+    let dir = sidecar(book);
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let name = entry?.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("metadata.")) else { continue };
+        let format = rest.strip_suffix(".lua.old").or_else(|| rest.strip_suffix(".lua"));
+        if format.is_some_and(|f| f.eq_ignore_ascii_case(ext)) {
+            files.push(dir.join(&name));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Removes a deleted book's KOReader sidecar, if it has one. A sidecar shared
+/// with another format of the same book loses only this book's files.
 pub fn delete_sidecar(book: &Path) -> Result<()> {
     let path = sidecar(book);
     match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path).context("Couldn't remove KOReader data"),
+        Ok(meta) if meta.is_dir() => {
+            if sidecar_shared(book).context("Couldn't remove KOReader data")? {
+                for file in own_metadata(book).context("Couldn't remove KOReader data")? {
+                    std::fs::remove_file(file).context("Couldn't remove KOReader data")?;
+                }
+                return Ok(());
+            }
+            std::fs::remove_dir_all(&path).context("Couldn't remove KOReader data")
+        }
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).context("Couldn't remove KOReader data"),
@@ -638,6 +724,60 @@ mod tests {
         std::fs::write(root.join("Note.sdr"), b"file")?;
         delete_sidecar(&root.join("Note.epub"))?;
         assert!(root.join("Note.sdr").exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// `Book.epub` and `Book.pdf` beside each other share `Book.sdr`.
+    fn shared_sidecar(dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir.join("Book.sdr"))?;
+        std::fs::write(dir.join("Book.epub"), b"epub")?;
+        std::fs::write(dir.join("Book.pdf"), b"pdf")?;
+        for name in ["metadata.epub.lua", "metadata.epub.lua.old", "metadata.pdf.lua", "cover.jpg"] {
+            std::fs::write(dir.join("Book.sdr").join(name), name)?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn a_shared_sidecar_keeps_the_other_formats_data() -> Result<()> {
+        let root = temp_root("verso-shared-sidecar");
+        let (source, dest) = (root.join("Source"), root.join("Dest"));
+        shared_sidecar(&source)?;
+        std::fs::create_dir_all(&dest)?;
+        std::fs::write(dest.join("Book.epub"), b"existing")?;
+        assert_eq!(
+            move_book(&source.join("Book.epub"), &dest, Some(ClashChoice::KeepBoth))?,
+            MoveOutcome::Moved(dest.join("Book (2).epub"))
+        );
+        let mut moved: Vec<_> = std::fs::read_dir(dest.join("Book (2).sdr"))?.map(|e| e.unwrap().file_name()).collect();
+        moved.sort();
+        assert_eq!(moved, ["metadata.epub.lua", "metadata.epub.lua.old"]);
+        let mut kept: Vec<_> = std::fs::read_dir(source.join("Book.sdr"))?.map(|e| e.unwrap().file_name()).collect();
+        kept.sort();
+        assert_eq!(kept, ["cover.jpg", "metadata.pdf.lua"]);
+
+        // A failure partway puts the moved files and the book back.
+        let other = root.join("Other");
+        shared_sidecar(&other)?;
+        let book = other.join("Book.epub");
+        let error = move_book_with(&book, &dest, Some(ClashChoice::KeepBoth), |from, to| {
+            if from.ends_with("metadata.epub.lua.old") {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                rename_free(from, to)
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("book restored"), "{error:#}");
+        assert!(book.is_file() && other.join("Book.sdr/metadata.epub.lua").is_file());
+        assert!(!dest.join("Book (3).epub").exists() && !dest.join("Book (3).sdr").exists());
+
+        // Deleting one format removes only its own files.
+        std::fs::remove_file(&book)?;
+        delete_sidecar(&book)?;
+        let mut left: Vec<_> = std::fs::read_dir(other.join("Book.sdr"))?.map(|e| e.unwrap().file_name()).collect();
+        left.sort();
+        assert_eq!(left, ["cover.jpg", "metadata.pdf.lua"]);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

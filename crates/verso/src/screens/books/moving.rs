@@ -15,6 +15,13 @@ struct Paste {
     choice: Option<ClashChoice>,
     changes: Vec<PathChange>,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PasteEnd {
+    Done,
+    /// The clash sheet was closed: the remaining items stay where they are.
+    Cancelled,
+    Failed(String),
+}
 pub(super) struct ClashSheet {
     sheet: Sheet,
     message: String,
@@ -25,11 +32,14 @@ pub(super) struct ClashSheet {
     keep: Button,
 }
 impl ClashSheet {
-    fn new(t: &Theme, screen: Rect, path: &std::path::Path) -> Self {
+    fn new(t: &Theme, screen: Rect, item: &MoveItem) -> Self {
         let sheet = Sheet::open("Name already taken", t.mm(65.0), screen, t);
         let c = sheet.content(t);
         let text = Rect::new(c.x, c.y, c.w, t.mm(17.0));
-        let message = format!("“{}” or its KOReader data already exists here.", collections::name(path));
+        let message = match item {
+            MoveItem::Book(path) => format!("“{}” or its KOReader data already exists here.", collections::name(path)),
+            MoveItem::Folder(path) => format!("A folder named “{}” already exists here.", collections::name(path)),
+        };
         let all_label = Rect::new(c.x, text.bottom() + t.mm(2.0), c.w - t.mm(15.0), t.target);
         let mut all = Toggle::new(false);
         all.place(c.right(), all_label.center().y, t);
@@ -149,7 +159,7 @@ impl Books {
         while let Some(item) = carry.items.get(paste.next) {
             match item.move_to(&paste.destination, once.take().or(paste.choice)) {
                 Ok(MoveOutcome::Clash) => {
-                    self.clash = Some(ClashSheet::new(cx.theme, self.screen, item.path()));
+                    self.clash = Some(ClashSheet::new(cx.theme, self.screen, item));
                     return;
                 }
                 Ok(MoveOutcome::Skipped) => paste.skipped += 1,
@@ -159,15 +169,21 @@ impl Books {
                 }
                 Err(e) => {
                     let error = format!("{}: {e:#}", item.path().display());
-                    self.finish_paste(Some(error), cx);
+                    self.finish_paste(PasteEnd::Failed(error), cx);
                     return;
                 }
             }
             paste.next += 1;
         }
-        self.finish_paste(None, cx);
+        self.finish_paste(PasteEnd::Done, cx);
     }
-    pub(super) fn finish_paste(&mut self, error: Option<String>, cx: &mut EventCx) {
+    /// A paste is underway, possibly waiting on a clash answer.
+    pub(super) fn pasting(&self) -> bool {
+        self.carry.as_ref().is_some_and(|c| c.paste.is_some())
+    }
+    /// The only way a paste ends: it saves the finished moves and resumes the
+    /// library worker paused by `start_paste`.
+    pub(super) fn finish_paste(&mut self, end: PasteEnd, cx: &mut EventCx) {
         self.clash = None;
         let Some(carry) = self.carry.take() else { return };
         let Some(mut paste) = carry.paste else { return };
@@ -183,14 +199,16 @@ impl Books {
         }
         self.library.pause(false);
         cx.refresh(self.screen, RefreshMode::Full);
-        if let Some(error) = error {
+        let total = carry.items.len();
+        if let PasteEnd::Failed(error) = end {
             // Also reconcile the very rare case where a sidecar error and its
             // rollback both failed. The error names the surviving book path.
             self.library.rescan();
-            let report =
-                format!("Moved {} of {} ({} skipped):\n\n{error}", paste.moved, carry.items.len(), paste.skipped);
-            cx.toast(format!("Moved {} of {}", paste.moved, carry.items.len()), None);
+            let report = format!("Moved {} of {total} ({} skipped):\n\n{error}", paste.moved, paste.skipped);
+            cx.toast(format!("Moved {} of {total}", paste.moved), None);
             self.details = Some(Details::from_text(cx.theme, self.screen, "Move incomplete", report));
+        } else if end == PasteEnd::Cancelled {
+            cx.toast(format!("Moved {} of {total} · rest left in place", paste.moved), None);
         } else {
             let suffix = if paste.skipped > 0 { format!(" · {} skipped", paste.skipped) } else { String::new() };
             cx.toast(format!("Moved {}{suffix}", counted(paste.moved, "item")), None);
@@ -406,6 +424,39 @@ mod tests {
         });
         drop(b);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn closing_a_clash_or_ending_the_selection_keeps_finished_moves() -> anyhow::Result<()> {
+        for end_selection in [false, true] {
+            let (mut b, store, root, t, screen) = fixture(if end_selection { "end-mid-paste" } else { "close-clash" })?;
+            let dest = root.join("Library/Destination");
+            std::fs::create_dir(dest.join("Tree"))?;
+            with_cx(&t, screen, |cx| {
+                let tree = root.join("Library/Source/Tree");
+                b.start_move(
+                    vec![Target::Book("0".into()), Target::Folder(tree.clone()), Target::Book("2".into())],
+                    cx,
+                );
+                b.navigate(Some(dest.clone()), cx);
+                b.start_paste(cx);
+                let clash = b.clash.as_ref().expect("the folder clashes");
+                assert_eq!(clash.message, "A folder named “Tree” already exists here.");
+                if end_selection {
+                    b.end_selection(cx);
+                } else {
+                    tap(&mut b, Point::new(screen.x + 4, screen.y + 4), cx);
+                }
+                assert!(b.clash.is_none() && !b.carrying() && b.selection.is_none());
+                assert!(b.details.is_none(), "cancelling is not reported as a failure");
+                assert_eq!(cx.toast.as_ref().unwrap().text, "Moved 1 of 3 · rest left in place");
+                assert!(tree.is_dir() && root.join("Library/Source/C.epub").is_file());
+                assert_eq!(b.index.books.iter().find(|e| e.id == "0").unwrap().path, dest.join("A.epub"));
+            });
+            drop(b);
+            assert_eq!(store.library().books.iter().find(|e| e.id == "0").unwrap().path, dest.join("A.epub"));
+            std::fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
     #[test]

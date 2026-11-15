@@ -112,6 +112,12 @@ impl Books {
         cx.refresh(self.screen, RefreshMode::Ui);
     }
     pub(super) fn end_selection(&mut self, cx: &mut EventCx) {
+        // Never drop a paste midway: its finished moves must reach the index
+        // and the paused library worker must resume.
+        if self.pasting() {
+            self.finish_paste(PasteEnd::Cancelled, cx);
+            return;
+        }
         self.carry = None;
         if self.selection.take().is_some() {
             cx.refresh(self.screen, RefreshMode::Ui);

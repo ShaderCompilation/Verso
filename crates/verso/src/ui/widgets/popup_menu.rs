@@ -79,9 +79,21 @@ impl PopupMenu {
         self.rect.union(&self.rect.moved(theme.mm(1.0), theme.mm(1.0)))
     }
 
+    fn columns(&self) -> usize {
+        self.items.len().max(1).div_ceil(self.rows)
+    }
+    /// Which of item `k`'s corners (top-left, top-right, bottom-left,
+    /// bottom-right) lie in a corner of the card. Items fill column by column.
+    fn card_corners(&self, k: usize) -> [bool; 4] {
+        let (row, column) = (k % self.rows, k / self.rows);
+        let (first, last) = (column == 0, column + 1 == self.columns());
+        let (top, bottom) = (row == 0, row + 1 == self.rows);
+        [top && first, top && last, bottom && first, bottom && last]
+    }
+
     fn item_rects(&self, theme: &Theme) -> Vec<Rect> {
         let top = self.rect.y + theme.mm(1.0);
-        let columns = self.items.len().max(1).div_ceil(self.rows);
+        let columns = self.columns();
         let width = (self.rect.w - 2 * theme.border) / columns as i32;
         (0..self.items.len())
             .map(|k| {
@@ -128,18 +140,23 @@ impl PopupMenu {
         cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), t.radius_sheet, SHADOW);
         cx.canvas.fill_rounded_rect(r, t.radius_sheet, PAPER);
         cx.canvas.stroke_rounded_rect(r, t.radius_sheet, t.border as f32, INK);
-        let n = self.items.len();
         for (k, (item, ir)) in self.items.iter().zip(self.item_rects(t)).enumerate() {
             let fg = if !self.enabled[k] {
                 crate::ui::theme::INK3
             } else if self.pressed == Some(k) && self.press.is_down() {
-                // Follow the card's rounded corners on the first and last item.
+                // Round only the corners that sit in a corner of the card.
                 cx.canvas.fill_rounded_rect(ir, t.radius_sheet - t.border as f32, INK);
-                if k > 0 {
-                    cx.fill(ir.split_top(ir.h / 2).0, INK);
-                }
-                if k + 1 < n {
-                    cx.fill(ir.split_bottom(ir.h / 2).0, INK);
+                let [top_left, top_right, bottom_left, bottom_right] = self.card_corners(k);
+                let c = (t.radius_sheet.ceil() as i32).min(ir.w / 2).min(ir.h / 2);
+                for (rounded, x, y) in [
+                    (top_left, ir.x, ir.y),
+                    (top_right, ir.right() - c, ir.y),
+                    (bottom_left, ir.x, ir.bottom() - c),
+                    (bottom_right, ir.right() - c, ir.bottom() - c),
+                ] {
+                    if !rounded {
+                        cx.fill(Rect::new(x, y, c, c), INK);
+                    }
                 }
                 cx.hint(ir, RefreshMode::Fast);
                 PAPER
@@ -184,6 +201,28 @@ mod tests {
                 assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), None);
             }
         }
+    }
+
+    #[test]
+    fn pressed_items_round_only_the_cards_corners() {
+        let t = Theme::for_dpi(300);
+        let mut menu =
+            PopupMenu::open(vec![(None, "Action".into()); 3], Point::new(600, 400), Rect::new(0, 0, 1272, 1696), &t);
+        assert_eq!(menu.card_corners(0), [true, true, false, false]);
+        assert_eq!(menu.card_corners(1), [false; 4]);
+        assert_eq!(menu.card_corners(2), [false, false, true, true]);
+        // Two columns of four: corners go to the outer items of each column.
+        menu.items = vec![(None, "Action".into()); 8];
+        menu.rows = 4;
+        let corners: Vec<_> = (0..8).map(|k| menu.card_corners(k)).collect();
+        assert_eq!(corners[0], [true, false, false, false]);
+        assert_eq!(corners[3], [false, false, true, false]);
+        assert_eq!(corners[4], [false, true, false, false]);
+        assert_eq!(corners[7], [false, false, false, true]);
+        assert!([1, 2, 5, 6].iter().all(|&k| corners[k] == [false; 4]));
+        // A shorter last column leaves the bottom-right corner empty.
+        menu.items.pop();
+        assert_eq!(menu.card_corners(6), [false; 4]);
     }
 
     #[test]
