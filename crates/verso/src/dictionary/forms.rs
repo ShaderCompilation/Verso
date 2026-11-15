@@ -8,6 +8,120 @@ const MAX_QUERY_BYTES: usize = 64;
 /// here may also be in WordNet's list.
 const SUPPLEMENT: &[(&str, &[&str])] = &[("being", &["be"]), ("does", &["do"]), ("doing", &["do"])];
 
+/// Function words and fixed adverbs whose suffixes give misleading guesses.
+/// Sorted for binary search; possessives and curated exceptions still apply.
+const NO_RULES: &[&str] = &[
+    "aboard",
+    "across",
+    "after",
+    "afterward",
+    "against",
+    "ahead",
+    "almost",
+    "altogether",
+    "always",
+    "amid",
+    "and",
+    "another",
+    "anything",
+    "around",
+    "backward",
+    "beforehand",
+    "behind",
+    "being",
+    "beyond",
+    "could",
+    "did",
+    "does",
+    "doing",
+    "downward",
+    "during",
+    "either",
+    "ever",
+    "everything",
+    "far",
+    "farther",
+    "farthest",
+    "first",
+    "for",
+    "forever",
+    "forward",
+    "further",
+    "furthest",
+    "had",
+    "has",
+    "henceforward",
+    "her",
+    "hereafter",
+    "his",
+    "hither",
+    "however",
+    "indeed",
+    "instead",
+    "inward",
+    "just",
+    "last",
+    "least",
+    "less",
+    "lest",
+    "minus",
+    "moreover",
+    "most",
+    "must",
+    "near",
+    "need",
+    "neither",
+    "never",
+    "nevertheless",
+    "nonetheless",
+    "nor",
+    "nothing",
+    "notwithstanding",
+    "other",
+    "our",
+    "outward",
+    "over",
+    "past",
+    "per",
+    "perhaps",
+    "plus",
+    "rather",
+    "round",
+    "should",
+    "something",
+    "their",
+    "thereafter",
+    "this",
+    "thither",
+    "thus",
+    "together",
+    "toward",
+    "under",
+    "unless",
+    "upward",
+    "versus",
+    "was",
+    "whatever",
+    "whatsoever",
+    "whenever",
+    "whereafter",
+    "whereas",
+    "wherever",
+    "whether",
+    "whichever",
+    "whichsoever",
+    "whilst",
+    "whither",
+    "whoever",
+    "whomever",
+    "whomsoever",
+    "whosoever",
+    "would",
+    "yes",
+    "yonder",
+    "your",
+];
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Candidates {
     /// Try this as an exact word before exceptions or rules.
@@ -40,37 +154,39 @@ pub(super) fn candidates(query: &str) -> Option<Candidates> {
     }
 
     let mut rules = Vec::new();
-    for (suffix, replacement) in [
-        ("ies", "y"),
-        ("ied", "y"),
-        ("ier", "y"),
-        ("iest", "y"),
-        ("s", ""),
-        ("es", ""),
-        ("ves", "f"),
-        ("ves", "fe"),
-        ("men", "man"),
-        ("d", ""),
-        ("ed", ""),
-        ("ing", "e"),
-        ("ing", ""),
-        ("r", ""),
-        ("er", ""),
-        ("st", ""),
-        ("est", ""),
-    ] {
-        if let Some(stem) = word.strip_suffix(suffix) {
-            // A one-letter stem makes a two-letter `y` word that is usually an
-            // abbreviation (dies → dy, lies → ly); the `s`/`d` rules find die/lie.
-            if replacement == "y" && stem.len() < 2 {
-                continue;
-            }
-            push_rule(&mut rules, format!("{stem}{replacement}"));
-            // Preserve the intact stem first: kissed -> kiss, never just kis.
-            if replacement.is_empty() && matches!(suffix, "ed" | "ing" | "er" | "est") {
-                let bytes = stem.as_bytes();
-                if bytes.len() >= 2 && bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
-                    push_rule(&mut rules, stem[..stem.len() - 1].to_owned());
+    if NO_RULES.binary_search(&word).is_err() {
+        for (suffix, replacement) in [
+            ("ies", "y"),
+            ("ied", "y"),
+            ("ier", "y"),
+            ("iest", "y"),
+            ("s", ""),
+            ("es", ""),
+            ("ves", "f"),
+            ("ves", "fe"),
+            ("men", "man"),
+            ("d", ""),
+            ("ed", ""),
+            ("ing", "e"),
+            ("ing", ""),
+            ("r", ""),
+            ("er", ""),
+            ("st", ""),
+            ("est", ""),
+        ] {
+            if let Some(stem) = word.strip_suffix(suffix) {
+                // A one-letter stem makes a two-letter `y` word that is usually an
+                // abbreviation (dies → dy, lies → ly); the `s`/`d` rules find die/lie.
+                if replacement == "y" && stem.len() < 2 {
+                    continue;
+                }
+                push_rule(&mut rules, format!("{stem}{replacement}"));
+                // Preserve the intact stem first: kissed -> kiss, never just kis.
+                if replacement.is_empty() && matches!(suffix, "ed" | "ing" | "er" | "est") {
+                    let bytes = stem.as_bytes();
+                    if bytes.len() >= 2 && bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
+                        push_rule(&mut rules, stem[..stem.len() - 1].to_owned());
+                    }
                 }
             }
         }
@@ -110,6 +226,63 @@ fn exception_lemmas<'a>(text: &'a str, word: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn function_words_skip_rules_after_normalization() {
+        for word in [
+            "his", "her", "and", "nor", "yes", "against", "this", "must", "always", "perhaps", "whereas", "HIS", "ThIs",
+        ] {
+            assert!(candidates(word).unwrap().rules.is_empty(), "{word}");
+        }
+        for word in ["other's", "other’s", "OTHER'S", "OTHER’S"] {
+            let forms = candidates(word).unwrap();
+            assert_eq!(forms.possessive.as_deref(), Some("other"));
+            assert!(forms.rules.is_empty(), "{word}");
+        }
+    }
+
+    #[test]
+    fn function_words_keep_exception_lemmas() {
+        for (word, expected) in [
+            ("was", "be"),
+            ("has", "have"),
+            ("does", "do"),
+            ("had", "have"),
+            ("did", "do"),
+            ("being", "be"),
+            ("doing", "do"),
+        ] {
+            let forms = candidates(word).unwrap();
+            assert_eq!(forms.exceptions, [expected], "{word}");
+            assert!(forms.rules.is_empty(), "{word}");
+        }
+    }
+
+    #[test]
+    fn valid_function_word_reductions_keep_rules() {
+        for (word, expected) in [
+            ("hers", "her"),
+            ("towards", "toward"),
+            ("others", "other"),
+            ("theirs", "their"),
+            ("ours", "our"),
+            ("yours", "your"),
+            ("its", "it"),
+        ] {
+            assert_eq!(candidates(word).unwrap().rules, [expected], "{word}");
+        }
+    }
+
+    #[test]
+    fn no_rules_is_sorted_lowercase_unique_and_suppresses_rules() {
+        for pair in NO_RULES.windows(2) {
+            assert!(pair[0] < pair[1], "unsorted or duplicate: {}", pair[1]);
+        }
+        for word in NO_RULES {
+            assert!(!word.is_empty() && word.bytes().all(|b| b.is_ascii_lowercase()), "{word}");
+            assert!(candidates(word).unwrap().rules.is_empty(), "{word}");
+        }
+    }
 
     #[test]
     fn regular_forms_keep_rule_priority() {
