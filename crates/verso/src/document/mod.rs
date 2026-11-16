@@ -260,8 +260,15 @@ mod tests {
         assert_ne!(left, buf, "justification changes rendering");
         drop(doc);
         let mut reopened = engine.open(&book, &layout, None).unwrap();
+        // A saved position keeps its saved progress; other pages are counted.
+        reopened.remember_progress(position.clone(), 4321);
         reopened.go_to_position(&position).unwrap();
         assert_eq!(reopened.current_page(), 5);
+        assert_eq!(reopened.progress(), 4321);
+        reopened.go_to_page(6);
+        assert!(reopened.progress().abs_diff(progress) < 1000, "other pages are counted");
+        reopened.go_to_page(0);
+        assert_eq!(reopened.progress(), 0, "the first page is the start");
         drop(reopened);
         selection_checks(&engine, &layout);
         search_checks(&engine, &layout);

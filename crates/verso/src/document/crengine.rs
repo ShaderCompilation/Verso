@@ -72,7 +72,13 @@ impl CreEngine {
         if raw.is_null() {
             bail!("crengine could not create a document view");
         }
-        let mut doc = CreDocument { raw, stats: OpenStats::default(), width: layout.width, height: layout.height };
+        let mut doc = CreDocument {
+            raw,
+            stats: OpenStats::default(),
+            width: layout.width,
+            height: layout.height,
+            known_progress: None,
+        };
         let css = cstr(&self.paths.engine_data.join("epub.css"))?;
         let face = CString::new(self.paths.font_face.as_str())?;
         let [l, t, r, b] = layout.margins.map(|m| m as c_int);
@@ -124,6 +130,9 @@ pub struct CreDocument {
     /// The page size in pixels.
     width: u32,
     height: u32,
+    /// A saved position and its progress, so reopening a book doesn't count
+    /// the whole text before the first page.
+    known_progress: Option<(Position, u32)>,
 }
 
 impl CreDocument {
@@ -234,6 +243,20 @@ impl Document for CreDocument {
     }
 
     fn progress(&mut self) -> u32 {
+        // The first page is the start, and a saved position keeps the progress
+        // saved with it (both depend only on the text). Anything else counts
+        // the whole book's text once, ~45–70 ms for a 1200-page book.
+        if self.current_page() == 0 {
+            return 0;
+        }
+        if self.known_progress.is_some() {
+            let here = self.position().ok();
+            if let Some((position, progress)) = &self.known_progress
+                && here.as_ref() == Some(position)
+            {
+                return *progress;
+            }
+        }
         unsafe { sys::verso_cre_progress(self.raw) }.clamp(0, 10000) as u32
     }
 
@@ -343,6 +366,10 @@ fn cstr(path: &Path) -> Result<CString> {
 }
 
 impl CreDocument {
+    /// `progress` was computed for `position` in this book; reuse it there.
+    pub fn remember_progress(&mut self, position: Position, progress: u32) {
+        self.known_progress = (!position.0.is_empty()).then_some((position, progress));
+    }
     pub fn annotation_clear(&mut self) {
         unsafe {
             sys::verso_cre_annotation_clear(self.raw);

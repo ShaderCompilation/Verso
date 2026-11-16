@@ -880,6 +880,7 @@ impl Books {
             typography: settings.typography,
             footer: settings.footer,
             position: saved.position,
+            progress: saved.progress,
         });
     }
     fn returned(&mut self, cx: &mut EventCx) {

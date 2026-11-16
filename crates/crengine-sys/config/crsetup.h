@@ -11,9 +11,13 @@
 #define USE_ZLIB                             1
 #define USE_ZSTD                             0
 
-/* Documents cache. */
-#define DOCUMENT_CACHING_MIN_SIZE            0x10000   //  64.0 KiB
-#define DOCUMENT_CACHING_SIZE_THRESHOLD      0x100000  //   1.0 MiB
+/* Documents cache. Every book is cached, however small: a 140 KB EPUB can be
+   a 240-page novel that takes ~0.6 s to lay out. Files of this size or smaller
+   never read the cache. The size at which a cache is *written* is the
+   crengine.cache.filesize.min property (default 300000 bytes), which the shim
+   sets to 0; this threshold is only its unused fallback. */
+#define DOCUMENT_CACHING_MIN_SIZE            0
+#define DOCUMENT_CACHING_SIZE_THRESHOLD      0
 
 /* Document formats (EPUB, FB2, HTML, TXT, RTF... are always on). */
 #define CHM_SUPPORT_ENABLED                  0

@@ -109,6 +109,8 @@ pub enum Command {
         typography: Typography,
         footer: bool,
         position: Position,
+        /// The progress saved with `position`.
+        progress: u32,
     },
     Layout {
         generation: u64,
@@ -319,11 +321,12 @@ impl Worker {
                                 }
                                 return Ok(());
                             }
-                            Command::Open { generation: g, path, layout, typography, footer, position } => {
+                            Command::Open { generation: g, path, layout, typography, footer, position, progress } => {
                                 generation = g;
                                 doc = None;
                                 dimensions = (layout.width, layout.height);
                                 let mut d = engine.open(&path, &layout, Some((&typography, footer)))?;
+                                d.remember_progress(position.clone(), progress);
                                 if !position.0.is_empty()
                                     && let Err(e) = d.go_to_position(&position)
                                 {

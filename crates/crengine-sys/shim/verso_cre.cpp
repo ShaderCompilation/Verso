@@ -437,6 +437,7 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         props->setInt(PROP_FONT_HINTING, 2);      // autohinter (as KOReader)
         props->setInt(PROP_EMBEDDED_STYLES, 1);
         props->setInt(PROP_EMBEDDED_FONTS, 1);
+        props->setInt(PROP_MIN_FILE_SIZE_TO_CACHE, 0); // cache every book (see crsetup.h)
         v->propsApply(props);
         v->Resize(width, height);
         VersoCreDoc *doc = new VersoCreDoc();
