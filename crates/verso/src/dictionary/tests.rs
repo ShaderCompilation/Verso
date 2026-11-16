@@ -436,7 +436,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
             break;
         }
     }
-    worker.change("test.ifo".into(), false);
+    worker.edit(sets::Edit::Disabled { set: sets::DEFAULT.into(), dictionary: "test.ifo".into(), disabled: true });
     let latest = worker.lookup("fruit".into(), None, false);
     let reply = receive()?;
     assert_eq!(reply.id, latest);

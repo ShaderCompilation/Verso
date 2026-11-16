@@ -821,12 +821,13 @@ impl Screen for Reader {
         match &mut self.overlay {
             Overlay::Lookup(lookup) => {
                 if let Some(event) = lookup.on_gesture(&g, cx) {
-                    if matches!(event, LookupEvent::Manage) {
+                    if let LookupEvent::Manage(set) = &event {
                         return Action::Push(Box::new(crate::screens::dictionaries::Dictionaries::new(
                             cx.theme,
                             self.screen,
                             self.store.clone(),
                             self.worker.waker(),
+                            Some(set),
                         )));
                     }
                     if let Some(worker) = &self.dictionary {

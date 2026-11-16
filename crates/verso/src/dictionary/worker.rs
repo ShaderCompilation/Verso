@@ -54,33 +54,10 @@ pub struct Reply {
     pub save_error: Option<String>,
 }
 enum Command {
-    Lookup {
-        request: Request,
-        query: String,
-        selected: Option<String>,
-        selection: Selection,
-        rescan: bool,
-    },
-    Catalog {
-        request: Request,
-        set: String,
-        rescan: bool,
-    },
-    Edit {
-        request: Request,
-        edit: Edit,
-    },
-    #[cfg(test)]
-    Change {
-        set: String,
-        id: String,
-        up: bool,
-    },
-    Retry {
-        request: Request,
-        set: String,
-        dictionary: String,
-    },
+    Lookup { request: Request, query: String, selected: Option<String>, selection: Selection, rescan: bool },
+    Catalog { request: Request, set: String, rescan: bool },
+    Edit { request: Request, edit: Edit },
+    Retry { request: Request, set: String, dictionary: String },
     Release,
     Flush(mpsc::Sender<Result<(), String>>),
     Stop,
@@ -247,20 +224,6 @@ impl Inner {
         let set = self.preferences.set(set);
         self.active_set = set.id.clone();
         set.apply(&mut self.catalog.dictionaries);
-    }
-    #[cfg(test)]
-    fn change(&mut self, set: &str, id: &str, up: bool) {
-        let entries = &self.preferences.set(set).dictionaries;
-        if let Some(i) = entries.iter().position(|d| d.id == id) {
-            let edit = if up {
-                Edit::MoveDictionary { set: set.into(), dictionary: id.into(), position: i.saturating_sub(1) }
-            } else {
-                Edit::Disabled { set: set.into(), dictionary: id.into(), disabled: !entries[i].disabled }
-            };
-            if self.preferences.edit(edit).is_ok() {
-                self.save();
-            }
-        }
     }
     /// Returns the chosen dictionary and the state.
     fn lookup(
@@ -450,8 +413,6 @@ impl Service {
                             }
                             let _ = done.send(inner.save_error.clone().map_or(Ok(()), Err));
                         }
-                        #[cfg(test)]
-                        Command::Change { set, id, up } => inner.change(&set, &id, up),
                         Command::Edit { request, edit } => {
                             // Edits survive closing the requesting screen.
                             let set = edit.set().to_owned();
@@ -459,15 +420,24 @@ impl Service {
                             if error.is_none() {
                                 inner.save();
                             }
+                            // Only a fresh catalog is published. The edit itself
+                            // is already applied and saved, even if this is cancelled.
+                            let current = || is_current(&request);
+                            if current() && (!inner.fresh || folders_changed(&inner)) && !inner.discover(&current) {
+                                continue;
+                            }
                             // Reply with the edited set (Default after a deletion).
                             inner.apply_set(&set);
                             let mut reply = inner.reply(request.id, None, None);
                             reply.change_error = error;
-                            publish(&request, reply, &|| is_current(&request));
+                            publish(&request, reply, &current);
                         }
                         Command::Retry { request, set, dictionary } => {
                             let current = || is_current(&request);
                             if !current() {
+                                continue;
+                            }
+                            if (!inner.fresh || folders_changed(&inner)) && !inner.discover(&current) {
                                 continue;
                             }
                             inner.backend = None;
@@ -570,14 +540,6 @@ impl Worker {
         let id = request.id;
         let _ = self.service.tx.send(Command::Edit { request, edit });
         id
-    }
-    #[cfg(test)]
-    pub fn change(&self, id: String, up: bool) {
-        self.change_in(DEFAULT, id, up);
-    }
-    #[cfg(test)]
-    pub fn change_in(&self, set: &str, id: String, up: bool) {
-        let _ = self.service.tx.send(Command::Change { set: set.into(), id, up });
     }
     pub fn retry(&self, set: &str, dictionary: &str) -> u64 {
         let request = self.request();

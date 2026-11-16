@@ -213,7 +213,7 @@ pub struct Books {
     menu: Option<(Target, PopupMenu)>,
     name_sheet: Option<NameSheet>,
     details: Option<Details>,
-    confirm: Option<ConfirmDelete>,
+    confirm: Option<ConfirmDelete<DeleteRequest>>,
     selection: Option<Selection>,
     carry: Option<Carry>,
     clash: Option<ClashSheet>,
@@ -2032,24 +2032,26 @@ impl Details {
     }
 }
 
-/// "Delete book?" with Cancel and Delete. Nothing is removed until Delete.
+/// What a library delete confirmation removes.
 enum DeleteRequest {
     Item(Target),
     Selection(Vec<Target>),
 }
 
-struct ConfirmDelete {
-    target: DeleteRequest,
+/// "Delete book?" with Cancel and Delete. Nothing is removed until Delete.
+/// Also asks before deleting a dictionary set.
+pub(crate) struct ConfirmDelete<T> {
+    pub(crate) target: T,
     sheet: Sheet,
     message: String,
     text: Rect,
-    cancel: Button,
-    delete: Button,
+    pub(crate) cancel: Button,
+    pub(crate) delete: Button,
     /// Delete was chosen; the deletion runs after this frame is shown.
     working: bool,
 }
-impl ConfirmDelete {
-    fn new(t: &Theme, screen: Rect, target: DeleteRequest, title: &str, message: String) -> Self {
+impl<T> ConfirmDelete<T> {
+    pub(crate) fn new(t: &Theme, screen: Rect, target: T, title: &str, message: String) -> Self {
         let sheet = Sheet::open(title, t.mm(62.0).min(screen.h - t.top_bar), screen, t);
         let c = sheet.content(t);
         let buttons_y = c.bottom() - t.margin - t.button_h;
@@ -2061,6 +2063,25 @@ impl ConfirmDelete {
         delete.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
         Self { target, sheet, message, text, cancel, delete, working: false }
     }
+    pub(crate) fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        let height = cx.text.measure(&self.message, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
+        cx.paragraph(&self.message, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
+        self.cancel.draw(cx);
+        self.delete.draw(cx);
+    }
+    /// Some(true) to delete, Some(false) to close without deleting.
+    pub(crate) fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
+        if self.working {
+            return None;
+        }
+        if self.sheet.on_gesture(g) || self.cancel.on_gesture(g) {
+            return Some(false);
+        }
+        self.delete.on_gesture(g).then_some(true)
+    }
+}
+impl ConfirmDelete<DeleteRequest> {
     fn start_working(&mut self) {
         let count = match &self.target {
             DeleteRequest::Selection(targets) => targets.len(),
@@ -2070,23 +2091,6 @@ impl ConfirmDelete {
         self.cancel.enabled = false;
         self.delete.enabled = false;
         self.working = true;
-    }
-    fn draw(&self, cx: &mut DrawCx) {
-        self.sheet.draw(cx);
-        let height = cx.text.measure(&self.message, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
-        cx.paragraph(&self.message, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
-        self.cancel.draw(cx);
-        self.delete.draw(cx);
-    }
-    /// Some(true) to delete, Some(false) to close without deleting.
-    fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
-        if self.working {
-            return None;
-        }
-        if self.sheet.on_gesture(g) || self.cancel.on_gesture(g) {
-            return Some(false);
-        }
-        self.delete.on_gesture(g).then_some(true)
     }
 }
 

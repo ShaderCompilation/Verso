@@ -8,7 +8,11 @@ use crate::{
     geom::Rect,
     gfx::HAlign,
     platform::{TextInput, Waker},
-    screens::{Action, EventCx, Screen, books::Details, dictionary_folders::DictionaryFolders},
+    screens::{
+        Action, EventCx, Screen,
+        books::{ConfirmDelete, Details},
+        dictionary_folders::DictionaryFolders,
+    },
     store::Store,
     ui::{
         gesture::Gesture,
@@ -97,18 +101,21 @@ pub struct Dictionaries {
     note: Rect,
     details: Option<Details>,
     editor: Option<Editor>,
+    /// Asks before deleting this set.
+    confirm: Option<ConfirmDelete<String>>,
 }
 impl Dictionaries {
-    pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
+    /// `set` opens that set directly (from a lookup); Back then shows all sets.
+    pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker, set: Option<&str>) -> Self {
         let worker = Worker::new(store.clone(), waker.clone());
-        let request = worker.catalog(false);
+        let request = worker.catalog_in(set.unwrap_or(DEFAULT), false);
         let mut this = Self {
             store,
             waker,
             worker,
             screen,
             top: TopBar::new("Dictionaries", true),
-            view: View::Sets,
+            view: set.map_or(View::Sets, |id| View::Set(id.into())),
             sets: vec![],
             dictionaries: vec![],
             sources: vec![],
@@ -125,6 +132,7 @@ impl Dictionaries {
             note: Rect::default(),
             details: None,
             editor: None,
+            confirm: None,
         };
         this.layout(t);
         this
@@ -138,9 +146,38 @@ impl Dictionaries {
     fn current_set(&self) -> Option<&Set> {
         self.sets.iter().find(|s| s.id == self.set_id())
     }
-    fn dictionary(&self) -> Option<&Dictionary> {
+    fn dictionary_index(&self) -> Option<usize> {
         let View::Dictionary(_, id) = &self.view else { return None };
-        self.dictionaries.iter().find(|d| d.id == *id)
+        self.dictionaries.iter().position(|d| d.id == *id)
+    }
+    fn dictionary(&self) -> Option<&Dictionary> {
+        self.dictionary_index().map(|i| &self.dictionaries[i])
+    }
+    /// The durable position of the visible neighbour, which also counts
+    /// dictionaries that are temporarily missing.
+    fn move_target(&self, dictionary: &str, up: bool) -> Option<usize> {
+        let visible = self.dictionaries.iter().position(|d| d.id == dictionary)?;
+        let neighbor = if up { visible.checked_sub(1)? } else { visible + 1 };
+        let neighbor = &self.dictionaries.get(neighbor)?.id;
+        self.current_set()?.dictionaries.iter().position(|p| p.id == *neighbor)
+    }
+    /// Leave views whose set or dictionary disappeared, e.g. after a rescan.
+    fn settle_view(&mut self, cx: &mut EventCx) {
+        let view = match &self.view {
+            View::Sets => return,
+            View::Set(set) | View::Languages(set) | View::Dictionary(set, _)
+                if !self.sets.iter().any(|s| s.id == *set) =>
+            {
+                View::Sets
+            }
+            View::Dictionary(set, _) if self.dictionary_index().is_none() => {
+                cx.toast("That dictionary is no longer available", None);
+                View::Set(set.clone())
+            }
+            _ => return,
+        };
+        self.view = view;
+        self.list.page = 0;
     }
     fn catalog(&mut self, rescan: bool) {
         self.request = self.worker.catalog_in(self.set_id(), rescan);
@@ -237,9 +274,9 @@ impl Dictionaries {
                 })
                 .collect(),
             View::Dictionary(_, _) => self
-                .dictionary()
-                .map(|d| {
-                    let index = self.dictionaries.iter().position(|o| o.id == d.id).unwrap();
+                .dictionary_index()
+                .map(|index| {
+                    let d = &self.dictionaries[index];
                     let mut rows = vec![
                         Row::new("Details").sub(&d.name).chevron(),
                         Row::new(if d.disabled { "Enable" } else { "Disable" }),
@@ -249,6 +286,8 @@ impl Dictionaries {
                     ];
                     rows[2].enabled = index > 0;
                     rows[3].enabled = index + 1 < self.dictionaries.len();
+                    // Retry only after a read failed; it reopens the dictionary.
+                    rows[4].enabled = d.error.is_some();
                     rows
                 })
                 .unwrap_or_default(),
@@ -324,22 +363,25 @@ impl Dictionaries {
         self.layout(cx.theme);
     }
     fn toolbar(&mut self, index: usize, cx: &mut EventCx) {
+        if matches!(self.view, View::Sets) {
+            return self.start_editor(Field::New, String::new(), cx.theme);
+        }
+        let Some(current) = self.current_set() else { return };
+        let (name, languages) = (current.name.clone(), current.languages.join(", "));
         match self.view.clone() {
-            View::Sets => self.start_editor(Field::New, String::new(), cx.theme),
             View::Set(set) => match index {
-                0 => self.start_editor(Field::Rename(set), self.current_set().unwrap().name.clone(), cx.theme),
+                0 => self.start_editor(Field::Rename(set), name, cx.theme),
                 1 => self.open(View::Languages(set), cx.theme),
                 2 => {
-                    self.edit(Edit::Delete { set });
-                    self.view = View::Sets;
-                    self.list.page = 0;
-                    self.layout(cx.theme);
+                    let message = format!(
+                        "Delete “{name}”? Its dictionary order, on/off choices and languages are removed. \
+                         Books that used it switch to the set for their language, or Default."
+                    );
+                    self.confirm = Some(ConfirmDelete::new(cx.theme, self.screen, set, "Delete set", message));
                 }
                 _ => {}
             },
-            View::Languages(set) => {
-                self.start_editor(Field::Languages(set), self.current_set().unwrap().languages.join(", "), cx.theme)
-            }
+            View::Languages(set) => self.start_editor(Field::Languages(set), languages, cx.theme),
             _ => {}
         }
     }
@@ -361,7 +403,7 @@ impl Dictionaries {
             View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id.clone()), cx.theme),
             View::Languages(set) => {
                 let code = self.language_choices()[index].0.clone();
-                let mut languages = self.current_set().unwrap().languages.clone();
+                let Some(mut languages) = self.current_set().map(|s| s.languages.clone()) else { return };
                 if languages.contains(&code) {
                     languages.retain(|l| l != &code);
                 } else {
@@ -386,11 +428,10 @@ impl Dictionaries {
                     }
                     1 => Edit::Disabled { set, dictionary, disabled: !d.disabled },
                     2 | 3 => {
-                        let visible = self.dictionaries.iter().position(|o| o.id == dictionary).unwrap();
-                        let neighbor = &self.dictionaries[if index == 2 { visible - 1 } else { visible + 1 }].id;
-                        // Durable order includes temporarily missing dictionaries.
-                        let position =
-                            self.current_set().unwrap().dictionaries.iter().position(|p| p.id == *neighbor).unwrap();
+                        let Some(position) = self.move_target(&dictionary, index == 2) else {
+                            cx.toast("Couldn’t move this dictionary. Tap Rescan and try again.", None);
+                            return;
+                        };
                         Edit::MoveDictionary { set, dictionary, position }
                     }
                     4 => {
@@ -480,7 +521,7 @@ impl Screen for Dictionaries {
             "Checking dictionaries…"
         } else if !self.warnings.is_empty() {
             "Some folders or preferences had problems. Tap here for details."
-        } else if self.list.rows.is_empty() {
+        } else if matches!(self.view, View::Set(_)) && self.list.rows.is_empty() {
             "No dictionaries found. Add a folder or copy StarDict files into Verso’s dictionaries folder."
         } else {
             "Changes save immediately. Tap a row to manage it."
@@ -492,12 +533,29 @@ impl Screen for Dictionaries {
         if let Some(details) = &mut self.details {
             details.draw(cx);
         }
+        if let Some(confirm) = &self.confirm {
+            confirm.draw(cx);
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
         if let Some(details) = &mut self.details {
             if details.on_gesture(&g, cx) {
                 self.details = None;
+            }
+            return Action::None;
+        }
+        if let Some(confirm) = &mut self.confirm {
+            match confirm.on_gesture(&g) {
+                Some(true) => {
+                    let set = self.confirm.take().map(|c| c.target).unwrap_or_default();
+                    self.edit(Edit::Delete { set });
+                    self.view = View::Sets;
+                    self.list.page = 0;
+                    self.layout(cx.theme);
+                }
+                Some(false) => self.confirm = None,
+                None => {}
             }
             return Action::None;
         }
@@ -600,7 +658,7 @@ impl Screen for Dictionaries {
             if let Some(error) = reply.save_error {
                 cx.toast(format!("Couldn’t save dictionary preferences: {error}"), None);
             }
-
+            self.settle_view(cx);
             self.layout(cx.theme);
             cx.redraw();
         }
@@ -659,6 +717,24 @@ mod tests {
         });
         wait(s, t);
     }
+    fn install(store: &Store, names: &[&str]) {
+        fs::create_dir_all(store.dictionary_dir()).unwrap();
+        for name in names {
+            fs::write(store.dictionary_dir().join(format!("{name}.ifo")), format!("StarDict's dict ifo file\nversion=2.4.2\nbookname={name}\nwordcount=1\nidxfilesize=14\nsametypesequence=m\n")).unwrap();
+            fs::write(store.dictionary_dir().join(format!("{name}.idx")), b"Hello\0\0\0\0\0\0\0\0\x07").unwrap();
+            fs::write(store.dictionary_dir().join(format!("{name}.dict")), b"meaning").unwrap();
+        }
+    }
+    fn temp_store(name: &str) -> (std::path::PathBuf, Store) {
+        let root = std::env::temp_dir().join(format!(
+            "verso-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store = Store::at(root.clone());
+        store.save_dictionary_folders(&[]).unwrap();
+        (root, store)
+    }
     #[test]
     fn management_edits_sets_languages_order_and_flags_and_returns_from_folders() {
         let root = std::env::temp_dir().join(format!(
@@ -668,15 +744,10 @@ mod tests {
         ));
         let store = Store::at(root.clone());
         store.save_dictionary_folders(&[]).unwrap();
-        fs::create_dir_all(store.dictionary_dir()).unwrap();
-        for name in ["a", "b", "c"] {
-            fs::write(store.dictionary_dir().join(format!("{name}.ifo")), format!("StarDict's dict ifo file\nversion=2.4.2\nbookname={name}\nwordcount=1\nidxfilesize=14\nsametypesequence=m\n")).unwrap();
-            fs::write(store.dictionary_dir().join(format!("{name}.idx")), b"Hello\0\0\0\0\0\0\0\0\x07").unwrap();
-            fs::write(store.dictionary_dir().join(format!("{name}.dict")), b"meaning").unwrap();
-        }
+        install(&store, &["a", "b", "c"]);
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}));
+        let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}), None);
         wait(&mut s, &t);
         assert_eq!(s.list.rows.len(), 1);
         let new = s.toolbar[0].rect().center();
@@ -712,6 +783,7 @@ mod tests {
         row(&mut s, 1, &t);
         wait(&mut s, &t);
         assert!(!s.dictionary().unwrap().disabled);
+        assert!(!s.list.rows[4].enabled, "Retry needs a read error");
         row(&mut s, 3, &t);
         wait(&mut s, &t);
         assert_eq!(s.dictionaries.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["b.ifo", "a.ifo", "c.ifo"]);
@@ -730,8 +802,15 @@ mod tests {
         wait(&mut s, &t);
         assert!(!s.warnings.is_empty());
         assert_eq!(s.current_set().unwrap().id, id);
+        // Delete asks first; Cancel keeps the set.
         let delete = s.toolbar[2].rect().center();
         tap(&mut s, delete, &t);
+        let cancel = s.confirm.as_ref().unwrap().cancel.rect().center();
+        tap(&mut s, cancel, &t);
+        assert!(s.confirm.is_none() && !s.pending && s.sets.len() == 2);
+        tap(&mut s, delete, &t);
+        let confirm = s.confirm.as_ref().unwrap().delete.rect().center();
+        tap(&mut s, confirm, &t);
         wait(&mut s, &t);
         assert_eq!(s.sets.len(), 1);
         row(&mut s, 0, &t);
@@ -755,7 +834,7 @@ mod tests {
             ));
             let store = Store::at(root.clone());
             store.save_dictionary_folders(&[]).unwrap();
-            let mut s = Dictionaries::new(&t, screen, store, Waker::new(|| {}));
+            let mut s = Dictionaries::new(&t, screen, store, Waker::new(|| {}), None);
             wait(&mut s, &t);
             for i in 0..20 {
                 s.sets.push(Set {
@@ -783,5 +862,40 @@ mod tests {
             drop(s);
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn opens_at_a_set_and_leaves_views_that_disappear() {
+        let (root, store) = temp_store("management-views");
+        install(&store, &["a", "b"]);
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        // A lookup opens its own set; Back then lists every set.
+        let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}), Some(DEFAULT));
+        wait(&mut s, &t);
+        assert!(matches!(&s.view, View::Set(id) if id == DEFAULT));
+        assert_eq!(s.list.rows.len(), 2);
+        assert!(matches!(s.back(&t), Action::None));
+        assert!(matches!(s.view, View::Sets));
+        // A set deleted meanwhile falls back to the set list.
+        let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}), Some("gone"));
+        wait(&mut s, &t);
+        assert!(matches!(s.view, View::Sets));
+        // An inconsistent order refuses to move instead of panicking.
+        s.open(View::Set(DEFAULT.into()), &t);
+        wait(&mut s, &t);
+        row(&mut s, 0, &t);
+        assert!(s.dictionary().is_some());
+        s.sets[0].dictionaries.clear();
+        row(&mut s, 3, &t);
+        assert!(!s.pending, "no edit is sent");
+        // A dictionary removed by a rescan returns to its set.
+        fs::remove_file(store.dictionary_dir().join("a.ifo")).unwrap();
+        s.catalog(true);
+        wait(&mut s, &t);
+        assert!(matches!(&s.view, View::Set(id) if id == DEFAULT));
+        assert_eq!(s.list.rows.len(), 1);
+        drop(s);
+        let _ = fs::remove_dir_all(root);
     }
 }

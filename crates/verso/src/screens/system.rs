@@ -397,6 +397,7 @@ impl SystemSettings {
                 self.screen,
                 self.store.clone(),
                 self.waker.clone(),
+                None,
             )));
         }
         if self.add_folder.on_gesture(g) {

@@ -109,7 +109,8 @@ pub enum LookupEvent {
     Close,
     /// Passage actions, retaining the independently edited lookup query.
     Actions(String),
-    Manage,
+    /// Open dictionary management at this lookup's set.
+    Manage(String),
 }
 
 pub struct Lookup {
@@ -118,6 +119,8 @@ pub struct Lookup {
     request: u64,
     selection: crate::dictionary::sets::Selection,
     active_set: String,
+    /// The last submitted query. The field may have been edited since.
+    query: String,
     pending: bool,
     field: TextField,
     keyboard: Keyboard,
@@ -203,6 +206,7 @@ impl Lookup {
             request,
             selection,
             active_set: crate::dictionary::sets::DEFAULT.into(),
+            query: query.into(),
             pending: true,
             field,
             keyboard,
@@ -268,8 +272,12 @@ impl Lookup {
         pages.is_complete() || !had_next && self.pager.page + 1 < pages.pages().len()
     }
     fn submit(&mut self, rescan: bool) {
-        self.request =
-            self.worker.lookup_in(self.field.value().into(), self.selected.clone(), rescan, self.selection.clone());
+        self.query = self.field.value().into();
+        self.repeat(rescan);
+    }
+    /// Runs the last submitted query again, leaving any unsubmitted field edit.
+    fn repeat(&mut self, rescan: bool) {
+        self.request = self.worker.lookup_in(self.query.clone(), self.selected.clone(), rescan, self.selection.clone());
         self.pending = true;
         self.pages = None;
         self.layout_error = None;
@@ -281,7 +289,7 @@ impl Lookup {
     pub fn receive(&mut self, cx: &mut EventCx) {
         if self.returning {
             self.returning = false;
-            self.submit(false);
+            self.repeat(false);
         }
         if let Some(reply) = self.worker.receive()
             && reply.id == self.request
@@ -348,7 +356,7 @@ impl Lookup {
         if self.manage.on_gesture(g) || self.dictionaries_button.on_gesture(g) {
             self.returning = true;
             self.worker.cancel();
-            return Some(LookupEvent::Manage);
+            return Some(LookupEvent::Manage(self.active_set.clone()));
         }
         if self.field.on_gesture(g) {
             self.field.focused = true;
@@ -509,6 +517,7 @@ impl SelectionActions {
 mod tests {
     use super::*;
     use crate::{
+        dictionary::sets::{DEFAULT, Edit},
         platform::{TextInput, Waker},
         store::Store,
     };
@@ -695,10 +704,7 @@ mod tests {
         }
         assert!(!first_paragraph(&State::NoResult).contains("Base form"));
         lookup.state = exact;
-        // Source warnings accompany results; same-name copies show their source.
-        lookup.warnings = vec!["/gone is not available.".into()];
-
-        lookup.warnings.clear();
+        // Same-name copies show their source.
         assert_eq!(lookup.title(&lookup.catalog[0]), lookup.catalog[0].name);
         let mut copy = lookup.catalog[0].clone();
         copy.name = lookup.catalog[1].name.clone();
@@ -719,11 +725,19 @@ mod tests {
         wait(&mut lookup, &mut cx);
         assert_eq!(lookup.state, State::NoResult);
         // Change requests are persisted before the next result or exit barrier.
-        worker.change("b.ifo".into(), true);
+        worker.edit(Edit::MoveDictionary { set: DEFAULT.into(), dictionary: "b.ifo".into(), position: 0 });
         lookup.submit(false);
         wait(&mut lookup, &mut cx);
         assert_eq!(lookup.catalog[0].id, "b.ifo");
-        worker.change("b.ifo".into(), false);
+        // Returning from management repeats the submitted query and keeps an unsubmitted edit.
+        lookup.field.edit(&TextInput::Clear);
+        lookup.field.edit(&TextInput::Insert("draft".into()));
+        lookup.returning = true;
+        lookup.receive(&mut cx);
+        wait(&mut lookup, &mut cx);
+        assert_eq!((lookup.query.as_str(), lookup.field.value()), ("absent", "draft"));
+        assert_eq!(lookup.state, State::NoResult);
+        worker.edit(Edit::Disabled { set: DEFAULT.into(), dictionary: "b.ifo".into(), disabled: true });
         worker.flush()?;
         let prefs: crate::dictionary::sets::Preferences =
             serde_json::from_slice(&std::fs::read(store.dictionary_preferences())?)?;

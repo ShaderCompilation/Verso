@@ -205,16 +205,15 @@ fn preferences_survive_source_removal_and_re_adding() {
     assert_eq!(names(&f.catalog()), ["A", "B", "Native"]);
     let b = f.join("ext/b.ifo").to_string_lossy().into_owned();
     let a = f.join("ext/a.ifo").to_string_lossy().into_owned();
-    f.worker.change(b.clone(), true); // B, A, Native
-    f.worker.change(a.clone(), false); // A disabled
+    edit(&f.worker, Edit::MoveDictionary { set: DEFAULT.into(), dictionary: b.clone(), position: 0 }); // B, A, Native
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: a.clone(), disabled: true }); // A disabled
     assert_eq!(names(&f.catalog()), ["B", "A", "Native"]);
 
     f.store.save_dictionary_folders(&[]).unwrap();
     assert_eq!(names(&f.catalog()), ["Native"]);
     // A change while the folder is gone keeps the removed dictionaries' preferences.
-    f.worker.change("n.ifo".into(), false);
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "n.ifo".into(), disabled: true });
     f.worker.flush().unwrap();
-    drop(f.worker.receive());
 
     // Re-adding restores flags and relative order, also after a restart.
     f.store.save_dictionary_folders(&[f.join("ext")]).unwrap();
@@ -237,12 +236,12 @@ fn preferred_base_form_beats_lower_exact_and_selection_and_disabled_are_respecte
     let reply = f.reply(f.worker.lookup("boxes".into(), Some("b.ifo".into()), false)).0;
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
     assert!(matches!(reply.state, Some(State::Definition { base_forms: None, .. })));
-    f.worker.change("b.ifo".into(), true);
+    edit(&f.worker, Edit::MoveDictionary { set: DEFAULT.into(), dictionary: "b.ifo".into(), position: 0 });
     assert_eq!(f.lookup("boxes").selected.as_deref(), Some("b.ifo"), "preference changes apply immediately");
-    f.worker.change("b.ifo".into(), false);
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "b.ifo".into(), disabled: true });
     let reply = f.reply(f.worker.lookup("boxes".into(), Some("b.ifo".into()), false)).0;
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"), "disabled selection falls back to enabled dictionaries");
-    f.worker.change("a.ifo".into(), false);
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "a.ifo".into(), disabled: true });
     assert_eq!(f.lookup("boxes").state, Some(State::Disabled));
 }
 
@@ -369,7 +368,7 @@ fn error_and_no_result_fallback_remain_in_preference_order_in_one_pass() {
         let reply = f.reply(f.worker.lookup(query.into(), Some("a.ifo".into()), false)).0;
         assert!(matches!(reply.state, Some(State::Error(_))));
         // A no-result before an error keeps the same priority.
-        f.worker.change("b.ifo".into(), true);
+        edit(&f.worker, Edit::MoveDictionary { set: DEFAULT.into(), dictionary: "b.ifo".into(), position: 0 });
         let reply = f.lookup(query);
         assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
         assert_eq!(reply.state, Some(State::NoResult));
@@ -537,7 +536,6 @@ fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_c
     // Another client's edits and folder saves are queued, not cancellations.
     let lookup = f.worker.lookup("word".into(), None, false);
     let created = settings.edit(Edit::Create { id: "set".into(), name: "Set".into() });
-    f.worker.change_in(DEFAULT, "a.ifo".into(), true);
     f.store.save_dictionary_folders(&[]).unwrap();
     assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
     let reply = wait_client(&settings, created);
@@ -627,8 +625,8 @@ fn settings_edits_apply_to_retained_reader_client_and_are_durable_before_reply()
     assert_eq!(lookup().selected.as_deref(), Some("b.ifo"));
     edit(&settings, Edit::Disabled { set: "english".into(), dictionary: "b.ifo".into(), disabled: true });
     assert_eq!(lookup().selected.as_deref(), Some("a.ifo"));
-    // Reader's inline controls edit the active set and cannot overwrite Default.
-    f.worker.change_in("english", "a.ifo".into(), false);
+    // Editing a set never changes Default.
+    edit(&settings, Edit::Disabled { set: "english".into(), dictionary: "a.ifo".into(), disabled: true });
     assert_eq!(lookup().state, Some(State::Disabled));
     assert_eq!(f.lookup("word").selected.as_deref(), Some("a.ifo"));
     edit(&settings, Edit::Delete { set: "english".into() });
@@ -661,7 +659,7 @@ fn unreadable_preferences_use_empty_default_and_failed_saves_retry_at_barrier() 
     fs::write(&path, b"[{\"id\":7}]").unwrap();
     f.reply(f.worker.catalog(true));
     assert_eq!(fs::read(&path).unwrap(), b"[{\"id\":7}]");
-    f.worker.change("a.ifo".into(), false);
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "a.ifo".into(), disabled: true });
     let reply = f.lookup("word");
     assert!(reply.warnings.is_empty(), "{:?}", reply.warnings);
     let saved: Preferences = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -710,4 +708,18 @@ fn rescan_retries_read_errors_and_refreshes_repaired_metadata() {
     let reply = wait_client(&f.worker, f.worker.catalog(true));
     assert!(reply.dictionaries[0].error.is_none());
     assert_eq!(reply.dictionaries[0].name, "Renamed full dictionary");
+}
+
+#[test]
+fn edits_and_retries_publish_a_fresh_catalog_after_folder_changes() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/n.ifo"), "Native", "word");
+    install(&f.join("ext/a.ifo"), "A", "word");
+    assert_eq!(names(&f.catalog()), ["Native"]);
+    f.store.save_dictionary_folders(&[f.join("ext")]).unwrap();
+    let reply = edit(&f.worker, Edit::Rename { set: DEFAULT.into(), name: "All".into() });
+    assert_eq!(names(&reply), ["Native", "A"], "the edit reply includes the added folder");
+    f.store.save_dictionary_folders(&[]).unwrap();
+    let reply = wait_client(&f.worker, f.worker.retry(DEFAULT, "n.ifo"));
+    assert_eq!(names(&reply), ["Native"], "the retry reply drops the removed folder");
 }
