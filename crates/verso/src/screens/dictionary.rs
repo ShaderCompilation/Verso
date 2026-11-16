@@ -566,6 +566,7 @@ impl Lookup {
         self.sheet.draw(cx);
         let t = cx.theme;
         let status = self.status();
+        log::debug!("dictionary status draw: {status}, set {}", self.active_set);
         if let Some(p) = &mut self.picker {
             p.set.draw(cx);
             p.list.draw(cx);

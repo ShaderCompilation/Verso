@@ -306,3 +306,77 @@ with the Kindle awake and no reader open. They restore the Kindle UI at the end.
 
 `annotation_fixture.py` builds the synthetic records from `reader.epub`; numeric
 results are in `highlights-results.csv`.
+
+## Dictionary indexing, sets and counters
+
+`dictionary.py` verifies dictionary-improvements Phase 6 on our portrait
+1272×1696 Paperwhite. Install the latest app with `scripts/deploy.sh --no-run`
+first, and build `probe` / `probe.so` as above. It uses the installed binary,
+real KOReader dictionaries read-only, original one-word EPUBs and isolated
+state under `/mnt/us/verso/dictionary-performance-check`. A copy of the normal
+launcher owns UI pause/restore. It accepts only test-state paths under that
+folder. Ctrl-C/SIGTERM exits through launcher cleanup.
+
+For example, from the repository root:
+
+```sh
+bench() {
+  python3 scripts/perf/dictionary.py "$@" \
+    --probe /tmp/probe --preload /tmp/probe.so --output /tmp/dictionary-results
+}
+bench cold --language und
+# Read "state" from /tmp/dictionary-results/cold.json and use that path below.
+COLD_STATE=/mnt/us/verso/dictionary-performance-check/cold-TIMESTAMP
+bench cancel
+bench warm --name warm-english --language en-US --cache-state "$COLD_STATE"
+bench warm --name warm-russian --word свет --language rus --cache-state "$COLD_STATE"
+bench warm --name warm-all --language und --cache-state "$COLD_STATE"
+bench added --name before-add --language und
+bench language --name wrong-tag --word light --language ru \
+  --expect-set english --cache-state "$COLD_STATE"
+bench language --name missing-tag --language '' \
+  --expect-set default --cache-state "$COLD_STATE"
+bench language --name cyrillic-in-english --word свет --language en \
+  --expect-set russian --cache-state "$COLD_STATE"
+bench language --name book-choice --language en --choose-default \
+  --expect-set english --cache-state "$COLD_STATE"
+```
+
+Cold times every index build, observes preparation and verifies byte-identical
+book dismissal. It does not flush Linux's page cache. Warm copies only dictionary
+caches, then runs five queries in one session: the first by long press, then four
+**Look up** taps. It is not five independent launches. English enables eight
+English/bilingual dictionaries, Russian the five monolingual Russian ones, and
+Default all 13. Concise Oxford leads the timed English/Default preferences.
+These fixture choices never replace the user's own preferences.
+
+Cancel turns definition pages while preparation is active, closes the sheet,
+turns the book, and checks partial `.tmp`/`.refs` cleanup. Added first indexes
+12 dictionaries, exits, copies the installed `eng_rus_full` dictionary into the
+isolated native dictionary folder, restarts, exercises cancellation/turns again,
+and finishes the retry. It checks that every old cache hash is unchanged and
+only the addition builds successfully. Language creates EPUBs with the specified
+metadata (an empty argument omits `dc:language`), checks the actual set and hits,
+and optionally selects Default through the picker and verifies its persisted
+book field after a full restart.
+
+JSON, debug logs, display traces and private PNG captures go into `--output`.
+Index logs name metadata paths and report elapsed time/success; search logs
+report first-definition readiness, completion, match count and set. Queries and
+definition content are not logged. Status RSS is sampled every 200 ms; detailed
+settled memory uses `smaps`. A cancelled build is recorded with `success=false`.
+Check successful display ioctls and captures together: release-to-SEND_UPDATE
+is a request boundary, and multiple changed regions/pressed feedback can produce
+several requests per action. It is not optical panel response. Long-press release
+is after the lookup has already started, so use worker timers for lookup latency,
+not the long-press release marker.
+
+After collecting evidence, stop the test app, verify its launcher PID file is
+gone and `awesome` is running, then remove the test folder's temporary state,
+cache and dictionary copy. Preserve raw evidence locally; commit aggregate CSVs
+only. Check the installed binary, launcher and KUAL hashes against the latest
+artifacts, and keep the user's settings/books/positions. Counter feel requires the user to try the actual panel. On 2026-11-16 the user
+reported slow-feeling definitions and blending during updates, and requested
+documentation without fixes. The 150 ms deadline is unchanged. Results and
+measurement limits:
+[dictionary.md](../../docs/dictionary.md#dictionary-improvements-kindle-verification-and-performance--2026-11-16).

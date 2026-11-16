@@ -163,6 +163,8 @@ impl Index {
         let (idx, compressed) = companion(&base, "idx", "idx.gz")?;
         let syn = sibling(&base, "syn");
         preparing();
+        let started = std::time::Instant::now();
+        log::debug!("dictionary index build started: {}", path.display());
         let build_id = BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = format!("{}-{build_id}", std::process::id());
         let temp = dest.with_extension(format!("{suffix}.tmp"));
@@ -264,6 +266,12 @@ impl Index {
         })();
         let _ = fs::remove_file(&temp);
         let _ = fs::remove_file(&refs_path);
+        log::debug!(
+            "dictionary index build finished: {:?}, success {}, {}",
+            started.elapsed(),
+            result.is_ok(),
+            path.display()
+        );
         result
     }
     pub fn find(&mut self, query: &str) -> Result<Vec<Entry>> {

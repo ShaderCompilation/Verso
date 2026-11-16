@@ -287,6 +287,7 @@ impl Inner {
             revision: request.revision,
         });
         let ids: Vec<_> = self.catalog.dictionaries.iter().filter(|d| !d.disabled).map(|d| d.id.clone()).collect();
+        log::debug!("dictionary search started: set {}, {} enabled", self.active_set, ids.len());
         let state = if self.catalog.dictionaries.is_empty() {
             State::Missing
         } else if ids.is_empty() {
@@ -350,6 +351,7 @@ impl Inner {
                             if snapshot.borrow().selected.is_none() {
                                 match self.render_match(&matched, query, current) {
                                     Ok(definition) => {
+                                        log::debug!("dictionary first definition: {:?}", started.elapsed());
                                         let mut snapshot = snapshot.borrow_mut();
                                         snapshot.selected = Some(id.clone());
                                         snapshot.state = Some(definition);
@@ -386,6 +388,12 @@ impl Inner {
             reply.selected = Some(first.dictionary.clone());
             reply.state = Some(State::Error(UNREADABLE.into()));
         }
+        log::debug!(
+            "dictionary search complete: {:?}, {} matches, set {}",
+            started.elapsed(),
+            reply.matches.len(),
+            self.active_set
+        );
         publish(request, reply, current);
     }
     #[cfg(test)]
