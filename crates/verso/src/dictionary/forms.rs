@@ -2,11 +2,13 @@
 //! headwords; none of these transformations proves that a word is English.
 
 const EXCEPTIONS: &str = include_str!("../../../../assets/wordforms/english-exceptions.txt");
+/// Verso's curated lemma lists, used instead of WordNet's row for the same
+/// form. Same format as `EXCEPTIONS`. Each row keeps every WordNet lemma and
+/// adds or reorders: forms WordNet lacks (`does`, where rules would pick
+/// `doe`), and regular readings that authoritative exceptions would otherwise
+/// hide (`lives → live`, `axes → axe`).
+const OVERRIDES: &str = include_str!("../../../../assets/wordforms/english-overrides.txt");
 const MAX_QUERY_BYTES: usize = 64;
-/// Common forms WordNet doesn't list, where the rules alone would pick the
-/// wrong word (`does → doe`, `doing → doe`, `being → bee`). Sorted; no form
-/// here may also be in WordNet's list.
-const SUPPLEMENT: &[(&str, &[&str])] = &[("being", &["be"]), ("does", &["do"]), ("doing", &["do"])];
 
 /// Function words, fixed adverbs, archaic auxiliaries and interjections whose
 /// suffixes give misleading guesses.
@@ -130,10 +132,11 @@ const NO_RULES: &[&str] = &[
 pub(super) struct Candidates {
     /// Try this as an exact word before exceptions or rules.
     pub possessive: Option<String>,
-    /// All curated lemmas, in source order.
+    /// All curated lemmas, in source order. Authoritative: when present,
+    /// there are no rule guesses, even if no lemma has an entry.
     pub exceptions: Vec<&'static str>,
-    /// Ordered, unique guesses; only the first rule with an entry counts,
-    /// after collecting exception hits.
+    /// Ordered, unique guesses for words without curated lemmas; only the
+    /// first rule with an entry counts.
     pub rules: Vec<String>,
 }
 impl Candidates {
@@ -163,49 +166,55 @@ pub(super) fn candidates(query: &str) -> Option<Candidates> {
         return None;
     }
 
+    let exceptions: Vec<_> = exception_lemmas(OVERRIDES, word)
+        .or_else(|| exception_lemmas(EXCEPTIONS, word))
+        .map_or_else(Vec::new, |lemmas| lemmas.split(' ').collect());
+    // Curated lemmas are authoritative: rules would add false readings
+    // (`lying → lye`, `best → be`, `stepped → steppe`).
+    let rules =
+        if exceptions.is_empty() && NO_RULES.binary_search(&word).is_err() { rule_guesses(word) } else { Vec::new() };
+    Some(Candidates { possessive: stripped.map(str::to_owned), exceptions, rules })
+}
+
+/// Ordered, unique suffix guesses for a lowercase word.
+fn rule_guesses(word: &str) -> Vec<String> {
     let mut rules = Vec::new();
-    if NO_RULES.binary_search(&word).is_err() {
-        for (suffix, replacement) in [
-            ("ies", "y"),
-            ("ied", "y"),
-            ("ier", "y"),
-            ("iest", "y"),
-            ("s", ""),
-            ("es", ""),
-            ("ves", "f"),
-            ("ves", "fe"),
-            ("men", "man"),
-            ("d", ""),
-            ("ed", ""),
-            ("ing", "e"),
-            ("ing", ""),
-            ("r", ""),
-            ("er", ""),
-            ("st", ""),
-            ("est", ""),
-        ] {
-            if let Some(stem) = word.strip_suffix(suffix) {
-                // A one-letter stem makes a two-letter `y` word that is usually an
-                // abbreviation (dies → dy, lies → ly); the `s`/`d` rules find die/lie.
-                if replacement == "y" && stem.len() < 2 {
-                    continue;
-                }
-                push_rule(&mut rules, format!("{stem}{replacement}"));
-                // Preserve the intact stem first: kissed -> kiss, never just kis.
-                if replacement.is_empty() && matches!(suffix, "ed" | "ing" | "er" | "est") {
-                    let bytes = stem.as_bytes();
-                    if bytes.len() >= 2 && bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
-                        push_rule(&mut rules, stem[..stem.len() - 1].to_owned());
-                    }
+    for (suffix, replacement) in [
+        ("ies", "y"),
+        ("ied", "y"),
+        ("ier", "y"),
+        ("iest", "y"),
+        ("s", ""),
+        ("es", ""),
+        ("ves", "f"),
+        ("ves", "fe"),
+        ("men", "man"),
+        ("d", ""),
+        ("ed", ""),
+        ("ing", "e"),
+        ("ing", ""),
+        ("r", ""),
+        ("er", ""),
+        ("st", ""),
+        ("est", ""),
+    ] {
+        if let Some(stem) = word.strip_suffix(suffix) {
+            // A one-letter stem makes a two-letter `y` word that is usually an
+            // abbreviation (dies → dy, lies → ly); the `s`/`d` rules find die/lie.
+            if replacement == "y" && stem.len() < 2 {
+                continue;
+            }
+            push_rule(&mut rules, format!("{stem}{replacement}"));
+            // Preserve the intact stem first: kissed -> kiss, never just kis.
+            if replacement.is_empty() && matches!(suffix, "ed" | "ing" | "er" | "est") {
+                let bytes = stem.as_bytes();
+                if bytes.len() >= 2 && bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
+                    push_rule(&mut rules, stem[..stem.len() - 1].to_owned());
                 }
             }
         }
     }
-    let exceptions = match exception_lemmas(EXCEPTIONS, word) {
-        Some(lemmas) => lemmas.split(' ').collect(),
-        None => SUPPLEMENT.iter().find(|(form, _)| *form == word).map_or_else(Vec::new, |(_, lemmas)| lemmas.to_vec()),
-    };
-    Some(Candidates { possessive: stripped.map(str::to_owned), exceptions, rules })
+    rules
 }
 
 fn push_rule(rules: &mut Vec<String>, word: String) {
@@ -308,7 +317,7 @@ mod tests {
             ("women", vec!["woman"]),
             ("happier", vec!["happy", "happie", "happi"]),
         ] {
-            assert_eq!(candidates(word).unwrap().rules, expected, "{word}");
+            assert_eq!(rule_guesses(word), expected, "{word}");
         }
     }
 
@@ -323,7 +332,7 @@ mod tests {
             ("spies", vec!["spy", "spie", "spi"]),
             ("dried", vec!["dry", "drie", "dri"]),
         ] {
-            assert_eq!(candidates(word).unwrap().rules, expected, "{word}");
+            assert_eq!(rule_guesses(word), expected, "{word}");
         }
     }
 
@@ -335,7 +344,7 @@ mod tests {
             ("nicer", vec!["nice", "nic"]),
             ("hoped", vec!["hope", "hop"]),
         ] {
-            assert_eq!(candidates(word).unwrap().rules, expected, "{word}");
+            assert_eq!(rule_guesses(word), expected, "{word}");
         }
     }
 
@@ -350,7 +359,7 @@ mod tests {
             ("trees", vec!["tree", "tre"]),
             ("balls", vec!["ball"]),
         ] {
-            assert_eq!(candidates(word).unwrap().rules, expected, "{word}");
+            assert_eq!(rule_guesses(word), expected, "{word}");
         }
     }
 
@@ -359,26 +368,59 @@ mod tests {
         for (word, expected) in [
             ("went", vec!["go"]),
             ("knelt", vec!["kneel"]),
-            ("axes", vec!["ax", "axis"]),
             ("dying", vec!["die"]),
-            // Supplement entries, missing from WordNet.
+            ("best", vec!["good", "well"]),
+            // Overrides: forms missing from WordNet, and added regular readings.
             ("does", vec!["do"]),
             ("DOING", vec!["do"]),
             ("being", vec!["be"]),
+            ("axes", vec!["ax", "axe", "axis"]),
+            ("lives", vec!["life", "live"]),
+            ("deeper", vec!["deep", "deeply"]),
         ] {
             assert_eq!(candidates(word).unwrap().exceptions, expected, "{word}");
         }
     }
 
     #[test]
-    fn supplement_is_sorted_and_adds_only_forms_wordnet_lacks() {
-        for pair in SUPPLEMENT.windows(2) {
-            assert!(pair[0].0 < pair[1].0, "unsorted or duplicate: {}", pair[1].0);
+    fn curated_lemmas_suppress_rules() {
+        // Each rule-only extra here is a real headword in an installed dictionary.
+        for (word, lemmas) in [
+            ("lying", vec!["lie"]),
+            ("best", vec!["good", "well"]),
+            ("happier", vec!["happy"]),
+            ("stepped", vec!["step"]),
+            ("running", vec!["run"]),
+            ("axes", vec!["ax", "axe", "axis"]),
+        ] {
+            let forms = candidates(word).unwrap();
+            assert_eq!(forms.exceptions, lemmas, "{word}");
+            assert!(forms.rules.is_empty(), "{word}: {:?}", forms.rules);
         }
-        for (form, lemmas) in SUPPLEMENT {
-            assert!(form.bytes().all(|b| b.is_ascii_lowercase()), "{form}");
-            assert!(!lemmas.is_empty(), "{form}");
-            assert_eq!(exception_lemmas(EXCEPTIONS, form), None, "{form} is now in WordNet's list");
+        // Words without curated lemmas still get rule guesses.
+        assert_eq!(candidates("boxes").unwrap().rules, ["boxe", "box"]);
+        assert_eq!(candidates("hoping").unwrap().rules, ["hope", "hop"]);
+    }
+
+    #[test]
+    fn overrides_are_sorted_and_only_add_or_reorder_wordnet_lemmas() {
+        assert!(OVERRIDES.ends_with('\n'));
+        let mut previous = "";
+        for line in OVERRIDES.lines() {
+            let (form, lemmas) = line.split_once(' ').expect("form and lemmas");
+            assert!(form > previous, "unsorted or duplicate form: {form}");
+            assert!(form.bytes().all(|b| b.is_ascii_lowercase()), "unreachable form: {form}");
+            previous = form;
+            let lemmas: Vec<_> = lemmas.split(' ').collect();
+            for (i, lemma) in lemmas.iter().enumerate() {
+                assert!(!lemma.is_empty() && !lemmas[..i].contains(lemma), "{line}");
+            }
+            let wordnet: Vec<_> = exception_lemmas(EXCEPTIONS, form).map_or_else(Vec::new, |l| l.split(' ').collect());
+            for lemma in &wordnet {
+                assert!(lemmas.contains(lemma), "{form} drops WordNet's {lemma}");
+            }
+            assert_ne!(lemmas, wordnet, "{form} repeats WordNet's row");
+            assert_eq!(exception_lemmas(OVERRIDES, form).map(|l| l.split(' ').collect()), Some(lemmas), "{form}");
         }
     }
 
@@ -452,7 +494,7 @@ mod tests {
         // The minimum is for rule guesses, not possessives or curated lemmas.
         assert_eq!(candidates("a's").unwrap().possessive.as_deref(), Some("a"));
         assert_eq!(exception_lemmas("as a\n", "as"), Some("a"));
-        assert_eq!(candidates("wolves").unwrap().rules.iter().filter(|s| *s == "wolve").count(), 1);
+        assert_eq!(rule_guesses("wolves").iter().filter(|s| *s == "wolve").count(), 1);
     }
 
     #[test]

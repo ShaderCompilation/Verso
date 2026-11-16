@@ -463,7 +463,7 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
         for (query, expected) in [
             ("uses", vec!["use"]),
             ("hoping", vec!["hope"]),
-            ("axes", vec!["axis", "axe"]),
+            ("axes", vec!["axe", "axis"]),
             ("thunders", vec!["thunder"]),
             ("studies", vec!["study"]),
             ("running", vec!["run"]),
@@ -497,8 +497,8 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
         let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
         assert_eq!(count, 3);
         assert_eq!(contents(&text), "axe\n\nA tool.\n\naxis\n\nA line.\n\nchild\n\nA young person.");
-        // A rule matching a span already returned by an exception is still
-        // the first rule hit, so later rule hits must not be added.
+        // `candidates` no longer combines exceptions and rules, but the backend
+        // still treats a rule matching an exception's span as the first rule hit.
         let candidates =
             forms::Candidates { possessive: None, exceptions: vec!["use"], rules: vec!["use".into(), "us".into()] };
         let (entries, count) = backend.lookup_forms(&candidates, &|| true)?;
