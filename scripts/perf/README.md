@@ -7,6 +7,94 @@ new Home → library path. Its report records run order, boundaries and correcti
 These are measurement components, not a deploy command. Running a reader still
 requires the launcher and device-readiness checks in `AGENTS.md`.
 
+## Current performance audit
+
+The [2026-11-16 pass](../../docs/research/performance-2026-11-16.md) reuses these
+components for current bottleneck attribution. Build both probes below, install
+the latest release with `scripts/deploy.sh --no-run` **before** measuring, verify
+its hash, and run one device workload at a time. The captures record the executed
+binary's SHA-256; startup `--installed` also verifies it against the supplied
+local binary. A clean Git tree does not prove an existing build is current.
+Each turn run uses
+fresh isolated settings and 24 turns. Repeat independent launches; do not count
+consecutive memory snapshots as independent runs.
+
+Readiness also resets powerd's current idle countdown using
+`touchScreenSaverTimeout`, without changing the normal sleep policy. Contacts
+injected into Verso's grabbed input do not reliably reset the paused native UI's
+idle timer. Sleep during a run invalidates its touch/update/page counts. Rejected
+captures are saved separately as `*.failed.json` for diagnosis and are rejected
+by the analyzer; keep them out of accepted-input globs.
+
+```sh
+python3 scripts/perf/redraw.py portrait-1 \
+  target/armv7-unknown-linux-gnueabihf/release/verso \
+  --book /mnt/us/verso/testbooks/BOOK.epub \
+  --probe /tmp/probe --preload /tmp/probe.so --home \
+  --memory-check --idle-seconds 12 --output /tmp/perf/portrait-1.json
+# Repeat with --orientation landscape for landscape; lifecycle flags remain portrait-only.
+# For rapid input, use --turn-delay-us 150000 --queued-input.
+# Compare the same rapid workload with --page-flash 0 (chapter/image flashes remain).
+python3 scripts/perf/analyze-redraw.py /tmp/perf/*.json \
+  --workloads --output /tmp/perf/numeric
+```
+
+Use a dedicated directory containing **only redraw captures** with that glob;
+startup and dictionary JSON have different schemas. The ordinary default rejects
+updates that cannot be associated with a single touch before the next contact.
+`--queued-input` permits a later FIFO update only if the run has exactly 24
+recognized taps, frames, successful full-screen updates, saves and saved-page
+advances. It adds one final settling second before CPU accounting ends. This
+captures a queue behind a full flash rather than discarding slow touches.
+
+The analyzer reports overlap between touch-to-request latency and earlier
+full-refresh completion waits, plus render/presentation distributions and
+main/book/position/library thread CPU. All CPU calculations use the measured
+device's 100 Hz accounting. `--workloads` validates final pixels and waveform
+sequences within each book hash/orientation/font/refresh/cadence/annotation workload;
+default comparison mode keeps the stricter global pixel/waveform checks.
+`--font-size-pt` makes layout comparisons explicit. The current pass uses
+10 pt for the illustrated book and 10.5 pt (44 engine pixels) for the large book,
+so its first open misses the previously retained 10 pt layout without deleting
+the user's engine caches. Repeat the same size to measure a matching-cache reopen.
+
+Startup can now run without a synthetic fixture or probes left by an old run:
+
+```sh
+python3 scripts/perf/startup.py current \
+  target/armv7-unknown-linux-gnueabihf/release/verso \
+  --probe /tmp/probe --preload /tmp/probe.so \
+  --fixture real --mode startup --runs 3 --collections-tap 636,230 \
+  --output /tmp/perf/startup.json
+python3 scripts/perf/analyze-startup.py /tmp/perf/startup.json \
+  --output /tmp/perf/startup.csv
+```
+
+For cached-only scaling, use `--fixture large --large screenshots/phase7/large-state`
+after generating the original fixture. `startup.py` replaces its `Unavailable:
+fixture` cover placeholders with the real source-stamped cover keys **in the
+uploaded copy only**. Otherwise the run measures 10,000 cover retries and index
+writes rather than unchanged startup. Check for zero cover changes and index
+writes before interpreting that workload. It retains the copied Home summary,
+as in the original Home-startup report; it is not a real 10,000-file scan.
+
+`analyze-startup.py` uses the reader's preload-constructor timestamp for initial
+request and matching driver-completion boundaries. Internal stage timers overlap
+and must not be summed into total startup. The app's `first frame on screen`
+message is emitted after presentation returns. Likewise, the legacy
+`highlights_load.py` field `first_page_ms` comes from `Reader::after_present`,
+including a full-refresh wait when applicable: it is not first SEND_UPDATE.
+The current report labels that value `first_present_return_ms`.
+
+Keep executable identity reads **before launch**. The current pass measured
+31,968 → 21,976 KiB RSS after running `sha256sum` on the live executable,
+with unchanged private dirty memory and page pixels. That observer effect can
+make reading memory look ~9.8 MiB lower. `--memory-check --identity-memory-check`
+reproduces the control outside the timed turn interval. Exported memory rows
+label whether an executable identity read occurred during the app's lifetime
+before that snapshot. Treat those post-read samples separately from normal RSS;
+the request/CPU interval precedes the read and remains usable.
+
 ## Redraw comparison
 
 `redraw.py` runs 24 text turns through the existing launcher with isolated state

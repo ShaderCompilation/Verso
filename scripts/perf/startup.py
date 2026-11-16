@@ -6,15 +6,32 @@ contains numeric timings/accounting and anonymous trace records, not book names.
 See docs/research/home-startup.md for measurement boundaries and cold-cache limits.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import time
+from redraw import memory
 
 APP = '/mnt/us/verso/startup-check'
 Q = shlex.quote
+
+
+def large_index(path):
+    """Upgrade the original cached-only fixture's placeholder cover keys.
+
+    Matches covers::key: otherwise every missing EPUB is retried and persisted,
+    which measures cache regeneration instead of unchanged-library startup.
+    """
+    index = json.loads(path.read_text())
+    for book in index['books']:
+        if book.get('cover') == {'Unavailable': 'fixture'}:
+            stamp = {k: book['stamp'][k] for k in ('size', 'modified_secs', 'modified_nanos')}
+            payload = json.dumps([1, book['id'], stamp], separators=(',', ':'), ensure_ascii=False).encode()
+            book['cover'] = {'Unavailable': hashlib.sha256(payload).hexdigest()}
+    return json.dumps(index, ensure_ascii=False).encode()
 
 
 def remote(command, data=None):
@@ -90,7 +107,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('variant')
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--large', type=Path, required=True)
+    parser.add_argument('--large', type=Path, help='Required only for the large-library fixture')
+    parser.add_argument('--probe', type=Path, help='Touch/clock helper; supply together with --preload')
+    parser.add_argument('--preload', type=Path, help='Display ioctl observer')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--runs', type=int, default=2)
     parser.add_argument('--fixture', choices=['real', 'large'])
@@ -101,14 +120,27 @@ def main():
     parser.add_argument('--summary', choices=['copied', 'missing', 'seeded'], default='copied',
                         help='Home summary: as copied, removed (migration), or the saved real-library seed')
     args = parser.parse_args()
+    assert re.fullmatch(r'[a-z0-9-]+', args.variant)
+    assert re.fullmatch(r'\d+,\d+', args.collections_tap)
+    if bool(args.probe) != bool(args.preload):
+        parser.error('--probe and --preload must be supplied together')
+    if args.fixture != 'real' and args.large is None:
+        parser.error('--large is required unless --fixture real is selected')
     assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
     repo = Path(__file__).resolve().parents[2]
     remote(f'mkdir -p {APP}/bin/{Q(args.variant)}')
     if not args.installed:
         upload(f'{APP}/bin/{args.variant}/verso', args.binary.read_bytes())
-    remote(f'chmod 755 {APP}/bin/{Q(args.variant)}/verso; '
-           f'cp /mnt/us/verso/persistence-check/bin/probe {APP}/bin/probe; '
-           f'cp /mnt/us/verso/persistence-check/bin/probe.so {APP}/bin/probe.so')
+    if args.probe:
+        upload(APP + '/bin/probe', args.probe.read_bytes())
+        upload(APP + '/bin/probe.so', args.preload.read_bytes())
+    else:
+        # Compatibility with earlier runs; new runs should provide both tools.
+        remote(f'cp /mnt/us/verso/persistence-check/bin/probe {APP}/bin/probe; '
+               f'cp /mnt/us/verso/persistence-check/bin/probe.so {APP}/bin/probe.so')
+    remote(f'chmod 755 {APP}/bin/{Q(args.variant)}/verso {APP}/bin/probe')
+    binary_sha256 = remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0]
+    assert binary_sha256 == hashlib.sha256(args.binary.read_bytes()).hexdigest(), 'Installed variant differs from binary'
     launcher = (repo / 'dist/kindle/verso/verso.sh').read_text().replace('APP_DIR="/mnt/us/verso"', f'APP_DIR="{APP}"')
     launcher = launcher.replace('/tmp/verso-launcher', '/tmp/verso-startup-launcher')
     upload(APP + '/launcher.sh', launcher.encode())
@@ -121,12 +153,13 @@ def main():
             continue
         for number in range(args.runs):
             assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
+            remote('lipc-set-prop com.lab126.powerd touchScreenSaverTimeout 1')
             run = f'{args.variant}-{fixture}-{mode}-{time.time_ns()}'
             state = APP + '/' + run + '.state'
             trace = APP + '/' + run + '.trace'
             remote(f'mkdir -p {state}; cp -r /mnt/us/verso/data/. {state}/')
             if fixture == 'large':
-                upload(state + '/library.json', (args.large / 'library.json').read_bytes())
+                upload(state + '/library.json', large_index(args.large / 'library.json'))
                 upload(state + '/settings.json', (args.large / 'settings.json').read_bytes())
             # A predictable source view; real reading positions/flags stay copied.
             upload(state + '/library-navigation.json', b'{"tab":"all_books","all_page":0}')
@@ -140,7 +173,8 @@ def main():
                        f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
             upload(APP + '/verso', wrapper.encode())
             pid = None
-            result = dict(variant=args.variant, fixture=fixture, mode=mode, number=number, summary=args.summary,
+            result = dict(variant=args.variant, binary_sha256=binary_sha256,
+                          fixture=fixture, mode=mode, number=number, summary=args.summary,
                           cache='warm OS cache; fresh copy of persisted app data', samples={})
             try:
                 remote(f'chmod 755 {APP}/verso; : > {APP}/verso.log; '
@@ -152,7 +186,8 @@ def main():
 
                 def sample(label):
                     records = remote(f'cat /proc/{pid}/stat /proc/{pid}/status /proc/{pid}/io')
-                    result['samples'][label] = dict(stat=records.splitlines()[0], status=records, io=records)
+                    result['samples'][label] = dict(stat=records.splitlines()[0], status=records, io=records,
+                                                   memory=memory(pid))
 
                 sample('first_frame')
                 probe = f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe tap {pid}'
@@ -173,7 +208,7 @@ def main():
                 lines = remote(f'cat {APP}/verso.log').splitlines()
                 result['timings'] = [line for line in lines if any(key in line for key in [
                     'startup stage:', 'first frame on screen', 'library covers:', 'library scan:',
-                    'library identities complete'])]
+                    'library identities complete', 'crengine ready:'])]
                 result['trace'] = remote(f'cat {trace}')
                 if fixture == 'real' and mode == 'startup' and args.summary == 'missing':
                     remote(f'grep -q {Q('"complete":true')} {state}/home.json && cp {state}/home.json {APP}/seed-home.json')
@@ -182,7 +217,9 @@ def main():
                     remote(f'kill -TERM {pid}')
                     wait(f'test ! -e /proc/{pid}')
                 wait('test ! -e /tmp/verso-startup-launcher.pid')
-                assert remote('ps | awk \'$5 == "awesome" {print $3}\'') != 'T'
+                states = remote('for n in awesome JunoStatusBarDriver; do p=$(pidof "$n"); '
+                                'test -n "$p" && awk \'/^State:/ {print $2}\' /proc/$p/status; done')
+                assert len(states.split()) == 2 and 'T' not in states.split(), 'Kindle UI not restored'
                 result['clean_exit'] = True
             # No process names, argv, kernel addresses or document paths in export.
             for sample_set in result['samples'].values():

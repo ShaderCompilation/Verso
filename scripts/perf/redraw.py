@@ -35,6 +35,9 @@ def wait_for(command, seconds=30):
 def ready():
     assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; '
                   'pidof reader.lua || true') == 'active', 'Wake Kindle and close readers first'
+    # Injected contacts reach Verso's grabbed input, not the paused Amazon UI.
+    # Start with a fresh idle deadline without changing the normal sleep policy.
+    remote('lipc-set-prop com.lab126.powerd touchScreenSaverTimeout 1')
 
 
 def memory(pid):
@@ -66,6 +69,8 @@ def main():
                         help='After timing, check real sleep/wake restoration and the next turn')
     parser.add_argument('--memory-check', action='store_true',
                         help='Sample smaps/status in library, reader and menu outside timed turns')
+    parser.add_argument('--identity-memory-check', action='store_true',
+                        help='With --memory-check, compare RSS before/after reading the executable digest')
     parser.add_argument('--turn-delay-us', type=int, default=850000,
                         help='Delay after each 50 ms contact (default: 850000)')
     parser.add_argument('--experiment', choices=['redraw', 'persistence', 'annotations'], default='redraw')
@@ -74,11 +79,25 @@ def main():
     parser.add_argument('--failure-check', action='store_true',
                         help='Block only the isolated position temp file, check errors and recover')
     parser.add_argument('--home', action='store_true', help='Visit All books from the current Home screen')
+    parser.add_argument('--orientation', choices=['portrait', 'landscape'], default='portrait')
+    parser.add_argument('--page-flash', type=int, default=6,
+                        help='Periodic full-refresh interval; 0 disables periodic flashes')
+    parser.add_argument('--font-size-pt', type=float, default=10.,
+                        help='Controlled book font size; use a new size to measure layout-cache misses')
+    parser.add_argument('--idle-seconds', type=int, default=0,
+                        help='Sample settled idle CPU outside the timed turns (0 skips)')
+    parser.add_argument('--queued-input', action='store_true',
+                        help='Allow updates after subsequent touches; require 24 taps, frames and saved-page advances')
     parser.add_argument('--annotation-count', type=int, choices=[0, 100, 1000])
     parser.add_argument('--annotation-fixture', type=Path, help='Local original reader.epub for synthetic records')
     args = parser.parse_args()
     APP = '/mnt/us/verso/' + args.experiment + '-check'
     assert 0 < args.turn_delay_us <= 1000000
+    assert args.page_flash >= 0 and 0 <= args.idle_seconds <= 30
+    assert 6 <= args.font_size_pt <= 36
+    assert not args.identity_memory_check or args.memory_check
+    assert args.orientation == 'portrait' or not (args.position_check or args.failure_check or args.wake_check), \
+        'Position/failure/wake lifecycle coordinates currently require portrait'
     assert re.fullmatch(r'[a-z0-9-]+', args.variant)
     ready()
     remote(f'mkdir -p {APP}/bin {APP}/books')
@@ -88,6 +107,9 @@ def main():
                          (args.variant + '/verso', args.binary)]:
         remote(f'mkdir -p {APP}/bin/{args.variant}')
         upload(APP + '/bin/' + name, source.read_bytes())
+    binary_sha256 = remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0]
+    assert binary_sha256 == hashlib.sha256(args.binary.read_bytes()).hexdigest()
+    book_sha256 = remote(f'sha256sum {APP}/books/book.epub').split()[0]
     launcher = Path('dist/kindle/verso/verso.sh').read_text()
     launcher = launcher.replace('APP_DIR="/mnt/us/verso"', f'APP_DIR="{APP}"')
     launcher = launcher.replace('/tmp/verso-launcher', '/tmp/verso-redraw-launcher')
@@ -96,9 +118,10 @@ def main():
     state = APP + '/' + run + '.state'
     trace = APP + '/' + run + '.trace'
     remote(f'mkdir -p {state}; chmod 755 {APP}/bin/probe {APP}/bin/{args.variant}/verso')
-    settings = {'typography': {'font': 'Literata', 'size_pt': 10., 'spacing': 0,
+    settings = {'typography': {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0,
                               'margins': 0, 'justify': True}, 'footer': True,
-                'library_folders': [APP + '/books'], 'library_sort': 'title'}
+                'library_folders': [APP + '/books'], 'library_sort': 'title',
+                'orientation': args.orientation, 'page_flash': args.page_flash}
     upload(state + '/settings.json', json.dumps(settings).encode())
     if args.annotation_count is not None:
         assert args.experiment == 'annotations' and args.annotation_fixture
@@ -110,6 +133,7 @@ def main():
                f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
     upload(APP + '/verso', wrapper.encode())
     pid = None
+    results = None
     try:
         remote(f'chmod 755 {APP}/verso; : > {APP}/verso.log; '
                f'setsid sh {APP}/launcher.sh </dev/null >/dev/null 2>&1 &')
@@ -126,27 +150,37 @@ def main():
         remote('sleep 2')
         sample('library')
         probe = f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe tap {pid}'
+        landscape = args.orientation == 'landscape'
+        def tap(x, y, label):
+            if landscape:
+                x, y = y, 1695 - x
+            return f'{probe} {x} {y} {label}'
+        center = (848, 550) if landscape else (636, 848)
+        forward = (1500, 600) if landscape else (1100, 1000)
         # Prime axes: evdev can omit unchanged ABS values between sessions.
-        home = f'{probe} 1000 230 all_books; sleep 2; ' if args.home else ''
-        remote(f'{probe} 1 1 prime; sleep 2; {home}{probe} 200 550 open; sleep 5')
-        assert remote(f'grep -c "page .* rendered in" {APP}/verso.log') != '0', 'Book did not open'
-        remote(
-               f'{probe} 636 848 seek_menu; sleep 1; {probe} 338 1164 seek; sleep 2; '
-               f'{probe} 636 848 seek_close; sleep 2')
+        home = tap(1400 if landscape else 1000, 230, 'all_books') + '; sleep 2; ' if args.home else ''
+        remote(f'{tap(1, 1, "prime")}; sleep 2; {home}{tap(200, 550, "open")}; sleep 5')
+        wait_for(f'grep -q "page .* rendered in" {APP}/verso.log', 120)
+        remote(f'{tap(*center, "seek_menu")}; sleep 1; '
+               f'{tap(440 if landscape else 338, 882 if landscape else 1164, "seek")}; sleep 2; '
+               f'{tap(*center, "seek_close")}; sleep 2')
         def position():
             records = json.loads(remote(f'cat {state}/books/*.json'))
             return {'page': records['page'], 'progress': records['progress'],
                     'position_hash': hashlib.sha256(records['position'].encode()).hexdigest()}
 
-        initial_position = position() if args.position_check else None
+        initial_position = position()
         sample('reader_start')
         remote(f'cp {APP}/verso.log {APP}/{run}.setup.log; : > {APP}/verso.log; '
                f'cat /proc/{pid}/stat > {APP}/{run}.start.stat; '
                f'for t in /proc/{pid}/task/*; do cat "$t/stat"; done > {APP}/{run}.start.tasks; '
                f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe mark turns_start')
         # One remote shell avoids per-tap SSH setup in the measured interval.
-        remote(f'i=1; while [ "$i" -le 24 ]; do {probe} 1100 1000 "turn_$i"; '
+        forward_command = tap(*forward, '"turn_$i"')
+        settle = 'sleep 1; ' if args.queued_input else ''
+        remote(f'i=1; while [ "$i" -le 24 ]; do {forward_command}; '
                f'usleep {args.turn_delay_us}; i=$((i+1)); done; '
+               f'{settle}'
                f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe mark turns_end; '
                f'cat /proc/{pid}/stat > {APP}/{run}.end.stat; '
                f'for t in /proc/{pid}/task/*; do cat "$t/stat"; done > {APP}/{run}.end.tasks; '
@@ -154,6 +188,13 @@ def main():
         # Keep private logs on-device. Export numeric frame/gesture data only.
         frames = remote(f'grep -E "frame: drawn|Down\\(|Tap\\(|presented [0-9]+ update" {APP}/verso.log')
         results = {'variant': args.variant, 'run': run, 'frames': frames,
+                   'binary_sha256': binary_sha256, 'identity_check_timing': 'before_launch',
+                   'book_sha256': book_sha256,
+                   'orientation': args.orientation, 'page_flash': args.page_flash,
+                   'font_size_pt': args.font_size_pt,
+                   'queued_input': args.queued_input, 'initial_position': initial_position,
+                   'render_log': remote(f'grep "rendered in" {APP}/verso.log || true'),
+                   'startup_log': remote(f'grep -E "startup stage:|book .*parse|book .*layout" {APP}/{run}.setup.log || true'),
                    'annotation_count': args.annotation_count,
                    'annotation_setup': remote(f'grep -E "annotation resolution:|book first page" {APP}/{run}.setup.log || true'),
                    'turn_delay_us': args.turn_delay_us,
@@ -161,29 +202,55 @@ def main():
                    'setup_frames': remote(f'grep "frame: drawn" {APP}/{run}.setup.log'),
                    'trace': remote(f'cat {trace}'),
                    'page_hash': remote(f'cat {APP}/{run}.page.hash').split()[0]}
+        setup_log = remote(f'cat {APP}/{run}.setup.log')
+        results['open_stats'] = [dict(parse_ms=int(p), layout_ms=int(l), pages=int(n)) for p, l, n in
+                                 re.findall(r': parse (\d+) ms, layout (\d+) ms, (\d+) pages', setup_log)]
+        results['saved_after_turns'] = position()
+        results['timed_position_after_turns'] = results['saved_after_turns']
+        for label in ['start', 'end']:
+            results[label + '_stat'] = remote(f'cat {APP}/{run}.{label}.stat')
+            results[label + '_tasks'] = remote(f'cat {APP}/{run}.{label}.tasks')
+        assert results['saved_after_turns']['page'] == initial_position['page'] + 24
         sample('reader_end')
         marks = [float(line.split()[0]) for line in results['trace'].splitlines()
                  if re.search(r' MARK \d+ turn_\d+$', line)]
         sends = [line.split() for line in results['trace'].splitlines() if ' IOCTL ' in line
                  and int(line.split()[3], 16) & 0xffff == 0x462e]
         assert len(marks) == 24
+        if args.queued_input:
+            start = next(float(s.split()[0]) for s in results['trace'].splitlines() if s.endswith(' turns_start'))
+            end = next(float(s.split()[0]) for s in results['trace'].splitlines() if s.endswith(' turns_end'))
+            updates = [s for s in sends if start <= float(s[0]) < end]
+            assert len(updates) == 24 and len(re.findall(r' Tap\(Point', frames)) == 24
+            assert len(re.findall(r'frame: drawn', frames)) == 24
+            assert all(s[5] == '0' and s[-2:] == ['1272', '1696'] for s in updates)
         for i, mark in enumerate(marks):
+            if args.queued_input:
+                assert float(updates[i][0]) >= mark, 'Update preceded its touch'
+                continue
             end = marks[i + 1] - .05 if i < 23 else float('inf')
             updates = [s for s in sends if mark <= float(s[0]) < end]
             assert len(updates) == 1 and updates[0][5] == '0', 'Expected one successful update per turn'
             assert updates[0][-2:] == ['1272', '1696'], 'Turn did not refresh the whole page'
-        for label in ['start', 'end']:
-            results[label + '_stat'] = remote(f'cat {APP}/{run}.{label}.stat')
-            results[label + '_tasks'] = remote(f'cat {APP}/{run}.{label}.tasks')
         remote(f'cp {APP}/verso.log {APP}/{run}.log')
         # Menu feedback and restoration (outside timed interval).
-        remote(f'{probe} 636 848 menu_open; sleep 1')
+        remote(f'{tap(*center, "menu_open")}; sleep 1')
         sample('menu')
-        remote(f'{probe} 636 848 menu_close; sleep 1; '
+        remote(f'{tap(*center, "menu_close")}; sleep 1; '
                f'head -c 2157312 /dev/fb0 | sha256sum > {APP}/{run}.restored.hash')
         sample('restored')
         results['restored_hash'] = remote(f'cat {APP}/{run}.restored.hash').split()[0]
         assert results['page_hash'] == results['restored_hash'], 'Menu did not restore page'
+        if args.identity_memory_check:
+            sample('identity_before')
+            assert remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0] == binary_sha256
+            sample('identity_after')
+            assert hashes['identity_before'] == hashes['identity_after'] == results['page_hash']
+        if args.idle_seconds:
+            # One shell and two /proc reads; no polling during the idle interval.
+            results['idle'] = remote(f'cat /proc/{pid}/stat; cat /proc/uptime; '
+                                     f'sleep {args.idle_seconds}; '
+                                     f'cat /proc/{pid}/stat; cat /proc/uptime').splitlines()
         lifecycle_hash = results['page_hash']
         if args.failure_check:
             saved = position()
@@ -258,6 +325,13 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2) + '\n')
         print(args.output, flush=True)
+    except BaseException as error:
+        if results is not None:
+            # Preserve rejected measurements for diagnosis, never as accepted data.
+            results['capture_error'] = repr(error)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.with_suffix('.failed.json').write_text(json.dumps(results, indent=2) + '\n')
+        raise
     finally:
         if args.failure_check:
             remote(f'for f in {state}/books/*.json; do '
