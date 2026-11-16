@@ -7,6 +7,7 @@ mod forms;
 mod index;
 mod markup;
 mod model;
+pub mod sets;
 mod text;
 pub mod worker;
 
@@ -135,6 +136,7 @@ fn discover(root: &Path, preferences: &[Preference]) -> Result<Vec<Dictionary>> 
 /// The preferences after a change: listed dictionaries in their current order,
 /// then preferences of dictionaries that are not listed now (a missing or
 /// removed folder), so re-adding the location restores them.
+#[cfg(test)]
 pub fn merged_preferences(dictionaries: &[Dictionary], previous: Vec<Preference>) -> Vec<Preference> {
     let mut merged: Vec<_> =
         dictionaries.iter().map(|d| Preference { id: d.id.clone(), disabled: d.disabled }).collect();

@@ -54,9 +54,7 @@ pub struct Reader {
     opened_at: Option<Instant>,
     selection: SelectionState,
     dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
-    /// `Store::dictionary_folder_saves` the dictionary worker has seen. When
-    /// folders change in Settings, the next lookup rediscovers.
-    dictionary_folders_seen: u64,
+    dictionary_language: String,
     search: Session,
     search_bar: Option<SearchBar>,
     search_redraw: Option<Instant>,
@@ -128,7 +126,7 @@ impl Reader {
             opened_at: Some(Instant::now()),
             selection: SelectionState::default(),
             dictionary: None,
-            dictionary_folders_seen: Store::dictionary_folder_saves(),
+            dictionary_language: String::new(),
             search: Session::default(),
             search_bar: None,
             search_redraw: None,
@@ -143,6 +141,7 @@ impl Reader {
         }
     }
     pub fn annotations(&mut self, mut book: crate::library::Book) {
+        self.dictionary_language = book.metadata.language.clone();
         if book.annotation_id.is_empty() {
             book.annotation_id = book.id.clone();
         }
@@ -250,18 +249,16 @@ impl Reader {
         }
     }
     fn lookup(&mut self, query: &str, cx: &mut EventCx) {
-        let saves = Store::dictionary_folder_saves();
-        if saves != self.dictionary_folders_seen {
-            self.dictionary_folders_seen = saves;
-            if let Some(worker) = &self.dictionary {
-                worker.invalidate();
-            }
-        }
         let service = self.dictionary.get_or_insert_with(|| {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
         });
         let word = self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)));
-        self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service.clone(), cx.theme, self.screen, word)));
+        let selection = crate::dictionary::sets::Selection {
+            book_set: self.store.book(&self.id).dictionary_set,
+            language: self.dictionary_language.clone(),
+        };
+        self.overlay =
+            Overlay::Lookup(Box::new(Lookup::new(query, service.clone(), cx.theme, self.screen, word, selection)));
         cx.redraw();
     }
     fn selection_released(&mut self, cx: &mut EventCx) {
@@ -1170,9 +1167,62 @@ mod tests {
         assert_eq!(catalog(&r), ["native"]);
         // Settings (stacked above the retained reader) adds a folder.
         store.save_dictionary_folders(&[root.join("koreader")])?;
-        assert_eq!(catalog(&r), ["native"], "the worker alone keeps its fresh catalog");
+        assert_eq!(catalog(&r), ["external", "native"], "the shared service notices folder saves itself");
         r.lookup("Hello", &mut cx);
         assert_eq!(catalog(&r), ["external", "native"], "the next lookup uses the new folders");
+        // Settings edits the same service while this reader is retained.
+        use crate::dictionary::{
+            sets::{Edit, Selection},
+            worker::Worker as Dictionaries,
+        };
+        let settings = Dictionaries::new(store.clone(), crate::platform::Waker::new(|| {}));
+        let wait = |worker: &Dictionaries, id| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(reply) = worker.receive() {
+                    assert_eq!(reply.id, id);
+                    return reply;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let edit = |change| {
+            let reply = wait(&settings, settings.edit(change));
+            assert!(reply.change_error.is_none() && reply.save_error.is_none());
+        };
+        edit(Edit::Create { id: "english".into(), name: "English".into() });
+        edit(Edit::Languages { set: "english".into(), languages: vec!["eng".into()] });
+        edit(Edit::Disabled { set: "english".into(), dictionary: "native.ifo".into(), disabled: false });
+        // The engine tag disagrees: use library metadata, as supplied when the
+        // book is handed to Reader::annotations, and then the persisted override.
+        r.metadata.language = "ru".into();
+        r.dictionary_language = "en-US".into();
+        let lookup = |r: &mut Reader, cx: &mut EventCx| {
+            r.lookup("Hello", cx);
+            let worker = r.dictionary.as_ref().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(reply) = worker.receive() {
+                    return reply;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let reply = lookup(&mut r, &mut cx);
+        assert_eq!(reply.active_set, "english");
+        assert_eq!(reply.selected.as_deref(), Some("native.ifo"));
+        edit(Edit::Disabled { set: "english".into(), dictionary: "native.ifo".into(), disabled: true });
+        assert_eq!(lookup(&mut r, &mut cx).state, Some(crate::dictionary::worker::State::Disabled));
+        let mut state = store.book("book");
+        state.dictionary_set = Some(crate::dictionary::sets::DEFAULT.into());
+        store.save_book("book", &state)?;
+        assert_eq!(lookup(&mut r, &mut cx).active_set, crate::dictionary::sets::DEFAULT);
+        // A recreated client still resolves the persisted book choice.
+        let selection = Selection { book_set: store.book("book").dictionary_set, language: "en".into() };
+        let reply = wait(&settings, settings.lookup_in("Hello".into(), None, false, selection));
+        assert_eq!(reply.active_set, crate::dictionary::sets::DEFAULT);
         drop(r);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1585,6 +1635,7 @@ mod tests {
             finished: true,
             hidden_from_continue: true,
             last_opened: 10,
+            dictionary_set: Some("english".into()),
             ..Default::default()
         };
         store.save_book("book", &saved)?;
@@ -1644,6 +1695,8 @@ mod tests {
         let mut state = store.book("book");
         assert!(!state.finished && !state.hidden_from_continue);
         assert!(state.last_opened > 10);
+        assert_eq!(state.dictionary_set.as_deref(), Some("english"));
+        state.dictionary_set = Some("russian".into());
         state.hidden_from_continue = true;
         store.save_book("book", &state)?;
         r.target = 1;
@@ -1652,6 +1705,7 @@ mod tests {
         r.flush_position()?;
         assert!(store.book("book").hidden_from_continue);
         assert_eq!(store.book("book").position.0, "page-1");
+        assert_eq!(store.book("book").dictionary_set.as_deref(), Some("russian"));
         // Cached neighbours, stale generations and an undisplayed target must
         // not replace the last submitted position at any lifecycle barrier.
         r.receive(Reply::Page(page(2)), &mut cx);

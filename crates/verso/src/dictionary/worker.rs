@@ -1,11 +1,8 @@
-//! Latest-request cancellation; preference writes remain ordered even on close.
-//!
-//! Discovery is lazy: the first request (or one after `invalidate`, or with
-//! `rescan`) reads the folder configuration and scans every source. A
-//! cancelled scan publishes nothing and leaves the catalog stale, so a later
-//! request scans again; a stale catalog is never sent to the UI.
+//! One service per Store family, with independent cancellable client mailboxes.
+//! Discovery is lazy; edits and durable writes share the lookup command queue.
 use super::{
-    Backend, Catalog, Dictionary, Entry, Preference, Source, SourceStatus, discover_catalog, forms, merged_preferences,
+    Backend, Catalog, Dictionary, Entry, Source, SourceStatus, discover_catalog, forms,
+    sets::{DEFAULT, Edit, Preferences, Selection, Set},
 };
 use crate::{
     platform::Waker,
@@ -49,23 +46,46 @@ pub struct Reply {
     /// Source and configuration problems, readable as they are.
     pub warnings: Vec<String>,
     pub selected: Option<String>,
+    #[allow(dead_code)] // Management consumes the set catalog in Phase 4.
+    pub sets: Vec<Set>,
+    pub active_set: String,
+    pub change_error: Option<String>,
     /// `None` answers a catalog request.
     pub state: Option<State>,
     pub save_error: Option<String>,
 }
 enum Command {
-    Lookup { id: u64, query: String, selected: Option<String>, rescan: bool },
-    Catalog { id: u64, rescan: bool },
-    Change { id: String, up: bool },
-    Invalidate,
-    Cancel,
+    Lookup { request: Request, query: String, selected: Option<String>, selection: Selection, rescan: bool },
+    Catalog { request: Request, set: String, rescan: bool },
+    Edit { request: Request, edit: Edit },
+    Change { set: String, id: String, up: bool },
+    Release,
     Flush(mpsc::Sender<Result<(), String>>),
     Stop,
 }
-pub struct Worker {
+struct Mailbox {
+    result: Mutex<Option<Reply>>,
+    latest: AtomicU64,
+    waker: Waker,
+}
+struct Request {
+    id: u64,
+    mailbox: Arc<Mailbox>,
+    revision: u64,
+    folders: u64,
+}
+/// The only owner of dictionary backends and preferences. Store creates this
+/// on first use and retains it across screen/client lifetimes.
+pub struct Service {
     tx: mpsc::Sender<Command>,
-    result: Arc<Mutex<Option<Reply>>>,
-    latest: Arc<AtomicU64>,
+    revision: Arc<AtomicU64>,
+    folders: Arc<AtomicU64>,
+}
+/// A screen's client, not a separate thread. Its replies and cancellation are
+/// private; a Settings catalog can never replace a reader lookup.
+pub struct Worker {
+    service: Arc<Service>,
+    mailbox: Arc<Mailbox>,
 }
 
 /// Source and configuration problems worth showing. An absent native or
@@ -91,7 +111,9 @@ pub fn warnings(sources: &[Source], config_error: Option<&str>) -> Vec<String> {
 struct Inner {
     store: Store,
     prefs_path: std::path::PathBuf,
-    preferences: Vec<Preference>,
+    preferences: Preferences,
+    folders_seen: u64,
+    active_set: String,
     /// The last discovered catalog. When stale it is only used to apply
     /// preference changes, never published.
     catalog: Catalog,
@@ -108,29 +130,44 @@ impl Inner {
         self.backend = None;
         self.fresh = false;
         let folders = self.store.dictionary_folders();
-        match discover_catalog(&self.store.dictionary_dir(), &folders.folders, &self.preferences, current) {
+        self.folders_seen = self.store.dictionary_folder_revision.load(Ordering::Relaxed);
+        match discover_catalog(
+            &self.store.dictionary_dir(),
+            &folders.folders,
+            &self.preferences.set(DEFAULT).dictionaries,
+            current,
+        ) {
             Ok(catalog) => {
                 self.warnings = warnings(&catalog.sources, folders.error.as_deref());
                 self.catalog = catalog;
+                if self.preferences.discover(&self.catalog.dictionaries) {
+                    self.save();
+                }
                 self.fresh = true;
                 true
             }
             Err(_) => false,
         }
     }
-    fn change(&mut self, id: &str, up: bool) {
-        let dictionaries = &mut self.catalog.dictionaries;
-        if let Some(i) = dictionaries.iter().position(|d| d.id == id) {
-            if up {
-                if i > 0 {
-                    dictionaries.swap(i, i - 1);
-                }
+    fn save(&mut self) {
+        self.save_error = atomic(&self.prefs_path, &self.preferences).err().map(|e| format!("{e:#}"));
+    }
+    fn apply_set(&mut self, set: &str) {
+        let set = self.preferences.set(set);
+        self.active_set = set.id.clone();
+        set.apply(&mut self.catalog.dictionaries);
+    }
+    fn change(&mut self, set: &str, id: &str, up: bool) {
+        let entries = &self.preferences.set(set).dictionaries;
+        if let Some(i) = entries.iter().position(|d| d.id == id) {
+            let edit = if up {
+                Edit::MoveDictionary { set: set.into(), dictionary: id.into(), position: i.saturating_sub(1) }
             } else {
-                dictionaries[i].disabled = !dictionaries[i].disabled;
+                Edit::Disabled { set: set.into(), dictionary: id.into(), disabled: !entries[i].disabled }
+            };
+            if self.preferences.edit(edit).is_ok() {
+                self.save();
             }
-            // Keep preferences for temporarily removed installations too.
-            self.preferences = merged_preferences(dictionaries, std::mem::take(&mut self.preferences));
-            self.save_error = atomic(&self.prefs_path, &self.preferences).err().map(|e| format!("{e:#}"));
         }
     }
     /// Returns the chosen dictionary and the state.
@@ -155,7 +192,7 @@ impl Inner {
             return (id, State::NoResult);
         }
         let mut outcomes = vec![None; dictionaries.len()];
-        let forms = forms::candidates(query);
+        let forms = self.preferences.set(&self.active_set).english_forms().then(|| forms::candidates(query)).flatten();
         if let Some(found) = self.search(query, forms.as_ref(), requested.as_deref(), &mut outcomes, current) {
             return found;
         }
@@ -248,131 +285,201 @@ impl Inner {
             sources: self.catalog.sources.clone(),
             warnings: self.warnings.clone(),
             selected,
+            sets: self.preferences.sets.clone(),
+            active_set: self.active_set.clone(),
+            change_error: None,
             state,
             save_error: self.save_error.clone(),
         }
     }
 }
 
-impl Worker {
-    pub fn new(store: Store, waker: Waker) -> Self {
+impl Service {
+    pub(crate) fn new(store: Store) -> Self {
         let (tx, commands) = mpsc::channel();
-        let latest = Arc::new(AtomicU64::new(0));
-        let result = Arc::new(Mutex::new(None));
-        let generation = latest.clone();
-        let output = result.clone();
+        let revision = Arc::new(AtomicU64::new(0));
+        let generation = revision.clone();
+        let folders = store.dictionary_folder_revision.clone();
+        // Do not retain Store's service registry from its own thread.
+        let store = store.dictionary_context();
         std::thread::Builder::new()
             .name("verso-dictionary".into())
             .spawn(move || {
+                // Even preference reads wait for an actual request.
+                let Ok(first) = commands.recv() else { return };
                 let prefs_path = store.dictionary_preferences();
-                let preferences = super::bounded_read(&prefs_path, 1024 * 1024)
+                let (preferences, migrated) = super::bounded_read(&prefs_path, 1024 * 1024)
                     .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .and_then(|s| Preferences::parse(&s).ok())
                     .unwrap_or_default();
                 let mut inner = Inner {
                     store,
                     prefs_path,
                     preferences,
+                    folders_seen: 0,
+                    active_set: DEFAULT.into(),
                     catalog: Catalog::default(),
                     warnings: Vec::new(),
                     fresh: false,
                     backend: None,
                     save_error: None,
                 };
-                let publish = |reply: Reply, current: &dyn Fn() -> bool| {
-                    if current() {
-                        *output.lock().unwrap() = Some(reply);
-                        waker.wake();
-                    }
-                };
-                while let Ok(command) = commands.recv() {
+                if migrated {
+                    inner.save();
+                }
+                for command in std::iter::once(first).chain(commands) {
+                    // Clone the counter so cancellation closures don't borrow Inner.
+                    let folder_revision = inner.store.dictionary_folder_revision.clone();
+                    let is_current = |r: &Request| {
+                        r.mailbox.latest.load(Ordering::Relaxed) == r.id
+                            && generation.load(Ordering::Relaxed) == r.revision
+                            && folder_revision.load(Ordering::Relaxed) == r.folders
+                    };
                     match command {
                         Command::Stop => break,
-                        Command::Cancel => inner.backend = None,
-                        Command::Invalidate => {
-                            // A removed source may own the open backend; the
-                            // next request rediscovers and reopens anyway.
+                        Command::Release => {
+                            // A queued request from another client owns its own backend work.
+                            // Releasing this cache is safe and bounds idle retained memory.
                             inner.backend = None;
-                            inner.fresh = false;
                         }
                         Command::Flush(done) => {
                             if inner.save_error.is_some() {
-                                inner.save_error =
-                                    atomic(&inner.prefs_path, &inner.preferences).err().map(|e| format!("{e:#}"));
+                                inner.save();
                             }
                             let _ = done.send(inner.save_error.clone().map_or(Ok(()), Err));
                         }
-                        Command::Change { id, up } => inner.change(&id, up),
-                        Command::Catalog { id, rescan } => {
-                            let current = || generation.load(Ordering::Relaxed) == id;
-                            if !current() || (!inner.fresh || rescan) && !inner.discover(&current) {
-                                continue;
+                        Command::Change { set, id, up } => inner.change(&set, &id, up),
+                        Command::Edit { request, edit } => {
+                            // Edits survive closing the requesting screen.
+                            let error = inner.preferences.edit(edit).err().map(|e| e.to_string());
+                            if error.is_none() {
+                                inner.save();
                             }
-                            publish(inner.reply(id, None, None), &current);
+                            inner.apply_set(DEFAULT);
+                            let mut reply = inner.reply(request.id, None, None);
+                            reply.change_error = error;
+                            publish(&request, reply, &|| is_current(&request));
                         }
-                        Command::Lookup { id, query, selected, rescan } => {
-                            let current = || generation.load(Ordering::Relaxed) == id;
-                            if !current() || (!inner.fresh || rescan) && !inner.discover(&current) {
+                        Command::Catalog { request, set, rescan } => {
+                            if !is_current(&request) {
                                 continue;
                             }
+                            let current = || is_current(&request);
+                            if (!inner.fresh || rescan || inner.folders_seen != request.folders)
+                                && !inner.discover(&current)
+                            {
+                                continue;
+                            }
+                            inner.apply_set(&set);
+                            publish(&request, inner.reply(request.id, None, None), &current);
+                        }
+                        Command::Lookup { request, query, selected, selection, rescan } => {
+                            if !is_current(&request) {
+                                continue;
+                            }
+                            let current = || is_current(&request);
+                            if (!inner.fresh || rescan || inner.folders_seen != request.folders)
+                                && !inner.discover(&current)
+                            {
+                                continue;
+                            }
+                            let set = inner.preferences.choose(&selection, &query).id.clone();
+                            inner.apply_set(&set);
                             let (chosen, state) = inner.lookup(&query, selected, &current);
-                            publish(inner.reply(id, chosen, Some(state)), &current);
+                            publish(&request, inner.reply(request.id, chosen, Some(state)), &current);
                         }
                     }
                 }
             })
             .expect("spawn dictionary worker");
-        Self { tx, result, latest }
+        Self { tx, revision, folders }
     }
-    fn next_id(&self) -> u64 {
-        self.latest.fetch_add(1, Ordering::Relaxed) + 1
+}
+fn publish(request: &Request, reply: Reply, current: &dyn Fn() -> bool) {
+    if current() {
+        *request.mailbox.result.lock().unwrap() = Some(reply);
+        request.mailbox.waker.wake();
     }
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(Command::Stop);
+        // Never join a potentially slow removable-storage read on the UI thread.
+    }
+}
+impl Worker {
+    pub fn new(store: Store, waker: Waker) -> Self {
+        let service = store.dictionary_service.get_or_init(|| Arc::new(Service::new(store.clone()))).clone();
+        Self { service, mailbox: Arc::new(Mailbox { result: Mutex::new(None), latest: AtomicU64::new(0), waker }) }
+    }
+    fn request(&self) -> Request {
+        let id = self.mailbox.latest.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.mailbox.result.lock().unwrap() = None;
+        Request {
+            id,
+            mailbox: self.mailbox.clone(),
+            revision: self.service.revision.load(Ordering::Relaxed),
+            folders: self.service.folders.load(Ordering::Relaxed),
+        }
+    }
+    #[cfg(test)]
     pub fn lookup(&self, query: String, selected: Option<String>, rescan: bool) -> u64 {
-        let id = self.next_id();
-        let _ = self.tx.send(Command::Lookup { id, query, selected, rescan });
+        self.lookup_in(query, selected, rescan, Selection::default())
+    }
+    pub fn lookup_in(&self, query: String, selected: Option<String>, rescan: bool, selection: Selection) -> u64 {
+        let request = self.request();
+        let id = request.id;
+        let _ = self.service.tx.send(Command::Lookup { request, query, selected, selection, rescan });
         id
     }
-    /// The dictionaries and source status without a query, e.g. for Settings
-    /// before any book is open. `rescan` forces a fresh discovery.
     pub fn catalog(&self, rescan: bool) -> u64 {
-        let id = self.next_id();
-        let _ = self.tx.send(Command::Catalog { id, rescan });
+        self.catalog_in(DEFAULT, rescan)
+    }
+    pub fn catalog_in(&self, set: &str, rescan: bool) -> u64 {
+        let request = self.request();
+        let id = request.id;
+        let _ = self.service.tx.send(Command::Catalog { request, set: set.into(), rescan });
         id
     }
-    /// The folder configuration changed: cancels work in flight, releases the
-    /// open dictionary and rediscovers on the next request.
-    pub fn invalidate(&self) {
-        self.latest.fetch_add(1, Ordering::Relaxed);
-        let _ = self.tx.send(Command::Invalidate);
+    #[allow(dead_code)] // Management uses the full edit API in Phase 4.
+    pub fn edit(&self, edit: Edit) -> u64 {
+        self.service.revision.fetch_add(1, Ordering::Relaxed);
+        let request = self.request();
+        let id = request.id;
+        let _ = self.service.tx.send(Command::Edit { request, edit });
+        id
     }
+    #[cfg(test)]
     pub fn change(&self, id: String, up: bool) {
-        let _ = self.tx.send(Command::Change { id, up });
+        self.change_in(DEFAULT, id, up);
+    }
+    pub fn change_in(&self, set: &str, id: String, up: bool) {
+        self.service.revision.fetch_add(1, Ordering::Relaxed);
+        let _ = self.service.tx.send(Command::Change { set: set.into(), id, up });
     }
     pub fn receive(&self) -> Option<Reply> {
-        self.result.lock().unwrap().take()
+        self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
     }
     #[cfg(test)]
     pub fn result_for_test(&self, reply: Reply) {
-        *self.result.lock().unwrap() = Some(reply);
+        *self.mailbox.result.lock().unwrap() = Some(reply);
     }
     pub fn cancel(&self) {
-        self.latest.fetch_add(1, Ordering::Relaxed);
-        let _ = self.tx.send(Command::Cancel);
+        self.mailbox.latest.fetch_add(1, Ordering::Relaxed);
+        *self.mailbox.result.lock().unwrap() = None;
+        let _ = self.service.tx.send(Command::Release);
     }
-    /// Close/exit barrier, after cancelling any obsolete lookup work.
     pub fn flush(&self) -> anyhow::Result<()> {
         self.cancel();
         let (tx, rx) = mpsc::channel();
-        self.tx.send(Command::Flush(tx))?;
+        self.service.tx.send(Command::Flush(tx))?;
         rx.recv()?.map_err(|e| anyhow::anyhow!("Couldn't save dictionary preferences: {e}"))
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.latest.fetch_add(1, Ordering::Relaxed);
-        let _ = self.tx.send(Command::Stop);
-        // No UI-thread join: a slow removable-storage read may still be running.
-        // Cancellation bounds further work; queued preference writes run before Stop.
+        self.cancel();
     }
 }
 

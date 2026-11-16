@@ -159,8 +159,7 @@ fn source_problems_are_warnings_next_to_working_lookups() {
 
     // An invalid configuration is a warning; the native folder still works.
     fs::write(f.join("dictionary-folders.json"), b"{broken").unwrap();
-    f.worker.invalidate();
-    let reply = f.lookup("word");
+    let reply = f.reply(f.worker.lookup("word".into(), None, true)).0;
     assert!(matches!(reply.state, Some(State::Definition { .. })));
     assert_eq!(reply.sources.len(), 1);
     assert!(reply.warnings[0].contains("only Verso's folder"), "{:?}", reply.warnings);
@@ -168,7 +167,6 @@ fn source_problems_are_warnings_next_to_working_lookups() {
     // Only broken sources: Missing, with the reasons alongside.
     fs::remove_dir_all(f.store.dictionary_dir()).unwrap();
     f.store.save_dictionary_folders(&[f.join("gone")]).unwrap();
-    f.worker.invalidate();
     let reply = f.lookup("word");
     assert_eq!(reply.state, Some(State::Missing));
     assert_eq!(reply.warnings.len(), 1);
@@ -187,7 +185,6 @@ fn invalidation_cancels_in_flight_work_and_drops_removed_sources() {
     // after the new catalog, nor answer from the removed source.
     let stale = f.worker.lookup("word".into(), None, true);
     f.store.save_dictionary_folders(&[]).unwrap();
-    f.worker.invalidate();
     let id = f.worker.lookup("word".into(), None, false);
     let (reply, earlier) = f.reply(id);
     assert!(earlier.iter().all(|&e| e == stale));
@@ -213,7 +210,6 @@ fn preferences_survive_source_removal_and_re_adding() {
     assert_eq!(names(&f.catalog()), ["B", "A", "Native"]);
 
     f.store.save_dictionary_folders(&[]).unwrap();
-    f.worker.invalidate();
     assert_eq!(names(&f.catalog()), ["Native"]);
     // A change while the folder is gone keeps the removed dictionaries' preferences.
     f.worker.change("n.ifo".into(), false);
@@ -225,9 +221,9 @@ fn preferences_survive_source_removal_and_re_adding() {
     let mut f = f;
     (f.worker, f.wake) = Fixture::worker(&f.store);
     let reply = f.catalog();
-    assert_eq!(names(&reply), ["Native", "B", "A"]);
+    assert_eq!(names(&reply), ["B", "A", "Native"]);
     let flags: Vec<_> = reply.dictionaries.iter().map(|d| d.disabled).collect();
-    assert_eq!(flags, [true, false, true]);
+    assert_eq!(flags, [false, true, true]);
 }
 
 #[test]
@@ -480,7 +476,9 @@ fn inner(f: &Fixture) -> Inner {
     let mut inner = Inner {
         store: f.store.clone(),
         prefs_path: f.store.dictionary_preferences(),
-        preferences: Vec::new(),
+        preferences: Preferences::default(),
+        folders_seen: 0,
+        active_set: DEFAULT.into(),
         catalog: Catalog::default(),
         warnings: Vec::new(),
         fresh: false,
@@ -489,4 +487,160 @@ fn inner(f: &Fixture) -> Inner {
     };
     assert!(inner.discover(&|| true));
     inner
+}
+
+fn wait_client(worker: &Worker, id: u64) -> Reply {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(reply) = worker.receive() {
+            assert_eq!(reply.id, id);
+            return reply;
+        }
+        assert!(Instant::now() < deadline, "no client reply to {id}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+fn edit(worker: &Worker, edit: Edit) -> Reply {
+    let reply = wait_client(worker, worker.edit(edit));
+    assert!(reply.change_error.is_none(), "{:?}", reply.change_error);
+    assert!(reply.save_error.is_none(), "{:?}", reply.save_error);
+    reply
+}
+fn set(worker: &Worker, id: &str, language: &str, dictionary: &str) {
+    edit(worker, Edit::Create { id: id.into(), name: id.into() });
+    edit(worker, Edit::Languages { set: id.into(), languages: vec![language.into()] });
+    edit(worker, Edit::Disabled { set: id.into(), dictionary: dictionary.into(), disabled: false });
+}
+#[test]
+fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_client() {
+    let f = Fixture::new();
+    let (settings, _) = Fixture::worker(&f.store);
+    assert!(Arc::ptr_eq(&f.worker.service, &settings.service));
+    assert!(!f.store.dictionary_preferences().exists(), "client construction does not discover dictionaries");
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    let lookup = f.worker.lookup("word".into(), None, false);
+    let catalog = settings.catalog(false);
+    let reply = wait_client(&settings, catalog);
+    assert!(reply.state.is_none());
+    let reply = wait_client(&f.worker, lookup);
+    assert!(matches!(reply.state, Some(State::Definition { .. })));
+    assert!(settings.receive().is_none());
+    let lookup = f.worker.lookup("word".into(), None, false);
+    settings.catalog(false);
+    settings.flush().unwrap(); // Does not cancel another client's lookup.
+    assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
+    let catalog = settings.catalog(false);
+    f.worker.cancel();
+    assert!(wait_client(&settings, catalog).state.is_none());
+}
+#[test]
+fn migration_new_dictionary_placement_and_missing_positions_survive_restart() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    let legacy = vec![
+        super::super::Preference { id: "gone.ifo".into(), disabled: true },
+        super::super::Preference { id: "a.ifo".into(), disabled: true },
+    ];
+    atomic(&f.store.dictionary_preferences(), &legacy).unwrap();
+    let reply = f.catalog();
+    assert_eq!(reply.sets[0].dictionaries, legacy);
+    set(&f.worker, "english", "en", "a.ifo");
+    install(&f.join("dictionaries/b.ifo"), "B", "word");
+    let reply = f.reply(f.worker.catalog(true)).0;
+    let saved: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
+    assert_eq!(
+        saved.set(DEFAULT).dictionaries.iter().map(|d| (&*d.id, d.disabled)).collect::<Vec<_>>(),
+        [("gone.ifo", true), ("a.ifo", true), ("b.ifo", false)]
+    );
+    assert_eq!(
+        saved.set("english").dictionaries.iter().map(|d| (&*d.id, d.disabled)).collect::<Vec<_>>(),
+        [("gone.ifo", true), ("a.ifo", false), ("b.ifo", true)]
+    );
+    assert_eq!(reply.sets, saved.sets);
+    // A new Store models a process restart, not just another client.
+    let restarted = Worker::new(Store::at(f.root.clone()), Waker::new(|| {}));
+    let reply = wait_client(&restarted, restarted.catalog(false));
+    assert_eq!(reply.sets, saved.sets);
+    install(&f.join("dictionaries/gone.ifo"), "Gone", "word");
+    let reply = wait_client(&restarted, restarted.catalog(true));
+    assert_eq!(
+        reply.dictionaries.iter().map(|d| (&*d.id, d.disabled)).collect::<Vec<_>>(),
+        [("gone.ifo", true), ("a.ifo", true), ("b.ifo", false)]
+    );
+}
+#[test]
+fn set_language_gates_forms_and_script_fallback_uses_the_resulting_sets_languages() {
+    let f = Fixture::new();
+    install_entries(
+        &f.join("dictionaries/a.ifo"),
+        "A",
+        &[("box", "base"), ("boxes", "exact"), ("thunder", "form"), ("слово", "word")],
+        &[],
+    );
+    f.catalog();
+    set(&f.worker, "english", "en", "a.ifo");
+    set(&f.worker, "french", "fr", "a.ifo");
+    set(&f.worker, "russian", "ru", "a.ifo");
+    for (language, query, expected_set, definition, base_form) in [
+        ("", "thunders", DEFAULT, true, true),
+        ("eng-US", "thunders", "english", true, true),
+        ("fr", "thunders", "french", false, false),
+        ("fr", "boxes", "french", true, false),
+        ("en", "слово", "russian", true, false),
+        ("ru", "thunders", "english", true, true),
+    ] {
+        let selection = Selection { language: language.into(), ..Default::default() };
+        let reply = f.reply(f.worker.lookup_in(query.into(), None, false, selection)).0;
+        assert_eq!(reply.active_set, expected_set);
+        assert_eq!(matches!(&reply.state, Some(State::Definition { .. })), definition, "{language} {query}");
+        assert_eq!(matches!(&reply.state, Some(State::Definition { base_forms: Some(_), .. })), base_form);
+    }
+}
+#[test]
+fn settings_edits_apply_to_retained_reader_client_and_are_durable_before_reply() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    install(&f.join("dictionaries/b.ifo"), "B", "word");
+    assert_eq!(f.lookup("word").selected.as_deref(), Some("a.ifo"));
+    let (settings, _) = Fixture::worker(&f.store);
+    set(&settings, "english", "en-US", "a.ifo");
+    edit(&settings, Edit::Disabled { set: "english".into(), dictionary: "b.ifo".into(), disabled: false });
+    edit(&settings, Edit::MoveDictionary { set: "english".into(), dictionary: "b.ifo".into(), position: 0 });
+    edit(&settings, Edit::Rename { set: "english".into(), name: "English books".into() });
+    let reply = edit(&settings, Edit::MoveSet { set: "english".into(), position: 0 });
+    assert_eq!(reply.sets[0].name, "English books");
+    let persisted: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
+    assert_eq!(persisted.sets, reply.sets);
+    let selection = Selection { book_set: Some("english".into()), language: "ru".into() };
+    let lookup = || f.reply(f.worker.lookup_in("word".into(), None, false, selection.clone())).0;
+    assert_eq!(lookup().selected.as_deref(), Some("b.ifo"));
+    edit(&settings, Edit::Disabled { set: "english".into(), dictionary: "b.ifo".into(), disabled: true });
+    assert_eq!(lookup().selected.as_deref(), Some("a.ifo"));
+    // Reader's inline controls edit the active set and cannot overwrite Default.
+    f.worker.change_in("english", "a.ifo".into(), false);
+    assert_eq!(lookup().state, Some(State::Disabled));
+    assert_eq!(f.lookup("word").selected.as_deref(), Some("a.ifo"));
+    edit(&settings, Edit::Delete { set: "english".into() });
+    assert_eq!(lookup().active_set, DEFAULT);
+    let reply = wait_client(&settings, settings.edit(Edit::Delete { set: DEFAULT.into() }));
+    assert!(reply.change_error.is_some());
+    assert_eq!(reply.sets.len(), 1);
+}
+#[test]
+fn unreadable_preferences_use_empty_default_and_failed_saves_retry_at_barrier() {
+    let f = Fixture::new();
+    fs::write(f.store.dictionary_preferences(), b"{broken").unwrap();
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    let reply = f.lookup("word");
+    assert_eq!(reply.active_set, DEFAULT);
+    assert!(!reply.dictionaries[0].disabled);
+    fs::remove_file(f.store.dictionary_preferences()).unwrap();
+    fs::create_dir(f.store.dictionary_preferences()).unwrap();
+    let reply = wait_client(&f.worker, f.worker.edit(Edit::Create { id: "set".into(), name: "Set".into() }));
+    assert!(reply.save_error.is_some());
+    assert!(f.worker.flush().is_err());
+    fs::remove_dir(f.store.dictionary_preferences()).unwrap();
+    f.worker.flush().unwrap();
+    let saved: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
+    assert_eq!(saved.set("set").name, "Set");
 }

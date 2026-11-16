@@ -115,6 +115,8 @@ pub struct Lookup {
     sheet: Sheet,
     worker: Rc<Worker>,
     request: u64,
+    selection: crate::dictionary::sets::Selection,
+    active_set: String,
     pending: bool,
     field: TextField,
     keyboard: Keyboard,
@@ -146,7 +148,14 @@ impl Lookup {
     /// `word` is where the looked-up text is on the page. In landscape a
     /// bottom sheet would cover most of the page, so the dictionary stands at
     /// the side away from the word instead.
-    pub fn new(query: &str, worker: Rc<Worker>, t: &Theme, screen: Rect, word: Option<Rect>) -> Self {
+    pub fn new(
+        query: &str,
+        worker: Rc<Worker>,
+        t: &Theme,
+        screen: Rect,
+        word: Option<Rect>,
+        selection: crate::dictionary::sets::Selection,
+    ) -> Self {
         let sheet = if screen.w > screen.h {
             let right = word.is_none_or(|w| w.center().x < screen.center().x);
             Sheet::side("Dictionary", (screen.w * 11 / 20).max(t.mm(72.0)).min(screen.w), right, screen, t)
@@ -191,13 +200,15 @@ impl Lookup {
         let body = Rect::new(content.x, controls + gap, content.w, footer.y - controls - 2 * gap);
         let mut manager_pager = Pager::new(1);
         manager_pager.place(footer, t);
-        let request = worker.lookup(query.into(), None, true);
+        let request = worker.lookup_in(query.into(), None, false, selection.clone());
         let mut keyboard = Keyboard::default();
         keyboard.place(screen, t);
         Self {
             sheet,
             worker,
             request,
+            selection,
+            active_set: crate::dictionary::sets::DEFAULT.into(),
             pending: true,
             field,
             keyboard,
@@ -276,7 +287,8 @@ impl Lookup {
         pages.is_complete() || !had_next && self.pager.page + 1 < pages.pages().len()
     }
     fn submit(&mut self, rescan: bool) {
-        self.request = self.worker.lookup(self.field.value().into(), self.selected.clone(), rescan);
+        self.request =
+            self.worker.lookup_in(self.field.value().into(), self.selected.clone(), rescan, self.selection.clone());
         self.pending = true;
         self.pages = None;
         self.layout_error = None;
@@ -294,6 +306,7 @@ impl Lookup {
             self.sources = reply.sources;
             self.warnings = reply.warnings;
             self.selected = reply.selected;
+            self.active_set = reply.active_set;
             self.state = reply.state.unwrap_or(State::NoResult);
             self.pages = None;
             self.layout_error = None;
@@ -394,7 +407,7 @@ impl Lookup {
                 }
             }
             if let Some((i, up)) = change {
-                self.worker.change(self.catalog[i].id.clone(), up);
+                self.worker.change_in(&self.active_set, self.catalog[i].id.clone(), up);
                 self.selected = None;
                 self.submit(false);
                 self.place_rows(cx.theme);
@@ -610,7 +623,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("verso-styled-lookup-{}", std::process::id()));
         let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
         for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
-            let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None);
+            let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None, Default::default());
             lookup.pending = false;
             lookup.state = State::Definition {
                 entries: vec![
@@ -739,7 +752,7 @@ mod tests {
         ));
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut lookup = Lookup::new("Hello", worker.clone(), &t, screen, None);
+        let mut lookup = Lookup::new("Hello", worker.clone(), &t, screen, None, Default::default());
         let mut cx = EventCx {
             theme: &t,
             screen,
@@ -810,16 +823,19 @@ mod tests {
         assert_eq!(lookup.catalog[0].id, "b.ifo");
         worker.change("b.ifo".into(), false);
         worker.flush()?;
-        let prefs: Vec<crate::dictionary::Preference> =
+        let prefs: crate::dictionary::sets::Preferences =
             serde_json::from_slice(&std::fs::read(store.dictionary_preferences())?)?;
-        assert_eq!(prefs[0].id, "b.ifo");
-        assert!(prefs[0].disabled);
+        assert_eq!(prefs.set(crate::dictionary::sets::DEFAULT).dictionaries[0].id, "b.ifo");
+        assert!(prefs.set(crate::dictionary::sets::DEFAULT).dictionaries[0].disabled);
         // An obsolete worker reply must not replace a newer request.
         let old = lookup.request;
         lookup.request += 1;
         lookup.pending = true;
         lookup.worker.result_for_test(crate::dictionary::worker::Reply {
             id: old,
+            sets: vec![],
+            active_set: crate::dictionary::sets::DEFAULT.into(),
+            change_error: None,
             dictionaries: Vec::new(),
             sources: Vec::new(),
             warnings: Vec::new(),

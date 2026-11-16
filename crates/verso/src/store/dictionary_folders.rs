@@ -58,6 +58,7 @@ impl Store {
         let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
         let result = atomic(&self.root.join(FILE), &Record { version: VERSION, folders });
         SAVES.fetch_add(1, Ordering::Relaxed);
+        self.dictionary_folder_revision.fetch_add(1, Ordering::Relaxed);
         result
     }
     /// Changes whenever the folder list was saved (or a save was attempted);

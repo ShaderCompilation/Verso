@@ -441,8 +441,8 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
     let reply = receive()?;
     assert_eq!(reply.id, latest);
     assert_eq!(reply.state, Some(State::Disabled));
-    let prefs: Vec<Preference> = serde_json::from_str(&fs::read_to_string(store.dictionary_preferences())?)?;
-    assert!(prefs[0].disabled);
+    let prefs: sets::Preferences = serde_json::from_str(&fs::read_to_string(store.dictionary_preferences())?)?;
+    assert!(prefs.set(sets::DEFAULT).dictionaries[0].disabled);
     drop(worker);
     let worker = Worker::new(store.clone(), Waker::new(|| {}));
     let id = worker.lookup("fruit".into(), None, true);

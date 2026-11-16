@@ -67,10 +67,15 @@ pub struct BookState {
     pub last_opened: u64,
     pub finished: bool,
     pub hidden_from_continue: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dictionary_set: Option<String>,
 }
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    pub(crate) dictionary_service:
+        std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::dictionary::worker::Service>>>,
+    pub(crate) dictionary_folder_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     selected_home: std::sync::Arc<std::sync::Mutex<Option<crate::library::Book>>>,
     /// Counts settings saves through this store and its clones, so screens
     /// can notice a change without rereading the file.
@@ -91,7 +96,17 @@ impl Store {
                     .join("verso")
             }
         });
-        Self { root, selected_home: Default::default(), settings_saves: Default::default() }
+        Self {
+            root,
+            selected_home: Default::default(),
+            settings_saves: Default::default(),
+            dictionary_service: Default::default(),
+            dictionary_folder_revision: Default::default(),
+        }
+    }
+    /// A worker keeps the data paths and counters, without owning its service registry.
+    pub(crate) fn dictionary_context(&self) -> Self {
+        Self { dictionary_service: Default::default(), ..self.clone() }
     }
     pub fn settings(&self) -> Settings {
         let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
@@ -209,7 +224,13 @@ impl Store {
     }
     #[cfg(test)]
     pub fn at(root: PathBuf) -> Self {
-        Self { root, selected_home: Default::default(), settings_saves: Default::default() }
+        Self {
+            root,
+            selected_home: Default::default(),
+            settings_saves: Default::default(),
+            dictionary_service: Default::default(),
+            dictionary_folder_revision: Default::default(),
+        }
     }
     fn book_path(&self, id: &str) -> PathBuf {
         self.root.join("books").join(format!("{id}.json"))

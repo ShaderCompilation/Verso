@@ -347,8 +347,7 @@ impl DictionaryFolders {
         let before = (self.folders.clone(), self.config_error.clone());
         self.reload(t);
         if (self.folders.clone(), self.config_error.clone()) != before {
-            self.worker.invalidate();
-            self.request = self.worker.catalog(false);
+            self.request = self.worker.catalog(true);
             self.pending = true;
         }
     }
