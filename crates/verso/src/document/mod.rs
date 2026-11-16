@@ -18,6 +18,26 @@ pub struct Layout {
     /// Left, top, right, bottom.
     pub margins: [u32; 4],
     pub font_size: u32,
+    pub shaping: TextShaping,
+}
+
+/// How the engine shapes text: a trade between layout speed and typography.
+/// Layout time for a 1220-page book on the Kindle: full 2.9 s, light 2.5 s,
+/// FreeType 0.94 s (docs/research/book-open-2026-11-17.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextShaping {
+    /// HarfBuzz with ligatures and complex scripts.
+    Full,
+    /// HarfBuzz kerning without ligatures; same line breaks as full.
+    #[default]
+    Light,
+    /// FreeType kerning only: fastest, plainest.
+    #[serde(rename = "freetype")]
+    FreeType,
+}
+impl TextShaping {
+    pub const ALL: [TextShaping; 3] = [TextShaping::Full, TextShaping::Light, TextShaping::FreeType];
 }
 
 /// An open book, laid out into pages for one screen size and typography.
@@ -220,7 +240,7 @@ mod tests {
         };
         let book = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reader.epub");
         let engine = CreEngine::new(paths, 300).expect("engine starts");
-        let layout = Layout { width: 600, height: 800, margins: [40; 4], font_size: 30 };
+        let layout = Layout { width: 600, height: 800, margins: [40; 4], font_size: 30, shaping: TextShaping::Full };
         let mut doc = engine.open(&book, &layout, None).expect("book opens");
         let pages = doc.page_count();
         assert!(pages > 10, "{pages} pages");

@@ -67,6 +67,21 @@ impl Segmented {
         let t = cx.theme;
         let segs = self.segments();
         let n = segs.len();
+        // Labels shrink together, down to 80%, rather than being cut short
+        // (five tabs on a 600 px wide screen).
+        let pad = t.mm(1.0);
+        let mut style = t.button;
+        let fit = segs
+            .iter()
+            .zip(&self.items)
+            .filter_map(|(seg, item)| match item {
+                Segment::Text(s) => Some((seg.w - 2 * pad) as f32 / cx.text.width(s, style).max(1.0)),
+                _ => None,
+            })
+            .fold(1.0f32, f32::min);
+        if fit < 1.0 {
+            style.size = (style.size * fit.max(0.8)).floor();
+        }
         for (i, (seg, item)) in segs.iter().zip(&self.items).enumerate() {
             let selected = i == self.selected;
             let fg = if selected {
@@ -87,7 +102,7 @@ impl Segmented {
                 INK
             };
             match item {
-                Segment::Text(s) => cx.line(s, t.button.gray(fg), seg.inset_xy(t.mm(1.0), 0), HAlign::Center),
+                Segment::Text(s) => cx.line(s, style.gray(fg), seg.inset_xy(pad, 0), HAlign::Center),
                 Segment::Icon(icon) => cx.icon(*icon, *seg, t.icon_small, fg),
                 Segment::Glyph(draw) => draw(cx, *seg, fg),
             }

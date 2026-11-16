@@ -54,6 +54,7 @@ unsafe extern "C" {
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;
 
     pub fn verso_cre_new(width: c_int, height: c_int, dpi: c_int) -> *mut VersoCreDoc;
+    pub fn verso_cre_set_shaping(doc: *mut VersoCreDoc, mode: c_int);
     pub fn verso_cre_free(doc: *mut VersoCreDoc);
 
     pub fn verso_cre_set_stylesheet_file(doc: *mut VersoCreDoc, path: *const c_char) -> c_int;

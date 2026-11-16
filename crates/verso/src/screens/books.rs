@@ -872,6 +872,7 @@ impl Books {
             height: self.screen.h as u32,
             margins: [margin; 4],
             font_size: cx.theme.pt(settings.typography.size_pt) as u32,
+            shaping: settings.text_shaping,
         };
         self.worker.send(Command::Open {
             generation: self.generation,

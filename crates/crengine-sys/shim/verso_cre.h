@@ -47,6 +47,9 @@ int verso_cre_register_font(const char *path);
 
 /* A document view of `width` x `height` pixels. NULL on failure. */
 VersoCreDoc *verso_cre_new(int width, int height, int dpi);
+/* Text shaping (crengine's kerning mode): 1 FreeType kerning, 2 HarfBuzz
+   light (default), 3 full HarfBuzz with ligatures. Set before loading. */
+void verso_cre_set_shaping(VersoCreDoc *doc, int mode);
 void verso_cre_free(VersoCreDoc *doc);
 
 /* Settings. Apply before verso_cre_load where possible: changing them after

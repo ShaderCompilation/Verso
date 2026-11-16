@@ -3,7 +3,7 @@ mod dictionary_folders;
 mod home;
 pub mod navigation;
 pub mod position;
-use crate::document::{Position, Typography};
+use crate::document::{Position, TextShaping, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 use crate::library::{LibraryIndex, Sort};
 pub use crate::platform::Orientation;
@@ -37,6 +37,8 @@ pub struct Settings {
     /// The name the device is found by on Wi-Fi while SSH runs, without
     /// `.local`. Changes only when another device already has it.
     pub hostname: String,
+    /// Settings → Advanced. Applies from the next book open.
+    pub text_shaping: TextShaping,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -52,6 +54,7 @@ impl Default for Settings {
             orientation: Orientation::Portrait,
             developer: false,
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
+            text_shaping: TextShaping::default(),
         }
     }
 }
@@ -388,6 +391,18 @@ mod tests {
         assert!(json.contains(r#""tap_zones":"mirrored""#), "{json}");
         let restored: Settings = serde_json::from_str(&json)?;
         assert_eq!((restored.page_flash, restored.tap_zones), (0, TapZones::Mirrored));
+        Ok(())
+    }
+    #[test]
+    fn text_shaping_defaults_to_light_and_round_trips() -> Result<()> {
+        let mut settings: Settings = serde_json::from_str(r#"{"footer":true}"#)?;
+        assert_eq!(settings.text_shaping, TextShaping::Light, "existing settings switch to light");
+        settings.text_shaping = TextShaping::FreeType;
+        let json = serde_json::to_string(&settings)?;
+        assert!(json.contains(r#""text_shaping":"freetype""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json)?.text_shaping, TextShaping::FreeType);
+        let full: Settings = serde_json::from_str(r#"{"text_shaping":"full"}"#)?;
+        assert_eq!(full.text_shaping, TextShaping::Full);
         Ok(())
     }
     #[test]

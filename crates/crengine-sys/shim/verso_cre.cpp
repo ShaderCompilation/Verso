@@ -433,7 +433,7 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         v->setPageHeaderInfo(0); // no crengine status bar; Verso draws its own
         CRPropRef props = LVCreatePropsContainer();
         props->setInt(PROP_RENDER_DPI, dpi);      // CSS units scale with the screen
-        props->setInt(PROP_FONT_KERNING, 3);      // HarfBuzz shaping (ligatures, kerning)
+        props->setInt(PROP_FONT_KERNING, 2);      // HarfBuzz light (see verso_cre_set_shaping)
         props->setInt(PROP_FONT_HINTING, 2);      // autohinter (as KOReader)
         props->setInt(PROP_EMBEDDED_STYLES, 1);
         props->setInt(PROP_EMBEDDED_FONTS, 1);
@@ -466,6 +466,13 @@ int verso_cre_set_stylesheet_file(VersoCreDoc *doc, const char *path) {
         doc->view->setStyleSheet(css, false);
         return 0;
     })
+}
+
+void verso_cre_set_shaping(VersoCreDoc *doc, int mode) {
+    try {
+        set_int(doc->view, PROP_FONT_KERNING, mode);
+    } catch (...) {
+    }
 }
 
 void verso_cre_set_font_face(VersoCreDoc *doc, const char *face) {

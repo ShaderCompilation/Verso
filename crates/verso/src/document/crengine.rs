@@ -10,7 +10,7 @@ use crengine_sys as sys;
 
 use super::{
     Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchHit, SearchStatus, Selection,
-    SelectionQuery, TextRange, TocEntry, Typography,
+    SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
 };
 
 /// Upper limit for crengine's on-disk document cache.
@@ -86,6 +86,14 @@ impl CreEngine {
             if sys::verso_cre_set_stylesheet_file(raw, css.as_ptr()) != 0 {
                 log::warn!("could not load {}", self.paths.engine_data.join("epub.css").display());
             }
+            sys::verso_cre_set_shaping(
+                raw,
+                match layout.shaping {
+                    TextShaping::FreeType => 1,
+                    TextShaping::Light => 2,
+                    TextShaping::Full => 3,
+                },
+            );
             sys::verso_cre_set_font_face(raw, face.as_ptr());
             sys::verso_cre_set_font_size(raw, layout.font_size as c_int);
             sys::verso_cre_set_margins(raw, l, t, r, b);

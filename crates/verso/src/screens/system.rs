@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::document::TextShaping;
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::platform::{Waker, ssh, wifi};
@@ -23,8 +24,9 @@ enum Tab {
     Display,
     Library,
     Device,
+    Advanced,
 }
-const TABS: [Tab; 4] = [Tab::Reading, Tab::Display, Tab::Library, Tab::Device];
+const TABS: [Tab; 5] = [Tab::Reading, Tab::Display, Tab::Library, Tab::Device, Tab::Advanced];
 
 /// Full-flash intervals offered in Settings (0 = never).
 const FLASH_CHOICES: [u32; 4] = [1, 6, 12, 0];
@@ -87,6 +89,8 @@ pub struct SystemSettings {
     /// switch vanish.
     ssh_was_running: bool,
     dev_top: i32,
+    // Advanced
+    shaping: Segmented,
 }
 impl SystemSettings {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
@@ -95,7 +99,7 @@ impl SystemSettings {
         top.place(screen, t);
         let content = screen.split_top(t.top_bar).1.inset(t.margin);
         let settings = store.settings();
-        let mut tabs = Segmented::texts(&["Reading", "Display", "Library", "Device"], 0);
+        let mut tabs = Segmented::texts(&["Reading", "Display", "Library", "Device", "Advanced"], 0);
         tabs.place(Rect::new(content.x, content.y, content.w, t.button_h));
         let body = tabs.rect().bottom() + t.mm(6.0);
 
@@ -161,6 +165,9 @@ impl SystemSettings {
         let mut ssh_toggle = Toggle::new(ssh.running);
         ssh_toggle.place(device_right.right(), dev_top + t.mm(12.0), t);
         let version = Rect::new(content.x, screen.bottom() - t.mm(14.0), content.w, t.target);
+        let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
+        let mut shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
+        shaping.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
         let mut this = Self {
             top,
             tabs,
@@ -199,6 +206,7 @@ impl SystemSettings {
             ssh_toggle,
             ssh_pending: None,
             dev_top,
+            shaping,
         };
         this.load_folders(t);
         this.sync_ssh_toggle();
@@ -579,6 +587,45 @@ impl SystemSettings {
     }
 }
 
+impl SystemSettings {
+    // ---- Advanced ----
+
+    fn draw_advanced(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        let c = self.content;
+        cx.section_label("Text shaping", Rect::new(c.x, self.shaping.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        self.shaping.draw(cx);
+        let note = match TextShaping::ALL[self.shaping.selected] {
+            TextShaping::Full => {
+                "HarfBuzz with ligatures such as “fi” and “Th”, and full support for scripts like Arabic or Hindi. The slowest to lay out a book."
+            }
+            TextShaping::Light => {
+                "HarfBuzz with kerning but no ligatures. Lines break as with Full, and books lay out 10–30% faster. The default."
+            }
+            TextShaping::FreeType => {
+                "The simplest shaping. Books lay out about three times faster, but without ligatures, and spacing and hyphenation can look rougher."
+            }
+        };
+        let note_rect = Rect::new(c.x, self.shaping.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0));
+        cx.paragraph(note, t.small.gray(INK2), note_rect, HAlign::Left);
+        cx.paragraph(
+            "Applies from the next book you open. Each book is laid out again once.",
+            t.small.gray(INK2),
+            Rect { y: note_rect.bottom() + t.mm(2.0), ..note_rect },
+            HAlign::Left,
+        );
+    }
+
+    fn advanced_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+        if let Some(i) = self.shaping.on_gesture(g)
+            && !self.save(cx, "text shaping", |s| s.text_shaping = TextShaping::ALL[i])
+        {
+            let current = self.store.settings().text_shaping;
+            self.shaping.selected = TextShaping::ALL.iter().position(|&m| m == current).unwrap_or(1);
+        }
+    }
+}
+
 /// A miniature page: the back zone shaded, the menu box outlined.
 fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones) {
     let t = cx.theme;
@@ -614,6 +661,7 @@ impl Screen for SystemSettings {
             Tab::Display => self.draw_display(cx),
             Tab::Library => self.draw_library(cx),
             Tab::Device => self.draw_device(cx),
+            Tab::Advanced => self.draw_advanced(cx),
         }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
@@ -630,6 +678,7 @@ impl Screen for SystemSettings {
             Tab::Display => return self.display_gesture(&g, cx),
             Tab::Library => return self.library_gesture(&g, cx),
             Tab::Device => self.device_gesture(&g, cx),
+            Tab::Advanced => self.advanced_gesture(&g, cx),
         }
         Action::None
     }

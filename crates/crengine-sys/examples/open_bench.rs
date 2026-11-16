@@ -5,7 +5,8 @@
 //!   open_bench CACHE_DIR BOOK.epub [PAGE]
 //!
 //! Env: VERSO_CRE_DATA (epub.css, hyph), VERSO_FONT_DIRS (colon-separated),
-//! VERSO_BENCH_PGM (write the first page as a PGM image).
+//! VERSO_BENCH_PGM (write the first page as a PGM image), VERSO_CRE_SHAPING
+//! (1 FreeType, 2 HarfBuzz light, 3 full HarfBuzz; default 2).
 
 use std::ffi::CString;
 use std::time::Instant;
@@ -44,6 +45,9 @@ fn main() {
         }
         let doc = verso_cre_new(w, h, dpi);
         assert!(!doc.is_null());
+        if let Some(mode) = std::env::var("VERSO_CRE_SHAPING").ok().and_then(|m| m.parse().ok()) {
+            verso_cre_set_shaping(doc, mode);
+        }
         verso_cre_set_stylesheet_file(doc, c(&format!("{data}/epub.css")).as_ptr());
         let face = c("Literata");
         verso_cre_set_font_face(doc, face.as_ptr());
