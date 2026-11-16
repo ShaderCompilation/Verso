@@ -484,6 +484,7 @@ fn inner(f: &Fixture) -> Inner {
         fresh: false,
         backend: None,
         save_error: None,
+        prefs_error: None,
     };
     assert!(inner.discover(&|| true));
     inner
@@ -532,6 +533,15 @@ fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_c
     let catalog = settings.catalog(false);
     f.worker.cancel();
     assert!(wait_client(&settings, catalog).state.is_none());
+    // Another client's edits and folder saves are queued, not cancellations.
+    let lookup = f.worker.lookup("word".into(), None, false);
+    let created = settings.edit(Edit::Create { id: "set".into(), name: "Set".into() });
+    f.worker.change_in(DEFAULT, "a.ifo".into(), true);
+    f.store.save_dictionary_folders(&[]).unwrap();
+    assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
+    let reply = wait_client(&settings, created);
+    assert_eq!(reply.active_set, "set", "an edit replies with the edited set");
+    assert!(reply.dictionaries.iter().all(|d| d.disabled));
 }
 #[test]
 fn migration_new_dictionary_placement_and_missing_positions_survive_restart() {
@@ -629,11 +639,32 @@ fn settings_edits_apply_to_retained_reader_client_and_are_durable_before_reply()
 #[test]
 fn unreadable_preferences_use_empty_default_and_failed_saves_retry_at_barrier() {
     let f = Fixture::new();
-    fs::write(f.store.dictionary_preferences(), b"{broken").unwrap();
+    let path = f.store.dictionary_preferences();
+    fs::write(&path, b"{broken").unwrap();
     install(&f.join("dictionaries/a.ifo"), "A", "word");
+    install(&f.join("dictionaries/b.ifo"), "B", "word");
     let reply = f.lookup("word");
     assert_eq!(reply.active_set, DEFAULT);
     assert!(!reply.dictionaries[0].disabled);
+    assert!(reply.warnings.iter().any(|w| w.contains("preferences couldn't be read")), "{:?}", reply.warnings);
+    // Discovery never replaces a damaged file; a repaired one is picked up.
+    assert_eq!(fs::read(&path).unwrap(), b"{broken");
+    let repaired = vec![super::super::Preference { id: "b.ifo".into(), disabled: false }];
+    atomic(&path, &repaired).unwrap();
+    let reply = f.reply(f.worker.lookup("word".into(), None, true)).0;
+    assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+    assert!(reply.warnings.is_empty(), "{:?}", reply.warnings);
+    let saved: Preferences = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved.set(DEFAULT).dictionaries.len(), 2, "migrated and new dictionary saved");
+    // A user's change replaces a damaged file and clears the warning.
+    fs::write(&path, b"[{\"id\":7}]").unwrap();
+    f.reply(f.worker.catalog(true));
+    assert_eq!(fs::read(&path).unwrap(), b"[{\"id\":7}]");
+    f.worker.change("a.ifo".into(), false);
+    let reply = f.lookup("word");
+    assert!(reply.warnings.is_empty(), "{:?}", reply.warnings);
+    let saved: Preferences = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved.set(DEFAULT).dictionaries.iter().any(|d| d.id == "a.ifo" && d.disabled));
     fs::remove_file(f.store.dictionary_preferences()).unwrap();
     fs::create_dir(f.store.dictionary_preferences()).unwrap();
     let reply = wait_client(&f.worker, f.worker.edit(Edit::Create { id: "set".into(), name: "Set".into() }));

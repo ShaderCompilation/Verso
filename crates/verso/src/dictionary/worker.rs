@@ -72,14 +72,13 @@ struct Request {
     id: u64,
     mailbox: Arc<Mailbox>,
     revision: u64,
-    folders: u64,
 }
 /// The only owner of dictionary backends and preferences. Store creates this
 /// on first use and retains it across screen/client lifetimes.
 pub struct Service {
     tx: mpsc::Sender<Command>,
+    /// Bumped only when the service stops.
     revision: Arc<AtomicU64>,
-    folders: Arc<AtomicU64>,
 }
 /// A screen's client, not a separate thread. Its replies and cancellation are
 /// private; a Settings catalog can never replace a reader lookup.
@@ -121,16 +120,45 @@ struct Inner {
     fresh: bool,
     backend: Option<(String, Backend)>,
     save_error: Option<String>,
+    /// The preference file exists but couldn't be read or parsed. Automatic
+    /// saves then leave it alone; the user's next change replaces it.
+    prefs_error: Option<String>,
+}
+/// Absent preferences are empty; an unreadable or invalid file is an error.
+fn read_preferences(path: &std::path::Path) -> anyhow::Result<(Preferences, bool)> {
+    if !path.try_exists()? {
+        return Ok((Preferences::default(), false));
+    }
+    Preferences::parse(&super::bounded_read(path, 1024 * 1024)?)
 }
 impl Inner {
+    /// Reads the preference file, keeping the in-memory copy if it fails.
+    fn load(&mut self) {
+        match read_preferences(&self.prefs_path) {
+            Ok((preferences, migrated)) => {
+                self.preferences = preferences;
+                self.prefs_error = None;
+                if migrated {
+                    self.save();
+                }
+            }
+            Err(e) => self.prefs_error = Some(format!("{e:#}")),
+        }
+    }
     /// Rediscovers every source with the current folder configuration.
     /// `false` when cancelled: the catalog stays stale and nothing is published.
     fn discover(&mut self, current: &impl Fn() -> bool) -> bool {
         // Files may have changed; reopen from the new catalog.
         self.backend = None;
         self.fresh = false;
-        let folders = self.store.dictionary_folders();
+        // Read the counter first: a save during the read then forces another scan.
         self.folders_seen = self.store.dictionary_folder_revision.load(Ordering::Relaxed);
+        let folders = self.store.dictionary_folders();
+        // A damaged file may have been a passing read failure (e.g. after USB).
+        // Retry until the user replaces it, unless their own save is pending.
+        if self.prefs_error.is_some() && self.save_error.is_none() {
+            self.load();
+        }
         match discover_catalog(
             &self.store.dictionary_dir(),
             &folders.folders,
@@ -140,7 +168,7 @@ impl Inner {
             Ok(catalog) => {
                 self.warnings = warnings(&catalog.sources, folders.error.as_deref());
                 self.catalog = catalog;
-                if self.preferences.discover(&self.catalog.dictionaries) {
+                if self.preferences.discover(&self.catalog.dictionaries) && self.prefs_error.is_none() {
                     self.save();
                 }
                 self.fresh = true;
@@ -149,8 +177,12 @@ impl Inner {
             Err(_) => false,
         }
     }
+    /// Writes the whole preference file, replacing a damaged one.
     fn save(&mut self) {
         self.save_error = atomic(&self.prefs_path, &self.preferences).err().map(|e| format!("{e:#}"));
+        if self.save_error.is_none() {
+            self.prefs_error = None;
+        }
     }
     fn apply_set(&mut self, set: &str) {
         let set = self.preferences.set(set);
@@ -283,7 +315,17 @@ impl Inner {
             id,
             dictionaries: self.catalog.dictionaries.clone(),
             sources: self.catalog.sources.clone(),
-            warnings: self.warnings.clone(),
+            warnings: self
+                .warnings
+                .iter()
+                .cloned()
+                .chain(self.prefs_error.as_ref().map(|e| {
+                    format!(
+                        "Dictionary preferences couldn't be read, so every dictionary is on, in the order found. \
+                     Changing a dictionary replaces the saved preferences. {e}"
+                    )
+                }))
+                .collect(),
             selected,
             sets: self.preferences.sets.clone(),
             active_set: self.active_set.clone(),
@@ -299,7 +341,6 @@ impl Service {
         let (tx, commands) = mpsc::channel();
         let revision = Arc::new(AtomicU64::new(0));
         let generation = revision.clone();
-        let folders = store.dictionary_folder_revision.clone();
         // Do not retain Store's service registry from its own thread.
         let store = store.dictionary_context();
         std::thread::Builder::new()
@@ -308,14 +349,10 @@ impl Service {
                 // Even preference reads wait for an actual request.
                 let Ok(first) = commands.recv() else { return };
                 let prefs_path = store.dictionary_preferences();
-                let (preferences, migrated) = super::bounded_read(&prefs_path, 1024 * 1024)
-                    .ok()
-                    .and_then(|s| Preferences::parse(&s).ok())
-                    .unwrap_or_default();
                 let mut inner = Inner {
                     store,
                     prefs_path,
-                    preferences,
+                    preferences: Preferences::default(),
                     folders_seen: 0,
                     active_set: DEFAULT.into(),
                     catalog: Catalog::default(),
@@ -323,17 +360,18 @@ impl Service {
                     fresh: false,
                     backend: None,
                     save_error: None,
+                    prefs_error: None,
                 };
-                if migrated {
-                    inner.save();
-                }
+                inner.load();
                 for command in std::iter::once(first).chain(commands) {
-                    // Clone the counter so cancellation closures don't borrow Inner.
-                    let folder_revision = inner.store.dictionary_folder_revision.clone();
+                    // Only the asking client's newer request (or stopping the
+                    // service) cancels; other clients' edits are queued in order.
                     let is_current = |r: &Request| {
                         r.mailbox.latest.load(Ordering::Relaxed) == r.id
                             && generation.load(Ordering::Relaxed) == r.revision
-                            && folder_revision.load(Ordering::Relaxed) == r.folders
+                    };
+                    let folders_changed = |inner: &Inner| {
+                        inner.folders_seen != inner.store.dictionary_folder_revision.load(Ordering::Relaxed)
                     };
                     match command {
                         Command::Stop => break,
@@ -351,11 +389,13 @@ impl Service {
                         Command::Change { set, id, up } => inner.change(&set, &id, up),
                         Command::Edit { request, edit } => {
                             // Edits survive closing the requesting screen.
+                            let set = edit.set().to_owned();
                             let error = inner.preferences.edit(edit).err().map(|e| e.to_string());
                             if error.is_none() {
                                 inner.save();
                             }
-                            inner.apply_set(DEFAULT);
+                            // Reply with the edited set (Default after a deletion).
+                            inner.apply_set(&set);
                             let mut reply = inner.reply(request.id, None, None);
                             reply.change_error = error;
                             publish(&request, reply, &|| is_current(&request));
@@ -365,9 +405,7 @@ impl Service {
                                 continue;
                             }
                             let current = || is_current(&request);
-                            if (!inner.fresh || rescan || inner.folders_seen != request.folders)
-                                && !inner.discover(&current)
-                            {
+                            if (!inner.fresh || rescan || folders_changed(&inner)) && !inner.discover(&current) {
                                 continue;
                             }
                             inner.apply_set(&set);
@@ -378,9 +416,7 @@ impl Service {
                                 continue;
                             }
                             let current = || is_current(&request);
-                            if (!inner.fresh || rescan || inner.folders_seen != request.folders)
-                                && !inner.discover(&current)
-                            {
+                            if (!inner.fresh || rescan || folders_changed(&inner)) && !inner.discover(&current) {
                                 continue;
                             }
                             let set = inner.preferences.choose(&selection, &query).id.clone();
@@ -392,7 +428,7 @@ impl Service {
                 }
             })
             .expect("spawn dictionary worker");
-        Self { tx, revision, folders }
+        Self { tx, revision }
     }
 }
 fn publish(request: &Request, reply: Reply, current: &dyn Fn() -> bool) {
@@ -416,12 +452,7 @@ impl Worker {
     fn request(&self) -> Request {
         let id = self.mailbox.latest.fetch_add(1, Ordering::Relaxed) + 1;
         *self.mailbox.result.lock().unwrap() = None;
-        Request {
-            id,
-            mailbox: self.mailbox.clone(),
-            revision: self.service.revision.load(Ordering::Relaxed),
-            folders: self.service.folders.load(Ordering::Relaxed),
-        }
+        Request { id, mailbox: self.mailbox.clone(), revision: self.service.revision.load(Ordering::Relaxed) }
     }
     #[cfg(test)]
     pub fn lookup(&self, query: String, selected: Option<String>, rescan: bool) -> u64 {
@@ -444,7 +475,6 @@ impl Worker {
     }
     #[allow(dead_code)] // Management uses the full edit API in Phase 4.
     pub fn edit(&self, edit: Edit) -> u64 {
-        self.service.revision.fetch_add(1, Ordering::Relaxed);
         let request = self.request();
         let id = request.id;
         let _ = self.service.tx.send(Command::Edit { request, edit });
@@ -455,7 +485,6 @@ impl Worker {
         self.change_in(DEFAULT, id, up);
     }
     pub fn change_in(&self, set: &str, id: String, up: bool) {
-        self.service.revision.fetch_add(1, Ordering::Relaxed);
         let _ = self.service.tx.send(Command::Change { set: set.into(), id, up });
     }
     pub fn receive(&self) -> Option<Reply> {

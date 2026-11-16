@@ -239,7 +239,8 @@ impl Books {
     pub fn new(t: &Theme, screen: Rect, worker: Rc<Worker>) -> Self {
         Self::with_store(t, screen, worker, Store::new())
     }
-    fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
+    /// Screens sharing one Store also share its dictionary service.
+    pub fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
         let roots = store.library_folders();
         let settings_seen = store.settings_saves();
         let started = std::time::Instant::now();

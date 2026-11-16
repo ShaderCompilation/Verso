@@ -42,9 +42,24 @@ pub enum Edit {
     MoveDictionary { set: String, dictionary: String, position: usize },
 }
 
+impl Edit {
+    /// The set the edit is about; after a deletion this falls back to Default.
+    pub fn set(&self) -> &str {
+        match self {
+            Edit::Create { id: set, .. }
+            | Edit::Rename { set, .. }
+            | Edit::Delete { set }
+            | Edit::MoveSet { set, .. }
+            | Edit::Languages { set, .. }
+            | Edit::Disabled { set, .. }
+            | Edit::MoveDictionary { set, .. } => set,
+        }
+    }
+}
+
 impl Preferences {
-    /// Legacy arrays migrate verbatim. Invalid records use the existing empty
-    /// preference fallback; the caller keeps read errors out of lookup results.
+    /// Legacy arrays migrate verbatim. For an invalid record the caller uses
+    /// empty preferences and leaves the file alone until the user changes one.
     pub fn parse(text: &str) -> Result<(Self, bool)> {
         #[derive(Deserialize)]
         #[serde(untagged)]
