@@ -322,6 +322,15 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "static inline void *verso_malloc16(size_t size) {\n    void *p = NULL;\n    return posix_memalign(&p, 16, size) == 0 ? p : NULL;\n}\n\nstruct LVFontGlyphCacheItem\n{",
     ),
     ("crengine/include/lvfntman.h", "(LVFontGlyphCacheItem *)malloc(", "(LVFontGlyphCacheItem *)verso_malloc16("),
+    // Some repackaged EPUBs leave out the `mimetype` entry. crengine then
+    // treats the book as a plain ZIP and shows the first file in it (often a
+    // stray text file). Accept a ZIP without `mimetype` as an EPUB when it has
+    // the EPUB container file, like the library's metadata reader does.
+    (
+        "crengine/src/epubfmt.cpp",
+        "    if ( mimeType != U\"application/epub+zip\" )\n        return false;",
+        "    if ( mimeType.empty() )\n        return !m_arc->OpenStream(U\"META-INF/container.xml\", LVOM_READ).isNull();\n    if ( mimeType != U\"application/epub+zip\" )\n        return false;",
+    ),
 ];
 
 /// crengine's own source list (CRE_SRCS in its CMakeLists.txt).

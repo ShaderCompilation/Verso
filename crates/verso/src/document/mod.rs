@@ -265,6 +265,35 @@ mod tests {
         drop(reopened);
         selection_checks(&engine, &layout);
         search_checks(&engine, &layout);
+        missing_mimetype_checks(&engine, &layout, &book, pages);
+    }
+
+    /// Some repackaged EPUBs have no `mimetype` entry. They must still open as
+    /// the book, not as the first file in the ZIP (here a stray text file).
+    fn missing_mimetype_checks(engine: &CreEngine, layout: &Layout, book: &std::path::Path, pages: usize) {
+        use std::io::{Read, Write};
+        let path = std::env::temp_dir().join(format!("verso-no-mimetype-{}.epub", std::process::id()));
+        let mut source = zip::ZipArchive::new(std::fs::File::open(book).unwrap()).unwrap();
+        let mut out = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        out.start_file("META-INF/calibre_bookmarks.txt", options).unwrap();
+        out.write_all(b"calibre_current_page_bookmark^5#body|0.000000").unwrap();
+        for i in 0..source.len() {
+            let mut entry = source.by_index(i).unwrap();
+            if entry.name() == "mimetype" || entry.is_dir() {
+                continue;
+            }
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            out.start_file(entry.name(), options).unwrap();
+            out.write_all(&data).unwrap();
+        }
+        out.finish().unwrap();
+        let mut doc = engine.open(&path, layout, None).unwrap();
+        assert_eq!(doc.page_count(), pages, "opens as the EPUB, not the stray text file");
+        assert!(!doc.toc().unwrap().is_empty());
+        drop(doc);
+        let _ = std::fs::remove_file(&path);
     }
 
     fn search_all(doc: &mut CreDocument, query: &str, budget: std::time::Duration) -> (Vec<SearchHit>, usize) {
