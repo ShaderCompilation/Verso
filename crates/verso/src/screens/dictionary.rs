@@ -109,6 +109,7 @@ pub enum LookupEvent {
     Close,
     /// Passage actions, retaining the independently edited lookup query.
     Actions(String),
+    Manage,
 }
 
 pub struct Lookup {
@@ -125,8 +126,8 @@ pub struct Lookup {
     dictionaries_button: Button,
     next: Button,
     find: Button,
-    back: Button,
-    rescan: Button,
+    manage: Button,
+    returning: bool,
     catalog: Vec<Dictionary>,
     sources: Vec<Source>,
     /// Source problems, shown with every result.
@@ -139,9 +140,6 @@ pub struct Lookup {
     layout_timing: (std::time::Instant, std::time::Duration),
     layout_error: Option<String>,
     pager: Pager,
-    manager_pager: Pager,
-    manager: bool,
-    rows: Vec<(usize, Rect, Button, Button)>,
     body: Rect,
 }
 impl Lookup {
@@ -192,14 +190,10 @@ impl Lookup {
         let footer = Rect::new(content.x, sheet.rect().bottom() - t.target - gap, content.w, t.target);
         let mut pager = Pager::new(1);
         pager.place(footer, t);
-        let mut back = Button::new("Back", ButtonKind::Secondary);
-        let mut rescan = Button::new("Rescan", ButtonKind::Secondary);
-        back.place(Rect::new(content.x, content.y, content.w / 2 - gap, t.target), t);
-        rescan.place(Rect::new(content.x + content.w / 2 + gap, content.y, content.w / 2 - gap, t.target), t);
+        let mut manage = Button::new("Manage dictionaries", ButtonKind::Secondary);
+        manage.place(Rect::new(content.x, footer.y - t.target - gap, content.w, t.target), t);
         let controls = find.rect().bottom().max(row.bottom());
-        let body = Rect::new(content.x, controls + gap, content.w, footer.y - controls - 2 * gap);
-        let mut manager_pager = Pager::new(1);
-        manager_pager.place(footer, t);
+        let body = Rect::new(content.x, controls + gap, content.w, manage.rect().y - controls - 2 * gap);
         let request = worker.lookup_in(query.into(), None, false, selection.clone());
         let mut keyboard = Keyboard::default();
         keyboard.place(screen, t);
@@ -217,8 +211,8 @@ impl Lookup {
             dictionaries_button,
             next,
             find,
-            back,
-            rescan,
+            manage,
+            returning: false,
             catalog: Vec::new(),
             sources: Vec::new(),
             warnings: Vec::new(),
@@ -228,9 +222,6 @@ impl Lookup {
             layout_timing: (std::time::Instant::now(), std::time::Duration::ZERO),
             layout_error: None,
             pager,
-            manager_pager,
-            manager: false,
-            rows: Vec::new(),
             body,
         }
     }
@@ -243,18 +234,8 @@ impl Lookup {
             d.name.clone()
         }
     }
-    fn with_warnings(&self, mut message: String) -> String {
-        if !self.warnings.is_empty() {
-            message.push_str("\n\nSome dictionary folders had problems:");
-            for warning in &self.warnings {
-                message.push_str("\n• ");
-                message.push_str(warning);
-            }
-        }
-        message
-    }
     pub fn busy(&self) -> bool {
-        self.pending || !self.manager && (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
+        self.pending || (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
     }
     pub fn paginating(&self) -> bool {
         self.pages.as_ref().is_some_and(|p| !p.is_complete())
@@ -298,6 +279,10 @@ impl Lookup {
         self.keyboard.visible = false;
     }
     pub fn receive(&mut self, cx: &mut EventCx) {
+        if self.returning {
+            self.returning = false;
+            self.submit(false);
+        }
         if let Some(reply) = self.worker.receive()
             && reply.id == self.request
         {
@@ -316,28 +301,7 @@ impl Lookup {
                 log::warn!("dictionary preferences: {e}");
                 cx.toast("Couldn't save dictionary preferences", None);
             }
-            self.place_rows(cx.theme);
             cx.redraw();
-        }
-    }
-    fn place_rows(&mut self, t: &Theme) {
-        let top = self.sheet.content(t).y + t.target + t.mm(3.0);
-        let height = self.manager_pager.rect().y - top;
-        let row_h = t.target + t.mm(10.0);
-        let per = (height / row_h).max(1) as usize;
-        self.manager_pager.set(self.manager_pager.page, self.catalog.len().div_ceil(per));
-        self.rows.clear();
-        for (row, index) in (self.manager_pager.page * per..self.catalog.len()).take(per).enumerate() {
-            let d = &self.catalog[index];
-            let rect = Rect::new(self.body.x, top + row as i32 * row_h, self.body.w, row_h);
-            let width = t.mm(20.0);
-            let mut toggle = Button::new(if d.disabled { "Enable" } else { "Disable" }, ButtonKind::Secondary);
-            toggle.enabled = !self.pending;
-            toggle.place(Rect::new(rect.right() - 2 * width - t.mm(2.0), rect.y, width, t.target), t);
-            let mut up = Button::new("Move up", ButtonKind::Secondary);
-            up.enabled = index > 0 && !self.pending;
-            up.place(Rect::new(rect.right() - width, rect.y, width, t.target), t);
-            self.rows.push((index, rect, toggle, up));
         }
     }
     fn cycle(&mut self, delta: isize) {
@@ -381,97 +345,37 @@ impl Lookup {
         if self.sheet.on_gesture(g) {
             return Some(LookupEvent::Close);
         }
-        if self.manager {
-            if self.back.on_gesture(g) {
-                self.manager = false;
-            }
-            if self.rescan.on_gesture(g) {
-                self.submit(true);
-                self.place_rows(cx.theme);
-            }
-            let old = self.manager_pager.page;
-            self.manager_pager.on_gesture(g);
-            if let Gesture::Swipe { dir, .. } = g {
-                self.manager_pager.on_swipe(*dir);
-            }
-            if old != self.manager_pager.page {
-                self.place_rows(cx.theme);
-            }
-            let mut change = None;
-            for (i, _, toggle, up) in &mut self.rows {
-                if toggle.on_gesture(g) {
-                    change = Some((*i, false));
-                }
-                if up.on_gesture(g) {
-                    change = Some((*i, true));
-                }
-            }
-            if let Some((i, up)) = change {
-                self.worker.change_in(&self.active_set, self.catalog[i].id.clone(), up);
-                self.selected = None;
-                self.submit(false);
-                self.place_rows(cx.theme);
-            }
-        } else {
-            if self.field.on_gesture(g) {
-                self.field.focused = true;
-                self.keyboard.visible = true;
-            }
-            if self.search.on_gesture(g) {
-                self.selected = None;
-                self.submit(false);
-            }
-            if self.previous.on_gesture(g) {
-                self.cycle(-1);
-            }
-            if self.next.on_gesture(g) {
-                self.cycle(1);
-            }
-            if self.dictionaries_button.on_gesture(g) {
-                self.manager = true;
-                self.place_rows(cx.theme);
-            }
-            if self.find.on_gesture(g) {
-                return Some(LookupEvent::Actions(self.field.value().to_owned()));
-            }
-            self.pager.on_gesture(g);
-            if let Gesture::Swipe { dir, .. } = g {
-                self.pager.on_swipe(*dir);
-            }
+        if self.manage.on_gesture(g) || self.dictionaries_button.on_gesture(g) {
+            self.returning = true;
+            self.worker.cancel();
+            return Some(LookupEvent::Manage);
+        }
+        if self.field.on_gesture(g) {
+            self.field.focused = true;
+            self.keyboard.visible = true;
+        }
+        if self.search.on_gesture(g) {
+            self.selected = None;
+            self.submit(false);
+        }
+        if self.previous.on_gesture(g) {
+            self.cycle(-1);
+        }
+        if self.next.on_gesture(g) {
+            self.cycle(1);
+        }
+        if self.find.on_gesture(g) {
+            return Some(LookupEvent::Actions(self.field.value().to_owned()));
+        }
+        self.pager.on_gesture(g);
+        if let Gesture::Swipe { dir, .. } = g {
+            self.pager.on_swipe(*dir);
         }
         None
     }
     pub fn draw(&mut self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
         let t = cx.theme;
-        if self.manager {
-            self.back.draw(cx);
-            self.rescan.draw(cx);
-            if self.catalog.is_empty() {
-                let message = self.with_warnings(
-                    "No dictionaries found. Add StarDict files to Verso's dictionaries/ folder, then tap Rescan."
-                        .into(),
-                );
-                cx.text.draw(cx.canvas, &message, t.body, self.body, HAlign::Left);
-            }
-            for (i, rect, toggle, up) in &self.rows {
-                let d = &self.catalog[*i];
-                let label = Rect::new(rect.x, rect.y, toggle.rect().x - rect.x - t.mm(2.0), t.target);
-                cx.line(&d.name, t.body, label, HAlign::Left);
-                let location = d.location(&self.sources);
-                let detail = if d.error.is_some() { format!("Unreadable · {location}") } else { location };
-                cx.line(
-                    &detail,
-                    t.caption.gray(INK2),
-                    Rect::new(rect.x, rect.y + t.target, rect.w, t.mm(8.0)),
-                    HAlign::Left,
-                );
-                toggle.draw(cx);
-                up.draw(cx);
-            }
-            self.manager_pager.draw(cx);
-            return;
-        }
         self.field.draw(cx);
         self.search.draw(cx);
         self.previous.enabled = self.catalog.iter().filter(|d| !d.disabled).count() > 1;
@@ -485,6 +389,7 @@ impl Lookup {
         self.dictionaries_button.draw(cx);
         self.next.draw(cx);
         self.find.draw(cx);
+        self.manage.draw(cx);
         if self.pages.is_none() && self.layout_error.is_none() {
             let started = std::time::Instant::now();
             let blocks = content(&self.state, self.pending, &self.warnings, t);
@@ -790,12 +695,9 @@ mod tests {
         }
         assert!(!first_paragraph(&State::NoResult).contains("Base form"));
         lookup.state = exact;
-        lookup.manager = true;
-        assert!(!lookup.busy(), "the manager does not wait for hidden pages to be drawn");
-        lookup.manager = false;
         // Source warnings accompany results; same-name copies show their source.
         lookup.warnings = vec!["/gone is not available.".into()];
-        assert!(lookup.with_warnings("text".into()).ends_with("problems:\n• /gone is not available."));
+
         lookup.warnings.clear();
         assert_eq!(lookup.title(&lookup.catalog[0]), lookup.catalog[0].name);
         let mut copy = lookup.catalog[0].clone();

@@ -248,7 +248,7 @@ impl Reader {
             _ => {}
         }
     }
-    fn lookup(&mut self, query: &str, cx: &mut EventCx) {
+    pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
         let service = self.dictionary.get_or_insert_with(|| {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
         });
@@ -821,6 +821,14 @@ impl Screen for Reader {
         match &mut self.overlay {
             Overlay::Lookup(lookup) => {
                 if let Some(event) = lookup.on_gesture(&g, cx) {
+                    if matches!(event, LookupEvent::Manage) {
+                        return Action::Push(Box::new(crate::screens::dictionaries::Dictionaries::new(
+                            cx.theme,
+                            self.screen,
+                            self.store.clone(),
+                            self.worker.waker(),
+                        )));
+                    }
                     if let Some(worker) = &self.dictionary {
                         worker.cancel();
                     }
@@ -1165,6 +1173,20 @@ mod tests {
         };
         r.lookup("Hello", &mut cx);
         assert_eq!(catalog(&r), ["native"]);
+        // The management button pushes a screen without dismissing the lookup
+        // or changing the book/selected passage. Returning refreshes the query.
+        r.lookup("Hello", &mut cx);
+        let before = r.anchor.clone();
+        let before_target = r.target;
+        let button = crate::geom::Point::new(screen.w / 2, screen.h - theme.mm(20.0));
+        r.on_gesture(Gesture::Down(button), &mut cx);
+        let action = r.on_gesture(Gesture::Tap(button), &mut cx);
+        assert!(matches!(action, Action::Push(_)));
+        assert!(matches!(r.overlay, Overlay::Lookup(_)));
+        assert_eq!(r.anchor, before);
+        assert_eq!(r.target, before_target);
+        drop(action);
+        r.on_background(&mut cx);
         // Settings (stacked above the retained reader) adds a folder.
         store.save_dictionary_folders(&[root.join("koreader")])?;
         assert_eq!(catalog(&r), ["external", "native"], "the shared service notices folder saves itself");

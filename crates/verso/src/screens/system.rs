@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::platform::{Waker, ssh, wifi};
-use crate::screens::dictionary_folders::DictionaryFolders;
+use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{Orientation, Settings, SleepScreen, Store, TapZones};
@@ -133,9 +133,7 @@ impl SystemSettings {
             let y = folder_pager.rect().y - t.mm(2.0) - entry_h;
             (content, Rect { y, h: entry_h, ..content })
         };
-        let mut dictionary_entry = List::new(vec![
-            Row::new("Dictionary folders").sub("Where Verso looks for StarDict dictionaries").chevron(),
-        ]);
+        let mut dictionary_entry = List::new(vec![Row::new("Dictionaries").sub("Sets, order and folders").chevron()]);
         let entry_row = Rect::new(screen.x, dictionaries.y + t.mm(8.0), screen.w, t.row2);
         let entry_row =
             if screen.w > screen.h { Rect { x: dictionaries.x, w: dictionaries.w, ..entry_row } } else { entry_row };
@@ -394,7 +392,7 @@ impl SystemSettings {
             return Action::None;
         }
         if let Some(ListEvent::Tapped(_)) = self.dictionary_entry.on_gesture(g) {
-            return Action::Push(Box::new(DictionaryFolders::new(
+            return Action::Push(Box::new(Dictionaries::new(
                 cx.theme,
                 self.screen,
                 self.store.clone(),

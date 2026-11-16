@@ -31,15 +31,37 @@ pub struct Selection {
 
 /// Every edit is ordered with lookups and saved before the next command.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // The full management UI arrives in Phase 4.
 pub enum Edit {
-    Create { id: String, name: String },
-    Rename { set: String, name: String },
-    Delete { set: String },
-    MoveSet { set: String, position: usize },
-    Languages { set: String, languages: Vec<String> },
-    Disabled { set: String, dictionary: String, disabled: bool },
-    MoveDictionary { set: String, dictionary: String, position: usize },
+    Create {
+        id: String,
+        name: String,
+    },
+    Rename {
+        set: String,
+        name: String,
+    },
+    Delete {
+        set: String,
+    },
+    #[allow(dead_code)] // Set order is retained for a future UI.
+    MoveSet {
+        set: String,
+        position: usize,
+    },
+    Languages {
+        set: String,
+        languages: Vec<String>,
+    },
+    Disabled {
+        set: String,
+        dictionary: String,
+        disabled: bool,
+    },
+    MoveDictionary {
+        set: String,
+        dictionary: String,
+        position: usize,
+    },
 }
 
 impl Edit {

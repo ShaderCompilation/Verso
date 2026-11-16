@@ -484,6 +484,7 @@ fn inner(f: &Fixture) -> Inner {
         fresh: false,
         backend: None,
         save_error: None,
+        failed_queries: Default::default(),
         prefs_error: None,
     };
     assert!(inner.discover(&|| true));
@@ -674,4 +675,39 @@ fn unreadable_preferences_use_empty_default_and_failed_saves_retry_at_barrier() 
     f.worker.flush().unwrap();
     let saved: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
     assert_eq!(saved.set("set").name, "Set");
+}
+
+#[test]
+fn retry_reopens_a_repaired_dictionary_and_clears_errors_even_when_disabled() {
+    let f = Fixture::new();
+    let ifo = f.store.dictionary_dir().join("repair.ifo");
+    install(&ifo, "Repair", "Hello");
+    let data = ifo.with_extension("dict");
+    fs::write(&data, b"").unwrap();
+    let reply = f.lookup("Hello");
+    assert!(reply.dictionaries[0].error.is_some());
+    let reply =
+        edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "repair.ifo".into(), disabled: true });
+    assert!(reply.dictionaries[0].disabled);
+    let failed = wait_client(&f.worker, f.worker.retry(DEFAULT, "repair.ifo"));
+    assert!(failed.dictionaries[0].error.is_some(), "retry must still read the failed entry");
+    let rescan = wait_client(&f.worker, f.worker.catalog(true));
+    assert!(rescan.dictionaries[0].error.is_some(), "rescan must not hide an unrepaired read error");
+    fs::write(&data, b"Repair text").unwrap();
+    let repaired = wait_client(&f.worker, f.worker.retry(DEFAULT, "repair.ifo"));
+    assert!(repaired.dictionaries[0].error.is_none());
+    assert!(repaired.dictionaries[0].disabled, "retry does not change set membership");
+}
+
+#[test]
+fn rescan_retries_read_errors_and_refreshes_repaired_metadata() {
+    let f = Fixture::new();
+    let ifo = f.store.dictionary_dir().join("repair.ifo");
+    install(&ifo, "Repair", "Hello");
+    fs::write(ifo.with_extension("idx"), b"broken").unwrap();
+    assert!(f.lookup("Hello").dictionaries[0].error.is_some());
+    install(&ifo, "Renamed full dictionary", "Hello");
+    let reply = wait_client(&f.worker, f.worker.catalog(true));
+    assert!(reply.dictionaries[0].error.is_none());
+    assert_eq!(reply.dictionaries[0].name, "Renamed full dictionary");
 }

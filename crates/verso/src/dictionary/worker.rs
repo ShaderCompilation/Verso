@@ -46,7 +46,6 @@ pub struct Reply {
     /// Source and configuration problems, readable as they are.
     pub warnings: Vec<String>,
     pub selected: Option<String>,
-    #[allow(dead_code)] // Management consumes the set catalog in Phase 4.
     pub sets: Vec<Set>,
     pub active_set: String,
     pub change_error: Option<String>,
@@ -55,10 +54,33 @@ pub struct Reply {
     pub save_error: Option<String>,
 }
 enum Command {
-    Lookup { request: Request, query: String, selected: Option<String>, selection: Selection, rescan: bool },
-    Catalog { request: Request, set: String, rescan: bool },
-    Edit { request: Request, edit: Edit },
-    Change { set: String, id: String, up: bool },
+    Lookup {
+        request: Request,
+        query: String,
+        selected: Option<String>,
+        selection: Selection,
+        rescan: bool,
+    },
+    Catalog {
+        request: Request,
+        set: String,
+        rescan: bool,
+    },
+    Edit {
+        request: Request,
+        edit: Edit,
+    },
+    #[cfg(test)]
+    Change {
+        set: String,
+        id: String,
+        up: bool,
+    },
+    Retry {
+        request: Request,
+        set: String,
+        dictionary: String,
+    },
     Release,
     Flush(mpsc::Sender<Result<(), String>>),
     Stop,
@@ -120,6 +142,7 @@ struct Inner {
     fresh: bool,
     backend: Option<(String, Backend)>,
     save_error: Option<String>,
+    failed_queries: std::collections::HashMap<String, (String, bool)>,
     /// The preference file exists but couldn't be read or parsed. Automatic
     /// saves then leave it alone; the user's next change replaces it.
     prefs_error: Option<String>,
@@ -130,6 +153,24 @@ fn read_preferences(path: &std::path::Path) -> anyhow::Result<(Preferences, bool
         return Ok((Preferences::default(), false));
     }
     Preferences::parse(&super::bounded_read(path, 1024 * 1024)?)
+}
+/// Reopen files and repeat the failed query (including base forms), so an
+/// error disappears only after the operation that failed can succeed.
+fn retry_read(
+    dictionary: &Dictionary,
+    cache: &std::path::Path,
+    query: Option<&(String, bool)>,
+    current: &impl Fn() -> bool,
+) -> anyhow::Result<()> {
+    let mut backend = Backend::open(&dictionary.path, cache, current)?;
+    if let Some((query, english_forms)) = query
+        && backend.lookup(query)?.is_empty()
+        && *english_forms
+        && let Some(forms) = forms::candidates(query)
+    {
+        backend.lookup_forms(&forms, current)?;
+    }
+    Ok(())
 }
 impl Inner {
     /// Reads the preference file, keeping the in-memory copy if it fails.
@@ -165,7 +206,25 @@ impl Inner {
             &self.preferences.set(DEFAULT).dictionaries,
             current,
         ) {
-            Ok(catalog) => {
+            Ok(mut catalog) => {
+                let cache = self.store.dictionary_cache();
+                for dictionary in &mut catalog.dictionaries {
+                    if dictionary.error.is_none()
+                        && self.catalog.dictionaries.iter().any(|d| d.id == dictionary.id && d.error.is_some())
+                    {
+                        dictionary.error =
+                            retry_read(dictionary, &cache, self.failed_queries.get(&dictionary.id), current)
+                                .err()
+                                .map(|e| format!("{e:#}"));
+                        if !current() {
+                            return false;
+                        }
+                        if dictionary.error.is_none() {
+                            self.failed_queries.remove(&dictionary.id);
+                        }
+                    }
+                }
+                self.failed_queries.retain(|id, _| catalog.dictionaries.iter().any(|d| d.id == *id));
                 self.warnings = warnings(&catalog.sources, folders.error.as_deref());
                 self.catalog = catalog;
                 if self.preferences.discover(&self.catalog.dictionaries) && self.prefs_error.is_none() {
@@ -189,6 +248,7 @@ impl Inner {
         self.active_set = set.id.clone();
         set.apply(&mut self.catalog.dictionaries);
     }
+    #[cfg(test)]
     fn change(&mut self, set: &str, id: &str, up: bool) {
         let entries = &self.preferences.set(set).dictionaries;
         if let Some(i) = entries.iter().position(|d| d.id == id) {
@@ -289,10 +349,12 @@ impl Inner {
             })();
             outcomes[i] = Some(match lookup {
                 Ok((text, _)) if text.is_empty() => {
+                    self.failed_queries.remove(&dictionary.id);
                     dictionary.error = None;
                     State::NoResult
                 }
                 Ok((entries, count)) => {
+                    self.failed_queries.remove(&dictionary.id);
                     dictionary.error = None;
                     let base_forms = count.map(|count| BaseForms { query: query.to_owned(), count });
                     return Some((Some(dictionary.id.clone()), State::Definition { entries, base_forms }));
@@ -302,6 +364,7 @@ impl Inner {
                         break;
                     }
                     let error = format!("{e:#}");
+                    self.failed_queries.insert(dictionary.id.clone(), (query.into(), forms.is_some()));
                     dictionary.error = Some(error.clone());
                     State::Error(error)
                 }
@@ -360,6 +423,7 @@ impl Service {
                     fresh: false,
                     backend: None,
                     save_error: None,
+                    failed_queries: Default::default(),
                     prefs_error: None,
                 };
                 inner.load();
@@ -386,6 +450,7 @@ impl Service {
                             }
                             let _ = done.send(inner.save_error.clone().map_or(Ok(()), Err));
                         }
+                        #[cfg(test)]
                         Command::Change { set, id, up } => inner.change(&set, &id, up),
                         Command::Edit { request, edit } => {
                             // Edits survive closing the requesting screen.
@@ -399,6 +464,33 @@ impl Service {
                             let mut reply = inner.reply(request.id, None, None);
                             reply.change_error = error;
                             publish(&request, reply, &|| is_current(&request));
+                        }
+                        Command::Retry { request, set, dictionary } => {
+                            let current = || is_current(&request);
+                            if !current() {
+                                continue;
+                            }
+                            inner.backend = None;
+                            if let Some(d) = inner.catalog.dictionaries.iter_mut().find(|d| d.id == dictionary) {
+                                let result = retry_read(
+                                    d,
+                                    &inner.store.dictionary_cache(),
+                                    inner.failed_queries.get(&dictionary),
+                                    &current,
+                                );
+                                if !current() {
+                                    continue;
+                                }
+                                d.error = result.err().map(|e| format!("{e:#}"));
+                                if d.error.is_none() {
+                                    inner.failed_queries.remove(&dictionary);
+                                    if let Ok(info) = super::Info::read(&d.path) {
+                                        d.name = info.name;
+                                    }
+                                }
+                            }
+                            inner.apply_set(&set);
+                            publish(&request, inner.reply(request.id, None, None), &current);
                         }
                         Command::Catalog { request, set, rescan } => {
                             if !is_current(&request) {
@@ -473,7 +565,6 @@ impl Worker {
         let _ = self.service.tx.send(Command::Catalog { request, set: set.into(), rescan });
         id
     }
-    #[allow(dead_code)] // Management uses the full edit API in Phase 4.
     pub fn edit(&self, edit: Edit) -> u64 {
         let request = self.request();
         let id = request.id;
@@ -484,8 +575,15 @@ impl Worker {
     pub fn change(&self, id: String, up: bool) {
         self.change_in(DEFAULT, id, up);
     }
+    #[cfg(test)]
     pub fn change_in(&self, set: &str, id: String, up: bool) {
         let _ = self.service.tx.send(Command::Change { set: set.into(), id, up });
+    }
+    pub fn retry(&self, set: &str, dictionary: &str) -> u64 {
+        let request = self.request();
+        let id = request.id;
+        let _ = self.service.tx.send(Command::Retry { request, set: set.into(), dictionary: dictionary.into() });
+        id
     }
     pub fn receive(&self) -> Option<Reply> {
         self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
