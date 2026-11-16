@@ -9,7 +9,7 @@ use crate::{
     store::{Store, atomic_bytes, default_dictionary_folders},
 };
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
@@ -106,6 +106,7 @@ enum Command {
 }
 struct Mailbox {
     result: Mutex<Option<Reply>>,
+    ready: Condvar,
     session: Mutex<Option<Session>>,
     latest: AtomicU64,
     waker: Waker,
@@ -304,10 +305,10 @@ impl Inner {
     /// Search every enabled index in set order, keeping only compact index
     /// hits; opening another dictionary later never repeats the search.
     ///
-    /// A search that outlasts `FIRST_PUBLICATION` publishes an incomplete
-    /// snapshot, then again only when what it shows changes meaning: the
-    /// first definition arrives, or index preparation starts or ends. More
-    /// matches alone wait for the final count, to keep e-ink redraws few.
+    /// Publish the first usable definition as soon as it is ready, while
+    /// counting other dictionaries. Long searches also publish preparation
+    /// progress after `FIRST_PUBLICATION`; more matches alone wait for the
+    /// final count to keep e-ink redraws few.
     fn lookup_session(&mut self, request: &Request, query: &str, current: &impl Fn() -> bool) {
         use std::{cell::RefCell, time::Instant};
         let started = Instant::now();
@@ -333,9 +334,9 @@ impl Inner {
             || request.mailbox.session.lock().unwrap().as_ref().map(|s| s.matches.clone()).unwrap_or_default();
         // (selected, preparing) as last published.
         let shown = RefCell::new(None);
-        let progress = || {
+        let publish_snapshot = |first_definition: bool| {
             let valid = current();
-            if valid && started.elapsed() >= FIRST_PUBLICATION {
+            if valid && (first_definition || started.elapsed() >= FIRST_PUBLICATION) {
                 let snapshot = snapshot.borrow();
                 let key = (snapshot.selected.clone(), snapshot.preparing.clone());
                 if shown.borrow().as_ref() != Some(&key) {
@@ -345,6 +346,7 @@ impl Inner {
             }
             valid
         };
+        let progress = || publish_snapshot(false);
         let forms = self.preferences.set(&self.active_set).english_forms().then(|| forms::candidates(query)).flatten();
         if let Some(forms) = &forms {
             log::debug!("dictionary query: {} generated candidates", forms.count());
@@ -372,6 +374,7 @@ impl Inner {
                 if !current() {
                     return;
                 }
+                let mut first_definition = false;
                 match outcome {
                     Ok(hits) => {
                         // A readable index clears an earlier failure, as before
@@ -387,6 +390,7 @@ impl Inner {
                                         let mut snapshot = snapshot.borrow_mut();
                                         snapshot.selected = Some(id.clone());
                                         snapshot.state = Some(definition);
+                                        first_definition = true;
                                     }
                                     Err(error) if current() => self.read_error(&id, query, forms.is_some(), error),
                                     Err(_) => return,
@@ -403,6 +407,9 @@ impl Inner {
                 let error = self.catalog.dictionaries.iter().find(|d| d.id == id).and_then(|d| d.error.clone());
                 if let Some(d) = snapshot.borrow_mut().dictionaries.iter_mut().find(|d| d.id == id) {
                     d.error = error;
+                }
+                if first_definition && !publish_snapshot(true) {
+                    return;
                 }
             }
         }
@@ -432,6 +439,7 @@ impl Inner {
     fn lookup(&mut self, query: &str, current: &impl Fn() -> bool) -> (Option<String>, State) {
         let mailbox = Arc::new(Mailbox {
             result: Mutex::new(None),
+            ready: Condvar::new(),
             session: Mutex::new(None),
             latest: AtomicU64::new(0),
             waker: Waker::new(|| {}),
@@ -713,6 +721,7 @@ impl Service {
 fn publish(request: &Request, reply: Reply, current: &dyn Fn() -> bool) {
     if current() {
         *request.mailbox.result.lock().unwrap() = Some(reply);
+        request.mailbox.ready.notify_one();
         request.mailbox.waker.wake();
     }
 }
@@ -730,6 +739,7 @@ impl Worker {
             service,
             mailbox: Arc::new(Mailbox {
                 result: Mutex::new(None),
+                ready: Condvar::new(),
                 session: Mutex::new(None),
                 latest: AtomicU64::new(0),
                 waker,
@@ -796,9 +806,19 @@ impl Worker {
     pub fn receive(&self) -> Option<Reply> {
         self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
     }
+    /// Give a first draw a short chance to include an already nearly ready
+    /// definition. The worker signals this condition when it publishes.
+    pub fn receive_wait(&self, timeout: std::time::Duration) -> Option<Reply> {
+        let mut result = self.mailbox.result.lock().unwrap();
+        if result.is_none() {
+            (result, _) = self.mailbox.ready.wait_timeout_while(result, timeout, |reply| reply.is_none()).unwrap();
+        }
+        result.take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
+    }
     #[cfg(test)]
     pub fn result_for_test(&self, reply: Reply) {
         *self.mailbox.result.lock().unwrap() = Some(reply);
+        self.mailbox.ready.notify_one();
     }
     pub fn cancel(&self) {
         self.mailbox.latest.fetch_add(1, Ordering::Relaxed);

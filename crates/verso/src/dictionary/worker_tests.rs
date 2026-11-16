@@ -62,7 +62,13 @@ impl Fixture {
         }
     }
     fn lookup(&self, query: &str) -> Reply {
-        self.reply(self.worker.lookup(query.into(), false)).0
+        let id = self.worker.lookup(query.into(), false);
+        loop {
+            let reply = self.reply(id).0;
+            if reply.complete {
+                return reply;
+            }
+        }
     }
     fn catalog(&self) -> Reply {
         self.reply(self.worker.catalog(false)).0
@@ -440,7 +446,7 @@ fn single_dictionary_reuses_its_backend_for_exact_and_forms() {
 }
 
 #[test]
-fn cancellation_at_any_point_returns_no_definition_and_marks_no_errors() {
+fn cancellation_at_any_point_marks_no_errors() {
     use std::cell::Cell;
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "other");
@@ -448,8 +454,9 @@ fn cancellation_at_any_point_returns_no_definition_and_marks_no_errors() {
     let mut inner = inner(&f);
     // Cancel at the nth check, through index building, exact and forms, the
     // dictionary switches and every base-form candidate, until one completes.
-    // The worker drops whatever a cancelled lookup returns; it must not
-    // return a definition or record cancellation as a dictionary error.
+    // A first definition may already have been published before a later
+    // cancellation. The client clears that mailbox; cancellation must never
+    // turn an interrupted read into a dictionary error.
     for n in 0.. {
         assert!(n < 1000, "the lookup never completed");
         let checks = Cell::new(0);
@@ -462,7 +469,9 @@ fn cancellation_at_any_point_returns_no_definition_and_marks_no_errors() {
             assert!(matches!(state, State::Definition { base_forms: Some(_), .. }), "{state:?}");
             break;
         }
-        assert!(!matches!(state, State::Definition { .. }), "cancelled at check {n}: {state:?}");
+        if let State::Definition { base_forms, .. } = state {
+            assert!(base_forms.is_some(), "cancelled at check {n}");
+        }
         assert!(inner.catalog.dictionaries.iter().all(|d| d.error.is_none()), "cancelled at check {n}");
     }
 }
@@ -845,6 +854,7 @@ fn publications(f: &Fixture, delay: impl Fn(&Mailbox) -> bool) -> Vec<Reply> {
     let weak = holder.clone();
     let mailbox = Arc::new(Mailbox {
         result: Mutex::new(None),
+        ready: Condvar::new(),
         session: Mutex::new(None),
         latest: AtomicU64::new(1),
         waker: Waker::new(move || {
@@ -867,13 +877,15 @@ fn publications(f: &Fixture, delay: impl Fn(&Mailbox) -> bool) -> Vec<Reply> {
 }
 
 #[test]
-fn fast_search_publishes_once_and_delayed_search_only_adds_its_final_count() {
+fn fast_search_publishes_first_definition_then_final_count() {
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "box");
     install(&f.join("dictionaries/b.ifo"), "B", "boxes");
     let fast = publications(&f, |_| false);
-    assert_eq!(fast.len(), 1);
-    assert!(fast[0].complete && fast[0].matches.len() == 2);
+    assert_eq!(fast.len(), 2);
+    assert!(!fast[0].complete && fast[0].matches.len() == 1);
+    assert!(matches!(fast[0].state, Some(State::Definition { .. })));
+    assert!(fast[1].complete && fast[1].matches.len() == 2);
     let delayed = publications(&f, |m| m.session.lock().unwrap().as_ref().is_some_and(|s| s.matches.len() == 1));
     assert_eq!(delayed.len(), 2);
     assert!(!delayed[0].complete);
@@ -896,11 +908,12 @@ fn first_index_build_reports_preparation_and_cancellation_cleans_its_temporary_f
         fs::read_dir(&cache)
             .is_ok_and(|mut files| files.any(|e| e.unwrap().path().extension().is_some_and(|x| x == "tmp")))
     });
-    assert_eq!(preparing.len(), 2);
+    assert_eq!(preparing.len(), 3);
     assert_eq!(preparing[0].preparing.as_deref(), Some("a.ifo"));
     assert!(!preparing[0].complete);
-    assert!(preparing[1].complete && preparing[1].preparing.is_none());
-    assert!(preparing[1].unprepared.is_empty());
+    assert!(!preparing[1].complete && matches!(preparing[1].state, Some(State::Definition { .. })));
+    assert!(preparing[2].complete && preparing[2].preparing.is_none());
+    assert!(preparing[2].unprepared.is_empty());
     assert!(fs::read_dir(cache).unwrap().all(|e| e.unwrap().path().extension().unwrap() == "index"));
 }
 

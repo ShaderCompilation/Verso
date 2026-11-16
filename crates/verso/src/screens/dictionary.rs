@@ -24,6 +24,7 @@ const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso
                        then open Dictionaries and tap Rescan.";
 const DISABLED: &str = "All dictionaries are disabled. Open Dictionaries to enable one.";
 const NO_RESULT: &str = "No definition found. Tap the query to edit it, or switch dictionary sets.";
+const FIRST_DRAW_WAIT: std::time::Duration = std::time::Duration::from_millis(12);
 /// Nesting levels that indent; deeper blocks stay at the last level.
 const MAX_DEPTH: u8 = 4;
 
@@ -158,6 +159,9 @@ pub struct Lookup {
     warnings: Vec<String>,
     selected: Option<String>,
     state: State,
+    /// A reply consumed during drawing still needs its save failure shown by
+    /// the next event pass, which can create an app toast.
+    pending_save_error: Option<String>,
     pages: Option<StyledPagination>,
     /// When the current pagination started and the layout time spent on it,
     /// for the completion debug log.
@@ -252,6 +256,7 @@ impl Lookup {
             warnings: Vec::new(),
             selected: None,
             state: State::NoResult,
+            pending_save_error: None,
             pages: None,
             layout_timing: (std::time::Instant::now(), std::time::Duration::ZERO),
             layout_error: None,
@@ -321,12 +326,17 @@ impl Lookup {
         self.field.focused = false;
         self.keyboard.visible = false;
     }
-    pub fn receive(&mut self, cx: &mut EventCx) {
+    fn take_reply(&mut self, t: &Theme, first_draw: bool) -> bool {
         if self.revision != self.worker.revision() || self.returning && !self.complete {
             self.repeat(false);
         }
         self.returning = false;
-        if let Some(reply) = self.worker.receive()
+        let reply = if first_draw && self.pending && self.selected.is_none() && self.pages.is_none() {
+            self.worker.receive_wait(FIRST_DRAW_WAIT)
+        } else {
+            self.worker.receive()
+        };
+        if let Some(reply) = reply
             && reply.id == self.request
         {
             self.complete = reply.complete;
@@ -354,12 +364,22 @@ impl Lookup {
                     self.pager.incomplete = true;
                 }
             }
-            if let Some(e) = reply.save_error {
-                log::warn!("dictionary preferences: {e}");
-                cx.toast("Couldn't save dictionary preferences", None);
+            if let Some(error) = reply.save_error {
+                self.pending_save_error = Some(error);
             }
-            self.refresh_picker(cx.theme);
+            self.refresh_picker(t);
+            true
+        } else {
+            false
+        }
+    }
+    pub fn receive(&mut self, cx: &mut EventCx) {
+        if self.take_reply(cx.theme, false) {
             cx.redraw();
+        }
+        if let Some(error) = self.pending_save_error.take() {
+            log::warn!("dictionary preferences: {error}");
+            cx.toast("Couldn't save dictionary preferences", None);
         }
     }
     fn choose(&mut self, index: usize) {
@@ -564,6 +584,10 @@ impl Lookup {
     }
     pub fn draw(&mut self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
+        // Drawing the cached book page takes long enough that a warm lookup
+        // may finish while the sheet chrome is drawn. Consume it before
+        // laying out content so the first update can contain the definition.
+        self.take_reply(cx.theme, true);
         let t = cx.theme;
         let status = self.status();
         log::debug!("dictionary status draw: {status}, set {}", self.active_set);
@@ -737,6 +761,7 @@ mod tests {
         let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
         for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
             let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None, Default::default());
+            worker.cancel(); // This test supplies its own styled state.
             lookup.pending = false;
             lookup.complete = true;
             lookup.state = State::Definition {
@@ -876,9 +901,9 @@ mod tests {
         };
         let wait = |lookup: &mut Lookup, cx: &mut EventCx| {
             let deadline = Instant::now() + Duration::from_secs(5);
-            while lookup.pending {
+            while lookup.pending || !lookup.complete {
                 lookup.receive(cx);
-                if !lookup.pending {
+                if !lookup.pending && lookup.complete {
                     break;
                 }
                 assert!(Instant::now() < deadline);
