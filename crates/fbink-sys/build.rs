@@ -10,7 +10,9 @@ fn main() {
         return;
     }
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/FBInk");
+    // Build-script binaries can survive a repository move in target/.
+    // Cargo supplies the current location when running the script.
+    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../third_party/FBInk");
     for f in ["fbink.c", "fbink.h", "cutef8/utf8.c", "cutef8/dfa.c"] {
         println!("cargo:rerun-if-changed={}", root.join(f).display());
     }

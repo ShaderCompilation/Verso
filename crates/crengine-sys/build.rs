@@ -253,7 +253,7 @@ impl Ctx {
     fn shim_and_crengine(&self, link: &mut Vec<&'static str>) {
         let cre = self.patched_crengine();
         let mut b = self.cpp();
-        b.file(Path::new(env!("CARGO_MANIFEST_DIR")).join("shim/verso_cre.cpp"));
+        b.file(PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("shim/verso_cre.cpp"));
         b.file(cre.join("crengine/qimagescale/qimagescale.cpp"));
         for f in CRENGINE_SOURCES {
             b.file(cre.join("crengine/src").join(f));
