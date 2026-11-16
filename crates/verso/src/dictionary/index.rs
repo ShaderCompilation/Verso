@@ -128,19 +128,23 @@ fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
     let dest = cache.join(format!("{name}.index"));
     Ok((dest, fingerprint))
 }
+/// The cache file when it exists and carries this fingerprint; the one rule
+/// for whether a cache is valid. A cache that can't be opened is rebuilt.
+fn cached(dest: &Path, fingerprint: &str) -> Result<Option<File>> {
+    let Ok(mut file) = File::open(dest) else { return Ok(None) };
+    if file.metadata()?.len() < HEADER {
+        return Ok(None);
+    }
+    let mut signature = [0; SIGNATURE as usize];
+    file.read_exact(&mut signature)?;
+    Ok((signature == fingerprint.as_bytes()).then_some(file))
+}
 impl Index {
+    /// Whether a valid cache exists, without building one.
     pub fn prepared(path: &Path, cache: &Path) -> bool {
-        (|| -> Result<bool> {
-            let (dest, fingerprint) = cache_location(path, cache)?;
-            let mut file = File::open(dest)?;
-            if file.metadata()?.len() < HEADER {
-                return Ok(false);
-            }
-            let mut signature = [0; SIGNATURE as usize];
-            file.read_exact(&mut signature)?;
-            Ok(signature == fingerprint.as_bytes())
-        })()
-        .unwrap_or(false)
+        cache_location(path, cache)
+            .and_then(|(dest, fingerprint)| cached(&dest, &fingerprint))
+            .is_ok_and(|f| f.is_some())
     }
     pub fn open(
         path: &Path,
@@ -151,19 +155,13 @@ impl Index {
         preparing: &impl Fn(),
     ) -> Result<Self> {
         fs::create_dir_all(cache)?;
+        let (dest, fingerprint) = cache_location(path, cache)?;
+        if let Some(file) = cached(&dest, &fingerprint)? {
+            return Ok(Self(file));
+        }
         let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
         let (idx, compressed) = companion(&base, "idx", "idx.gz")?;
         let syn = sibling(&base, "syn");
-        let (dest, fingerprint) = cache_location(path, cache)?;
-        if let Ok(mut file) = File::open(&dest)
-            && file.metadata()?.len() >= HEADER
-        {
-            let mut signature = [0; SIGNATURE as usize];
-            file.read_exact(&mut signature)?;
-            if signature == fingerprint.as_bytes() {
-                return Ok(Self(file));
-            }
-        }
         preparing();
         let build_id = BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = format!("{}-{build_id}", std::process::id());

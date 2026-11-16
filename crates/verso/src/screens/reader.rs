@@ -1256,7 +1256,7 @@ mod tests {
         assert_eq!(lookup(&mut r, &mut cx).active_set, crate::dictionary::sets::DEFAULT);
         // A recreated client still resolves the persisted book choice.
         let selection = Selection { book_set: store.book("book").dictionary_set, language: "en".into() };
-        let reply = wait(&settings, settings.lookup_in("Hello".into(), None, false, selection));
+        let reply = wait(&settings, settings.lookup_in("Hello".into(), false, selection));
         assert_eq!(reply.active_set, crate::dictionary::sets::DEFAULT);
         drop(r);
         std::fs::remove_dir_all(root)?;

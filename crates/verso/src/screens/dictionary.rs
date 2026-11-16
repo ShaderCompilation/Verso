@@ -219,7 +219,7 @@ impl Lookup {
         let controls = find.rect().bottom().max(row.bottom());
         let counter = Rect::new(content.x, controls + gap, content.w, t.mm(7.0));
         let body = Rect::new(content.x, counter.bottom(), content.w, manage.rect().y - counter.bottom() - gap);
-        let request = worker.lookup_in(query.into(), None, false, selection.clone());
+        let request = worker.lookup_in(query.into(), false, selection.clone());
         let mut keyboard = Keyboard::default();
         keyboard.place(screen, t);
         let revision = worker.revision();
@@ -307,7 +307,7 @@ impl Lookup {
     }
     /// Runs the last submitted query again, leaving any unsubmitted field edit.
     fn repeat(&mut self, rescan: bool) {
-        self.request = self.worker.lookup_in(self.query.clone(), None, rescan, self.selection.clone());
+        self.request = self.worker.lookup_in(self.query.clone(), rescan, self.selection.clone());
         self.pending = true;
         self.complete = false;
         self.matches.clear();
@@ -463,10 +463,7 @@ impl Lookup {
             return false;
         }
         match input {
-            TextInput::Submit => {
-                self.selected = None;
-                self.submit(false);
-            }
+            TextInput::Submit => self.submit(false),
             TextInput::Dismiss => {
                 self.field.focused = false;
                 self.keyboard.visible = false;
@@ -548,7 +545,6 @@ impl Lookup {
             self.keyboard.visible = true;
         }
         if self.search.on_gesture(g) {
-            self.selected = None;
             self.submit(false);
         }
         if self.previous.on_gesture(g) {
@@ -953,6 +949,7 @@ mod tests {
             complete: true,
             preparing: None,
             unprepared: vec![],
+            missing: vec![],
             sets: vec![],
             active_set: crate::dictionary::sets::DEFAULT.into(),
             change_error: None,

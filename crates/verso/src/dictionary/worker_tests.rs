@@ -61,7 +61,7 @@ impl Fixture {
         }
     }
     fn lookup(&self, query: &str) -> Reply {
-        self.reply(self.worker.lookup(query.into(), None, false)).0
+        self.reply(self.worker.lookup(query.into(), false)).0
     }
     fn catalog(&self) -> Reply {
         self.reply(self.worker.catalog(false)).0
@@ -159,7 +159,7 @@ fn source_problems_are_warnings_next_to_working_lookups() {
 
     // An invalid configuration is a warning; the native folder still works.
     fs::write(f.join("dictionary-folders.json"), b"{broken").unwrap();
-    let reply = f.reply(f.worker.lookup("word".into(), None, true)).0;
+    let reply = f.reply(f.worker.lookup("word".into(), true)).0;
     assert!(matches!(reply.state, Some(State::Definition { .. })));
     assert_eq!(reply.sources.len(), 1);
     assert!(reply.warnings[0].contains("only Verso's folder"), "{:?}", reply.warnings);
@@ -183,9 +183,9 @@ fn invalidation_cancels_in_flight_work_and_drops_removed_sources() {
     );
     // A lookup in flight when the folder is removed must not be published
     // after the new catalog, nor answer from the removed source.
-    let stale = f.worker.lookup("word".into(), None, true);
+    let stale = f.worker.lookup("word".into(), true);
     f.store.save_dictionary_folders(&[]).unwrap();
-    let id = f.worker.lookup("word".into(), None, false);
+    let id = f.worker.lookup("word".into(), false);
     let (reply, earlier) = f.reply(id);
     assert!(earlier.iter().all(|&e| e == stale));
     assert_eq!(reply.state, Some(State::NoResult), "removed source no longer answers");
@@ -233,14 +233,16 @@ fn preferred_base_form_beats_lower_exact_and_selection_and_disabled_are_respecte
     let reply = f.lookup("boxes");
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
     assert!(matches!(reply.state, Some(State::Definition { base_forms: Some(_), .. })));
-    let reply = f.reply(f.worker.lookup("boxes".into(), Some("b.ifo".into()), false)).0;
+    f.worker.open("b.ifo");
+    let reply = f.reply(reply.id).0;
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
     assert!(matches!(reply.state, Some(State::Definition { base_forms: None, .. })));
     edit(&f.worker, Edit::MoveDictionary { set: DEFAULT.into(), dictionary: "b.ifo".into(), position: 0 });
     assert_eq!(f.lookup("boxes").selected.as_deref(), Some("b.ifo"), "preference changes apply immediately");
     edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "b.ifo".into(), disabled: true });
-    let reply = f.reply(f.worker.lookup("boxes".into(), Some("b.ifo".into()), false)).0;
-    assert_eq!(reply.selected.as_deref(), Some("a.ifo"), "disabled selection falls back to enabled dictionaries");
+    let reply = f.lookup("boxes");
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"), "disabled dictionaries are not searched");
+    assert_eq!(reply.matches.len(), 1);
     edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "a.ifo".into(), disabled: true });
     assert_eq!(f.lookup("boxes").state, Some(State::Disabled));
 }
@@ -362,7 +364,7 @@ fn misses_and_failures_are_skipped_and_diagnostics_remain_separate() {
         assert!(reply.matches.is_empty());
         assert!(reply.dictionaries[0].error.is_some());
         fs::write(f.join("dictionaries/b.idx"), b"broken").unwrap();
-        let reply = f.reply(f.worker.lookup(query.into(), None, true)).0;
+        let reply = f.reply(f.worker.lookup(query.into(), true)).0;
         assert_eq!(reply.state, Some(State::NoResult));
         assert!(reply.dictionaries.iter().all(|d| d.error.is_some()));
     }
@@ -395,7 +397,7 @@ fn lookup_cancelled_before_it_starts_publishes_nothing() {
     worker.catalog(false);
     wake.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(worker.receive().is_some());
-    worker.lookup("thunders".into(), None, false);
+    worker.lookup("thunders".into(), false);
     worker.cancel();
     release.send(()).unwrap();
     worker.flush().unwrap();
@@ -409,11 +411,13 @@ fn unreadable_definition_keeps_its_index_hit_and_management_diagnostic() {
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
     fs::write(f.join("dictionaries/a.dict"), [0xff; 6]).unwrap();
     let reply = f.lookup("thunders");
-    assert_eq!(reply.state, Some(State::NoResult));
+    // Not "no definition" next to "1 found": the match opens on its error page.
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    assert!(matches!(reply.state, Some(State::Error(_))));
     assert_eq!(reply.matches.len(), 1, "counts do not require readable definitions");
     assert!(reply.dictionaries[0].error.is_some());
     install(&f.join("dictionaries/b.ifo"), "B", "thunder");
-    let reply = f.reply(f.worker.lookup("thunders".into(), None, true)).0;
+    let reply = f.reply(f.worker.lookup("thunders".into(), true)).0;
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
     assert_eq!(reply.matches.len(), 2);
     assert!(matches!(reply.state, Some(State::Definition { .. })));
@@ -425,11 +429,11 @@ fn single_dictionary_reuses_its_backend_for_exact_and_forms() {
     let path = f.join("dictionaries/a.ifo");
     install(&path, "A", "thunder");
     let mut inner = inner(&f);
-    assert_eq!(inner.lookup("other", None, &|| true).1, State::NoResult);
+    assert_eq!(inner.lookup("other", &|| true).1, State::NoResult);
     // The cached backend has everything needed. Reopening during either lookup
     // would fail because its metadata is no longer on disk.
     fs::remove_file(path).unwrap();
-    let (selected, state) = inner.lookup("thunders", None, &|| true);
+    let (selected, state) = inner.lookup("thunders", &|| true);
     assert_eq!(selected.as_deref(), Some("a.ifo"));
     assert!(matches!(state, State::Definition { base_forms: Some(_), .. }));
 }
@@ -452,7 +456,7 @@ fn cancellation_at_any_point_returns_no_definition_and_marks_no_errors() {
             checks.set(checks.get() + 1);
             checks.get() <= n
         };
-        let (_, state) = inner.lookup("thunders", None, &current);
+        let (_, state) = inner.lookup("thunders", &current);
         if checks.get() <= n {
             assert!(matches!(state, State::Definition { base_forms: Some(_), .. }), "{state:?}");
             break;
@@ -510,14 +514,14 @@ fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_c
     assert!(Arc::ptr_eq(&f.worker.service, &settings.service));
     assert!(!f.store.dictionary_preferences().exists(), "client construction does not discover dictionaries");
     install(&f.join("dictionaries/a.ifo"), "A", "word");
-    let lookup = f.worker.lookup("word".into(), None, false);
+    let lookup = f.worker.lookup("word".into(), false);
     let catalog = settings.catalog(false);
     let reply = wait_client(&settings, catalog);
     assert!(reply.state.is_none());
     let reply = wait_client(&f.worker, lookup);
     assert!(matches!(reply.state, Some(State::Definition { .. })));
     assert!(settings.receive().is_none());
-    let lookup = f.worker.lookup("word".into(), None, false);
+    let lookup = f.worker.lookup("word".into(), false);
     settings.catalog(false);
     settings.flush().unwrap(); // Does not cancel another client's lookup.
     assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
@@ -525,7 +529,7 @@ fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_c
     f.worker.cancel();
     assert!(wait_client(&settings, catalog).state.is_none());
     // Preference changes cancel obsolete lookups; management keeps its own mailbox.
-    let lookup = f.worker.lookup("word".into(), None, false);
+    let lookup = f.worker.lookup("word".into(), false);
     let created = settings.edit(Edit::Create { id: "set".into(), name: "Set".into() });
     f.store.save_dictionary_folders(&[]).unwrap();
     let reply = wait_client(&settings, created);
@@ -533,7 +537,7 @@ fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_c
     if let Some(old) = f.worker.receive() {
         assert_eq!(old.id, lookup);
     }
-    let lookup = f.worker.lookup("word".into(), None, false);
+    let lookup = f.worker.lookup("word".into(), false);
     assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
     assert_eq!(reply.active_set, "set", "an edit replies with the edited set");
     assert!(reply.dictionaries.iter().all(|d| d.disabled));
@@ -595,7 +599,7 @@ fn set_language_gates_forms_and_script_fallback_uses_the_resulting_sets_language
         ("ru", "thunders", "english", true, true),
     ] {
         let selection = Selection { language: language.into(), ..Default::default() };
-        let reply = f.reply(f.worker.lookup_in(query.into(), None, false, selection)).0;
+        let reply = f.reply(f.worker.lookup_in(query.into(), false, selection)).0;
         assert_eq!(reply.active_set, expected_set);
         assert_eq!(matches!(&reply.state, Some(State::Definition { .. })), definition, "{language} {query}");
         assert_eq!(matches!(&reply.state, Some(State::Definition { base_forms: Some(_), .. })), base_form);
@@ -617,7 +621,7 @@ fn settings_edits_apply_to_retained_reader_client_and_are_durable_before_reply()
     let persisted: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
     assert_eq!(persisted.sets, reply.sets);
     let selection = Selection { book_set: Some("english".into()), language: "ru".into() };
-    let lookup = || f.reply(f.worker.lookup_in("word".into(), None, false, selection.clone())).0;
+    let lookup = || f.reply(f.worker.lookup_in("word".into(), false, selection.clone())).0;
     assert_eq!(lookup().selected.as_deref(), Some("b.ifo"));
     edit(&settings, Edit::Disabled { set: "english".into(), dictionary: "b.ifo".into(), disabled: true });
     assert_eq!(lookup().selected.as_deref(), Some("a.ifo"));
@@ -646,7 +650,7 @@ fn unreadable_preferences_use_empty_default_and_failed_saves_retry_at_barrier() 
     assert_eq!(fs::read(&path).unwrap(), b"{broken");
     let repaired = vec![super::super::Preference { id: "b.ifo".into(), disabled: false }];
     atomic(&path, &repaired).unwrap();
-    let reply = f.reply(f.worker.lookup("word".into(), None, true)).0;
+    let reply = f.reply(f.worker.lookup("word".into(), true)).0;
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
     assert!(reply.warnings.is_empty(), "{:?}", reply.warnings);
     let saved: Preferences = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -779,7 +783,7 @@ fn publications(f: &Fixture, delay: impl Fn(&Mailbox) -> bool) -> Vec<Reply> {
         }
         true
     };
-    inner(f).lookup_session(&request, "boxes", None, &current);
+    inner(f).lookup_session(&request, "boxes", &current);
     results.lock().unwrap().clone()
 }
 
@@ -836,4 +840,75 @@ fn forgetting_a_missing_dictionary_removes_all_sets_but_never_a_present_dictiona
     f.worker.flush().unwrap();
     let saved = read_preferences(&f.store.dictionary_preferences()).unwrap().0;
     assert!(saved.sets.iter().all(|s| s.dictionaries.is_empty()));
+}
+
+#[test]
+fn delayed_search_republishes_when_its_first_definition_arrives() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "absent");
+    install(&f.join("dictionaries/b.ifo"), "B", "boxes");
+    install(&f.join("dictionaries/c.ifo"), "C", "absent");
+    f.lookup("boxes"); // Build the indexes, so preparation adds no publications.
+    let published = publications(&f, |_| true);
+    assert_eq!(published.len(), 3, "searching, first definition, final count");
+    assert!(published[0].matches.is_empty() && published[0].selected.is_none());
+    assert!(!published[1].complete);
+    assert_eq!(published[1].selected.as_deref(), Some("b.ifo"));
+    assert!(matches!(published[1].state, Some(State::Definition { .. })));
+    assert!(published[2].complete && published[2].selected == published[1].selected);
+}
+
+#[test]
+fn a_readable_search_clears_an_earlier_read_error() {
+    let f = Fixture::new();
+    let idx = f.join("dictionaries/a.idx");
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    f.catalog();
+    // A passing failure, for example while USB storage is away.
+    fs::rename(&idx, f.join("away")).unwrap();
+    assert!(f.lookup("word").dictionaries[0].error.is_some());
+    fs::rename(f.join("away"), &idx).unwrap();
+    let reply = f.lookup("other");
+    assert_eq!(reply.state, Some(State::NoResult));
+    assert!(reply.dictionaries[0].error.is_none(), "a successful miss clears the error");
+}
+
+#[test]
+fn lookups_skip_catalog_only_checks() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    let reply = f.lookup("word");
+    assert!(reply.unprepared.is_empty() && reply.missing.is_empty());
+    fs::remove_file(f.join("dictionaries/a.ifo")).unwrap();
+    let reply = wait_client(&f.worker, f.worker.catalog(true));
+    assert_eq!(reply.missing, ["a.ifo"]);
+}
+
+#[test]
+fn forget_survives_its_screen_closing_during_discovery() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    f.catalog();
+    fs::remove_file(f.join("dictionaries/a.ifo")).unwrap();
+    // Folder changes force discovery before the edit; the client then moves on.
+    f.store.save_dictionary_folders(&[f.join("ext")]).unwrap();
+    f.worker.edit(Edit::Forget { set: DEFAULT.into(), dictionary: "a.ifo".into() });
+    f.worker.cancel();
+    f.worker.flush().unwrap();
+    let saved = read_preferences(&f.store.dictionary_preferences()).unwrap().0;
+    assert!(saved.sets.iter().all(|s| s.dictionaries.is_empty()));
+}
+
+#[test]
+fn preparation_starting_and_ending_after_the_first_publication_is_shown() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "absent");
+    install(&f.join("dictionaries/c.ifo"), "C", "absent");
+    f.lookup("boxes");
+    // Only b needs its first index build, after the first publication.
+    install(&f.join("dictionaries/b.ifo"), "B", "absent");
+    f.catalog();
+    let published = publications(&f, |_| true);
+    let preparing: Vec<_> = published.iter().map(|r| (r.preparing.as_deref(), r.complete)).collect();
+    assert_eq!(preparing, [(None, false), (Some("b.ifo"), false), (None, false), (None, true)]);
 }

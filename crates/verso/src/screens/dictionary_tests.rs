@@ -90,6 +90,7 @@ fn reply(lookup: &Lookup) -> crate::dictionary::worker::Reply {
         complete: true,
         preparing: None,
         unprepared: vec![],
+        missing: vec![],
         dictionaries: lookup.catalog.clone(),
         sources: lookup.sources.clone(),
         warnings: vec![],

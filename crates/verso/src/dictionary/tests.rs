@@ -419,8 +419,8 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
             let _ = tx.send(());
         }),
     );
-    worker.lookup("old".into(), None, true);
-    let latest = worker.lookup("FRUIT".into(), None, false);
+    worker.lookup("old".into(), true);
+    let latest = worker.lookup("FRUIT".into(), false);
     let receive = || -> Result<worker::Reply> {
         loop {
             if let Some(reply) = worker.receive() {
@@ -437,7 +437,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
         }
     }
     worker.edit(sets::Edit::Disabled { set: sets::DEFAULT.into(), dictionary: "test.ifo".into(), disabled: true });
-    let latest = worker.lookup("fruit".into(), None, false);
+    let latest = worker.lookup("fruit".into(), false);
     let reply = receive()?;
     assert_eq!(reply.id, latest);
     assert_eq!(reply.state, Some(State::Disabled));
@@ -445,7 +445,7 @@ fn worker_latest_reply_preferences_and_errors() -> Result<()> {
     assert!(prefs.set(sets::DEFAULT).dictionaries[0].disabled);
     drop(worker);
     let worker = Worker::new(store.clone(), Waker::new(|| {}));
-    let id = worker.lookup("fruit".into(), None, true);
+    let id = worker.lookup("fruit".into(), true);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(reply) = worker.receive() {

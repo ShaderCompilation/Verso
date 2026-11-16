@@ -78,6 +78,27 @@ impl Editor {
     }
 }
 
+/// One row of a set: a discovered dictionary, or saved preferences for one
+/// that is not on disk now. Only a found dictionary has a path or source.
+#[derive(Clone)]
+enum Item {
+    Found(Dictionary),
+    Missing { id: String, disabled: bool },
+}
+impl Item {
+    fn id(&self) -> &str {
+        match self {
+            Item::Found(d) => &d.id,
+            Item::Missing { id, .. } => id,
+        }
+    }
+    fn disabled(&self) -> bool {
+        match self {
+            Item::Found(d) => d.disabled,
+            Item::Missing { disabled, .. } => *disabled,
+        }
+    }
+}
 pub struct Dictionaries {
     store: Store,
     waker: Waker,
@@ -86,8 +107,8 @@ pub struct Dictionaries {
     top: TopBar,
     view: View,
     sets: Vec<Set>,
-    dictionaries: Vec<Dictionary>,
-    missing: std::collections::HashSet<String>,
+    /// The viewed set's rows in set order.
+    dictionaries: Vec<Item>,
     unprepared: Vec<String>,
     sources: Vec<Source>,
     warnings: Vec<String>,
@@ -120,7 +141,6 @@ impl Dictionaries {
             view: set.map_or(View::Sets, |id| View::Set(id.into())),
             sets: vec![],
             dictionaries: vec![],
-            missing: Default::default(),
             unprepared: vec![],
             sources: vec![],
             warnings: vec![],
@@ -152,17 +172,17 @@ impl Dictionaries {
     }
     fn dictionary_index(&self) -> Option<usize> {
         let View::Dictionary(_, id) = &self.view else { return None };
-        self.dictionaries.iter().position(|d| d.id == *id)
+        self.dictionaries.iter().position(|d| d.id() == id)
     }
-    fn dictionary(&self) -> Option<&Dictionary> {
+    fn dictionary(&self) -> Option<&Item> {
         self.dictionary_index().map(|i| &self.dictionaries[i])
     }
     /// The durable position of the visible neighbour, which also counts
     /// dictionaries that are temporarily missing.
     fn move_target(&self, dictionary: &str, up: bool) -> Option<usize> {
-        let visible = self.dictionaries.iter().position(|d| d.id == dictionary)?;
+        let visible = self.dictionaries.iter().position(|d| d.id() == dictionary)?;
         let neighbor = if up { visible.checked_sub(1)? } else { visible + 1 };
-        let neighbor = &self.dictionaries.get(neighbor)?.id;
+        let neighbor = self.dictionaries.get(neighbor)?.id();
         self.current_set()?.dictionaries.iter().position(|p| p.id == *neighbor)
     }
     /// Leave views whose set or dictionary disappeared, e.g. after a rescan.
@@ -256,14 +276,15 @@ impl Dictionaries {
             View::Set(_) => self
                 .dictionaries
                 .iter()
-                .map(|d| {
+                .map(|item| {
+                    let on = if item.disabled() { "Off" } else { "On" };
+                    let Item::Found(d) = item else {
+                        return Row::new(item.id()).sub(format!("{on} · Missing")).chevron();
+                    };
                     Row::new(&d.name)
                         .sub(format!(
-                            "{}{} · {}",
-                            if d.disabled { "Off" } else { "On" },
-                            if self.missing.contains(&d.id) {
-                                " · Missing"
-                            } else if self.unprepared.contains(&d.id) {
+                            "{on}{} · {}",
+                            if self.unprepared.contains(&d.id) {
                                 " · Needs preparation"
                             } else if d.error.is_some() {
                                 " · Read error"
@@ -288,13 +309,15 @@ impl Dictionaries {
             View::Dictionary(_, _) => self
                 .dictionary_index()
                 .map(|index| {
-                    let d = &self.dictionaries[index];
-                    if self.missing.contains(&d.id) {
-                        return vec![
-                            Row::new("Missing dictionary").sub(&d.id),
-                            Row::new("Forget dictionary").sub("Remove its preferences from every set"),
-                        ];
-                    }
+                    let d = match &self.dictionaries[index] {
+                        Item::Found(d) => d,
+                        Item::Missing { id, .. } => {
+                            return vec![
+                                Row::new("Missing dictionary").sub(id),
+                                Row::new("Forget dictionary").sub("Remove its preferences from every set"),
+                            ];
+                        }
+                    };
                     let mut rows = vec![
                         Row::new("Details").sub(&d.name).chevron(),
                         Row::new(if d.disabled { "Enable" } else { "Disable" }),
@@ -418,7 +441,7 @@ impl Dictionaries {
     fn row(&mut self, index: usize, cx: &mut EventCx) {
         match self.view.clone() {
             View::Sets => self.open(View::Set(self.sets[index].id.clone()), cx.theme),
-            View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id.clone()), cx.theme),
+            View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id().into()), cx.theme),
             View::Languages(set) => {
                 let code = self.language_choices()[index].0.clone();
                 let Some(mut languages) = self.current_set().map(|s| s.languages.clone()) else { return };
@@ -431,25 +454,23 @@ impl Dictionaries {
                 self.layout(cx.theme);
             }
             View::Dictionary(set, dictionary) => {
-                let Some(d) = self.dictionary() else { return };
-                if self.missing.contains(&d.id) {
-                    if index == 1 {
-                        self.edit(Edit::Forget { set: set.clone(), dictionary });
-                        self.view = View::Set(set);
-                        self.layout(cx.theme);
-                    } else {
-                        self.details = Some(Details::from_text(
-                            cx.theme,
-                            self.screen,
-                            "Missing dictionary",
-                            format!(
-                                "{}\n\nThis dictionary is no longer on disk. Its order and on/off choices are kept in every set until you forget it.",
-                                d.id
-                            ),
-                        ));
+                let d = match self.dictionary() {
+                    Some(Item::Found(d)) => d,
+                    Some(Item::Missing { id, .. }) => {
+                        if index == 1 {
+                            self.edit(Edit::Forget { set: set.clone(), dictionary });
+                            self.view = View::Set(set);
+                            self.layout(cx.theme);
+                        } else {
+                            let text = format!(
+                                "{id}\n\nThis dictionary is no longer on disk. Its order and on/off choices are kept in every set until you forget it."
+                            );
+                            self.details = Some(Details::from_text(cx.theme, self.screen, "Missing dictionary", text));
+                        }
+                        return;
                     }
-                    return;
-                }
+                    None => return,
+                };
                 let edit = match index {
                     0 => {
                         let text = format!(
@@ -685,25 +706,17 @@ impl Screen for Dictionaries {
         {
             self.pending = false;
             self.sets = reply.sets;
-            self.dictionaries = reply.dictionaries;
-            self.missing.clear();
             self.unprepared = reply.unprepared;
+            // The worker applied the active set to the found dictionaries;
+            // missing ones take their saved place and state.
+            self.dictionaries = reply.dictionaries.into_iter().map(Item::Found).collect();
             if let Some(set) = self.sets.iter().find(|s| s.id == reply.active_set) {
-                for preference in &set.dictionaries {
-                    if !self.dictionaries.iter().any(|d| d.id == preference.id) {
-                        self.missing.insert(preference.id.clone());
-                        self.dictionaries.push(Dictionary {
-                            id: preference.id.clone(),
-                            name: preference.id.clone(),
-                            path: preference.id.clone().into(),
-                            relative: preference.id.clone().into(),
-                            source: usize::MAX,
-                            error: None,
-                            disabled: preference.disabled,
-                        });
-                    }
-                }
-                set.apply(&mut self.dictionaries);
+                let position = |id: &str| set.dictionaries.iter().position(|p| p.id == id).unwrap_or(usize::MAX);
+                self.dictionaries.extend(reply.missing.into_iter().map(|id| Item::Missing {
+                    disabled: set.dictionaries.iter().find(|p| p.id == id).is_none_or(|p| p.disabled),
+                    id,
+                }));
+                self.dictionaries.sort_by_key(|d| position(d.id()));
             }
             self.sources = reply.sources;
             self.warnings = reply.warnings;
@@ -837,14 +850,14 @@ mod tests {
         row(&mut s, 0, &t);
         row(&mut s, 1, &t);
         wait(&mut s, &t);
-        assert!(!s.dictionary().unwrap().disabled);
+        assert!(!s.dictionary().unwrap().disabled());
         assert!(!s.list.rows[4].enabled, "Retry needs a read error");
         row(&mut s, 3, &t);
         wait(&mut s, &t);
-        assert_eq!(s.dictionaries.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["b.ifo", "a.ifo", "c.ifo"]);
+        assert_eq!(s.dictionaries.iter().map(Item::id).collect::<Vec<_>>(), ["b.ifo", "a.ifo", "c.ifo"]);
         row(&mut s, 2, &t);
         wait(&mut s, &t);
-        assert_eq!(s.dictionaries[0].id, "a.ifo");
+        assert_eq!(s.dictionaries[0].id(), "a.ifo");
         row(&mut s, 0, &t);
         assert!(s.details.is_some());
         s.details = None;
@@ -949,7 +962,7 @@ mod tests {
         s.catalog(true);
         wait(&mut s, &t);
         assert!(matches!(&s.view, View::Dictionary(id, _) if id == DEFAULT));
-        assert!(s.missing.contains("a.ifo"));
+        assert!(matches!(s.dictionary(), Some(Item::Missing { id, .. }) if id == "a.ifo"));
         assert_eq!(s.list.rows[1].label, "Forget dictionary");
         row(&mut s, 1, &t);
         wait(&mut s, &t);
