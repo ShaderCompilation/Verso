@@ -260,7 +260,27 @@ impl DictionaryFolders {
     /// Dictionaries in a row's folder, also those an overlapping folder found.
     fn found(&self, row: usize) -> Vec<&Dictionary> {
         let Some((index, source)) = self.source(row) else { return Vec::new() };
-        self.dictionaries.iter().filter(|d| d.source == index || d.path.starts_with(&source.root)).collect()
+        self.dictionaries
+            .iter()
+            .filter(|d| {
+                if d.source == index || d.path.starts_with(&source.root) {
+                    return true;
+                }
+                let Some(real_root) = &source.real_root else { return false };
+                if d.path.starts_with(real_root) {
+                    return true;
+                }
+                // Native dictionaries can retain a symlinked configured path
+                // even though the covered source was compared by real path.
+                self.sources.get(d.source).is_some_and(|origin| {
+                    origin.real_root.as_ref().is_some_and(|origin_real| {
+                        d.path
+                            .strip_prefix(&origin.root)
+                            .is_ok_and(|relative| origin_real.join(relative).starts_with(real_root))
+                    })
+                })
+            })
+            .collect()
     }
 
     /// One line under the label: the state, then the path of added folders.
@@ -624,6 +644,36 @@ mod tests {
         });
         assert!(matches!(action, Action::Pop));
         assert_eq!(f.on_disk(), vec![real]);
+    }
+
+    #[test]
+    fn symlinked_child_covered_by_parent_reports_its_dictionaries() {
+        let f = Fixture::new();
+        let real = f.root.join("real");
+        let child = real.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let ifo = child.join("words.ifo");
+        std::fs::write(&ifo, "StarDict's dict ifo file\nversion=3.0.0\nbookname=Words\nwordcount=1\nidxfilesize=13\nsametypesequence=m\n").unwrap();
+        let mut idx = b"word\0".to_vec();
+        idx.extend_from_slice(&0u32.to_be_bytes());
+        idx.extend_from_slice(&4u32.to_be_bytes());
+        std::fs::write(child.join("words.idx"), idx).unwrap();
+        std::fs::write(child.join("words.dict"), b"text").unwrap();
+        let sibling = real.join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        for name in ["words.ifo", "words.idx", "words.dict"] {
+            std::fs::copy(child.join(name), sibling.join(name)).unwrap();
+        }
+        std::os::unix::fs::symlink(&real, f.root.join("alias")).unwrap();
+        let alias_child = f.root.join("alias/child");
+        f.store.save_dictionary_folders(&[real, alias_child]).unwrap();
+        let mut s = f.screen();
+        wait(&mut s);
+        assert_eq!(s.sources[2].status, SourceStatus::Available);
+        assert_eq!(s.found(1).len(), 2);
+        assert_eq!(s.found(2).len(), 1);
+        assert!(s.state(2).starts_with("1 dictionary"));
+        assert!(s.details_text(2).contains("Words"));
     }
 
     #[test]

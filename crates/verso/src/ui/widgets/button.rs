@@ -65,6 +65,11 @@ impl Button {
         self.rect
     }
 
+    #[cfg(test)]
+    pub(crate) fn hit_rect(&self) -> Rect {
+        self.hit
+    }
+
     pub fn is_pressed(&self) -> bool {
         self.press.is_down()
     }

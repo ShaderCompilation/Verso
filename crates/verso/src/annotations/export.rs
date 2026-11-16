@@ -54,7 +54,7 @@ pub fn markdown(export: &Export, exported: &str) -> String {
     out
 }
 
-/// A stable, FAT-safe file name: the title plus a short book identity, so the
+/// A stable, FAT-safe file name: the title plus the full book identity, so the
 /// same book overwrites its previous export and two same-titled books don't.
 pub fn file_name(title: &str, book: &str) -> String {
     let mut name: String =
@@ -64,11 +64,19 @@ pub fn file_name(title: &str, book: &str) -> String {
         name.truncate(i);
         name = name.trim_end().to_owned();
     }
+    // Duplicate copies share the first 16 hex digits; their path-derived
+    // disambiguator follows a dash. Keep it and any annotation-id suffix.
+    let id: String = book.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let suffix = format!(" ({id}).md");
+    // FAT filenames are limited to 255 bytes, including the identity suffix.
+    while name.len() > 255usize.saturating_sub(suffix.len()) {
+        name.pop();
+    }
+    name = name.trim_end().to_owned();
     if name.is_empty() {
         name = "Untitled".into();
     }
-    let id: String = book.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
-    format!("{name} ({id}).md")
+    format!("{name}{suffix}")
 }
 
 /// Writes atomically (temp file, fsync, rename) and returns the destination.
@@ -117,11 +125,32 @@ mod tests {
     }
     #[test]
     fn file_names_are_fat_safe_stable_and_distinct() {
-        assert_eq!(file_name("A: B/C?", "0123456789abcdef"), "A_ B_C_ (01234567).md");
+        assert_eq!(file_name("A: B/C?", "0123456789abcdef"), "A_ B_C_ (0123456789abcdef).md");
         assert_eq!(file_name(" .. ", "x"), "Untitled (x).md");
         assert_ne!(file_name("Same", "aaaaaaaa"), file_name("Same", "bbbbbbbb"));
+        let copy_a = "0123456789abcdef-1111111111111111";
+        let copy_b = "0123456789abcdef-2222222222222222";
+        assert_ne!(file_name("Same", copy_a), file_name("Same", copy_b));
+        assert_ne!(file_name("Same", copy_a), file_name("Same", &format!("{copy_a}-n1")));
         let long = file_name(&"Ж".repeat(200), "id");
         assert_eq!(long.chars().count(), 80 + " (id).md".len());
+        let long_cjk = file_name(&"漢".repeat(80), copy_a);
+        assert!(long_cjk.len() <= 255);
+    }
+    #[test]
+    fn duplicate_book_exports_keep_both_files() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-export-copies-{}", std::process::id()));
+        let store = Store::at(root.clone());
+        let first = export();
+        let mut second = export();
+        second.records[0].note = Some("from the second copy".into());
+        let path_a = write(&store, "0123456789abcdef-1111111111111111", &first)?;
+        let path_b = write(&store, "0123456789abcdef-2222222222222222", &second)?;
+        assert_ne!(path_a, path_b);
+        assert!(!std::fs::read_to_string(&path_a)?.contains("from the second copy"));
+        assert!(std::fs::read_to_string(&path_b)?.contains("from the second copy"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn failed_export_reports_an_error_and_leaves_annotations_alone() -> Result<()> {

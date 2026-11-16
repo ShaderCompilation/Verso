@@ -47,7 +47,7 @@ struct Tag<'a> {
     name: String,
     attrs: Vec<(String, String)>,
     closing: bool,
-    empty: bool,
+    self_closing: bool,
     rest: &'a str,
 }
 impl<'a> Tag<'a> {
@@ -79,7 +79,7 @@ impl<'a> Tag<'a> {
             return None;
         }
         let name = body[..n].to_ascii_lowercase();
-        let empty = body.ends_with('/') || void(&name);
+        let self_closing = body.ends_with('/');
         let mut attrs = Vec::new();
         body = &body[n..];
         while !body.trim_start().is_empty() {
@@ -107,7 +107,12 @@ impl<'a> Tag<'a> {
             }
             attrs.push((key, entities(value)));
         }
-        Some(Self { name, attrs, closing, empty, rest: &token[end.0 + 1..] })
+        Some(Self { name, attrs, closing, self_closing, rest: &token[end.0 + 1..] })
+    }
+    fn empty(&self, kind: u8) -> bool {
+        // HTML and Pango-style fields tolerate a stray slash on non-void
+        // tags. XDXF is XML, where the slash really closes an empty element.
+        void(&self.name) || kind == b'x' && self.self_closing
     }
     fn attr(&self, key: &str) -> Option<&str> {
         self.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
@@ -332,7 +337,7 @@ impl Builder {
 // convert a simple superscript. Nested markup is otherwise handled by the
 // normal stack. Scans stop at a 33rd nested opener, which keeps repeated
 // unclosed elements from rescanning a whole field each time.
-fn element_end<'a>(source: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+fn element_end<'a>(source: &'a str, name: &str, kind: u8) -> Option<(&'a str, &'a str)> {
     let mut rest = source;
     let mut depth = 1usize;
     while let Some(i) = rest.find('<') {
@@ -341,7 +346,7 @@ fn element_end<'a>(source: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
             if tag.name == name {
                 if tag.closing {
                     depth -= 1;
-                } else if !tag.empty {
+                } else if !tag.empty(kind) {
                     depth += 1;
                     if depth > 32 {
                         return None;
@@ -415,17 +420,17 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
             rest = tag.rest;
             if !tag.closing {
                 if matches!(tag.name.as_str(), "abr" | "c")
-                    && let Some((_, after)) = element_end(rest, &tag.name)
+                    && let Some((_, after)) = element_end(rest, &tag.name, kind)
                     && Tag::read(after.trim_start()).is_some_and(|t| !t.closing && t.audio())
                 {
                     rest = after;
                     continue;
                 }
                 let headword = tag.name == "k" && kind == b'x' && *first_k && out.content == 0;
-                if (tag.hidden() || headword) && !tag.empty {
+                if (tag.hidden() || headword) && !tag.empty(kind) {
                     // Hide only a closed element: an unclosed one would
                     // swallow the rest of the field, so drop just its tag.
-                    if let Some((_, after)) = element_end(rest, &tag.name) {
+                    if let Some((_, after)) = element_end(rest, &tag.name, kind) {
                         *first_k &= !headword;
                         rest = after;
                         continue;
@@ -452,7 +457,7 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
                 if tag.boundary(kind) {
                     out.flush();
                 }
-                if tag.empty {
+                if tag.empty(kind) {
                     if tag.boundary(kind) {
                         out.special(BlockKind::Gap);
                     }
@@ -629,6 +634,24 @@ mod tests {
             "a¹ 10⁻¹⁸ Q? 1st xi"
         );
         assert_eq!(lines(&parse("&NotEqualTilde; &#x416; &unknown; &lt;b&gt;", b'h')), "≂̸ Ж &unknown; <b>");
+    }
+    #[test]
+    fn stray_slash_opens_non_void_styles_except_in_xdxf() {
+        let html = parse("<i/>word</i> plain <b/>bold", b'h');
+        validate(&html);
+        assert_eq!(style_at(&html, "word"), Style::ITALIC);
+        assert_eq!(style_at(&html, "plain"), Style::default());
+        assert_eq!(style_at(&html, "bold"), Style::BOLD);
+
+        let pango = parse("<span style='font-style: italic'/>word</span> plain", b'g');
+        validate(&pango);
+        assert_eq!(style_at(&pango, "word"), Style::ITALIC);
+        assert_eq!(style_at(&pango, "plain"), Style::default());
+
+        let xdxf = parse("<i/>plain <i>styled</i>", b'x');
+        validate(&xdxf);
+        assert_eq!(style_at(&xdxf, "plain"), Style::default());
+        assert_eq!(style_at(&xdxf, "styled"), Style::ITALIC);
     }
     #[test]
     fn whitespace_gaps_and_inert_resources() {

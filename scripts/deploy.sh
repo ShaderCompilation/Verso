@@ -30,10 +30,20 @@ cargo kindle-build
 scripts/build-ssh.sh
 
 echo "==> stopping Verso if it's running"
-ssh "$HOST" "killall -TERM verso 2>/dev/null
-    i=0
-    while [ -f $PIDFILE ] && kill -0 \$(cat $PIDFILE) 2>/dev/null && [ \$i -lt 100 ]; do usleep 100000; i=\$((i+1)); done
-    true"
+ssh "$HOST" sh -s <<'EOF'
+killall -TERM verso 2>/dev/null || true
+i=0
+while [ "$i" -lt 100 ]; do
+    if ! pidof verso >/dev/null 2>&1 &&
+        { [ ! -s /tmp/verso-launcher.pid ] || ! kill -0 "$(cat /tmp/verso-launcher.pid)" 2>/dev/null; }; then
+        exit 0
+    fi
+    usleep 100000
+    i=$((i + 1))
+done
+echo "Verso did not stop; deployment cancelled before copying files" >&2
+exit 1
+EOF
 
 echo "==> copying to $HOST:$APP and $EXT"
 ssh "$HOST" "mkdir -p $APP $EXT"

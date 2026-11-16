@@ -341,9 +341,16 @@ impl App {
         if self.wake_cleanup.is_some_and(|due| now >= due) {
             self.wake_cleanup = None;
             let bounds = self.canvas.bounds();
-            let height = bounds.h.div_euclid(10) + 1;
-            self.forced
-                .push(Update { rect: Rect::new(0, bounds.bottom() - height, bounds.w, height), mode: RefreshMode::Ui });
+            // The landscape canvas is turned onto the portrait panel: its
+            // left edge maps to the panel's bottom edge.
+            let rect = match self.orientation {
+                Orientation::Portrait => {
+                    let height = bounds.h.div_euclid(10) + 1;
+                    Rect::new(0, bounds.bottom() - height, bounds.w, height)
+                }
+                Orientation::Landscape => Rect::new(0, 0, bounds.w.div_euclid(10) + 1, bounds.h),
+            };
+            self.forced.push(Update { rect, mode: RefreshMode::Ui });
             self.needs_redraw = true;
         }
         if self.toast.as_ref().is_some_and(|t| now >= t.until) {
@@ -891,6 +898,27 @@ mod tests {
         app.schedule_wake_cleanup();
         assert!(app.deadline().is_none());
         assert!(app.wake_cleanup.is_none());
+    }
+    #[test]
+    fn landscape_wake_cleanup_targets_the_panel_bottom() {
+        let info = DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150 };
+        let mut app = App::new(
+            &info,
+            Theme::for_dpi(150),
+            Box::new(BookScreen {
+                touches: Rc::new(Cell::new(0)),
+                backgrounds: Rc::new(Cell::new(0)),
+                saves: Rc::new(Cell::new(0)),
+                cover: false,
+            }),
+        );
+        app.set_orientation(Orientation::Landscape);
+        app.frame();
+        app.on_sleep();
+        app.on_wake();
+        app.frame();
+        app.on_tick(app.wake_cleanup.unwrap());
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 81, 600), mode: RefreshMode::Ui }]);
     }
     #[test]
     fn usb_is_modal_but_keeps_worker_results_and_saves_running() {

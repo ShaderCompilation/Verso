@@ -118,7 +118,7 @@ impl Keyboard {
         if rect.h < t.target {
             // Low landscape keys: grow into the gaps only, so rows don't overlap.
             let gap = t.mm(0.5).max(1);
-            b.place_with_hit(rect, rect.inset(-gap / 2 - 1));
+            b.place_with_hit(rect, rect.inset(-gap / 2));
         } else {
             b.place(rect, t);
         }
@@ -211,7 +211,7 @@ mod tests {
     }
     #[test]
     fn layouts_have_usable_nonoverlapping_keys_and_all_russian_letters() {
-        for (w, h, dpi) in [(1272, 1696, 300), (600, 800, 167)] {
+        for (w, h, dpi) in [(1272, 1696, 300), (600, 800, 167), (1696, 1272, 300), (800, 600, 167)] {
             let t = Theme::for_dpi(dpi);
             let mut k = Keyboard::default();
             k.place(Rect::new(0, 0, w, h), &t);
@@ -220,9 +220,10 @@ mod tests {
                 k.place(k.screen, &t);
                 assert!(k.rect.y > t.top_bar + 2 * t.target + t.mm(10.0));
                 for (i, (b, _)) in k.keys.iter().enumerate() {
-                    assert!(b.rect().w >= t.target && b.rect().h >= t.target);
+                    assert!(b.rect().w >= t.target && b.hit_rect().h >= t.mm(7.5).min(t.target));
                     for (other, _) in &k.keys[i + 1..] {
                         assert!(b.rect().intersect(&other.rect()).is_none());
+                        assert!(b.hit_rect().intersect(&other.hit_rect()).is_none());
                     }
                 }
                 if language == 2 {

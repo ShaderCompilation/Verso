@@ -797,15 +797,34 @@ impl Books {
             .find(|b| b.id == id)
             .or_else(|| self.home.books.iter().find(|e| e.book.id == id).map(|e| &e.book))
     }
+    /// Home entries are display summaries: use the full index when opening a
+    /// reader so language and other source metadata reach its lookup session.
+    fn reading_book(&self, id: &str) -> Option<Book> {
+        let displayed = self.book(id)?.clone();
+        if !self.is_home() {
+            return Some(displayed);
+        }
+        let full = |index: &LibraryIndex| {
+            index
+                .books
+                .iter()
+                .find(|book| book.id == id && book.path == displayed.path && !book.metadata_pending)
+                .cloned()
+        };
+        (self.browsing_ready.then(|| full(&self.index)).flatten())
+            .or_else(|| self.pending.as_ref().and_then(|snapshot| full(&snapshot.index)))
+            .or_else(|| full(&self.store.library()))
+            .or(Some(displayed))
+    }
     fn open(&mut self, id: String, cx: &mut EventCx) {
         if let Some(error) = &self.engine_error {
             cx.toast(error.clone(), None);
             return;
         }
-        let Some(book) = self.book(&id) else { return };
+        let Some(book) = self.reading_book(&id) else { return };
         let path = book.path.clone();
         let annotation_book = book.clone();
-        self.store.select_home_book(book);
+        self.store.select_home_book(&book);
         self.save_navigation(cx);
         self.library.pause(true);
         self.thumbnails.clear();
@@ -848,6 +867,10 @@ impl Books {
         }
         if let Some(r) = self.reader.take() {
             self.generation = r.generation();
+            // The Home resume book is excluded from `self.books` (recents).
+            // Refresh its state explicitly before sorting browsing tabs.
+            let id = r.book_id();
+            self.states.insert(id.to_owned(), self.store.book(id));
         }
         for b in &self.books {
             self.states.insert(b.id.clone(), self.store.book(&b.id));
@@ -2535,7 +2558,10 @@ mod tests {
     #[test]
     fn home_reader_uses_authoritative_position_and_returns_to_home() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("home-return")?;
-        let book = store.library().books[0].clone();
+        let mut index = store.library();
+        index.books[0].metadata.language = "ru".into();
+        store.save_library(&index)?;
+        let book = index.books[0].clone();
         let state = BookState {
             position: crate::document::Position("authoritative-anchor".into()),
             last_opened: 7,
@@ -2547,6 +2573,10 @@ mod tests {
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        assert!(
+            books.home.books.iter().any(|entry| entry.book.id == book.id && entry.book.metadata.language.is_empty())
+        );
+        assert_eq!(books.reading_book(&book.id).unwrap().metadata.language, "ru");
         with_cx(&t, screen, |cx| {
             let point = Point::new(t.margin + 10, books.continue_rect.y + 10);
             tap(&mut books, point, cx);
@@ -2566,8 +2596,13 @@ mod tests {
             books.returned(cx);
             assert!(books.is_home());
             assert_eq!(books.home.resume().unwrap().status.progress, 6789);
+            assert_eq!(books.states.get(&book.id).unwrap().progress, 6789);
             assert!(!books.browsing_ready);
             assert_eq!(store.book(&book.id).position.0, "authoritative-anchor");
+            books.home_active = false;
+            books.navigation.tab = Tab::AllBooks;
+            books.refresh(&t);
+            assert_eq!(books.states.get(&book.id).unwrap().progress, 6789);
         });
         drop(books);
         std::fs::remove_dir_all(root)?;

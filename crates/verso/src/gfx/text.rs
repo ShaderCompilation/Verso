@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Ellipsize, EllipsizeHeightLimit, Family as CtFamily, FontSystem, Metrics, Shaping,
+    Align, Attrs, Buffer, Ellipsize, EllipsizeHeightLimit, Family as CtFamily, FontSystem, LineIter, Metrics, Shaping,
     SwashCache, SwashContent, Wrap, fontdb,
 };
 
@@ -205,8 +205,7 @@ impl TextRenderer {
             }
             let text = &remaining[..end];
             let buffer = self.shape(text, style, Some(width.max(1) as f32), 0, HAlign::Left);
-            let mut offsets = vec![0];
-            offsets.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+            let offsets = paragraph_offsets(text);
             let mut start = 0;
             for (i, run) in buffer.layout_runs().enumerate() {
                 if i > 0 && i % lines == 0 {
@@ -229,10 +228,9 @@ impl TextRenderer {
     }
 
     /// Byte offsets where each wrapped line of `text` starts (at least `[0]`).
-    /// Hard line breaks (`\n`) start a new line too.
+    /// Hard paragraph breaks start a new line too.
     pub fn line_starts(&mut self, text: &str, style: TextStyle, width: i32) -> Vec<usize> {
-        let mut offsets = vec![0];
-        offsets.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+        let offsets = paragraph_offsets(text);
         let buffer = self.layout(text, style, Some(width.max(1) as f32), 0, HAlign::Left);
         let mut starts: Vec<usize> = buffer
             .layout_runs()
@@ -382,6 +380,18 @@ impl TextRenderer {
     }
 }
 
+/// Use the same hard-line splitter as `Buffer::set_text`, so run indices and
+/// byte offsets agree for CR, LF, CRLF, and LFCR.
+fn paragraph_offsets(text: &str) -> Vec<usize> {
+    let mut offsets: Vec<_> = LineIter::new(text).map(|(range, _)| range.start).collect();
+    // Buffer::set_text adds a final empty line after a trailing hard break,
+    // and one empty line when the input itself is empty.
+    if offsets.is_empty() || text.ends_with('\r') || text.ends_with('\n') {
+        offsets.push(text.len());
+    }
+    offsets
+}
+
 /// How far to shift a wrapped line left so it doesn't start with a space.
 /// With a line limit, cosmic-text lays out the last line again for the "…"
 /// and keeps the space it wrapped at.
@@ -501,6 +511,17 @@ mod tests {
                 let height = renderer.measure(page.trim_end(), STYLE, Some(300.0)).1;
                 assert!(height <= 250.0, "page exceeds its area: {height}: {page:?}");
             }
+        }
+    }
+
+    #[test]
+    fn hard_break_offsets_match_shaped_paragraphs() {
+        let mut renderer = TextRenderer::new();
+        for (source, starts) in [("a\rb", vec![0, 2]), ("a\n\rb", vec![0, 3]), ("a\r\nb", vec![0, 3])] {
+            assert_eq!(renderer.line_starts(source, STYLE, 300), starts, "{source:?}");
+            let pages = renderer.pages(source, STYLE, 300, 50);
+            assert_eq!(pages.concat(), source, "{source:?}");
+            assert!(pages.len() > 1, "hard breaks should paginate: {source:?}");
         }
     }
 

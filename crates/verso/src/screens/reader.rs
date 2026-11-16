@@ -66,6 +66,7 @@ pub struct Reader {
     /// A `Command::Position` whose reply decides the target page; 0 = none.
     jump: u64,
     next_jump: u64,
+    jump_destination: Option<Position>,
     pending_position: Option<Position>,
     annotations: annotations::State,
     extension: Option<annotations::ExtendBar>,
@@ -138,6 +139,7 @@ impl Reader {
             next_highlight: 0,
             jump: 0,
             next_jump: 0,
+            jump_destination: None,
             pending_position: None,
             annotations: annotations::State::default(),
             extension: None,
@@ -202,6 +204,7 @@ impl Reader {
             Reply::Jumped { jump, page } if page.generation == self.cache.generation => {
                 if jump == self.jump {
                     self.jump = 0;
+                    self.jump_destination = None;
                     self.target = page.number;
                 }
                 self.cache.insert(page.clone(), self.target);
@@ -258,6 +261,9 @@ impl Reader {
                 self.laying_out = false;
                 self.layout_at = None;
                 self.pending_position = None;
+                self.jump = 0;
+                self.jump_destination = None;
+                self.turn_pending = false;
                 self.target = self.shown.as_ref().map_or(0, |p| p.number);
                 cx.toast(message, None);
             }
@@ -352,6 +358,7 @@ impl Reader {
             return;
         }
         self.jump = 0;
+        self.jump_destination = None;
         self.target = page;
         self.turn_pending = true;
         if let Some(p) = self.cache.get(page) {
@@ -366,12 +373,15 @@ impl Reader {
             // Page numbers will change. Keep only the stable text destination;
             // the latest choice wins after the new layout's first page arrives.
             self.pending_position = Some(position);
+            self.jump = 0;
+            self.jump_destination = None;
             return true;
         }
         self.pending_position = None;
         self.turn_pending = true;
         if let Some(p) = page.map(|p| p.min(self.pages.saturating_sub(1))).and_then(|p| self.cache.get(p)) {
             self.jump = 0;
+            self.jump_destination = None;
             self.target = p.number;
             self.display(p, cx);
         } else {
@@ -380,6 +390,7 @@ impl Reader {
             if let Some(page) = page {
                 self.target = page.min(self.pages.saturating_sub(1));
             }
+            self.jump_destination = Some(position.clone());
             self.worker.send(Command::Position { generation: self.cache.generation, position, jump: self.jump });
         }
         true
@@ -621,6 +632,10 @@ impl Reader {
             Overlay::Text(Box::new(TextSheet::new(t, self.screen, &self.settings.typography, self.settings.footer)));
     }
     fn changed(&mut self) {
+        if self.jump != 0 {
+            self.pending_position = self.jump_destination.take();
+            self.jump = 0;
+        }
         self.extension = None;
         self.selection.clear();
         self.highlight = None;
@@ -1078,7 +1093,7 @@ impl Screen for Reader {
                 position: self.anchor.clone(),
             });
             // Hit pages belong to a layout: re-run the query for the new one.
-            self.search.refresh(self.cache.generation, &self.worker);
+            self.search.refresh_after_layout(self.cache.generation, &self.worker);
         }
         Action::None
     }
@@ -1296,6 +1311,63 @@ mod tests {
             r.receive(Reply::Jumped { jump, page: test_page(2, 25) }, cx);
             assert_eq!(r.shown.as_ref().unwrap().number, 25);
             assert_eq!(r.target, 25);
+        });
+    }
+
+    #[test]
+    fn search_started_during_layout_debounce_is_reissued_after_layout() {
+        let (mut r, commands) = test_reader("debounced-search");
+        r.laying_out = false;
+        r.search.start("chapter", 1, &r.worker);
+        assert!(matches!(commands.try_recv(), Ok(Command::Search { request, .. }) if request.generation == 1));
+        r.changed();
+        test_cx(&Theme::for_dpi(150), |cx| {
+            r.open_search(None, cx);
+            let early = match commands.try_recv() {
+                Ok(Command::Search { request, .. }) => request,
+                _ => panic!("search should be requested during debounce"),
+            };
+            assert_eq!(early.generation, 2);
+            cx.now += Duration::from_secs(1);
+            r.on_tick(cx);
+            assert!(matches!(commands.try_recv(), Ok(Command::Layout { generation: 2, .. })));
+            assert!(matches!(commands.try_recv(), Ok(Command::Search { request, query })
+                if request.generation == 2 && request.id > early.id && query == "chapter"));
+        });
+    }
+
+    #[test]
+    fn in_flight_jump_survives_repagination() {
+        let (mut r, commands) = test_reader("jump-layout-race");
+        r.laying_out = false;
+        r.pages = 20;
+        r.shown = Some(test_page(1, 0));
+        test_cx(&Theme::for_dpi(150), |cx| {
+            r.jump_position(None, Position("chapter".into()), cx);
+            let old_jump = match commands.try_recv() {
+                Ok(Command::Position { generation: 1, jump, .. }) => jump,
+                _ => panic!("initial jump missing"),
+            };
+            r.changed();
+            assert_eq!(r.pending_position, Some(Position("chapter".into())));
+            assert_eq!(r.jump, 0);
+            r.receive(Reply::Jumped { jump: old_jump, page: test_page(1, 12) }, cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 0);
+            cx.now += Duration::from_secs(1);
+            r.on_tick(cx);
+            assert!(matches!(commands.try_recv(), Ok(Command::Layout { generation: 2, .. })));
+            r.receive(
+                Reply::Opened { generation: 2, metadata: Metadata::default(), toc: vec![], pages: 20, current: 0 },
+                cx,
+            );
+            r.receive(Reply::Page(test_page(2, 0)), cx);
+            let new_jump = commands.try_iter().find_map(|command| match command {
+                Command::Position { generation: 2, position, jump } if position == Position("chapter".into()) => {
+                    Some(jump)
+                }
+                _ => None,
+            });
+            assert!(new_jump.is_some_and(|jump| jump > old_jump));
         });
     }
 

@@ -321,13 +321,18 @@ impl Background {
                     interrupted = true;
                     break;
                 }
-                let book = &mut self.index.books[i];
-                book.fingerprint = result.unwrap_or_default();
-                book.fingerprint_attempted = true;
-                self.unsaved = true;
-                fingerprinted += 1;
-                if fingerprinted % SAVE_EVERY == 0 {
-                    self.save(&mut errors, "library identity");
+                match result {
+                    Ok(fingerprint) => {
+                        let book = &mut self.index.books[i];
+                        book.fingerprint = fingerprint;
+                        book.fingerprint_attempted = true;
+                        self.unsaved = true;
+                        fingerprinted += 1;
+                        if fingerprinted % SAVE_EVERY == 0 {
+                            self.save(&mut errors, "library identity");
+                        }
+                    }
+                    Err(e) => push_error(&mut errors, format!("Couldn't fingerprint {}: {e}", book.path.display())),
                 }
             }
         }
@@ -652,6 +657,18 @@ fn fingerprint(path: &Path, cancelled: &impl Fn() -> bool) -> Result<String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
+fn fingerprint_status(path: &Path, result: Result<String>, errors: &mut Vec<String>) -> (String, bool) {
+    match result {
+        Ok(fingerprint) => (fingerprint, true),
+        Err(e) => {
+            if !e.is::<Cancelled>() {
+                push_error(errors, format!("Couldn't fingerprint {}: {e}", path.display()));
+            }
+            // A transient read failure must be retried on the next scan.
+            (String::new(), false)
+        }
+    }
+}
 fn enumerate(
     root: &Path,
     cancelled: &impl Fn() -> bool,
@@ -764,14 +781,12 @@ pub fn scan_roots(
             continue;
         }
         let legacy_id = book_id(&path).unwrap_or_default();
-        let fingerprint_attempted =
-            if changed { cached.is_some() || possible_moves } else { cached.is_some_and(|b| b.fingerprint_attempted) };
-        let fingerprint = if changed && (cached.is_some() || possible_moves) {
-            fingerprint(&path, cancelled).unwrap_or_default()
+        let (fingerprint, fingerprint_attempted) = if changed && (cached.is_some() || possible_moves) {
+            fingerprint_status(&path, fingerprint(&path, cancelled), &mut errors)
         } else if changed {
-            String::new()
+            (String::new(), false)
         } else {
-            cached.map_or(String::new(), |b| b.fingerprint.clone())
+            cached.map_or_else(|| (String::new(), false), |b| (b.fingerprint.clone(), b.fingerprint_attempted))
         };
         let mut metadata = Metadata {
             title: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
@@ -885,6 +900,18 @@ pub fn scan(
 mod tests {
     use super::*;
     use crate::library::epub::tests::fixture;
+    #[test]
+    fn fingerprint_read_error_is_retryable() {
+        let missing = Path::new("/this/verso-fingerprint-fixture-does-not-exist.epub");
+        let mut errors = Vec::new();
+        let (fingerprint, attempted) = fingerprint_status(missing, fingerprint(missing, &|| false), &mut errors);
+        assert!(fingerprint.is_empty());
+        assert!(!attempted);
+        assert!(errors.iter().any(|e| e.contains("Couldn't fingerprint")));
+        let (fingerprint, attempted) = fingerprint_status(missing, Ok("digest".into()), &mut errors);
+        assert_eq!(fingerprint, "digest");
+        assert!(attempted);
+    }
     #[test]
     fn multiple_folders_spaces_overlaps_and_partial_failure() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-multi-folders-{}", std::process::id()));

@@ -21,6 +21,9 @@ use crate::{NAME_FILE, PID_FILE, PROCESS_NAME};
 /// How often to look for a changed address (after a Wi-Fi reconnect). A
 /// netlink listener would notice at once, but this is one cheap check.
 const ADDRESS_CHECK: Duration = Duration::from_secs(10);
+/// Return to poll after a bounded batch so signals and the watched pidfd
+/// cannot be starved by a continuously readable multicast socket.
+const PACKET_BATCH_LIMIT: usize = 64;
 
 pub struct Options {
     /// Advertise `<label>.local`; must pass [`crate::valid_label`].
@@ -146,7 +149,7 @@ fn serve(socket: &UdpSocket, watch: Option<&OwnedFd>, responder: &mut Responder)
             return "the watched process exited";
         }
         if fds[0].revents != 0 {
-            loop {
+            for _ in 0..PACKET_BATCH_LIMIT {
                 match socket.recv_from(&mut buf) {
                     Ok((n, SocketAddr::V4(src))) => send(socket, responder.on_packet(src, &buf[..n], Instant::now())),
                     Ok(_) => {}

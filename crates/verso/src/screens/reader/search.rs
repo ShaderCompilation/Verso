@@ -74,6 +74,15 @@ impl Session {
         if self.request.is_none() || !self.interrupted && !self.stale(generation) {
             return;
         }
+        self.refresh_after_layout(generation, worker);
+    }
+
+    /// A search queued during layout debounce can be dropped by the worker
+    /// before it receives `Layout`. Reissue after that command is queued.
+    pub fn refresh_after_layout(&mut self, generation: u64, worker: &Worker) {
+        if self.request.is_none() {
+            return;
+        }
         let (current, list_page) = (self.current, self.list_page);
         let query = self.query.clone();
         self.start(&query, generation, worker);

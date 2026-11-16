@@ -289,9 +289,10 @@ fn run() -> Result<()> {
                     }
                 }
                 Some(Event::Usb(connected)) => {
-                    gestures.reset();
                     app.set_battery(platform.battery());
-                    app.on_usb(platform.usb_connected().unwrap_or(connected));
+                    if app.on_usb(platform.usb_connected().unwrap_or(connected)) {
+                        gestures.reset();
+                    }
                 }
                 Some(Event::Quit) => {
                     if cfg!(feature = "desktop") && opts.screenshot.is_none() {

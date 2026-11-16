@@ -40,6 +40,8 @@ pub enum SourceStatus {
 pub struct Source {
     /// As configured (not resolved), so a missing folder keeps its spelling.
     pub root: PathBuf,
+    /// Canonical root used to relate aliases and overlapping folders in Settings.
+    pub real_root: Option<PathBuf>,
     pub native: bool,
     pub status: SourceStatus,
 }
@@ -103,6 +105,7 @@ fn discover_limited(
     let roots = std::iter::once((native, true)).chain(external.iter().map(|r| (r.as_path(), false)));
     for (source, (root, native)) in roots.enumerate() {
         ensure!(current(), "Dictionary discovery cancelled");
+        let mut real_root = None;
         let status = if scan.exhausted {
             SourceStatus::LimitReached
         } else {
@@ -110,19 +113,23 @@ fn discover_limited(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => SourceStatus::Absent,
                 Err(e) => SourceStatus::Unreadable(format!("Cannot open {}: {e}", root.display())),
                 Ok(real) if !real.is_dir() => SourceStatus::Unreadable(format!("{} is not a folder", root.display())),
-                Ok(real) if covered.iter().any(|c| inside_scanned(c, &real)) => SourceStatus::Available,
+                Ok(real) if covered.iter().any(|c| inside_scanned(c, &real)) => {
+                    real_root = Some(real);
+                    SourceStatus::Available
+                }
                 Ok(real) => {
                     // Native paths keep the configured spelling (stable cache
                     // names); external paths are real so IDs match across aliases.
                     let status = scan.tree(if native { root } else { &real }, &real, native, source)?;
                     if status == SourceStatus::Available {
-                        covered.push(real);
+                        covered.push(real.clone());
                     }
+                    real_root = Some(real);
                     status
                 }
             }
         };
-        sources.push(Source { root: root.to_owned(), native, status });
+        sources.push(Source { root: root.to_owned(), real_root, native, status });
     }
     let mut dictionaries = scan.found;
     dictionaries.sort_by(|a, b| {

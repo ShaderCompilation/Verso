@@ -10,8 +10,10 @@ export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 APP_DIR="/mnt/us/verso"
 LOG="${APP_DIR}/verso.log"
 PIDFILE="/tmp/verso-launcher.pid"
+LOCKFILE="/tmp/verso-launcher.lock"
+OWNERFILE="/tmp/verso-launcher-$$.owner"
 FB_DUMP="/tmp/verso-fb.dump"
-SELF="/tmp/verso-launcher.sh"
+SELF="/tmp/verso-launcher-$$.sh"
 
 # Run from a copy in /tmp. /mnt/us is a FUSE filesystem; if this file were
 # replaced there (e.g. by a deploy) while running, the restore step could break.
@@ -20,16 +22,39 @@ if [ "$0" != "${SELF}" ]; then
     # If the copy failed, carry on from the original.
 fi
 
-# Keep the log small: start a fresh one when it passes 256 KB.
-if [ -f "${LOG}" ] && [ "$(stat -c %s "${LOG}" 2>/dev/null || echo 0)" -gt 262144 ]; then
-    mv -f "${LOG}" "${LOG}.old"
-fi
-
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') launcher: $*" >>"${LOG}"
 }
 
-# Only one Verso at a time.
+# Prepare the owner before claiming the lock, so even a kill at the instant of
+# acquisition leaves a recoverable owner. A hard link is atomic on /tmp.
+echo $$ >"${OWNERFILE}"
+if ! ln "${OWNERFILE}" "${LOCKFILE}" 2>/dev/null; then
+    # Serialise stale-lock removal: two contenders must not both decide that
+    # an old owner died and remove each other's newly acquired lock.
+    if mkdir "${LOCKFILE}.recovery" 2>/dev/null; then
+        OWNER="$(cat "${LOCKFILE}" 2>/dev/null)"
+        if [ -n "${OWNER}" ] && ! kill -0 "${OWNER}" 2>/dev/null; then
+            rm -f "${LOCKFILE}"
+        fi
+        rmdir "${LOCKFILE}.recovery" 2>/dev/null || true
+    fi
+    if ! ln "${OWNERFILE}" "${LOCKFILE}" 2>/dev/null; then
+        log "Verso is already running or its launcher lock needs cleanup"
+        rm -f "${SELF}" "${OWNERFILE}"
+        exit 0
+    fi
+fi
+
+release_lock() {
+    if [ "$(cat "${LOCKFILE}" 2>/dev/null)" = "$$" ]; then
+        rm -f "${LOCKFILE}"
+    fi
+    rm -f "${SELF}" "${OWNERFILE}"
+}
+trap release_lock EXIT
+
+# Only one Verso at a time, including a process from an older launcher.
 if pidof verso >/dev/null 2>&1 || { [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; }; then
     log "Verso is already running"
     exit 0
@@ -46,6 +71,12 @@ if [ "${POWER_STATE}" != "active" ]; then
     exit 1
 fi
 echo $$ >"${PIDFILE}"
+
+# Rotate only after we own the launch. A refused second launch must leave the
+# running process's log inode and the stream followed by deploy intact.
+if [ -f "${LOG}" ] && [ "$(stat -c %s "${LOG}" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    mv -f "${LOG}" "${LOG}.old"
+fi
 
 AWESOME_STOPPED=no
 STATUS_STOPPED=no
@@ -86,12 +117,15 @@ restore() {
     fi
     [ "${PILLOW_DISABLED}" = yes ] && lipc-set-prop com.lab126.pillow disableEnablePillow enable
     lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home
-    rm -f "${PIDFILE}"
+    if [ "$(cat "${PIDFILE}" 2>/dev/null)" = "$$" ]; then
+        rm -f "${PIDFILE}"
+    fi
     rm -f "${VERSO_SYSTEM_ACK}"
     log "done"
     # Last: a pending USB insertion may unmount /mnt/us immediately. Finish
     # all app storage access before handing it back to volumd.
     [ "${VOLUMD_STOPPED}" = yes ] && killall -CONT volumd 2>/dev/null
+    release_lock
 }
 trap restore EXIT
 trap 'exit 1' INT TERM HUP
