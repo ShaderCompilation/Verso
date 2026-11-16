@@ -342,6 +342,23 @@ fn forms_search_dictionary_order_and_passages_get_no_base_forms() {
 }
 
 #[test]
+fn oversized_queries_are_misses_without_dictionary_errors() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
+    // Over 4 KiB as typed, and 2732 bytes that fold to 4098 (U+0130 grows).
+    for query in ["a".repeat(4097), "İ".repeat(1366)] {
+        let reply = f.lookup(&query);
+        assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+        assert_eq!(reply.state, Some(State::NoResult));
+        assert!(reply.dictionaries.iter().all(|d| d.error.is_none()), "no index errors recorded");
+        let reply = f.reply(f.worker.lookup(query, Some("b.ifo".into()), false)).0;
+        assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+        assert_eq!(reply.state, Some(State::NoResult));
+    }
+}
+
+#[test]
 fn error_and_no_result_fallback_remain_in_preference_order_in_one_pass() {
     for query in ["absent", "thunders", "two words"] {
         let f = Fixture::new();

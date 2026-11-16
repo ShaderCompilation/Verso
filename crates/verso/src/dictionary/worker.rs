@@ -148,6 +148,12 @@ impl Inner {
             return (None, State::Disabled);
         }
         let requested = selected.filter(|s| dictionaries.iter().any(|d| d.id == *s && !d.disabled));
+        // No headword can match an oversized query. Answer it as a plain miss
+        // instead of recording an index error against every dictionary.
+        if !super::index::query_fits(query) {
+            let id = requested.or_else(|| dictionaries.iter().find(|d| !d.disabled).map(|d| d.id.clone()));
+            return (id, State::NoResult);
+        }
         let mut outcomes = vec![None; dictionaries.len()];
         let forms = forms::candidates(query);
         if let Some(found) = self.search(query, forms.as_ref(), requested.as_deref(), &mut outcomes, current) {

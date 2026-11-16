@@ -41,6 +41,18 @@ fn read_word(r: &mut impl BufRead) -> Result<Option<String>> {
     ensure!(!data.is_empty(), "Empty index word");
     Ok(Some(String::from_utf8(data)?))
 }
+/// The folded lookup key for a source headword, within the cache limit.
+/// Folding can lengthen text, so a source word that fits may not.
+fn folded_key(word: &str) -> Result<String> {
+    let key = fold(word);
+    ensure!(key.len() <= MAX_WORD_BYTES, "Folded headword too long (limit 4096 bytes)");
+    Ok(key)
+}
+/// `false` when a lookup query exceeds the index limits, before or after
+/// folding. Such a query cannot match any headword.
+pub fn query_fits(query: &str) -> bool {
+    query.len() <= MAX_WORD_BYTES && fold(query.trim()).len() <= MAX_WORD_BYTES
+}
 fn read_u64(r: &mut impl Read) -> Result<u64> {
     let mut b = [0; 8];
     r.read_exact(&mut b)?;
@@ -57,12 +69,11 @@ struct Builder {
     cursor: u64,
 }
 impl Builder {
-    fn append(&mut self, word: &str, display: &str, offset: u64, size: u32) -> Result<u64> {
+    /// Appends a record for an already folded `key` (see `folded_key`).
+    fn append(&mut self, key: &str, display: &str, offset: u64, size: u32) -> Result<u64> {
         let file = &mut self.output;
         let heads = &mut self.heads;
-        let key = fold(word);
-        ensure!(key.len() <= MAX_WORD_BYTES, "Folded headword too long (limit 4096 bytes)");
-        let bucket = hash(&key);
+        let bucket = hash(key);
         let at = self.cursor;
         file.write_all(&heads[bucket].to_le_bytes())?;
         file.write_all(&offset.to_le_bytes())?;
@@ -145,9 +156,10 @@ impl Index {
                 if count.is_multiple_of(128) {
                     ensure!(current(), "Lookup cancelled");
                 }
-                let (ordinal, start) = (count, bytes);
-                let next = (|| -> Result<bool> {
-                    let Some(word) = read_word(&mut input)? else { return Ok(false) };
+                // Only source-record problems get the record context; cache
+                // write errors (a full disk, say) are reported as they are.
+                let entry = (|| -> Result<Option<(String, String, u64, u32)>> {
+                    let Some(word) = read_word(&mut input)? else { return Ok(None) };
                     ensure!(count < info.count, "Index has more words than wordcount");
                     let offset = if info.wide {
                         let mut b = [0; 8];
@@ -161,16 +173,15 @@ impl Index {
                         offset.checked_add(size as u64).is_some_and(|end| end <= data_len),
                         "Index points outside definitions"
                     );
-                    let at = builder.append(&word, &word, offset, size)?;
-                    refs.write_all(&at.to_le_bytes())?;
-                    bytes += word.len() as u64 + 1 + if info.wide { 12 } else { 8 };
-                    count += 1;
-                    Ok(true)
+                    let key = folded_key(&word)?;
+                    Ok(Some((word, key, offset, size)))
                 })()
-                .with_context(|| format!("{}: .idx record {ordinal} at byte offset {start}", idx.display()))?;
-                if !next {
-                    break;
-                }
+                .with_context(|| format!("{}: .idx record {count} at byte offset {bytes}", idx.display()))?;
+                let Some((word, key, offset, size)) = entry else { break };
+                let at = builder.append(&key, &word, offset, size)?;
+                refs.write_all(&at.to_le_bytes())?;
+                bytes += word.len() as u64 + 1 + if info.wide { 12 } else { 8 };
+                count += 1;
             }
             ensure!(
                 count == info.count && bytes == info.index_size,
@@ -190,24 +201,23 @@ impl Index {
                     if count.is_multiple_of(128) {
                         ensure!(current(), "Lookup cancelled");
                     }
-                    let (ordinal, start) = (count, bytes);
-                    let next = (|| -> Result<bool> {
-                        let Some(word) = read_word(&mut input)? else { return Ok(false) };
+                    let alias = (|| -> Result<Option<(String, String, u32)>> {
+                        let Some(word) = read_word(&mut input)? else { return Ok(None) };
                         ensure!(count < info.syn_count, "Synonym count differs from .ifo");
-                        let ordinal = read_u32_be(&mut input).context("Truncated synonym target record")?;
-                        ensure!(ordinal < info.count, "Invalid synonym target");
-                        refs.seek(SeekFrom::Start(ordinal as u64 * 8))?;
-                        let at = read_u64(&mut refs)?;
-                        let original = record(&mut originals, at)?;
-                        builder.append(&word, &original.word, original.offset, original.size)?;
-                        bytes += word.len() as u64 + 5;
-                        count += 1;
-                        Ok(true)
+                        let target = read_u32_be(&mut input).context("Truncated synonym target record")?;
+                        ensure!(target < info.count, "Invalid synonym target");
+                        let key = folded_key(&word)?;
+                        Ok(Some((word, key, target)))
                     })()
-                    .with_context(|| format!("{}: .syn record {ordinal} at byte offset {start}", syn.display()))?;
-                    if !next {
-                        break;
-                    }
+                    .with_context(|| format!("{}: .syn record {count} at byte offset {bytes}", syn.display()))?;
+                    let Some((word, key, target)) = alias else { break };
+                    // The target's record comes from the partly built cache.
+                    refs.seek(SeekFrom::Start(target as u64 * 8))?;
+                    let at = read_u64(&mut refs)?;
+                    let original = record(&mut originals, at)?;
+                    builder.append(&key, &original.word, original.offset, original.size)?;
+                    bytes += word.len() as u64 + 5;
+                    count += 1;
                 }
                 ensure!(
                     count == info.syn_count,

@@ -227,7 +227,7 @@ fn malformed_records_report_source_record_offset_and_cause_without_a_cache() -> 
                                 7
                             }
                         ],
-                        "Truncated",
+                        if ext == "syn" { "Truncated synonym target record" } else { "Truncated offset/size record" },
                     ),
                     // U+0130 folds from 2 bytes to 3: the source fits, its key doesn't.
                     ("İ".repeat(1366), vec![0; 13], "Folded headword too long"),
