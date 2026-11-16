@@ -16,8 +16,12 @@ use std::sync::{
 
 /// Shown when a matched entry can't be read; details live in management.
 const UNREADABLE: &str = "Couldn’t read this entry. Open Manage dictionaries for details.";
-/// How long a search may run before its first, incomplete publication.
-const FIRST_PUBLICATION: std::time::Duration = std::time::Duration::from_millis(150);
+/// How long a search may run before it publishes status-only progress
+/// ("Searching…", index preparation). A first definition never waits for
+/// this: it is published as soon as it is rendered. Why: most searches finish
+/// sooner, and on e-ink a status shown briefly and then replaced is an extra
+/// panel update.
+const PROGRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 /// Every file we write must fit the same bound used when reopening it.
 const PREFERENCES_LIMIT: usize = 1024 * 1024;
 
@@ -307,7 +311,7 @@ impl Inner {
     ///
     /// Publish the first usable definition as soon as it is ready, while
     /// counting other dictionaries. Long searches also publish preparation
-    /// progress after `FIRST_PUBLICATION`; more matches alone wait for the
+    /// progress after `PROGRESS_DELAY`; more matches alone wait for the
     /// final count to keep e-ink redraws few.
     fn lookup_session(&mut self, request: &Request, query: &str, current: &impl Fn() -> bool) {
         use std::{cell::RefCell, time::Instant};
@@ -336,7 +340,7 @@ impl Inner {
         let shown = RefCell::new(None);
         let publish_snapshot = |first_definition: bool| {
             let valid = current();
-            if valid && (first_definition || started.elapsed() >= FIRST_PUBLICATION) {
+            if valid && (first_definition || started.elapsed() >= PROGRESS_DELAY) {
                 let snapshot = snapshot.borrow();
                 let key = (snapshot.selected.clone(), snapshot.preparing.clone());
                 if shown.borrow().as_ref() != Some(&key) {
@@ -807,13 +811,17 @@ impl Worker {
         self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
     }
     /// Give a first draw a short chance to include an already nearly ready
-    /// definition. The worker signals this condition when it publishes.
+    /// definition. The worker signals this condition when it publishes. A
+    /// reply left by an older request doesn't end the wait.
     pub fn receive_wait(&self, timeout: std::time::Duration) -> Option<Reply> {
-        let mut result = self.mailbox.result.lock().unwrap();
-        if result.is_none() {
-            (result, _) = self.mailbox.ready.wait_timeout_while(result, timeout, |reply| reply.is_none()).unwrap();
-        }
-        result.take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
+        let latest = || self.mailbox.latest.load(Ordering::Relaxed);
+        let result = self.mailbox.result.lock().unwrap();
+        let (mut result, _) = self
+            .mailbox
+            .ready
+            .wait_timeout_while(result, timeout, |reply| reply.as_ref().is_none_or(|r| r.id != latest()))
+            .unwrap();
+        result.take().filter(|r| r.id == latest())
     }
     #[cfg(test)]
     pub fn result_for_test(&self, reply: Reply) {

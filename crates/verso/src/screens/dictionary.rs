@@ -162,6 +162,9 @@ pub struct Lookup {
     /// A reply consumed during drawing still needs its save failure shown by
     /// the next event pass, which can create an app toast.
     pending_save_error: Option<String>,
+    /// No frame has been drawn for the current request yet; only that draw
+    /// waits briefly for its reply.
+    first_frame: bool,
     pages: Option<StyledPagination>,
     /// When the current pagination started and the layout time spent on it,
     /// for the completion debug log.
@@ -257,6 +260,7 @@ impl Lookup {
             selected: None,
             state: State::NoResult,
             pending_save_error: None,
+            first_frame: true,
             pages: None,
             layout_timing: (std::time::Instant::now(), std::time::Duration::ZERO),
             layout_error: None,
@@ -315,6 +319,7 @@ impl Lookup {
         self.request = self.worker.lookup_in(self.query.clone(), rescan, self.selection.clone());
         self.pending = true;
         self.complete = false;
+        self.first_frame = true;
         self.matches.clear();
         self.selected = None;
         self.preparing = None;
@@ -326,12 +331,15 @@ impl Lookup {
         self.field.focused = false;
         self.keyboard.visible = false;
     }
-    fn take_reply(&mut self, t: &Theme, first_draw: bool) -> bool {
+    /// Consumes the worker's reply for the current request. `drawing` lets the
+    /// first frame of a request wait briefly for it.
+    fn take_reply(&mut self, t: &Theme, drawing: bool) -> bool {
         if self.revision != self.worker.revision() || self.returning && !self.complete {
             self.repeat(false);
         }
         self.returning = false;
-        let reply = if first_draw && self.pending && self.selected.is_none() && self.pages.is_none() {
+        let first_frame = drawing && std::mem::take(&mut self.first_frame);
+        let reply = if first_frame && self.pending && self.selected.is_none() && self.pages.is_none() {
             self.worker.receive_wait(FIRST_DRAW_WAIT)
         } else {
             self.worker.receive()

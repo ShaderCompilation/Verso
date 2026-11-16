@@ -1004,3 +1004,21 @@ fn preparation_starting_and_ending_after_the_first_publication_is_shown() {
     let preparing: Vec<_> = published.iter().map(|r| (r.preparing.as_deref(), r.complete)).collect();
     assert_eq!(preparing, [(None, false), (Some("b.ifo"), false), (None, false), (None, true)]);
 }
+
+#[test]
+fn first_draw_wait_skips_a_stale_reply() {
+    let f = Fixture::new();
+    let stale = inner(&f).reply(1, None, None);
+    let current = Reply { id: 2, ..stale.clone() };
+    f.worker.mailbox.latest.store(2, Ordering::Relaxed);
+    f.worker.result_for_test(stale);
+    let mailbox = f.worker.mailbox.clone();
+    let publisher = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        *mailbox.result.lock().unwrap() = Some(current);
+        mailbox.ready.notify_one();
+    });
+    let reply = f.worker.receive_wait(Duration::from_secs(5));
+    publisher.join().unwrap();
+    assert_eq!(reply.map(|r| r.id), Some(2));
+}
