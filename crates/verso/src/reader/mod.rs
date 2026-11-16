@@ -85,6 +85,10 @@ impl PageCache {
     pub fn request(&mut self, page: usize) -> bool {
         !self.pages.contains_key(&page) && self.requested.insert(page)
     }
+    /// Release only the failed request, leaving other in-flight renders alone.
+    pub fn failed(&mut self, page: usize) {
+        self.requested.remove(&page);
+    }
     pub fn retain_neighbours(&mut self, current: usize) {
         self.pages.retain(|n, _| n.abs_diff(current) <= 1);
     }

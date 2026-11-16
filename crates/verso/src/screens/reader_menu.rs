@@ -96,7 +96,7 @@ impl ReaderMenu {
             outside: false,
         }
     }
-    pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize) {
+    pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize, pages_ready: bool) {
         let t = cx.theme;
         cx.fill(self.top.rect(), PAPER);
         self.top.draw(cx);
@@ -109,7 +109,11 @@ impl ReaderMenu {
             self.info,
             HAlign::Right,
         );
-        self.progress.draw(cx);
+        if pages_ready {
+            self.progress.draw(cx);
+        } else {
+            cx.line("Laying out…", t.small.gray(INK2), self.progress.bounds(), HAlign::Center);
+        }
         self.prev.draw(cx);
         self.next.draw(cx);
         for (label, slider) in [("Light", &self.light), ("Warmth", &self.warmth)] {
@@ -124,7 +128,7 @@ impl ReaderMenu {
         self.text.draw(cx);
         self.highlights.draw(cx);
     }
-    pub fn on_gesture(&mut self, g: &Gesture) -> Option<MenuEvent> {
+    pub fn on_gesture(&mut self, g: &Gesture, pages_ready: bool) -> Option<MenuEvent> {
         if let Gesture::Down(p) = g {
             self.outside = !self.panel.contains(*p) && !self.top.rect().contains(*p);
         }
@@ -152,7 +156,7 @@ impl ReaderMenu {
         if self.next.on_gesture(g) {
             return Some(MenuEvent::Chapter(1));
         }
-        if let Some(SliderEvent::Released(v)) = self.progress.on_gesture(g) {
+        if pages_ready && let Some(SliderEvent::Released(v)) = self.progress.on_gesture(g) {
             return Some(MenuEvent::Page(v as usize));
         }
         let brightness_changed = self.light.as_mut().is_some_and(|s| s.on_gesture(g).is_some());

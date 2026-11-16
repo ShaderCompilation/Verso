@@ -31,8 +31,8 @@ pub(super) struct State {
     pub load_error: Option<String>,
     /// The latest save failed and its snapshot is waiting for a retry.
     pub save_error: Option<String>,
-    /// Reading or parsing the chosen KOReader file failed. Shown only in the
-    /// import view; it never turns Import into Retry saving.
+    /// Reading, parsing or validating the chosen KOReader file failed, or its
+    /// preview became stale. Shown only in Import, separate from save retries.
     pub import_error: Option<String>,
     pub preview: Option<Preview>,
     pub preview_resolved: Vec<Resolved>,
@@ -53,6 +53,7 @@ impl State {
         if !self.ready {
             return;
         }
+        self.invalidate_import("Highlights changed. Preview the import again.");
         self.resolving = true;
         self.revision += 1;
         self.resolved.clear();
@@ -234,6 +235,15 @@ impl State {
         self.importing = false;
         self.import_error = None;
         self.preview = None;
+        self.preview_resolved.clear();
+    }
+    /// Discards both I/O still running and a finished preview, whose resolved
+    /// positions cannot be reused after layout or committed highlights change.
+    pub fn invalidate_import(&mut self, reason: &str) {
+        if self.importing || self.preview.is_some() {
+            self.cancel_import();
+            self.import_error = Some(reason.into());
+        }
     }
     pub fn confirm(&mut self, generation: u64, worker: &Worker) {
         if self.importing {
@@ -534,7 +544,7 @@ impl View {
                 let status = if state.importing {
                     "Reading and validating…".into()
                 } else if let Some(e) = &state.import_error {
-                    format!("Couldn't read this file: {e}\n\nCheck the path and preview again.")
+                    format!("Couldn't preview this import: {e}\n\nPreview again to continue.")
                 } else if state.preview.is_some() && stale {
                     "The path changed. Preview the new file to see what it contains.".into()
                 } else if let Some(p) = &state.preview {
@@ -797,6 +807,53 @@ mod tests {
         assert!(!state.resolving);
         assert_eq!(state.resolved[0].page, Some(3));
     }
+    #[test]
+    fn committed_resolution_invalidates_queued_running_and_completed_import_previews() {
+        for stage in 0..3 {
+            let mut state = ready(&["saved"]);
+            let mut sent = Vec::new();
+            state.start_import("/metadata.epub.lua".into());
+            let old = state.import_id;
+            let preview = Preview { records: vec![entry("imported", None)], ..Default::default() };
+            let resolved = |revision, preview| Reply::Resolved {
+                generation: 1,
+                revision,
+                entries: vec![Resolved { index: 0, page: Some(3) }],
+                preview,
+            };
+            if stage >= 1 {
+                state.apply(worker::Reply::Preview(old, Ok(preview.clone())), 1, &mut |c| sent.push(c));
+                assert!(matches!(sent.pop(), Some(Command::Resolve { preview: true, .. })));
+            }
+            if stage == 2 {
+                assert!(state.receive(resolved(old, true)));
+                assert!(!state.importing && state.preview.is_some());
+            }
+
+            state.resolve_with(1, &mut |c| sent.push(c));
+            assert!(matches!(sent.pop(), Some(Command::Resolve { preview: false, .. })));
+            assert!(!state.importing && state.preview.is_none());
+            assert!(state.preview_resolved.is_empty());
+            assert!(state.import_error.as_deref().unwrap().contains("Preview the import again"));
+            assert_ne!(state.import_id, old);
+            // Either worker may finish obsolete work after cancellation.
+            state.apply(worker::Reply::Preview(old, Ok(preview.clone())), 1, &mut |c| sent.push(c));
+            assert!(sent.is_empty(), "stale I/O cannot restart preview resolution");
+            assert!(!state.receive(resolved(old, true)));
+            assert!(state.preview.is_none(), "an invalidated preview cannot be confirmed");
+            assert_eq!(state.collection.records.len(), 1, "saved highlights stay untouched");
+
+            assert!(state.receive(resolved(state.revision, false)));
+            state.start_import("/metadata.epub.lua".into());
+            let retried = state.import_id;
+            assert!(state.importing && state.import_error.is_none());
+            state.apply(worker::Reply::Preview(retried, Ok(preview)), 1, &mut |c| sent.push(c));
+            assert!(matches!(sent.pop(), Some(Command::Resolve { preview: true, .. })));
+            assert!(state.receive(resolved(retried, true)));
+            assert!(!state.importing && state.preview.is_some(), "retry reaches a confirmable preview");
+        }
+    }
+
     #[test]
     fn import_errors_stay_separate_and_a_flushed_retry_clears_only_the_save_error() {
         let mut state = State { ready: true, ..Default::default() };

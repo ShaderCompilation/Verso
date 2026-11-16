@@ -159,19 +159,33 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
             previous_fingerprints.entry(&old.fingerprint).and_modify(|entry| *entry = None).or_insert(Some(old));
         }
     }
-    for b in books.iter_mut() {
-        if let Some(old) = previous_paths.get(&b.path)
+    // Claim unique content before paths: an edited edition at the old path
+    // must not steal the moved original's reading state. Reserved IDs prevent
+    // fresh books from reusing old state; claims prevent duplicate transfers.
+    let mut claimed = HashSet::new();
+    let mut assigned = vec![None; books.len()];
+    for (slot, b) in assigned.iter_mut().zip(books.iter()) {
+        if let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
+            && fingerprints.get(&b.fingerprint) == Some(&1)
+            && claimed.insert(old.id.clone())
+        {
+            *slot = Some(old.id.clone());
+        }
+    }
+    for (slot, b) in assigned.iter_mut().zip(books.iter()) {
+        if slot.is_none()
+            && let Some(old) = previous_paths.get(&b.path)
             && ((!b.fingerprint.is_empty() && b.fingerprint == old.fingerprint)
                 || (b.fingerprint.is_empty() && old.fingerprint.is_empty() && b.stamp == old.stamp)
                 || (!b.metadata.identifier.is_empty() && b.metadata.identifier == old.metadata.identifier))
+            && claimed.insert(old.id.clone())
         {
-            b.id = old.id.clone();
-            continue;
+            *slot = Some(old.id.clone());
         }
-        if let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
-            && fingerprints.get(&b.fingerprint) == Some(&1)
-        {
-            b.id = old.id.clone();
+    }
+    for (assigned, b) in assigned.into_iter().zip(books.iter_mut()) {
+        if let Some(id) = assigned {
+            b.id = id;
         } else if legacy_counts.get(&b.legacy_id) == Some(&1)
             && !used.contains(&b.legacy_id)
             && !previous_legacy.contains(&b.legacy_id)
@@ -376,6 +390,36 @@ mod identity_tests {
         assert_ne!(ambiguous[0].id, ambiguous[1].id);
     }
     #[test]
+    fn moved_original_keeps_reading_identity_before_same_path_edition_in_either_order() {
+        let mut original = vec![book("/a/title.epub", "one")];
+        assign_ids(&mut original, &[]);
+        for reverse in [false, true] {
+            let mut current = vec![book("/a/title.epub", "new edition"), book("/b/moved.epub", "one")];
+            if reverse {
+                current.reverse();
+            }
+            assign_ids(&mut current, &original);
+            let moved = current.iter().find(|b| b.path == std::path::Path::new("/b/moved.epub")).unwrap();
+            let edited = current.iter().find(|b| b.path == std::path::Path::new("/a/title.epub")).unwrap();
+            assert_eq!(moved.id, original[0].id);
+            assert_ne!(edited.id, moved.id);
+            // Subsequent scans preserve both independently assigned identities.
+            let previous = current.clone();
+            assign_ids(&mut current, &previous);
+            assert_eq!(current, previous);
+        }
+    }
+    #[test]
+    fn reading_identity_transfers_repair_duplicate_previous_ids() {
+        let mut previous = vec![book("/a/title.epub", "one"), book("/b/title.epub", "two")];
+        previous[0].id = "shared".into();
+        previous[1].id = "shared".into();
+        let mut current = previous.clone();
+        assign_ids(&mut current, &previous);
+        assert_ne!(current[0].id, current[1].id);
+        assert_eq!(current.iter().filter(|b| b.id == "shared").count(), 1);
+    }
+    #[test]
     fn annotation_identities_stay_unambiguous() {
         let mut original = vec![book("/a/title.epub", "one")];
         assign_ids(&mut original, &[]);
@@ -386,7 +430,7 @@ mod identity_tests {
         assign_ids(&mut swapped, &original);
         assert_eq!(swapped[1].annotation_id, "legacy");
         assert_ne!(swapped[0].annotation_id, "legacy");
-        // Also when A's edit keeps its reading identity through the identifier.
+        // Also when A's edit shares the original EPUB identifier.
         let mut edited = vec![book("/a/title.epub", "new edition"), book("/b/moved.epub", "one")];
         assign_ids(&mut edited, &original);
         assert_eq!(edited[1].annotation_id, "legacy");

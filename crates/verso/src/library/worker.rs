@@ -824,9 +824,11 @@ pub fn scan_roots(
         }
     }
     assign_ids(&mut books, &previous.books);
-    // A moved entry supersedes its unavailable old path.
+    // A moved entry supersedes its unavailable old path. Identity assignment
+    // keeps every current ID unique, so compare the tombstone's previous ID:
+    // its freshly assigned ID no longer identifies the transferred state.
     let available_ids: HashSet<_> = books.iter().filter(|b| b.available).map(|b| b.id.clone()).collect();
-    books.retain(|b| b.available || !available_ids.contains(&b.id));
+    books.retain(|b| b.available || old.get(&b.path).is_none_or(|cached| !available_ids.contains(&cached.id)));
     empty_folders.extend(
         previous
             .empty_folders

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     platform::Waker,
-    store::{Store, atomic, default_dictionary_folders},
+    store::{Store, atomic_bytes, default_dictionary_folders},
 };
 use std::sync::{
     Arc, Mutex,
@@ -18,6 +18,8 @@ use std::sync::{
 const UNREADABLE: &str = "Couldn’t read this entry. Open Manage dictionaries for details.";
 /// How long a search may run before its first, incomplete publication.
 const FIRST_PUBLICATION: std::time::Duration = std::time::Duration::from_millis(150);
+/// Every file we write must fit the same bound used when reopening it.
+const PREFERENCES_LIMIT: usize = 1024 * 1024;
 
 /// How a base-form definition was found, for the line above it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,7 +175,15 @@ fn read_preferences(path: &std::path::Path) -> anyhow::Result<(Preferences, bool
     if !path.try_exists()? {
         return Ok((Preferences::default(), false));
     }
-    Preferences::parse(&super::bounded_read(path, 1024 * 1024)?)
+    Preferences::parse(&super::bounded_read(path, PREFERENCES_LIMIT)?)
+}
+fn preference_bytes(preferences: &Preferences) -> anyhow::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(preferences)?;
+    anyhow::ensure!(
+        bytes.len() <= PREFERENCES_LIMIT,
+        "Dictionary preferences exceed the 1 MiB limit. Remove unused sets or forget missing dictionaries first."
+    );
+    Ok(bytes)
 }
 /// Reopen files and repeat the failed query (including base forms), so an
 /// error disappears only after the operation that failed can succeed.
@@ -248,8 +258,17 @@ impl Inner {
                 self.failed_queries.retain(|id, _| catalog.dictionaries.iter().any(|d| d.id == *id));
                 self.warnings = warnings(&catalog.sources, folders.error.as_deref());
                 self.catalog = catalog;
-                if self.preferences.discover(&self.catalog.dictionaries) && self.prefs_error.is_none() {
-                    self.save();
+                let mut candidate = self.preferences.clone();
+                if candidate.discover(&self.catalog.dictionaries) {
+                    match preference_bytes(&candidate) {
+                        Ok(_) => {
+                            self.preferences = candidate;
+                            if self.prefs_error.is_none() {
+                                self.save();
+                            }
+                        }
+                        Err(e) => self.warnings.push(format!("New dictionaries couldn't be added to sets. {e:#}")),
+                    }
                 }
                 self.fresh = true;
                 true
@@ -259,10 +278,23 @@ impl Inner {
     }
     /// Writes the whole preference file, replacing a damaged one.
     fn save(&mut self) {
-        self.save_error = atomic(&self.prefs_path, &self.preferences).err().map(|e| format!("{e:#}"));
+        self.save_error = preference_bytes(&self.preferences)
+            .and_then(|bytes| atomic_bytes(&self.prefs_path, &bytes))
+            .err()
+            .map(|e| format!("{e:#}"));
         if self.save_error.is_none() {
             self.prefs_error = None;
         }
+    }
+    /// A size rejection leaves both the accepted settings and saved file alone.
+    /// I/O failures still retain the accepted edit for a later flush retry.
+    fn edit_preferences(&mut self, edit: Edit) -> anyhow::Result<()> {
+        let mut candidate = self.preferences.clone();
+        candidate.edit(edit)?;
+        preference_bytes(&candidate)?;
+        self.preferences = candidate;
+        self.save();
+        Ok(())
     }
     fn apply_set(&mut self, set: &str) {
         let set = self.preferences.set(set);
@@ -598,11 +630,8 @@ impl Service {
                             {
                                 Some("Only a missing dictionary can be forgotten. Rescan first.".into())
                             } else {
-                                inner.preferences.edit(edit).err().map(|e| e.to_string())
+                                inner.edit_preferences(edit).err().map(|e| e.to_string())
                             };
-                            if error.is_none() {
-                                inner.save();
-                            }
                             // Only a fresh catalog is published. The edit itself
                             // is already applied and saved, even if this is cancelled.
                             let current = || is_current(&request);

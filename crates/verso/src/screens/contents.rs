@@ -7,7 +7,7 @@ use crate::ui::widgets::{List, ListEvent, Pager, Row, TopBar};
 
 pub enum ContentsEvent {
     Close,
-    Position(usize, Position),
+    Position(Position),
 }
 pub struct Contents {
     top: TopBar,
@@ -72,7 +72,7 @@ impl Contents {
         }
         self.list.page = self.pager.page;
         if let Some(ListEvent::Tapped(i)) = self.list.on_gesture(g) {
-            return Some(ContentsEvent::Position(self.entries[i].page, self.entries[i].position.clone()));
+            return Some(ContentsEvent::Position(self.entries[i].position.clone()));
         }
         None
     }

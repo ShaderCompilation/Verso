@@ -210,9 +210,7 @@ fn run() -> Result<()> {
             quit = false;
             continue;
         }
-        if let Some(orientation) = app.take_orientation_request()
-            && app.prepare_relayout()
-        {
+        if let Some(orientation) = app.prepare_orientation() {
             platform.set_orientation(orientation)?;
             let info = platform.info().clone();
             log::info!("screen turned: {}x{}, {orientation:?}", info.width, info.height);

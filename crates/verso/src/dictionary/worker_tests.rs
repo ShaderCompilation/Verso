@@ -1,5 +1,6 @@
 use super::*;
 use crate::dictionary::{basename, sibling};
+use crate::store::atomic;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -673,6 +674,84 @@ fn unreadable_preferences_use_empty_default_and_failed_saves_retry_at_barrier() 
     f.worker.flush().unwrap();
     let saved: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
     assert_eq!(saved.set("set").name, "Set");
+}
+
+#[test]
+fn oversized_set_edits_preserve_saved_sets_and_survive_restart() {
+    let f = Fixture::new();
+    let mut preferences = Preferences::default();
+    // A large collection's retained IDs are copied into each custom set.
+    preferences.sets[0].dictionaries = (0..1024)
+        .map(|i| super::super::Preference { id: format!("{i:04}{}", "d".repeat(96)), disabled: false })
+        .collect();
+    for i in 0.. {
+        let mut candidate = preferences.clone();
+        candidate.edit(Edit::Create { id: format!("set-{i}"), name: format!("Set {i}") }).unwrap();
+        if preference_bytes(&candidate).is_err() {
+            break;
+        }
+        preferences = candidate;
+    }
+    assert!(preferences.sets.len() > 1);
+    let path = f.store.dictionary_preferences();
+    atomic(&path, &preferences).unwrap();
+    let saved = fs::read(&path).unwrap();
+    assert_eq!(f.catalog().sets, preferences.sets);
+    let reply = wait_client(&f.worker, f.worker.edit(Edit::Create { id: "overflow".into(), name: "Extra".into() }));
+    assert!(reply.change_error.as_ref().is_some_and(|e| e.contains("1 MiB")));
+    assert!(reply.save_error.is_none());
+    assert_eq!(reply.sets, preferences.sets, "rejected candidate never becomes active");
+    f.worker.flush().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), saved);
+
+    let restarted = Worker::new(Store::at(f.root.clone()), Waker::new(|| {}));
+    let reply = wait_client(&restarted, restarted.catalog(false));
+    assert!(reply.warnings.is_empty());
+    assert_eq!(reply.sets, preferences.sets);
+    // A later valid edit retains every custom set instead of replacing them.
+    let reply = edit(
+        &restarted,
+        Edit::Disabled {
+            set: DEFAULT.into(),
+            dictionary: preferences.sets[0].dictionaries[0].id.clone(),
+            disabled: true,
+        },
+    );
+    assert_eq!(reply.sets.len(), preferences.sets.len());
+    assert_eq!(read_preferences(&path).unwrap().0.sets, reply.sets);
+}
+
+#[test]
+fn discovery_respects_the_preference_read_limit_without_partial_updates() {
+    let f = Fixture::new();
+    let mut preferences = Preferences::default();
+    preferences.sets[0].name.clear();
+    let overhead = preference_bytes(&preferences).unwrap().len();
+    preferences.sets[0].name = "x".repeat(PREFERENCES_LIMIT - overhead);
+    assert_eq!(preference_bytes(&preferences).unwrap().len(), PREFERENCES_LIMIT);
+    let path = f.store.dictionary_preferences();
+    atomic(&path, &preferences).unwrap();
+    assert_eq!(read_preferences(&path).unwrap().0, preferences, "exactly the limit is readable");
+    assert_eq!(f.catalog().sets, preferences.sets);
+    let saved = fs::read(&path).unwrap();
+
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    install(&f.join("dictionaries/b.ifo"), "B", "word");
+    let reply = f.reply(f.worker.catalog(true)).0;
+    assert!(reply.warnings.iter().any(|w| w.contains("1 MiB")));
+    assert_eq!(reply.sets, preferences.sets);
+    assert_eq!(reply.dictionaries.len(), 2, "the catalog remains available");
+    f.worker.flush().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    assert_eq!(read_preferences(&path).unwrap().0, preferences);
+
+    // Make space and rescan: both additions can now be accepted and reopened.
+    edit(&f.worker, Edit::Rename { set: DEFAULT.into(), name: "Default".into() });
+    let reply = f.reply(f.worker.catalog(true)).0;
+    assert!(reply.warnings.is_empty());
+    assert_eq!(reply.sets[0].dictionaries.len(), 2);
+    assert!(reply.dictionaries.iter().all(|d| !d.disabled));
+    assert_eq!(read_preferences(&path).unwrap().0.sets, reply.sets);
 }
 
 #[test]

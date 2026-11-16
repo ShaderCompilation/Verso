@@ -44,7 +44,7 @@ pub struct App {
     usb_connected: bool,
     wake_cleanup: Option<Instant>,
     orientation: Orientation,
-    /// A screen asked to turn the display; see `take_orientation_request`.
+    /// A screen asked to turn the display; see `prepare_orientation`.
     orientation_request: Option<Orientation>,
 }
 
@@ -85,13 +85,20 @@ impl App {
         self.orientation = orientation;
     }
 
-    pub fn take_orientation_request(&mut self) -> Option<Orientation> {
-        self.orientation_request.take()
+    /// Saves the screens before handing the pending orientation to the platform.
+    /// A failed save leaves the request pending so a later event can retry it.
+    pub fn prepare_orientation(&mut self) -> Option<Orientation> {
+        let orientation = self.orientation_request?;
+        if !self.prepare_relayout() {
+            return None;
+        }
+        self.orientation_request = None;
+        Some(orientation)
     }
 
     /// Saves every screen like a normal exit, before a relayout. On failure
     /// the error is shown and the screens stay as they are.
-    pub fn prepare_relayout(&mut self) -> bool {
+    fn prepare_relayout(&mut self) -> bool {
         self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
         for s in &mut self.stack {
             if let Err(e) = s.on_quit() {
@@ -826,9 +833,8 @@ mod tests {
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Turns(saves.clone())));
         app.frame();
         tap(&mut app, crate::geom::Point::new(300, 400));
-        assert_eq!(app.take_orientation_request(), Some(Orientation::Landscape));
-        assert!(app.take_orientation_request().is_none());
-        assert!(app.prepare_relayout());
+        assert_eq!(app.prepare_orientation(), Some(Orientation::Landscape));
+        assert!(app.prepare_orientation().is_none());
         assert_eq!(saves.get(), 1, "positions are saved before the screens are rebuilt");
         let turned = DeviceInfo { width: 800, height: 600, ..info };
         app.relayout(&turned, Orientation::Landscape, |_, rect| {
@@ -838,6 +844,34 @@ mod tests {
         assert_eq!(app.stack.len(), 2);
         assert_eq!(app.canvas.bounds(), Rect::new(0, 0, 800, 600));
         assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 800, 600), mode: RefreshMode::Full }]);
+    }
+
+    #[test]
+    fn failed_relayout_save_keeps_orientation_pending_until_retry_succeeds() {
+        struct FailsOnce(bool);
+        impl Screen for FailsOnce {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn on_quit(&mut self) -> anyhow::Result<()> {
+                anyhow::ensure!(std::mem::replace(&mut self.0, true), "Couldn't save your place");
+                Ok(())
+            }
+        }
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(FailsOnce(false)));
+        app.orientation_request = Some(Orientation::Landscape);
+        app.frame();
+
+        assert!(app.prepare_orientation().is_none());
+        assert_eq!(app.orientation_request, Some(Orientation::Landscape));
+        assert_eq!(app.orientation, Orientation::Portrait);
+        assert_eq!(app.canvas.bounds(), Rect::new(0, 0, 600, 800));
+        assert!(app.toast.is_some());
+        assert!(!app.frame().is_empty(), "the save error must be visible");
+        assert_eq!(app.prepare_orientation(), Some(Orientation::Landscape));
+        assert!(app.prepare_orientation().is_none(), "a successful preparation consumes the request once");
     }
 
     #[test]

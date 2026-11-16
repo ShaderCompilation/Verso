@@ -135,6 +135,7 @@ pub enum Reply {
     Fonts(Vec<FontFace>),
     Opened { generation: u64, metadata: Metadata, toc: Vec<TocEntry>, pages: usize, current: usize },
     Page(Arc<Page>),
+    PageFailed { generation: u64, number: usize, message: String },
     Jumped { jump: u64, page: Arc<Page> },
     Search { request: SearchRequest, result: Result<SearchBatch, String> },
     Error { generation: u64, message: String },
@@ -341,14 +342,12 @@ impl Worker {
                                 if g == generation
                                     && let Some(d) = &mut doc
                                 {
-                                    send(Reply::Page(render(
-                                        d,
-                                        g,
-                                        number,
-                                        dimensions,
-                                        annotation_revision,
-                                        &annotations,
-                                    )?));
+                                    match render(d, g, number, dimensions, annotation_revision, &annotations) {
+                                        Ok(page) => send(Reply::Page(page)),
+                                        Err(e) => {
+                                            send(Reply::PageFailed { generation: g, number, message: format!("{e:#}") })
+                                        }
+                                    }
                                 }
                                 return Ok(());
                             }

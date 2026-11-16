@@ -2589,7 +2589,13 @@ mod tests {
             )?;
         }
         store.rebuild_home_summary(&index)?;
-        let before = std::fs::read(root.join("home.json"))?;
+        // A real library worker may resolve covers while the open fails.
+        // Compare persisted history, which cover repair must not change.
+        let history = || -> anyhow::Result<Vec<_>> {
+            let summary: Summary = serde_json::from_slice(&std::fs::read(root.join("home.json"))?)?;
+            Ok(summary.books.into_iter().map(|entry| (entry.book.id, entry.status)).collect())
+        };
+        let before = history()?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
@@ -2605,7 +2611,7 @@ mod tests {
             assert_eq!(books.home.resume().unwrap().book.id, "2", "a failed open never becomes the resume book");
             assert!(!books.browsing_ready);
         });
-        assert_eq!(std::fs::read(root.join("home.json"))?, before, "a failed open adds no history");
+        assert_eq!(history()?, before, "a failed open adds no history");
         assert_eq!(store.book("0").last_opened, 1);
         drop(books);
         std::fs::remove_dir_all(root)?;

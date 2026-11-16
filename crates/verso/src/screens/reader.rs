@@ -50,6 +50,7 @@ pub struct Reader {
     save_pending: bool,
     persistence: Writer,
     save_error: Option<String>,
+    settings_save_pending: bool,
     error: Option<String>,
     opened_at: Option<Instant>,
     selection: SelectionState,
@@ -65,6 +66,7 @@ pub struct Reader {
     /// A `Command::Position` whose reply decides the target page; 0 = none.
     jump: u64,
     next_jump: u64,
+    pending_position: Option<Position>,
     annotations: annotations::State,
     extension: Option<annotations::ExtendBar>,
     lookup_query: Option<String>,
@@ -122,6 +124,7 @@ impl Reader {
             turn_pending: false,
             save_pending: false,
             save_error: None,
+            settings_save_pending: false,
             error: None,
             opened_at: Some(Instant::now()),
             selection: SelectionState::default(),
@@ -135,6 +138,7 @@ impl Reader {
             next_highlight: 0,
             jump: 0,
             next_jump: 0,
+            pending_position: None,
             annotations: annotations::State::default(),
             extension: None,
             lookup_query: None,
@@ -237,11 +241,23 @@ impl Reader {
                     self.display(page, cx);
                 }
             }
+            Reply::PageFailed { generation, number, message } if generation == self.cache.generation => {
+                self.cache.failed(number);
+                log::error!("page {}: {message}", number + 1);
+                // A speculative failure must not abandon another pending turn.
+                if number == self.target {
+                    self.target = self.shown.as_ref().map_or(0, |p| p.number);
+                    self.turn_pending = false;
+                    self.error = Some(message.clone());
+                    cx.toast(message, None);
+                }
+            }
             Reply::Error { generation, message } if generation == 0 || generation == self.cache.generation => {
                 log::error!("{message}");
                 self.error = Some(message.clone());
                 self.laying_out = false;
                 self.layout_at = None;
+                self.pending_position = None;
                 self.target = self.shown.as_ref().map_or(0, |p| p.number);
                 cx.toast(message, None);
             }
@@ -314,6 +330,9 @@ impl Reader {
             menu.progress.value = page.number as f32;
             menu.progress.max = self.pages.saturating_sub(1) as f32;
         }
+        if layout_changed && let Some(position) = self.pending_position.take() {
+            self.jump_position(None, position, cx);
+        }
     }
     fn prefetch(&mut self) {
         self.cache.retain_neighbours(self.target);
@@ -344,8 +363,12 @@ impl Reader {
     /// `page` is the position's page in the current layout, when known.
     fn jump_position(&mut self, page: Option<usize>, position: Position, cx: &mut EventCx) -> bool {
         if self.laying_out || self.layout_at.is_some() {
-            return false;
+            // Page numbers will change. Keep only the stable text destination;
+            // the latest choice wins after the new layout's first page arrives.
+            self.pending_position = Some(position);
+            return true;
         }
+        self.pending_position = None;
         self.turn_pending = true;
         if let Some(p) = page.map(|p| p.min(self.pages.saturating_sub(1))).and_then(|p| self.cache.get(p)) {
             self.jump = 0;
@@ -603,12 +626,26 @@ impl Reader {
         self.highlight = None;
         self.highlight_pending = None;
         // A short debounce makes several quick taps one layout.
+        self.annotations.invalidate_import("Text layout changed. Preview the import again.");
         self.cache.reset(self.cache.generation + 1);
         self.layout_at = Some(Instant::now() + Duration::from_millis(180));
-        if let Err(e) = self.store.save_settings(&self.settings) {
-            log::error!("saving typography: {e:#}");
-            self.error = Some("Couldn't save text settings".into());
+        self.settings_save_pending = true;
+        let _ = self.flush_text_settings();
+    }
+    fn flush_text_settings(&mut self) -> anyhow::Result<()> {
+        if !self.settings_save_pending {
+            return Ok(());
         }
+        // Other settings screens may have saved while this reader was retained.
+        let mut settings = self.store.settings();
+        settings.typography = self.settings.typography.clone();
+        settings.footer = self.settings.footer;
+        self.store.save_settings(&settings).map_err(|e| {
+            log::error!("saving typography: {e:#}");
+            anyhow::anyhow!("Couldn't save text settings: {e:#}")
+        })?;
+        self.settings_save_pending = false;
+        Ok(())
     }
     fn save(&mut self) {
         if !self.save_pending {
@@ -644,6 +681,7 @@ impl Reader {
     }
     pub fn close(&mut self) -> anyhow::Result<()> {
         self.selection.clear();
+        self.flush_text_settings()?;
         self.annotations.flush()?;
         self.flush_position()?;
         if let Some(worker) = &self.dictionary {
@@ -707,7 +745,9 @@ impl Screen for Reader {
         if let Some(bar) = &mut self.extension {
             bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
         }
-        if let Some(bar) = &mut self.search_bar {
+        if !self.selection.extending
+            && let Some(bar) = &mut self.search_bar
+        {
             bar.draw(cx, &self.search);
         }
         match &mut self.overlay {
@@ -716,7 +756,7 @@ impl Screen for Reader {
                 let title = reader::chapter(&self.toc, menu.progress.value as usize)
                     .map(|i| self.toc[i].title.as_str())
                     .unwrap_or("Book");
-                menu.draw(cx, title, self.pages);
+                menu.draw(cx, title, self.pages, !self.laying_out && self.layout_at.is_none());
             }
             Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
             Overlay::Fonts(fonts) => fonts.draw(cx),
@@ -726,11 +766,17 @@ impl Screen for Reader {
             Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
             Overlay::Highlights(view) => view.draw(cx, &self.annotations),
         }
-        if self.laying_out || self.layout_at.is_some() || self.error.is_some() || self.save_error.is_some() {
+        if self.laying_out
+            || self.layout_at.is_some()
+            || self.error.is_some()
+            || self.save_error.is_some()
+            || self.settings_save_pending
+        {
             let message = self
                 .error
                 .as_deref()
                 .or(self.save_error.as_ref().map(|_| "Couldn't save your place"))
+                .or(self.settings_save_pending.then_some("Couldn't save text settings"))
                 .unwrap_or(if self.shown.is_some() { "Laying out…" } else { "Opening book…" });
             let width = self.screen.w - 2 * t.margin;
             let r = Rect::new(t.margin, t.mm(16.0), width, t.mm(10.0));
@@ -889,7 +935,7 @@ impl Screen for Reader {
                     self.on_search(event, cx);
                 }
             }
-            Overlay::Menu(menu) => match menu.on_gesture(&g) {
+            Overlay::Menu(menu) => match menu.on_gesture(&g, !self.laying_out && self.layout_at.is_none()) {
                 Some(MenuEvent::Books) => {
                     return match self.close() {
                         Ok(()) => Action::Pop,
@@ -952,9 +998,9 @@ impl Screen for Reader {
             },
             Overlay::Contents(contents) => match contents.on_gesture(&g) {
                 Some(ContentsEvent::Close) => self.menu(cx),
-                Some(ContentsEvent::Position(page, position)) => {
+                Some(ContentsEvent::Position(position)) => {
                     self.overlay = Overlay::None;
-                    self.jump_position(Some(page), position, cx);
+                    self.jump_position(None, position, cx);
                 }
                 None => {}
             },
@@ -1105,6 +1151,7 @@ impl Screen for Reader {
         if let Some(worker) = &self.dictionary {
             worker.cancel();
         }
+        let _ = self.flush_text_settings();
         let _ = self.annotations.flush();
         let _ = self.flush_position();
         // Dropping the controls cancels held steppers and slider drags. An open
@@ -1114,6 +1161,7 @@ impl Screen for Reader {
         }
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
+        self.flush_text_settings()?;
         self.annotations.flush()?;
         self.flush_position()?;
         if let Some(worker) = &self.dictionary {
@@ -1127,6 +1175,241 @@ impl Screen for Reader {
 mod tests {
     use super::*;
     use crate::store::BookState;
+
+    fn test_reader(name: &str) -> (Reader, std::sync::mpsc::Receiver<Command>) {
+        let (worker, commands) = Worker::recording_stub();
+        let reader = Reader::new(
+            Rect::new(0, 0, 600, 800),
+            Rc::new(worker),
+            Store::at(std::env::temp_dir().join(format!("verso-{name}-{}", std::process::id()))),
+            "book".into(),
+            1,
+            Settings { footer: false, ..Default::default() },
+            vec![],
+            Position::default(),
+        );
+        (reader, commands)
+    }
+    fn test_page(generation: u64, number: usize) -> Arc<Page> {
+        Arc::new(Page {
+            generation,
+            number,
+            pixels: vec![255; 600 * 800],
+            position: Position(format!("page-{number}")),
+            progress: 0,
+            images: false,
+            annotation_revision: 0,
+            annotations: vec![],
+            painted: vec![],
+        })
+    }
+    fn test_cx(theme: &Theme, f: impl FnOnce(&mut EventCx)) {
+        f(&mut EventCx {
+            theme,
+            screen: Rect::new(0, 0, 600, 800),
+            now: Instant::now(),
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut None,
+            forced: &mut vec![],
+            needs_redraw: &mut false,
+        });
+    }
+
+    #[test]
+    fn failed_page_requests_retry_without_releasing_other_inflight_pages() {
+        let (mut r, commands) = test_reader("page-retry");
+        r.pages = 20;
+        r.laying_out = false;
+        r.target = 5;
+        r.shown = Some(test_page(1, 5));
+        r.cache.insert(test_page(1, 5), 5);
+        assert!(r.cache.request(4));
+        assert!(r.cache.request(6));
+        test_cx(&Theme::for_dpi(150), |cx| {
+            r.go(6, cx);
+            r.receive(Reply::PageFailed { generation: 0, number: 6, message: "stale".into() }, cx);
+            assert!(!r.cache.request(6), "a stale failure must not release this generation's request");
+            r.receive(Reply::PageFailed { generation: 1, number: 6, message: "transient".into() }, cx);
+            assert_eq!(r.target, 5);
+            assert!(!r.cache.request(4), "another in-flight page stays requested");
+            assert!(commands.try_iter().next().is_none(), "errors do not automatically retry");
+            r.go(6, cx);
+            assert!(matches!(commands.try_recv(), Ok(Command::Page { generation: 1, number: 6 })));
+            // A failed speculative page must not discard this retry's target.
+            r.receive(Reply::PageFailed { generation: 1, number: 4, message: "prefetch".into() }, cx);
+            assert_eq!(r.target, 6);
+            assert!(r.cache.request(4));
+            r.receive(Reply::Page(test_page(1, 6)), cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 6);
+            assert!(r.error.is_none());
+        });
+    }
+
+    #[test]
+    fn repagination_keeps_the_latest_stable_destination_and_disables_old_page_numbers() {
+        let (mut r, commands) = test_reader("pending-navigation");
+        let theme = Theme::for_dpi(150);
+        r.pages = 20;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 0));
+        r.layout_at = Some(Instant::now() + Duration::from_secs(1));
+        r.cache.reset(2);
+        test_cx(&theme, |cx| {
+            assert!(r.jump_position(Some(9), Position("chapter".into()), cx));
+            assert_eq!(r.pending_position, Some(Position("chapter".into())));
+            r.menu(cx);
+            let point = match &r.overlay {
+                Overlay::Menu(menu) => menu.progress.rect().center(),
+                _ => unreachable!(),
+            };
+            r.on_gesture(Gesture::Down(point), cx);
+            r.on_gesture(Gesture::Tap(point), cx);
+            if let Overlay::Menu(menu) = &r.overlay {
+                assert!(!menu.progress.is_dragging());
+                assert_eq!(menu.progress.value, 0.0, "old page control cannot move during layout");
+            }
+            cx.now += Duration::from_secs(2);
+            r.on_tick(cx);
+            assert!(r.laying_out);
+            assert!(matches!(commands.try_recv(), Ok(Command::Layout { generation: 2, .. })));
+            // A passage chosen during layout supersedes the earlier chapter.
+            assert!(r.jump_position(None, Position("passage".into()), cx));
+            r.receive(
+                Reply::Opened { generation: 2, metadata: Metadata::default(), toc: vec![], pages: 40, current: 1 },
+                cx,
+            );
+            assert!(commands.try_iter().all(|c| !matches!(c, Command::Position { .. })));
+            r.receive(Reply::Page(test_page(2, 1)), cx);
+            let jump = commands
+                .try_iter()
+                .find_map(|c| match c {
+                    Command::Position { generation, position, jump } => {
+                        assert_eq!(generation, 2);
+                        assert_eq!(position, Position("passage".into()));
+                        Some(jump)
+                    }
+                    _ => None,
+                })
+                .expect("stable destination is located in the new layout");
+            assert!(r.pending_position.is_none());
+            r.receive(Reply::Jumped { jump, page: test_page(2, 25) }, cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 25);
+            assert_eq!(r.target, 25);
+        });
+    }
+
+    #[test]
+    fn contents_opened_before_repagination_uses_positions_after_it_finishes() {
+        let (mut r, commands) = test_reader("stale-contents");
+        let theme = Theme::for_dpi(150);
+        r.pages = 40;
+        r.cache.reset(2);
+        r.target = 0;
+        r.shown = Some(test_page(2, 0));
+        r.cache.insert(test_page(2, 1), 0);
+        let old_toc =
+            vec![TocEntry { title: "Chapter".into(), level: 1, page: 1, position: Position("chapter".into()) }];
+        r.overlay = Overlay::Contents(Box::new(Contents::new(&theme, r.screen, &old_toc, 0)));
+        r.laying_out = false; // The new layout has finished since opening Contents.
+        let p = crate::geom::Point::new(300, theme.top_bar + theme.mm(2.0) + theme.row / 2);
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(p), cx);
+            r.on_gesture(Gesture::Tap(p), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::None));
+        assert_eq!(r.shown.as_ref().unwrap().number, 0, "old page 1 must not use the new cached page 1");
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::Position { generation: 2, position: Position(p), .. }) if p == "chapter")
+        );
+    }
+
+    #[test]
+    fn text_settings_errors_survive_rendering_and_retry_without_overwriting_other_settings() -> anyhow::Result<()> {
+        let (mut r, _commands) = test_reader("text-settings-retry");
+        let root = r.store.dictionary_preferences().parent().unwrap().to_owned();
+        let path = root.join("settings.json");
+        std::fs::create_dir_all(&path)?; // Atomic file replacement must fail.
+        r.laying_out = false;
+        r.settings.typography.size_pt += 2.0;
+        r.changed();
+        assert!(r.settings_save_pending);
+        test_cx(&Theme::for_dpi(150), |cx| {
+            cx.now += Duration::from_secs(1);
+            r.on_tick(cx);
+            r.receive(
+                Reply::Opened { generation: 2, metadata: Metadata::default(), toc: vec![], pages: 10, current: 0 },
+                cx,
+            );
+            r.receive(Reply::Page(test_page(2, 0)), cx);
+            assert!(r.settings_save_pending, "page display cannot acknowledge a failed settings save");
+        });
+        assert!(r.on_quit().is_err(), "lifecycle save retries and reports a continuing failure");
+        std::fs::remove_dir(&path)?;
+        let settings =
+            Settings { orientation: crate::platform::Orientation::Landscape, developer: true, ..Default::default() };
+        r.store.save_settings(&settings)?;
+        r.on_quit()?;
+        assert!(!r.settings_save_pending);
+        let saved = r.store.settings();
+        assert_eq!(saved.typography.size_pt, r.settings.typography.size_pt);
+        assert!(!saved.footer);
+        assert_eq!(saved.orientation, settings.orientation);
+        assert!(saved.developer);
+        drop(r);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn extending_hides_search_controls_and_restores_them_on_cancel() {
+        use crate::{
+            document::{Selection, TextRange},
+            gfx::{Canvas, IconRenderer, TextRenderer},
+        };
+        let (mut r, _commands) = test_reader("extension-bars");
+        let theme = Theme::for_dpi(150);
+        r.pages = 10;
+        r.target = 2;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 2));
+        r.search_bar = Some(SearchBar::new(&theme, r.screen));
+        r.search.query = "search".into();
+        r.selection.selected = Some(Selection {
+            range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+            text: "two words".into(),
+            rects: vec![],
+            start_page: 2,
+            start_visible: true,
+            end_visible: true,
+        });
+        r.selection.extend();
+        r.extension = Some(annotations::ExtendBar::new(&theme, r.screen));
+        let mut canvas = Canvas::new(600, 800);
+        let mut text = TextRenderer::new();
+        let mut icons = IconRenderer::default();
+        let mut hints = vec![];
+        let mut draw = |r: &mut Reader| {
+            r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+            canvas.gray_data().to_vec()
+        };
+        let extending = draw(&mut r);
+        let search_bar = r.search_bar.take();
+        assert_eq!(extending, draw(&mut r), "search controls cannot cover the active extension controls");
+        r.search_bar = search_bar;
+        // Cancel is the fourth extension button, at the right end of the strip.
+        let p = crate::geom::Point::new(530, r.screen.h - theme.mm(10.0));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(p), cx);
+            r.on_gesture(Gesture::Tap(p), cx);
+        });
+        assert!(!r.selection.extending && r.extension.is_none());
+        assert!(r.search_bar.is_some());
+        assert_eq!(r.search.query, "search");
+        let restored = draw(&mut r);
+        r.search_bar = None;
+        assert_ne!(restored, draw(&mut r), "the retained search bar is visible again");
+    }
 
     #[test]
     fn a_retained_reader_rediscovers_after_dictionary_folders_change() -> anyhow::Result<()> {
