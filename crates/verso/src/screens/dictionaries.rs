@@ -87,6 +87,8 @@ pub struct Dictionaries {
     view: View,
     sets: Vec<Set>,
     dictionaries: Vec<Dictionary>,
+    missing: std::collections::HashSet<String>,
+    unprepared: Vec<String>,
     sources: Vec<Source>,
     warnings: Vec<String>,
     request: u64,
@@ -118,6 +120,8 @@ impl Dictionaries {
             view: set.map_or(View::Sets, |id| View::Set(id.into())),
             sets: vec![],
             dictionaries: vec![],
+            missing: Default::default(),
+            unprepared: vec![],
             sources: vec![],
             warnings: vec![],
             request,
@@ -257,7 +261,15 @@ impl Dictionaries {
                         .sub(format!(
                             "{}{} · {}",
                             if d.disabled { "Off" } else { "On" },
-                            if d.error.is_some() { " · Read error" } else { "" },
+                            if self.missing.contains(&d.id) {
+                                " · Missing"
+                            } else if self.unprepared.contains(&d.id) {
+                                " · Needs preparation"
+                            } else if d.error.is_some() {
+                                " · Read error"
+                            } else {
+                                ""
+                            },
                             d.location(&self.sources)
                         ))
                         .chevron()
@@ -277,6 +289,12 @@ impl Dictionaries {
                 .dictionary_index()
                 .map(|index| {
                     let d = &self.dictionaries[index];
+                    if self.missing.contains(&d.id) {
+                        return vec![
+                            Row::new("Missing dictionary").sub(&d.id),
+                            Row::new("Forget dictionary").sub("Remove its preferences from every set"),
+                        ];
+                    }
                     let mut rows = vec![
                         Row::new("Details").sub(&d.name).chevron(),
                         Row::new(if d.disabled { "Enable" } else { "Disable" }),
@@ -414,6 +432,24 @@ impl Dictionaries {
             }
             View::Dictionary(set, dictionary) => {
                 let Some(d) = self.dictionary() else { return };
+                if self.missing.contains(&d.id) {
+                    if index == 1 {
+                        self.edit(Edit::Forget { set: set.clone(), dictionary });
+                        self.view = View::Set(set);
+                        self.layout(cx.theme);
+                    } else {
+                        self.details = Some(Details::from_text(
+                            cx.theme,
+                            self.screen,
+                            "Missing dictionary",
+                            format!(
+                                "{}\n\nThis dictionary is no longer on disk. Its order and on/off choices are kept in every set until you forget it.",
+                                d.id
+                            ),
+                        ));
+                    }
+                    return;
+                }
                 let edit = match index {
                     0 => {
                         let text = format!(
@@ -650,6 +686,25 @@ impl Screen for Dictionaries {
             self.pending = false;
             self.sets = reply.sets;
             self.dictionaries = reply.dictionaries;
+            self.missing.clear();
+            self.unprepared = reply.unprepared;
+            if let Some(set) = self.sets.iter().find(|s| s.id == reply.active_set) {
+                for preference in &set.dictionaries {
+                    if !self.dictionaries.iter().any(|d| d.id == preference.id) {
+                        self.missing.insert(preference.id.clone());
+                        self.dictionaries.push(Dictionary {
+                            id: preference.id.clone(),
+                            name: preference.id.clone(),
+                            path: preference.id.clone().into(),
+                            relative: preference.id.clone().into(),
+                            source: usize::MAX,
+                            error: None,
+                            disabled: preference.disabled,
+                        });
+                    }
+                }
+                set.apply(&mut self.dictionaries);
+            }
             self.sources = reply.sources;
             self.warnings = reply.warnings;
             if let Some(error) = reply.change_error {
@@ -892,6 +947,11 @@ mod tests {
         // A dictionary removed by a rescan returns to its set.
         fs::remove_file(store.dictionary_dir().join("a.ifo")).unwrap();
         s.catalog(true);
+        wait(&mut s, &t);
+        assert!(matches!(&s.view, View::Dictionary(id, _) if id == DEFAULT));
+        assert!(s.missing.contains("a.ifo"));
+        assert_eq!(s.list.rows[1].label, "Forget dictionary");
+        row(&mut s, 1, &t);
         wait(&mut s, &t);
         assert!(matches!(&s.view, View::Set(id) if id == DEFAULT));
         assert_eq!(s.list.rows.len(), 1);

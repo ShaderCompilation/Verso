@@ -821,6 +821,18 @@ impl Screen for Reader {
         match &mut self.overlay {
             Overlay::Lookup(lookup) => {
                 if let Some(event) = lookup.on_gesture(&g, cx) {
+                    if let LookupEvent::Set(set) = &event {
+                        let result = self.flush_position().and_then(|()| {
+                            let mut state = self.store.book(&self.id);
+                            state.dictionary_set = Some(set.clone());
+                            self.store.save_book(&self.id, &state)
+                        });
+                        if let Err(error) = result {
+                            log::error!("saving dictionary set: {error:#}");
+                            cx.toast("Couldn’t save the dictionary set for this book", None);
+                        }
+                        return Action::None;
+                    }
                     if let LookupEvent::Manage(set) = &event {
                         return Action::Push(Box::new(crate::screens::dictionaries::Dictionaries::new(
                             cx.theme,

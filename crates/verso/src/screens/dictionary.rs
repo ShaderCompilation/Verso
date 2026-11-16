@@ -2,7 +2,8 @@
 use crate::{
     dictionary::{
         Block, BlockKind, Dictionary, Source, Style,
-        worker::{State, Worker},
+        sets::Set,
+        worker::{Match, State, Worker},
     },
     geom::Rect,
     gfx::{
@@ -14,7 +15,7 @@ use crate::{
         gesture::Gesture,
         theme::{INK2, LINE, Theme},
         widget::DrawCx,
-        widgets::{Button, ButtonKind, Keyboard, Pager, Sheet, TextField},
+        widgets::{Button, ButtonKind, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
     },
 };
 use std::rc::Rc;
@@ -22,8 +23,7 @@ use std::rc::Rc;
 const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
                        then open Dictionaries and tap Rescan.";
 const DISABLED: &str = "All dictionaries are disabled. Open Dictionaries to enable one.";
-const NO_RESULT: &str = "No definition found. Tap the query to edit it, or try another dictionary.";
-const UNREADABLE_HINT: &str = "Try another dictionary, or replace its files and tap Rescan.";
+const NO_RESULT: &str = "No definition found. Tap the query to edit it, or switch dictionary sets.";
 /// Nesting levels that indent; deeper blocks stay at the last level.
 const MAX_DEPTH: u8 = 4;
 
@@ -93,14 +93,17 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
         State::Missing => blocks.push(plain(MISSING.into(), t.body)),
         State::Disabled => blocks.push(plain(DISABLED.into(), t.body)),
         State::NoResult => blocks.push(plain(NO_RESULT.into(), t.body)),
-        State::Error(e) => {
-            blocks.push(plain(format!("Couldn't read this dictionary.\n\n{e}\n\n{UNREADABLE_HINT}"), t.body));
-        }
+        State::Error(_) => blocks.push(plain(
+            "Couldn’t read this entry. Open Manage dictionaries for details, or choose another result.".into(),
+            t.body,
+        )),
     }
-    if !warnings.is_empty() {
+    if !warnings.is_empty() && !matches!(state, State::Definition { .. }) {
         blocks.push(StyledBlock::Gap(gap));
-        blocks.push(plain("Some dictionary folders had problems:".into(), t.body));
-        blocks.extend(warnings.iter().map(|warning| plain(format!("• {warning}"), t.body)));
+        blocks.push(plain(
+            "Search incomplete: some dictionaries couldn’t be read. Open Manage dictionaries for details.".into(),
+            t.body,
+        ));
     }
     blocks
 }
@@ -111,6 +114,17 @@ pub enum LookupEvent {
     Actions(String),
     /// Open dictionary management at this lookup's set.
     Manage(String),
+    Set(String),
+}
+
+struct Picker {
+    sets: bool,
+    list: List,
+    pager: Pager,
+    set: Button,
+    back: Button,
+    manage: Button,
+    status: Rect,
 }
 
 pub struct Lookup {
@@ -122,6 +136,13 @@ pub struct Lookup {
     /// The last submitted query. The field may have been edited since.
     query: String,
     pending: bool,
+    complete: bool,
+    preparing: Option<String>,
+    matches: Vec<Match>,
+    sets: Vec<Set>,
+    revision: u64,
+    picker: Option<Picker>,
+    counter: Rect,
     field: TextField,
     keyboard: Keyboard,
     search: Button,
@@ -133,7 +154,7 @@ pub struct Lookup {
     returning: bool,
     catalog: Vec<Dictionary>,
     sources: Vec<Source>,
-    /// Source problems, shown with every result.
+    /// Search diagnostics, shown as an incomplete notice only on a miss.
     warnings: Vec<String>,
     selected: Option<String>,
     state: State,
@@ -196,10 +217,12 @@ impl Lookup {
         let mut manage = Button::new("Manage dictionaries", ButtonKind::Secondary);
         manage.place(Rect::new(content.x, footer.y - t.target - gap, content.w, t.target), t);
         let controls = find.rect().bottom().max(row.bottom());
-        let body = Rect::new(content.x, controls + gap, content.w, manage.rect().y - controls - 2 * gap);
+        let counter = Rect::new(content.x, controls + gap, content.w, t.mm(7.0));
+        let body = Rect::new(content.x, counter.bottom(), content.w, manage.rect().y - counter.bottom() - gap);
         let request = worker.lookup_in(query.into(), None, false, selection.clone());
         let mut keyboard = Keyboard::default();
         keyboard.place(screen, t);
+        let revision = worker.revision();
         Self {
             sheet,
             worker,
@@ -208,6 +231,13 @@ impl Lookup {
             active_set: crate::dictionary::sets::DEFAULT.into(),
             query: query.into(),
             pending: true,
+            complete: false,
+            preparing: None,
+            matches: vec![],
+            sets: vec![],
+            revision,
+            picker: None,
+            counter,
             field,
             keyboard,
             search,
@@ -239,7 +269,7 @@ impl Lookup {
         }
     }
     pub fn busy(&self) -> bool {
-        self.pending || (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
+        !self.complete || self.pending || (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
     }
     pub fn paginating(&self) -> bool {
         self.pages.as_ref().is_some_and(|p| !p.is_complete())
@@ -277,8 +307,13 @@ impl Lookup {
     }
     /// Runs the last submitted query again, leaving any unsubmitted field edit.
     fn repeat(&mut self, rescan: bool) {
-        self.request = self.worker.lookup_in(self.query.clone(), self.selected.clone(), rescan, self.selection.clone());
+        self.request = self.worker.lookup_in(self.query.clone(), None, rescan, self.selection.clone());
         self.pending = true;
+        self.complete = false;
+        self.matches.clear();
+        self.selected = None;
+        self.preparing = None;
+        self.revision = self.worker.revision();
         self.pages = None;
         self.layout_error = None;
         self.pager.set(0, 1);
@@ -287,40 +322,141 @@ impl Lookup {
         self.keyboard.visible = false;
     }
     pub fn receive(&mut self, cx: &mut EventCx) {
-        if self.returning {
-            self.returning = false;
+        if self.revision != self.worker.revision() || self.returning && !self.complete {
             self.repeat(false);
         }
+        self.returning = false;
         if let Some(reply) = self.worker.receive()
             && reply.id == self.request
         {
-            self.pending = false;
+            self.complete = reply.complete;
+            self.preparing = reply.preparing;
             self.catalog = reply.dictionaries;
             self.sources = reply.sources;
             self.warnings = reply.warnings;
-            self.selected = reply.selected;
+            self.warnings.extend(self.catalog.iter().filter(|d| !d.disabled).filter_map(|d| d.error.clone()));
             self.active_set = reply.active_set;
-            self.state = reply.state.unwrap_or(State::NoResult);
-            self.pages = None;
-            self.layout_error = None;
-            self.pager.set(0, 1);
-            self.pager.incomplete = true;
+            self.matches = reply.matches;
+            self.sets = reply.sets;
+            // A final count must never replace a dictionary selected since the
+            // first publication, or throw away its pagination/page.
+            if (self.selected.is_none() || self.selected == reply.selected)
+                && let Some(state) = reply.state
+            {
+                let changed = self.selected != reply.selected || self.state != state || self.pending;
+                self.pending = !self.complete && !matches!(&state, State::Definition { .. });
+                self.selected = reply.selected;
+                self.state = state;
+                if changed {
+                    self.pages = None;
+                    self.layout_error = None;
+                    self.pager.set(0, 1);
+                    self.pager.incomplete = true;
+                }
+            }
             if let Some(e) = reply.save_error {
                 log::warn!("dictionary preferences: {e}");
                 cx.toast("Couldn't save dictionary preferences", None);
             }
+            self.refresh_picker(cx.theme);
             cx.redraw();
         }
     }
-    fn cycle(&mut self, delta: isize) {
-        let enabled: Vec<_> = self.catalog.iter().filter(|d| !d.disabled).map(|d| d.id.clone()).collect();
-        if enabled.len() < 2 {
+    fn choose(&mut self, index: usize) {
+        let Some(matched) = self.matches.get(index) else { return };
+        if self.selected.as_ref() == Some(&matched.dictionary) {
             return;
         }
-        let current = enabled.iter().position(|id| Some(id) == self.selected.as_ref()).unwrap_or(0);
-        let index = (current as isize + delta).rem_euclid(enabled.len() as isize) as usize;
-        self.selected = Some(enabled[index].clone());
-        self.submit(false);
+        self.selected = Some(matched.dictionary.clone());
+        self.worker.open(&matched.dictionary);
+        self.pending = true;
+        self.pages = None;
+        self.layout_error = None;
+        self.pager.set(0, 1);
+        self.pager.incomplete = true;
+    }
+    fn cycle(&mut self, delta: isize) {
+        let current = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref()).unwrap_or(0);
+        let target = current as isize + delta;
+        if target >= 0 {
+            self.choose(target as usize);
+        }
+    }
+    fn status(&self) -> String {
+        let count = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref()).map_or_else(
+            || format!("{} found", self.matches.len()),
+            |i| format!("{} of {}", i + 1, self.matches.len()),
+        );
+        if !self.complete && self.preparing.is_some() {
+            format!("{count} · Preparing dictionaries…")
+        } else if !self.complete {
+            format!("{count} · Searching…")
+        } else {
+            count
+        }
+    }
+    fn open_picker(&mut self, t: &Theme) {
+        let c = self.sheet.content(t);
+        let gap = t.mm(2.0);
+        let footer = Rect::new(c.x, self.sheet.rect().bottom() - t.target - gap, c.w, t.target);
+        let mut back = Button::new("Back", ButtonKind::Secondary);
+        let mut manage = Button::new("Manage dictionaries", ButtonKind::Secondary);
+        let back_w = t.mm(17.0);
+        back.place(Rect::new(c.x, footer.y, back_w, footer.h), t);
+        manage.place(Rect::new(c.x + back_w + gap, footer.y, c.w - back_w - gap, footer.h), t);
+        let mut pager = Pager::new(1);
+        pager.place(Rect::new(c.x, footer.y - t.target - gap, c.w, t.target), t);
+        let status = Rect::new(c.x, pager.rect().y - t.mm(8.0), c.w, t.mm(8.0));
+        let mut set = Button::new("", ButtonKind::Secondary);
+        set.place(Rect::new(c.x, c.y, c.w, t.target), t);
+        let mut list = List::new(vec![]);
+        list.place(Rect::new(c.x, c.y + t.target + gap, c.w, status.y - c.y - t.target - gap), t.row2, 0);
+        self.picker = Some(Picker { sets: false, list, pager, set, back, manage, status });
+        self.refresh_picker(t);
+    }
+    fn refresh_picker(&mut self, _t: &Theme) {
+        let rows = if self.picker.as_ref().is_some_and(|p| p.sets) {
+            self.sets
+                .iter()
+                .map(|s| {
+                    Row::new(&s.name)
+                        .sub(if s.languages.is_empty() {
+                            "No assigned languages".into()
+                        } else {
+                            s.languages.join(", ")
+                        })
+                        .value(if self.selection.book_set.as_ref() == Some(&s.id) { "Chosen" } else { "" })
+                })
+                .collect()
+        } else {
+            self.matches
+                .iter()
+                .map(|m| {
+                    let name = self
+                        .catalog
+                        .iter()
+                        .find(|d| d.id == m.dictionary)
+                        .map_or_else(|| m.dictionary.clone(), |d| self.title(d));
+                    let headwords = m.headwords().join(", ");
+                    let label = if m.hits.forms.is_some() { format!("{headwords} (base form)") } else { headwords };
+                    Row::new(name)
+                        .sub(format!(
+                            "{label} · {} {}",
+                            m.hits.records.len(),
+                            if m.hits.records.len() == 1 { "entry" } else { "entries" }
+                        ))
+                        .value(if self.selected.as_ref() == Some(&m.dictionary) { "Current" } else { "" })
+                })
+                .collect()
+        };
+        let set_name = self.sets.iter().find(|s| s.id == self.active_set).map_or("Default", |s| s.name.as_str());
+        if let Some(p) = &mut self.picker {
+            p.set.label =
+                if p.sets { "Choose a set for this book".into() } else { format!("Set: {set_name} · Change") };
+            p.list.rows = rows;
+            p.pager.set(p.list.page, p.list.paging().pages());
+            p.list.page = p.pager.page;
+        }
     }
     pub fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
         if !self.field.focused {
@@ -353,9 +489,58 @@ impl Lookup {
         if self.sheet.on_gesture(g) {
             return Some(LookupEvent::Close);
         }
-        if self.manage.on_gesture(g) || self.dictionaries_button.on_gesture(g) {
+        if let Some(p) = &mut self.picker {
+            if p.manage.on_gesture(g) {
+                self.picker = None;
+                self.returning = true;
+                if !self.complete {
+                    self.worker.cancel();
+                }
+                return Some(LookupEvent::Manage(self.active_set.clone()));
+            }
+            if p.back.on_gesture(g) {
+                if p.sets {
+                    p.sets = false;
+                    p.list.page = 0;
+                    self.refresh_picker(cx.theme);
+                } else {
+                    self.picker = None;
+                }
+                return None;
+            }
+            if p.set.on_gesture(g) {
+                p.sets = !p.sets;
+                p.list.page = 0;
+                self.refresh_picker(cx.theme);
+                return None;
+            }
+            p.pager.on_gesture(g);
+            if let Gesture::Swipe { dir, .. } = g {
+                p.pager.on_swipe(*dir);
+            }
+            p.list.page = p.pager.page;
+            if let Some(ListEvent::Tapped(index)) = p.list.on_gesture(g) {
+                if p.sets {
+                    let id = self.sets[index].id.clone();
+                    self.selection.book_set = Some(id.clone());
+                    self.picker = None;
+                    self.repeat(false);
+                    return Some(LookupEvent::Set(id));
+                }
+                self.choose(index);
+                self.picker = None;
+            }
+            return None;
+        }
+        if self.dictionaries_button.on_gesture(g) {
+            self.open_picker(cx.theme);
+            return None;
+        }
+        if (self.pending || !matches!(self.state, State::Definition { .. })) && self.manage.on_gesture(g) {
             self.returning = true;
-            self.worker.cancel();
+            if !self.complete {
+                self.worker.cancel();
+            }
             return Some(LookupEvent::Manage(self.active_set.clone()));
         }
         if self.field.on_gesture(g) {
@@ -384,10 +569,22 @@ impl Lookup {
     pub fn draw(&mut self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
         let t = cx.theme;
+        let status = self.status();
+        if let Some(p) = &mut self.picker {
+            p.set.draw(cx);
+            p.list.draw(cx);
+            p.pager.draw(cx);
+            p.back.draw(cx);
+            p.manage.draw(cx);
+            cx.line(&status, t.small.gray(INK2), p.status, HAlign::Left);
+            return;
+        }
         self.field.draw(cx);
         self.search.draw(cx);
-        self.previous.enabled = self.catalog.iter().filter(|d| !d.disabled).count() > 1;
-        self.next.enabled = self.previous.enabled;
+        let index = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref());
+        self.previous.enabled = index.is_some_and(|i| i > 0);
+        self.next.enabled = index.is_some_and(|i| i + 1 < self.matches.len());
+        cx.line(&status, t.small.gray(INK2), self.counter, HAlign::Left);
         self.dictionaries_button.label = self
             .catalog
             .iter()
@@ -397,7 +594,12 @@ impl Lookup {
         self.dictionaries_button.draw(cx);
         self.next.draw(cx);
         self.find.draw(cx);
-        self.manage.draw(cx);
+        let definition = !self.pending && matches!(self.state, State::Definition { .. });
+        let bottom = if definition { self.pager.rect().y } else { self.manage.rect().y };
+        self.body.h = bottom - self.body.y - t.mm(2.0);
+        if !definition {
+            self.manage.draw(cx);
+        }
         if self.pages.is_none() && self.layout_error.is_none() {
             let started = std::time::Instant::now();
             let blocks = content(&self.state, self.pending, &self.warnings, t);
@@ -539,6 +741,7 @@ mod tests {
         for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
             let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None, Default::default());
             lookup.pending = false;
+            lookup.complete = true;
             lookup.state = State::Definition {
                 entries: vec![
                     Entry {
@@ -611,10 +814,7 @@ mod tests {
             assert_eq!(recovered.lines().filter(|s| *s == "leaf").count(), 1);
             assert_eq!(recovered.lines().filter(|s| *s == "leave").count(), 1);
             assert!(recovered.starts_with("Base forms of “leaves”\nleaf\n"));
-            assert!(
-                recovered
-                    .ends_with("leave\nTo depart.\nSome dictionary folders had problems:\n• /gone is not available.\n")
-            );
+            assert!(recovered.ends_with("leave\nTo depart.\n"));
             let mut cx = EventCx {
                 theme: &t,
                 screen,
@@ -749,6 +949,10 @@ mod tests {
         lookup.pending = true;
         lookup.worker.result_for_test(crate::dictionary::worker::Reply {
             id: old,
+            matches: vec![],
+            complete: true,
+            preparing: None,
+            unprepared: vec![],
             sets: vec![],
             active_set: crate::dictionary::sets::DEFAULT.into(),
             change_error: None,
@@ -769,3 +973,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "dictionary_tests.rs"]
+mod result_tests;

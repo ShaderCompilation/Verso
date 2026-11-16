@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 const MAX_WORD_BYTES: usize = 4096;
 const BUCKETS: usize = 4096;
@@ -104,30 +104,57 @@ fn record(file: &mut File, at: u64) -> Result<Record> {
     file.read_exact(&mut word)?;
     Ok(Record { next, offset, size, key: String::from_utf8(key)?, word: String::from_utf8(word)? })
 }
+fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
+    let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
+    let (idx, _) = companion(&base, "idx", "idx.gz")?;
+    let (dict, _) = companion(&base, "dict", "dict.dz")?;
+    let syn = sibling(&base, "syn");
+    let mut signature = Sha256::new();
+    signature.update(b"verso-stardict-index-v1");
+    // `path` is the metadata actually read (`.ifo` or `.ifo.gz`), so
+    // switching or replacing either variant changes the signature.
+    for source in [path, &idx, &dict, &syn] {
+        signature.update(source.as_os_str().as_encoded_bytes());
+        if source.exists() {
+            let meta = source.metadata()?;
+            signature.update(meta.len().to_le_bytes());
+            signature.update(meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_le_bytes());
+        }
+    }
+    let fingerprint = format!("{:x}", signature.finalize());
+    // Named after the plain `.ifo` path for either variant: existing caches
+    // stay valid, and a replaced variant overwrites rather than orphans.
+    let name = format!("{:x}", Sha256::digest(sibling(&base, "ifo").as_os_str().as_encoded_bytes()));
+    let dest = cache.join(format!("{name}.index"));
+    Ok((dest, fingerprint))
+}
 impl Index {
-    pub fn open(path: &Path, cache: &Path, info: &Info, data_len: u64, current: &impl Fn() -> bool) -> Result<Self> {
+    pub fn prepared(path: &Path, cache: &Path) -> bool {
+        (|| -> Result<bool> {
+            let (dest, fingerprint) = cache_location(path, cache)?;
+            let mut file = File::open(dest)?;
+            if file.metadata()?.len() < HEADER {
+                return Ok(false);
+            }
+            let mut signature = [0; SIGNATURE as usize];
+            file.read_exact(&mut signature)?;
+            Ok(signature == fingerprint.as_bytes())
+        })()
+        .unwrap_or(false)
+    }
+    pub fn open(
+        path: &Path,
+        cache: &Path,
+        info: &Info,
+        data_len: u64,
+        current: &impl Fn() -> bool,
+        preparing: &impl Fn(),
+    ) -> Result<Self> {
         fs::create_dir_all(cache)?;
         let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
         let (idx, compressed) = companion(&base, "idx", "idx.gz")?;
-        let (dict, _) = companion(&base, "dict", "dict.dz")?;
         let syn = sibling(&base, "syn");
-        let mut signature = Sha256::new();
-        signature.update(b"verso-stardict-index-v1");
-        // `path` is the metadata actually read (`.ifo` or `.ifo.gz`), so
-        // switching or replacing either variant changes the signature.
-        for source in [path, &idx, &dict, &syn] {
-            signature.update(source.as_os_str().as_encoded_bytes());
-            if source.exists() {
-                let meta = source.metadata()?;
-                signature.update(meta.len().to_le_bytes());
-                signature.update(meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_le_bytes());
-            }
-        }
-        let fingerprint = format!("{:x}", signature.finalize());
-        // Named after the plain `.ifo` path for either variant: existing caches
-        // stay valid, and a replaced variant overwrites rather than orphans.
-        let name = format!("{:x}", Sha256::digest(sibling(&base, "ifo").as_os_str().as_encoded_bytes()));
-        let dest = cache.join(format!("{name}.index"));
+        let (dest, fingerprint) = cache_location(path, cache)?;
         if let Ok(mut file) = File::open(&dest)
             && file.metadata()?.len() >= HEADER
         {
@@ -137,6 +164,7 @@ impl Index {
                 return Ok(Self(file));
             }
         }
+        preparing();
         let build_id = BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = format!("{}-{build_id}", std::process::id());
         let temp = dest.with_extension(format!("{suffix}.tmp"));

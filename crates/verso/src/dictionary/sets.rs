@@ -57,6 +57,10 @@ pub enum Edit {
         dictionary: String,
         disabled: bool,
     },
+    Forget {
+        set: String,
+        dictionary: String,
+    },
     MoveDictionary {
         set: String,
         dictionary: String,
@@ -74,7 +78,8 @@ impl Edit {
             | Edit::MoveSet { set, .. }
             | Edit::Languages { set, .. }
             | Edit::Disabled { set, .. }
-            | Edit::MoveDictionary { set, .. } => set,
+            | Edit::MoveDictionary { set, .. }
+            | Edit::Forget { set, .. } => set,
         }
     }
 }
@@ -188,6 +193,11 @@ impl Preferences {
                 let entry = dictionaries.iter_mut().find(|d| d.id == dictionary);
                 let Some(entry) = entry else { anyhow::bail!("Unknown dictionary") };
                 entry.disabled = disabled;
+            }
+            Edit::Forget { dictionary, .. } => {
+                for set in &mut self.sets {
+                    set.dictionaries.retain(|d| d.id != dictionary);
+                }
             }
             Edit::MoveDictionary { set, dictionary, position } => {
                 let dictionaries = &mut self.find_mut(&set)?.dictionaries;

@@ -151,6 +151,12 @@ struct FormHits {
     forms: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hits {
+    pub records: Vec<(String, u64, u32)>,
+    pub forms: Option<usize>,
+}
+
 pub struct Backend {
     index: Index,
     definitions: Definitions,
@@ -158,11 +164,14 @@ pub struct Backend {
 }
 impl Backend {
     pub fn open(path: &Path, cache: &Path, current: &impl Fn() -> bool) -> Result<Self> {
+        Self::open_progress(path, cache, current, &|| {})
+    }
+    fn open_progress(path: &Path, cache: &Path, current: &impl Fn() -> bool, preparing: &impl Fn()) -> Result<Self> {
         let info = Info::read(path)?;
         let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
         let (data_path, compressed) = companion(&base, "dict", "dict.dz")?;
         let definitions = Definitions::open(&data_path, compressed)?;
-        let index = Index::open(path, cache, &info, definitions.len, current)?;
+        let index = Index::open(path, cache, &info, definitions.len, current, preparing)?;
         Ok(Self { index, definitions, types: info.types })
     }
     pub fn lookup(&mut self, query: &str) -> Result<Vec<Entry>> {
@@ -173,6 +182,19 @@ impl Backend {
     /// most three. A base form is a candidate word, so case variants of one
     /// headword (`hope`, `Hope`) count once.
     fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(Vec<Entry>, usize)> {
+        let hits = self.find_forms(forms, current)?;
+        Ok((self.render(hits.records)?, hits.forms.unwrap_or(0)))
+    }
+    fn find(&mut self, query: &str) -> Result<Hits> {
+        let mut records = self.index.find(query)?;
+        let mut seen = std::collections::HashSet::new();
+        records.retain(|(_, offset, size)| seen.insert((*offset, *size)));
+        Ok(Hits { records, forms: None })
+    }
+    fn displayable(&self) -> bool {
+        self.types.is_empty() || self.types.bytes().any(|k| matches!(k, b'm' | b't' | b'y' | b'h' | b'x' | b'g'))
+    }
+    fn find_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<Hits> {
         const MAX_FORMS: usize = 3;
         let mut hits = FormHits::default();
         'search: {
@@ -196,7 +218,7 @@ impl Backend {
             }
         }
         ensure!(current(), "Lookup cancelled");
-        Ok((self.render(hits.entries)?, hits.forms))
+        Ok(Hits { records: hits.entries, forms: Some(hits.forms) })
     }
     /// Adds the entries for `word` that aren't shown yet; `true` if the
     /// dictionary has the word, even when every entry was already shown.

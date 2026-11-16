@@ -340,50 +340,39 @@ fn forms_search_dictionary_order_and_passages_get_no_base_forms() {
 fn oversized_queries_are_misses_without_dictionary_errors() {
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
-    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
-    // Over 4 KiB as typed, and 2732 bytes that fold to 4098 (U+0130 grows).
     for query in ["a".repeat(4097), "İ".repeat(1366)] {
         let reply = f.lookup(&query);
-        assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+        assert!(reply.matches.is_empty());
+        assert_eq!(reply.selected, None);
         assert_eq!(reply.state, Some(State::NoResult));
-        assert!(reply.dictionaries.iter().all(|d| d.error.is_none()), "no index errors recorded");
-        let reply = f.reply(f.worker.lookup(query, Some("b.ifo".into()), false)).0;
-        assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-        assert_eq!(reply.state, Some(State::NoResult));
+        assert!(reply.dictionaries.iter().all(|d| d.error.is_none()));
     }
 }
 
 #[test]
-fn error_and_no_result_fallback_remain_in_preference_order_in_one_pass() {
+fn misses_and_failures_are_skipped_and_diagnostics_remain_separate() {
     for query in ["absent", "thunders", "two words"] {
         let f = Fixture::new();
         install(&f.join("dictionaries/a.ifo"), "A", "other");
         install(&f.join("dictionaries/b.ifo"), "B", "other");
         fs::write(f.join("dictionaries/a.idx"), b"broken").unwrap();
         let reply = f.lookup(query);
-        assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-        assert_eq!(reply.state, Some(State::NoResult), "{query}");
-        assert!(reply.dictionaries[0].error.is_some(), "index errors remain visible");
-        // An explicitly selected broken dictionary reports its error.
-        let reply = f.reply(f.worker.lookup(query.into(), Some("a.ifo".into()), false)).0;
-        assert!(matches!(reply.state, Some(State::Error(_))));
-        // A no-result before an error keeps the same priority.
-        edit(&f.worker, Edit::MoveDictionary { set: DEFAULT.into(), dictionary: "b.ifo".into(), position: 0 });
-        let reply = f.lookup(query);
-        assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+        assert_eq!(reply.selected, None);
         assert_eq!(reply.state, Some(State::NoResult));
+        assert!(reply.matches.is_empty());
+        assert!(reply.dictionaries[0].error.is_some());
         fs::write(f.join("dictionaries/b.idx"), b"broken").unwrap();
         let reply = f.reply(f.worker.lookup(query.into(), None, true)).0;
-        assert_eq!(reply.selected.as_deref(), Some("b.ifo"), "first error wins if all fail");
-        assert!(matches!(reply.state, Some(State::Error(_))));
+        assert_eq!(reply.state, Some(State::NoResult));
+        assert!(reply.dictionaries.iter().all(|d| d.error.is_some()));
     }
-    // An index error does not prevent a later base-form hit.
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
     install(&f.join("dictionaries/b.ifo"), "B", "thunder");
     fs::write(f.join("dictionaries/a.idx"), b"broken").unwrap();
     let reply = f.lookup("thunders");
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
+    assert_eq!(reply.matches.len(), 1);
     assert!(matches!(reply.state, Some(State::Definition { base_forms: Some(_), .. })));
 }
 
@@ -415,17 +404,19 @@ fn lookup_cancelled_before_it_starts_publishes_nothing() {
 }
 
 #[test]
-fn base_form_read_error_is_reported_unless_another_dictionary_has_no_result() {
+fn unreadable_definition_keeps_its_index_hit_and_management_diagnostic() {
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
-    // The exact query misses without reading this malformed definition.
     fs::write(f.join("dictionaries/a.dict"), [0xff; 6]).unwrap();
     let reply = f.lookup("thunders");
-    assert!(matches!(reply.state, Some(State::Error(_))), "the base-form failure is not a no-result");
-    install(&f.join("dictionaries/b.ifo"), "B", "other");
+    assert_eq!(reply.state, Some(State::NoResult));
+    assert_eq!(reply.matches.len(), 1, "counts do not require readable definitions");
+    assert!(reply.dictionaries[0].error.is_some());
+    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
     let reply = f.reply(f.worker.lookup("thunders".into(), None, true)).0;
     assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-    assert_eq!(reply.state, Some(State::NoResult));
+    assert_eq!(reply.matches.len(), 2);
+    assert!(matches!(reply.state, Some(State::Definition { .. })));
 }
 
 #[test]
@@ -533,12 +524,17 @@ fn shared_service_is_lazy_and_routes_overlapping_requests_and_cancellation_per_c
     let catalog = settings.catalog(false);
     f.worker.cancel();
     assert!(wait_client(&settings, catalog).state.is_none());
-    // Another client's edits and folder saves are queued, not cancellations.
+    // Preference changes cancel obsolete lookups; management keeps its own mailbox.
     let lookup = f.worker.lookup("word".into(), None, false);
     let created = settings.edit(Edit::Create { id: "set".into(), name: "Set".into() });
     f.store.save_dictionary_folders(&[]).unwrap();
-    assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
     let reply = wait_client(&settings, created);
+    // An already completed reply may be waiting; there is no later publication.
+    if let Some(old) = f.worker.receive() {
+        assert_eq!(old.id, lookup);
+    }
+    let lookup = f.worker.lookup("word".into(), None, false);
+    assert!(matches!(wait_client(&f.worker, lookup).state, Some(State::Definition { .. })));
     assert_eq!(reply.active_set, "set", "an edit replies with the edited set");
     assert!(reply.dictionaries.iter().all(|d| d.disabled));
 }
@@ -722,4 +718,122 @@ fn edits_and_retries_publish_a_fresh_catalog_after_folder_changes() {
     f.store.save_dictionary_folders(&[]).unwrap();
     let reply = wait_client(&f.worker, f.worker.retry(DEFAULT, "n.ifo"));
     assert_eq!(names(&reply), ["Native"], "the retry reply drops the removed folder");
+}
+
+#[test]
+fn sessions_count_index_hits_without_reading_other_definitions() {
+    let f = Fixture::new();
+    install_entries(&f.join("dictionaries/a.ifo"), "A", &[("box", "first"), ("box", "second")], &[("box", 0)]);
+    install(&f.join("dictionaries/b.ifo"), "B", "boxes");
+    // A text read would fail; counting its index hit must succeed.
+    fs::write(f.join("dictionaries/b.dict"), [0xff; 6]).unwrap();
+    install(&f.join("dictionaries/c.ifo"), "C", "absent");
+    install(&f.join("dictionaries/d.ifo"), "D", "boxes");
+    let path = f.join("dictionaries/d.ifo");
+    fs::write(&path, fs::read_to_string(&path).unwrap().replace("sametypesequence=m", "sametypesequence=W")).unwrap();
+    let reply = f.lookup("boxes");
+    assert!(reply.complete);
+    assert_eq!(reply.matches.len(), 2);
+    assert_eq!(reply.matches[0].hits.records.len(), 2, "alias is deduplicated");
+    assert_eq!(reply.matches[0].hits.forms, Some(1));
+    assert_eq!(reply.matches[0].headwords(), ["box"]);
+    assert_eq!(reply.matches[1].hits.forms, None);
+    assert!(reply.dictionaries[1].error.is_none(), "unopened definition has not failed");
+    let session = reply.id;
+    f.worker.open("b.ifo");
+    let opened = f.reply(session).0;
+    assert_eq!(opened.matches, reply.matches);
+    assert!(matches!(opened.state, Some(State::Error(_))));
+    assert!(opened.dictionaries[1].error.is_some());
+    f.worker.open("a.ifo");
+    let opened = f.reply(session).0;
+    assert!(matches!(opened.state, Some(State::Definition { entries, .. }) if entries.len() == 2));
+    let reply = f.lookup("absent");
+    assert_eq!(reply.matches.len(), 1);
+    assert_eq!(reply.matches[0].dictionary, "c.ifo");
+}
+
+/// Capture every publication synchronously, without racing mailbox replacement.
+fn publications(f: &Fixture, delay: impl Fn(&Mailbox) -> bool) -> Vec<Reply> {
+    use std::cell::Cell;
+    let holder: Arc<Mutex<Option<std::sync::Weak<Mailbox>>>> = Arc::new(Mutex::new(None));
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let captured = results.clone();
+    let weak = holder.clone();
+    let mailbox = Arc::new(Mailbox {
+        result: Mutex::new(None),
+        session: Mutex::new(None),
+        latest: AtomicU64::new(1),
+        waker: Waker::new(move || {
+            let mailbox = weak.lock().unwrap().as_ref().unwrap().upgrade().unwrap();
+            captured.lock().unwrap().push(mailbox.result.lock().unwrap().as_ref().unwrap().clone());
+        }),
+    });
+    *holder.lock().unwrap() = Some(Arc::downgrade(&mailbox));
+    let request = Request { id: 1, mailbox: mailbox.clone(), revision: 0 };
+    let delayed = Cell::new(false);
+    let current = || {
+        if !delayed.get() && delay(&mailbox) {
+            delayed.set(true);
+            std::thread::sleep(Duration::from_millis(170));
+        }
+        true
+    };
+    inner(f).lookup_session(&request, "boxes", None, &current);
+    results.lock().unwrap().clone()
+}
+
+#[test]
+fn fast_search_publishes_once_and_delayed_search_only_adds_its_final_count() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "box");
+    install(&f.join("dictionaries/b.ifo"), "B", "boxes");
+    let fast = publications(&f, |_| false);
+    assert_eq!(fast.len(), 1);
+    assert!(fast[0].complete && fast[0].matches.len() == 2);
+    let delayed = publications(&f, |m| m.session.lock().unwrap().as_ref().is_some_and(|s| s.matches.len() == 1));
+    assert_eq!(delayed.len(), 2);
+    assert!(!delayed[0].complete);
+    assert_eq!(delayed[0].matches.len(), 1);
+    assert!(matches!(delayed[0].state, Some(State::Definition { .. })));
+    assert!(delayed[1].complete);
+    assert_eq!(delayed[1].matches.len(), 2);
+    assert_eq!(delayed[0].state, delayed[1].state);
+    assert_eq!(delayed[0].selected, delayed[1].selected);
+}
+
+#[test]
+fn first_index_build_reports_preparation_and_cancellation_cleans_its_temporary_files() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "boxes");
+    let reply = f.catalog();
+    assert_eq!(reply.unprepared, ["a.ifo"]);
+    let cache = f.store.dictionary_cache();
+    let preparing = publications(&f, |_| {
+        fs::read_dir(&cache)
+            .is_ok_and(|mut files| files.any(|e| e.unwrap().path().extension().is_some_and(|x| x == "tmp")))
+    });
+    assert_eq!(preparing.len(), 2);
+    assert_eq!(preparing[0].preparing.as_deref(), Some("a.ifo"));
+    assert!(!preparing[0].complete);
+    assert!(preparing[1].complete && preparing[1].preparing.is_none());
+    assert!(preparing[1].unprepared.is_empty());
+    assert!(fs::read_dir(cache).unwrap().all(|e| e.unwrap().path().extension().unwrap() == "index"));
+}
+
+#[test]
+fn forgetting_a_missing_dictionary_removes_all_sets_but_never_a_present_dictionary() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "word");
+    f.catalog();
+    set(&f.worker, "english", "en", "a.ifo");
+    let reply = wait_client(&f.worker, f.worker.edit(Edit::Forget { set: DEFAULT.into(), dictionary: "a.ifo".into() }));
+    assert!(reply.change_error.is_some());
+    fs::remove_file(f.join("dictionaries/a.ifo")).unwrap();
+    f.reply(f.worker.catalog(true));
+    let reply = edit(&f.worker, Edit::Forget { set: DEFAULT.into(), dictionary: "a.ifo".into() });
+    assert!(reply.sets.iter().all(|s| s.dictionaries.is_empty()));
+    f.worker.flush().unwrap();
+    let saved = read_preferences(&f.store.dictionary_preferences()).unwrap().0;
+    assert!(saved.sets.iter().all(|s| s.dictionaries.is_empty()));
 }

@@ -1,7 +1,7 @@
 //! One service per Store family, with independent cancellable client mailboxes.
 //! Discovery is lazy; edits and durable writes share the lookup command queue.
 use super::{
-    Backend, Catalog, Dictionary, Entry, Source, SourceStatus, discover_catalog, forms,
+    Backend, Catalog, Dictionary, Entry, Hits, Source, SourceStatus, discover_catalog, forms,
     sets::{DEFAULT, Edit, Preferences, Selection, Set},
 };
 use crate::{
@@ -38,8 +38,38 @@ pub enum State {
     /// The dictionary itself could not be read.
     Error(String),
 }
+/// Index hits only: definitions are loaded for the selected dictionary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Match {
+    pub dictionary: String,
+    pub hits: Hits,
+}
+impl Match {
+    pub fn headwords(&self) -> Vec<String> {
+        let mut words = Vec::new();
+        for (word, _, _) in &self.hits.records {
+            if !words.contains(word) {
+                words.push(word.clone());
+            }
+        }
+        words
+    }
+}
+#[derive(Clone)]
+struct Session {
+    query: String,
+    active_set: String,
+    matches: Vec<Match>,
+    revision: u64,
+}
+#[derive(Clone)]
 pub struct Reply {
     pub id: u64,
+    pub matches: Vec<Match>,
+    pub complete: bool,
+    /// The dictionary whose index is being built; never inferred from a delay.
+    pub preparing: Option<String>,
+    pub unprepared: Vec<String>,
     pub dictionaries: Vec<Dictionary>,
     /// The native source first, then external folders in configured order.
     pub sources: Vec<Source>,
@@ -58,12 +88,14 @@ enum Command {
     Catalog { request: Request, set: String, rescan: bool },
     Edit { request: Request, edit: Edit },
     Retry { request: Request, set: String, dictionary: String },
+    Open { request: Request, dictionary: String },
     Release,
     Flush(mpsc::Sender<Result<(), String>>),
     Stop,
 }
 struct Mailbox {
     result: Mutex<Option<Reply>>,
+    session: Mutex<Option<Session>>,
     latest: AtomicU64,
     waker: Waker,
 }
@@ -76,8 +108,9 @@ struct Request {
 /// on first use and retains it across screen/client lifetimes.
 pub struct Service {
     tx: mpsc::Sender<Command>,
-    /// Bumped only when the service stops.
+    /// Cancels obsolete searches on preferences, rescan, or shutdown.
     revision: Arc<AtomicU64>,
+    folders: Arc<AtomicU64>,
 }
 /// A screen's client, not a separate thread. Its replies and cancellation are
 /// private; a Settings catalog can never replace a reader lookup.
@@ -225,120 +258,188 @@ impl Inner {
         self.active_set = set.id.clone();
         set.apply(&mut self.catalog.dictionaries);
     }
-    /// Returns the chosen dictionary and the state.
+    /// Search every enabled index in set order. Keep only compact index hits;
+    /// opening other definitions never repeats the search or retains more backends.
+    fn lookup_session(
+        &mut self,
+        request: &Request,
+        query: &str,
+        selected: Option<String>,
+        current: &impl Fn() -> bool,
+    ) {
+        use std::{
+            cell::{Cell, RefCell},
+            time::{Duration, Instant},
+        };
+        let started = Instant::now();
+        let published = Cell::new(false);
+        let snapshot = RefCell::new(self.reply(request.id, None, None));
+        snapshot.borrow_mut().complete = false;
+        let progress = || {
+            let valid = current();
+            if valid && !published.get() && started.elapsed() >= Duration::from_millis(150) {
+                publish(request, snapshot.borrow().clone(), current);
+                published.set(true);
+            }
+            valid
+        };
+        let mut session = Session {
+            query: query.into(),
+            active_set: self.active_set.clone(),
+            matches: Vec::new(),
+            revision: request.revision,
+        };
+        let forms = self.preferences.set(&self.active_set).english_forms().then(|| forms::candidates(query)).flatten();
+        if let Some(forms) = &forms {
+            log::debug!("dictionary query: {} generated candidates", forms.count());
+        }
+        let ids: Vec<_> = self.catalog.dictionaries.iter().filter(|d| !d.disabled).map(|d| d.id.clone()).collect();
+        let mut state = if self.catalog.dictionaries.is_empty() {
+            State::Missing
+        } else if ids.is_empty() {
+            State::Disabled
+        } else {
+            State::NoResult
+        };
+        let mut chosen = None;
+        if super::index::query_fits(query) {
+            for id in ids {
+                if !progress() {
+                    return;
+                }
+                let preparing = || {
+                    snapshot.borrow_mut().preparing = Some(id.clone());
+                };
+                let outcome = self.open_backend(&id, &progress, &preparing).and_then(|backend| {
+                    if !backend.displayable() {
+                        return Ok(Hits { records: vec![], forms: None });
+                    }
+                    let hits = backend.find(query)?;
+                    if hits.records.is_empty()
+                        && let Some(forms) = &forms
+                    {
+                        backend.find_forms(forms, &progress)
+                    } else {
+                        Ok(hits)
+                    }
+                });
+                snapshot.borrow_mut().preparing = None;
+                if !current() {
+                    return;
+                }
+                match outcome {
+                    Ok(hits) => {
+                        if !hits.records.is_empty() {
+                            let matched = Match { dictionary: id.clone(), hits };
+                            session.matches.push(matched.clone());
+                            // Only the first usable definition is rendered during search.
+                            if chosen.is_none() || selected.as_ref() == Some(&id) {
+                                match self.render_match(&matched, query, current) {
+                                    Ok(definition) => {
+                                        self.clear_error(&id);
+                                        chosen = Some(id.clone());
+                                        state = definition;
+                                    }
+                                    Err(error) if current() => self.read_error(&id, query, forms.is_some(), error),
+                                    Err(_) => return,
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => self.read_error(&id, query, forms.is_some(), error),
+                }
+                let mut reply = self.reply(request.id, chosen.clone(), Some(state.clone()));
+                reply.matches = session.matches.clone();
+                reply.complete = false;
+                *snapshot.borrow_mut() = reply;
+                *request.mailbox.session.lock().unwrap() = Some(session.clone());
+            }
+        }
+        if !current() {
+            return;
+        }
+        *request.mailbox.session.lock().unwrap() = Some(session.clone());
+        let mut reply = self.reply(request.id, chosen, Some(state));
+        reply.matches = session.matches;
+        publish(request, reply, current);
+    }
+    #[cfg(test)]
     fn lookup(
         &mut self,
         query: &str,
         selected: Option<String>,
         current: &impl Fn() -> bool,
     ) -> (Option<String>, State) {
-        let dictionaries = &self.catalog.dictionaries;
-        if dictionaries.is_empty() {
-            return (None, State::Missing);
-        }
-        if dictionaries.iter().all(|d| d.disabled) {
-            return (None, State::Disabled);
-        }
-        let requested = selected.filter(|s| dictionaries.iter().any(|d| d.id == *s && !d.disabled));
-        // No headword can match an oversized query. Answer it as a plain miss
-        // instead of recording an index error against every dictionary.
-        if !super::index::query_fits(query) {
-            let id = requested.or_else(|| dictionaries.iter().find(|d| !d.disabled).map(|d| d.id.clone()));
-            return (id, State::NoResult);
-        }
-        let mut outcomes = vec![None; dictionaries.len()];
-        let forms = self.preferences.set(&self.active_set).english_forms().then(|| forms::candidates(query)).flatten();
-        if let Some(found) = self.search(query, forms.as_ref(), requested.as_deref(), &mut outcomes, current) {
-            return found;
-        }
-        // Keep each dictionary's final outcome in preference order. A readable
-        // dictionary with no result wins over an error, as in the exact-only lookup.
-        let mut fallback = None;
-        for (dictionary, state) in self.catalog.dictionaries.iter().zip(outcomes).filter_map(|(d, s)| s.map(|s| (d, s)))
-        {
-            if fallback.is_none() || matches!(&fallback, Some((_, State::Error(_)))) && state == State::NoResult {
-                fallback = Some((dictionary.id.clone(), state));
-            }
-        }
-        fallback.map_or((None, State::NoResult), |(id, state)| (Some(id), state))
+        let mailbox = Arc::new(Mailbox {
+            result: Mutex::new(None),
+            session: Mutex::new(None),
+            latest: AtomicU64::new(0),
+            waker: Waker::new(|| {}),
+        });
+        let request = Request { id: 0, mailbox: mailbox.clone(), revision: 0 };
+        self.lookup_session(&request, query, selected, current);
+        let Some(reply) = mailbox.result.lock().unwrap().take() else { return (None, State::NoResult) };
+        (reply.selected, reply.state.unwrap())
     }
-    /// Each enabled (or requested) dictionary tries exact, then base forms,
-    /// before moving to the next dictionary. Records misses/errors for fallback.
-    fn search(
+    fn open_backend(
         &mut self,
-        query: &str,
-        forms: Option<&forms::Candidates>,
-        requested: Option<&str>,
-        outcomes: &mut [Option<State>],
+        id: &str,
         current: &impl Fn() -> bool,
-    ) -> Option<(Option<String>, State)> {
-        let backend = &mut self.backend;
-        let cache = self.store.dictionary_cache();
-        for (i, dictionary) in self
-            .catalog
-            .dictionaries
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, d)| !d.disabled && requested.is_none_or(|s| d.id == s))
-        {
-            if !current() {
-                break;
-            }
-            // The entries, plus the base-form count for a base-form lookup.
-            let lookup = (|| -> anyhow::Result<(Vec<Entry>, Option<usize>)> {
-                if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
-                    // Release the old index and eight-block cache before opening another.
-                    *backend = None;
-                    *backend = Some((dictionary.id.clone(), Backend::open(&dictionary.path, &cache, current)?));
-                }
-                let backend = &mut backend.as_mut().unwrap().1;
-                let entries = backend.lookup(query)?;
-                if !current() {
-                    anyhow::bail!("Lookup cancelled");
-                }
-                if entries.is_empty()
-                    && let Some(forms) = forms
-                {
-                    let started = std::time::Instant::now();
-                    let result = backend.lookup_forms(forms, current);
-                    log::debug!(
-                        "dictionary base forms: {:?}, {} generated candidates",
-                        started.elapsed(),
-                        forms.count()
-                    );
-                    return result.map(|(entries, count)| (entries, Some(count)));
-                }
-                Ok((entries, None))
-            })();
-            outcomes[i] = Some(match lookup {
-                Ok((text, _)) if text.is_empty() => {
-                    self.failed_queries.remove(&dictionary.id);
-                    dictionary.error = None;
-                    State::NoResult
-                }
-                Ok((entries, count)) => {
-                    self.failed_queries.remove(&dictionary.id);
-                    dictionary.error = None;
-                    let base_forms = count.map(|count| BaseForms { query: query.to_owned(), count });
-                    return Some((Some(dictionary.id.clone()), State::Definition { entries, base_forms }));
-                }
-                Err(e) => {
-                    if !current() {
-                        break;
-                    }
-                    let error = format!("{e:#}");
-                    self.failed_queries.insert(dictionary.id.clone(), (query.into(), forms.is_some()));
-                    dictionary.error = Some(error.clone());
-                    State::Error(error)
-                }
-            });
+        preparing: &impl Fn(),
+    ) -> anyhow::Result<&mut Backend> {
+        if self.backend.as_ref().is_none_or(|(open, _)| open != id) {
+            self.backend = None;
+            let dictionary = self
+                .catalog
+                .dictionaries
+                .iter()
+                .find(|d| d.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Dictionary disappeared"))?;
+            self.backend = Some((
+                id.into(),
+                Backend::open_progress(&dictionary.path, &self.store.dictionary_cache(), current, preparing)?,
+            ));
         }
-        None
+        Ok(&mut self.backend.as_mut().unwrap().1)
+    }
+    fn render_match(&mut self, matched: &Match, query: &str, current: &impl Fn() -> bool) -> anyhow::Result<State> {
+        let entries = self.open_backend(&matched.dictionary, current, &|| {})?.render(matched.hits.records.clone())?;
+        Ok(State::Definition {
+            entries,
+            base_forms: matched.hits.forms.map(|count| BaseForms { query: query.into(), count }),
+        })
+    }
+    fn clear_error(&mut self, id: &str) {
+        self.failed_queries.remove(id);
+        if let Some(d) = self.catalog.dictionaries.iter_mut().find(|d| d.id == id) {
+            d.error = None;
+        }
+    }
+    fn read_error(&mut self, id: &str, query: &str, english: bool, error: anyhow::Error) {
+        self.failed_queries.insert(id.into(), (query.into(), english));
+        if let Some(d) = self.catalog.dictionaries.iter_mut().find(|d| d.id == id) {
+            d.error = Some(format!("{error:#}"));
+        }
     }
 
     fn reply(&self, id: u64, selected: Option<String>, state: Option<State>) -> Reply {
         Reply {
             id,
+            matches: vec![],
+            complete: true,
+            preparing: None,
+            unprepared: if state.is_none() {
+                self.catalog
+                    .dictionaries
+                    .iter()
+                    .filter(|d| {
+                        d.error.is_none() && !super::index::Index::prepared(&d.path, &self.store.dictionary_cache())
+                    })
+                    .map(|d| d.id.clone())
+                    .collect()
+            } else {
+                vec![]
+            },
             dictionaries: self.catalog.dictionaries.clone(),
             sources: self.catalog.sources.clone(),
             warnings: self
@@ -367,6 +468,7 @@ impl Service {
         let (tx, commands) = mpsc::channel();
         let revision = Arc::new(AtomicU64::new(0));
         let generation = revision.clone();
+        let folders = store.dictionary_folder_revision.clone();
         // Do not retain Store's service registry from its own thread.
         let store = store.dictionary_context();
         std::thread::Builder::new()
@@ -393,15 +495,43 @@ impl Service {
                 for command in std::iter::once(first).chain(commands) {
                     // Only the asking client's newer request (or stopping the
                     // service) cancels; other clients' edits are queued in order.
-                    let is_current = |r: &Request| {
-                        r.mailbox.latest.load(Ordering::Relaxed) == r.id
-                            && generation.load(Ordering::Relaxed) == r.revision
-                    };
+                    let is_current = |r: &Request| r.mailbox.latest.load(Ordering::Relaxed) == r.id;
                     let folders_changed = |inner: &Inner| {
                         inner.folders_seen != inner.store.dictionary_folder_revision.load(Ordering::Relaxed)
                     };
                     match command {
                         Command::Stop => break,
+                        Command::Open { request, dictionary } => {
+                            let current =
+                                || is_current(&request) && generation.load(Ordering::Relaxed) == request.revision;
+                            let session = request.mailbox.session.lock().unwrap().clone();
+                            if let Some(session) = session.filter(|s| current() && s.revision == request.revision)
+                                && let Some(matched) = session.matches.iter().find(|m| m.dictionary == dictionary)
+                            {
+                                inner.apply_set(&session.active_set);
+                                let state = match inner.render_match(matched, &session.query, &current) {
+                                    Ok(state) => {
+                                        inner.clear_error(&dictionary);
+                                        state
+                                    }
+                                    Err(error) if current() => {
+                                        inner.read_error(
+                                            &dictionary,
+                                            &session.query,
+                                            matched.hits.forms.is_some(),
+                                            error,
+                                        );
+                                        State::Error(
+                                            "Couldn’t read this entry. Open Manage dictionaries for details.".into(),
+                                        )
+                                    }
+                                    Err(_) => continue,
+                                };
+                                let mut reply = inner.reply(request.id, Some(dictionary), Some(state));
+                                reply.matches = session.matches;
+                                publish(&request, reply, &current);
+                            }
+                        }
                         Command::Release => {
                             // A queued request from another client owns its own backend work.
                             // Releasing this cache is safe and bounds idle retained memory.
@@ -416,7 +546,20 @@ impl Service {
                         Command::Edit { request, edit } => {
                             // Edits survive closing the requesting screen.
                             let set = edit.set().to_owned();
-                            let error = inner.preferences.edit(edit).err().map(|e| e.to_string());
+                            let current = || is_current(&request);
+                            if matches!(edit, Edit::Forget { .. })
+                                && (!inner.fresh || folders_changed(&inner))
+                                && !inner.discover(&current)
+                            {
+                                continue;
+                            }
+                            let error = if let Edit::Forget { dictionary, .. } = &edit
+                                && inner.catalog.dictionaries.iter().any(|d| d.id == *dictionary)
+                            {
+                                Some("Only a missing dictionary can be forgotten. Rescan first.".into())
+                            } else {
+                                inner.preferences.edit(edit).err().map(|e| e.to_string())
+                            };
                             if error.is_none() {
                                 inner.save();
                             }
@@ -477,20 +620,25 @@ impl Service {
                             if !is_current(&request) {
                                 continue;
                             }
-                            let current = || is_current(&request);
+                            let folders_revision = inner.store.dictionary_folder_revision.clone();
+                            let folders = folders_revision.load(Ordering::Relaxed);
+                            let current = || {
+                                is_current(&request)
+                                    && generation.load(Ordering::Relaxed) == request.revision
+                                    && folders_revision.load(Ordering::Relaxed) == folders
+                            };
                             if (!inner.fresh || rescan || folders_changed(&inner)) && !inner.discover(&current) {
                                 continue;
                             }
                             let set = inner.preferences.choose(&selection, &query).id.clone();
                             inner.apply_set(&set);
-                            let (chosen, state) = inner.lookup(&query, selected, &current);
-                            publish(&request, inner.reply(request.id, chosen, Some(state)), &current);
+                            inner.lookup_session(&request, &query, selected, &current);
                         }
                     }
                 }
             })
             .expect("spawn dictionary worker");
-        Self { tx, revision }
+        Self { tx, revision, folders }
     }
 }
 fn publish(request: &Request, reply: Reply, current: &dyn Fn() -> bool) {
@@ -509,7 +657,15 @@ impl Drop for Service {
 impl Worker {
     pub fn new(store: Store, waker: Waker) -> Self {
         let service = store.dictionary_service.get_or_init(|| Arc::new(Service::new(store.clone()))).clone();
-        Self { service, mailbox: Arc::new(Mailbox { result: Mutex::new(None), latest: AtomicU64::new(0), waker }) }
+        Self {
+            service,
+            mailbox: Arc::new(Mailbox {
+                result: Mutex::new(None),
+                session: Mutex::new(None),
+                latest: AtomicU64::new(0),
+                waker,
+            }),
+        }
     }
     fn request(&self) -> Request {
         let id = self.mailbox.latest.fetch_add(1, Ordering::Relaxed) + 1;
@@ -521,7 +677,11 @@ impl Worker {
         self.lookup_in(query, selected, rescan, Selection::default())
     }
     pub fn lookup_in(&self, query: String, selected: Option<String>, rescan: bool, selection: Selection) -> u64 {
+        if rescan {
+            self.service.revision.fetch_add(1, Ordering::Relaxed);
+        }
         let request = self.request();
+        *self.mailbox.session.lock().unwrap() = None;
         let id = request.id;
         let _ = self.service.tx.send(Command::Lookup { request, query, selected, selection, rescan });
         id
@@ -530,22 +690,39 @@ impl Worker {
         self.catalog_in(DEFAULT, rescan)
     }
     pub fn catalog_in(&self, set: &str, rescan: bool) -> u64 {
+        if rescan {
+            self.service.revision.fetch_add(1, Ordering::Relaxed);
+        }
         let request = self.request();
         let id = request.id;
         let _ = self.service.tx.send(Command::Catalog { request, set: set.into(), rescan });
         id
     }
     pub fn edit(&self, edit: Edit) -> u64 {
+        self.service.revision.fetch_add(1, Ordering::Relaxed);
         let request = self.request();
         let id = request.id;
         let _ = self.service.tx.send(Command::Edit { request, edit });
         id
     }
     pub fn retry(&self, set: &str, dictionary: &str) -> u64 {
+        self.service.revision.fetch_add(1, Ordering::Relaxed);
         let request = self.request();
         let id = request.id;
         let _ = self.service.tx.send(Command::Retry { request, set: set.into(), dictionary: dictionary.into() });
         id
+    }
+    pub fn revision(&self) -> u64 {
+        self.service.revision.load(Ordering::Relaxed).wrapping_add(self.service.folders.load(Ordering::Relaxed))
+    }
+    /// Opening a hit queues behind the bounded search and keeps the session ID.
+    pub fn open(&self, dictionary: &str) {
+        let request = Request {
+            id: self.mailbox.latest.load(Ordering::Relaxed),
+            mailbox: self.mailbox.clone(),
+            revision: self.service.revision.load(Ordering::Relaxed),
+        };
+        let _ = self.service.tx.send(Command::Open { request, dictionary: dictionary.into() });
     }
     pub fn receive(&self) -> Option<Reply> {
         self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
@@ -557,6 +734,7 @@ impl Worker {
     pub fn cancel(&self) {
         self.mailbox.latest.fetch_add(1, Ordering::Relaxed);
         *self.mailbox.result.lock().unwrap() = None;
+        *self.mailbox.session.lock().unwrap() = None;
         let _ = self.service.tx.send(Command::Release);
     }
     pub fn flush(&self) -> anyhow::Result<()> {
