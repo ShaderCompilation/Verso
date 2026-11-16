@@ -133,7 +133,10 @@ impl Store {
         read(&self.root.join("library-navigation.json")).unwrap_or_default()
     }
     pub fn save_navigation(&self, navigation: &Navigation) -> Result<()> {
-        atomic(&self.root.join("library-navigation.json"), navigation)
+        let started = std::time::Instant::now();
+        let result = atomic(&self.root.join("library-navigation.json"), navigation);
+        log::debug!("navigation write: {:?}, ok={}", started.elapsed(), result.is_ok());
+        result
     }
     pub fn book(&self, id: &str) -> BookState {
         read(&self.book_path(id)).unwrap_or_default()
@@ -150,6 +153,26 @@ impl Store {
             log::warn!("updating Home summary: {error:#}");
         }
         result
+    }
+    /// Ids that have a reading-state record, from one directory listing, so
+    /// books never opened cost no failed file open. None when listing fails.
+    pub fn book_state_ids(&self) -> Option<std::collections::HashSet<String>> {
+        let entries = match std::fs::read_dir(self.root.join("books")) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Default::default()),
+            Err(e) => {
+                log::warn!("listing reading states: {e}");
+                return None;
+            }
+        };
+        let mut ids = std::collections::HashSet::new();
+        for entry in entries {
+            let name = entry.ok()?.file_name();
+            if let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) {
+                ids.insert(id.to_owned());
+            }
+        }
+        Some(ids)
     }
     /// Removes a deleted book's reading state. A missing record is fine.
     pub fn remove_book(&self, id: &str) -> Result<()> {

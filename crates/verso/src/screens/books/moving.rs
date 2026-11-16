@@ -121,7 +121,7 @@ impl Books {
         self.navigation.tab = Tab::Collections;
         self.pager.page = self.navigation.page();
         self.refresh(cx.theme);
-        self.save_navigation(cx);
+        self.save_navigation();
         cx.refresh(self.screen, RefreshMode::Full);
     }
     pub(super) fn paste_reason(&self) -> Option<&'static str> {
