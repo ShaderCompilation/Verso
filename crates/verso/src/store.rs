@@ -33,6 +33,9 @@ pub struct Settings {
     pub orientation: Orientation,
     /// Developer options in Settings (tap the version five times).
     pub developer: bool,
+    /// The name the device is found by on Wi-Fi while SSH runs, without
+    /// `.local`. Changes only when another device already has it.
+    pub hostname: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -47,6 +50,7 @@ impl Default for Settings {
             tap_zones: TapZones::Standard,
             orientation: Orientation::Portrait,
             developer: false,
+            hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
         }
     }
 }
@@ -111,6 +115,9 @@ impl Store {
     pub fn settings(&self) -> Settings {
         let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
         s.typography.normalize();
+        if !verso_mdns::valid_label(&s.hostname) {
+            s.hostname = verso_mdns::DEFAULT_LABEL.to_owned();
+        }
         s
     }
     pub fn save_settings(&self, s: &Settings) -> Result<()> {

@@ -4,7 +4,8 @@
 //! for scp and sftp. scripts/build-ssh.sh builds them and scripts/deploy.sh
 //! installs them in /mnt/us/verso/bin. Keys live in /mnt/us/verso/ssh. It uses
 //! KOReader's port and pidfile, so either app sees and can stop a server the
-//! other one started. The server keeps running after Verso exits.
+//! other one started. The server keeps running after Verso exits. While it
+//! runs, the mDNS responder (platform/mdns.rs) advertises `verso.local`.
 //! See docs/device-tools.md.
 
 use anyhow::Result;
@@ -19,15 +20,31 @@ pub struct Status {
     pub unavailable: Option<&'static str>,
     /// This device's address on the local network, if it has one.
     pub address: Option<String>,
+    /// The name it's advertised as, without `.local` (e.g. `verso`, or
+    /// `verso-2` if another device had the name), once the responder has it.
+    pub hostname: Option<String>,
 }
 
 pub fn status() -> Status {
     imp::status()
 }
 
-/// Starts or stops the server. Quick, but can take up to ~2 s to stop.
-pub fn set_running(on: bool) -> Result<()> {
-    imp::set_running(on)
+/// Starts the server and advertises it as `<hostname>.local`. Takes up to
+/// ~2 s while the name is claimed.
+pub fn start(hostname: &str) -> Result<()> {
+    imp::start(hostname)
+}
+
+/// Stops the server and its name. Quick, but can take up to ~2 s.
+pub fn stop() -> Result<()> {
+    imp::stop()
+}
+
+/// Advertises a server that's already running (left on when Verso last
+/// exited, or started by KOReader) under `hostname`, unless that's already
+/// happening. Call at startup.
+pub fn advertise(hostname: &str) {
+    imp::advertise(hostname)
 }
 
 /// The address other devices on the network reach us at. Connecting a UDP
@@ -43,14 +60,15 @@ fn local_address() -> Option<String> {
 
 #[cfg(feature = "kindle")]
 mod imp {
+    use super::super::mdns;
+    use super::super::process::{alive, spawn_detached, wait_until};
     use super::{PORT, Status, local_address};
     use anyhow::{Context, Result, bail};
     use std::fs;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     const BINARY: &str = "/mnt/us/verso/bin/dropbear";
     const SSH_DIR: &str = "/mnt/us/verso/ssh";
@@ -73,11 +91,19 @@ mod imp {
     const PIDFILE: &str = "/tmp/dropbear_koreader.pid";
 
     pub fn status() -> Status {
-        Status { running: running_pid().is_some(), unavailable: unavailable(), address: local_address() }
+        let running = running_pid().is_some();
+        Status {
+            running,
+            unavailable: unavailable(),
+            address: local_address(),
+            hostname: if running { mdns::hostname() } else { None },
+        }
     }
 
-    pub fn set_running(on: bool) -> Result<()> {
-        if on { start() } else { stop() }
+    pub fn advertise(hostname: &str) {
+        if let Some(pid) = running_pid() {
+            mdns::ensure(hostname, pid);
+        }
     }
 
     fn unavailable() -> Option<&'static str> {
@@ -107,8 +133,9 @@ mod imp {
         (comm.trim() == "dropbear").then_some(pid)
     }
 
-    fn start() -> Result<()> {
+    pub fn start(hostname: &str) -> Result<()> {
         if running_pid().is_some() {
+            advertise(hostname);
             return Ok(());
         }
         if let Some(reason) = unavailable() {
@@ -127,28 +154,18 @@ mod imp {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // Detach like a daemon: fork once more and let the middle process
-        // exit, so init adopts the server (no zombie left in Verso when it
-        // stops), and give it its own session, so it outlives Verso.
-        // SAFETY: fork, _exit and setsid are async-signal-safe, as required
-        // between fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                match libc::fork() {
-                    -1 => return Err(std::io::Error::last_os_error()),
-                    0 => {}
-                    _ => libc::_exit(0),
-                }
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let ok = command.status().context("starting dropbear")?.success();
+        let ok = spawn_detached(&mut command).context("starting dropbear")?;
         // The server writes the pidfile once it's listening.
         if ok && wait_until(Duration::from_secs(2), || running_pid().is_some()) {
             log::info!("SSH server started on port {PORT}");
+            if let Some(pid) = running_pid() {
+                mdns::ensure(hostname, pid);
+                // Claiming the name takes about a second; without a network
+                // there's nothing to wait for.
+                if local_address().is_some() {
+                    mdns::wait_for_name(Duration::from_secs(2));
+                }
+            }
             return Ok(());
         }
         firewall(false);
@@ -175,11 +192,12 @@ mod imp {
         Ok(())
     }
 
-    fn stop() -> Result<()> {
+    pub fn stop() -> Result<()> {
         let Some(pid) = running_pid() else {
             let _ = fs::remove_file(PIDFILE);
             let _ = fs::remove_dir_all(RUN_DIR);
             firewall(false);
+            mdns::wait_stopped();
             return Ok(());
         };
         // Like KOReader: end open sessions (the server's children), then the server.
@@ -190,12 +208,13 @@ mod imp {
             .status();
         // SAFETY: plain kill(2) on a PID we just checked is dropbear.
         unsafe { libc::kill(pid, libc::SIGTERM) };
-        if !wait_until(Duration::from_secs(2), || !Path::new(&format!("/proc/{pid}")).exists()) {
+        if !wait_until(Duration::from_secs(2), || !alive(pid)) {
             bail!("dropbear didn't stop");
         }
         let _ = fs::remove_file(PIDFILE);
         let _ = fs::remove_dir_all(RUN_DIR);
         firewall(false);
+        mdns::wait_stopped();
         log::info!("SSH server stopped");
         Ok(())
     }
@@ -231,19 +250,6 @@ mod imp {
             }
         }
     }
-
-    fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
-        let start = Instant::now();
-        loop {
-            if done() {
-                return true;
-            }
-            if start.elapsed() > limit {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
 }
 
 /// The simulator pretends, so the Settings row can be tried and captured.
@@ -256,15 +262,21 @@ mod imp {
     static RUNNING: AtomicBool = AtomicBool::new(false);
 
     pub fn status() -> Status {
-        Status {
-            running: RUNNING.load(Ordering::Relaxed),
-            unavailable: None,
-            address: super::super::wifi::enabled().unwrap_or(false).then(|| "192.168.1.42".into()),
-        }
+        let running = RUNNING.load(Ordering::Relaxed);
+        let address = super::super::wifi::enabled().unwrap_or(false).then(|| "192.168.1.42".to_owned());
+        let hostname = (running && address.is_some()).then(|| verso_mdns::DEFAULT_LABEL.to_owned());
+        Status { running, unavailable: None, address, hostname }
     }
 
-    pub fn set_running(on: bool) -> Result<()> {
-        RUNNING.store(on, Ordering::Relaxed);
+    pub fn start(_hostname: &str) -> Result<()> {
+        RUNNING.store(true, Ordering::Relaxed);
         Ok(())
     }
+
+    pub fn stop() -> Result<()> {
+        RUNNING.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn advertise(_hostname: &str) {}
 }

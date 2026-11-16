@@ -51,9 +51,10 @@ fi
 # Book fonts and their licence, separate from crengine data.
 ssh "$HOST" "mkdir -p $APP/fonts"
 tar -C assets/fonts --owner=0 --group=0 -cf - Literata-Regular.ttf Literata-Italic.ttf Literata-SemiBold.ttf Literata-SemiBoldItalic.ttf Literata-LICENSE.txt | ssh "$HOST" "tar -xf - -C $APP/fonts"
-# The SSH server (Settings → Developer) and its keys folder. Unpacked next to
-# bin/ and moved in, because a running server keeps its binary open.
-tar -C target/kindle-ssh/bin --owner=0 --group=0 -cf - . | ssh "$HOST" "rm -rf $APP/bin.new && mkdir -p $APP/bin.new $APP/bin $APP/ssh &&
+# The SSH server (Settings → Developer), its mDNS responder and the keys
+# folder. Unpacked next to bin/ and moved in, because a running server keeps
+# its binary open. (Verso restarts a responder left on the old binary.)
+tar --owner=0 --group=0 -cf - -C target/kindle-ssh/bin . -C "$(dirname "$BIN")" verso-mdns | ssh "$HOST" "rm -rf $APP/bin.new && mkdir -p $APP/bin.new $APP/bin $APP/ssh &&
     tar -xf - -C $APP/bin.new && for f in $APP/bin.new/*; do mv -f \$f $APP/bin/; done && rmdir $APP/bin.new"
 # Copy under a temporary name first, so a broken transfer never leaves half a binary.
 ssh "$HOST" "cat > $APP/verso.new && chmod 755 $APP/verso.new && mv -f $APP/verso.new $APP/verso" <"$BIN"

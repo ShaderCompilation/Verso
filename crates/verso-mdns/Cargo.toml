@@ -1,0 +1,9 @@
+[package]
+name = "verso-mdns"
+description = "Minimal mDNS responder that advertises the Kindle as verso.local."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2.191"

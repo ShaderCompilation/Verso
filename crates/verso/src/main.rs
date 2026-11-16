@@ -197,6 +197,9 @@ fn run() -> Result<()> {
                     started.elapsed()
                 );
                 first_frame = false;
+                // An SSH server left running (or started by KOReader) gets its
+                // name back. After the first frame, so startup isn't delayed.
+                platform::ssh::advertise(&store.settings().hostname);
             }
         }
         if quit || app.wants_exit() {

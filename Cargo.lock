@@ -2349,8 +2349,16 @@ dependencies = [
  "tiny-skia 0.12.0",
  "unicode-normalization",
  "unicode-segmentation",
+ "verso-mdns",
  "winit",
  "zip",
+]
+
+[[package]]
+name = "verso-mdns"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

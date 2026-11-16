@@ -202,6 +202,7 @@ impl SystemSettings {
         };
         this.load_folders(t);
         this.sync_ssh_toggle();
+        this.remember_hostname();
         this
     }
 
@@ -453,6 +454,27 @@ impl SystemSettings {
         self.developer || self.ssh.running || self.ssh_was_running
     }
 
+    fn read_ssh(&mut self) {
+        self.ssh = ssh::status();
+        self.sync_ssh_toggle();
+        self.remember_hostname();
+    }
+
+    /// Keeps the name the responder won (`verso-2` if another device had
+    /// `verso`), so the device is found by the same name next time.
+    fn remember_hostname(&mut self) {
+        let Some(name) = &self.ssh.hostname else { return };
+        let mut settings = self.store.settings();
+        if &settings.hostname == name {
+            return;
+        }
+        settings.hostname = name.clone();
+        match self.store.save_settings(&settings) {
+            Ok(()) => self.settings_seen = self.store.settings_saves(),
+            Err(e) => log::error!("saving the device name: {e:#}"),
+        }
+    }
+
     fn sync_ssh_toggle(&mut self) {
         self.ssh_toggle.on = self.ssh.running;
         self.ssh_toggle.enabled = self.ssh.running || self.ssh.unavailable.is_none();
@@ -462,12 +484,16 @@ impl SystemSettings {
         match (self.ssh_pending, &self.ssh) {
             (Some(true), _) => "Starting…".into(),
             (Some(false), _) => "Stopping…".into(),
-            (None, s) if s.running => match &s.address {
-                Some(ip) => format!(
+            (None, s) if s.running => match (&s.hostname, &s.address) {
+                (Some(host), Some(ip)) => format!(
+                    "ssh -p {} root@{host}.local\nor root@{ip}. Keeps running after Verso closes. Turn it off to save battery.",
+                    ssh::PORT
+                ),
+                (None, Some(ip)) => format!(
                     "ssh -p {} root@{ip}\nKeeps running after Verso closes. Turn it off to save battery.",
                     ssh::PORT
                 ),
-                None => "On, but there’s no network. Turn on Wi-Fi to connect.".into(),
+                (_, None) => "On, but there’s no network. Turn on Wi-Fi to connect.".into(),
             },
             (None, s) => match s.unavailable {
                 Some(reason) => reason.into(),
@@ -626,7 +652,7 @@ impl Screen for SystemSettings {
         if let Some(on) = self.wifi_pending.take() {
             // Stop SSH before losing the network. If stopping fails, leave
             // Wi-Fi alone so the server can still be reached and stopped.
-            let stop_ssh = if on { Ok(()) } else { ssh::set_running(false) };
+            let stop_ssh = if on { Ok(()) } else { ssh::stop() };
             if let Err(e) = stop_ssh {
                 log::error!("stopping SSH before Wi-Fi off: {e:#}");
                 cx.toast("Couldn't stop SSH. Wi-Fi left on.", None);
@@ -637,17 +663,16 @@ impl Screen for SystemSettings {
             self.wifi = Self::read_wifi();
             self.wifi_toggle.on = self.wifi.unwrap_or(false);
             self.wifi_toggle.enabled = self.wifi.is_some();
-            self.ssh = ssh::status();
-            self.sync_ssh_toggle();
+            self.read_ssh();
             cx.redraw();
         }
         if let Some(on) = self.ssh_pending.take() {
-            if let Err(e) = ssh::set_running(on) {
+            let result = if on { ssh::start(&self.store.settings().hostname) } else { ssh::stop() };
+            if let Err(e) = result {
                 log::error!("SSH server: {e:#}");
                 cx.toast(if on { "Couldn't start SSH" } else { "Couldn't stop SSH" }, None);
             }
-            self.ssh = ssh::status();
-            self.sync_ssh_toggle();
+            self.read_ssh();
             cx.redraw();
         }
         Action::None

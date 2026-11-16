@@ -14,8 +14,12 @@ mod desktop;
 mod headless;
 #[cfg(feature = "kindle")]
 mod kindle;
+#[cfg(feature = "kindle")]
+mod mdns;
 #[cfg(any(feature = "kindle", test))]
 mod power;
+#[cfg(feature = "kindle")]
+mod process;
 pub mod ssh;
 pub mod wifi;
 

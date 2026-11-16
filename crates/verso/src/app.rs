@@ -395,7 +395,7 @@ impl App {
         // Save first: a failed save must keep both the app and SSH available.
         if self.stop_ssh_on_exit {
             self.stop_ssh_on_exit = false;
-            if let Err(e) = crate::platform::ssh::set_running(false) {
+            if let Err(e) = crate::platform::ssh::stop() {
                 log::error!("stopping SSH on exit: {e:#}");
                 self.exit = false;
                 if let Some(prompt) = &mut self.exit_prompt {
