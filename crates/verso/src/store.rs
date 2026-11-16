@@ -1,6 +1,7 @@
 //! Small, versioned JSON records. Rename replaces a complete file atomically.
 mod dictionary_folders;
 mod home;
+pub mod navigation;
 pub mod position;
 use crate::document::{Position, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};

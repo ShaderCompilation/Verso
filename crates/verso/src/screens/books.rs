@@ -16,7 +16,7 @@ use crate::library::{
 use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
 use crate::screens::{Action, EventCx, Screen};
-use crate::store::{BookState, Store};
+use crate::store::{BookState, Store, navigation::Writer as NavigationWriter};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -189,8 +189,9 @@ pub struct Books {
     collections: Collections,
     folders: Vec<PathBuf>,
     navigation: Navigation,
-    /// Navigation changed since it was last written; see `persist_navigation`.
+    /// Navigation changed since it was last sent to the writer; see `persist_navigation`.
     navigation_unsaved: bool,
+    navigation_writer: NavigationWriter,
     navigation_error: Option<String>,
     tabs: Segmented,
     back: IconButton,
@@ -258,6 +259,7 @@ impl Books {
         let navigation = store.navigation();
         let tabs = Segmented::texts(&["Home", "Collections", "All books"], 0);
         let library = LibraryWorker::new(store.clone(), roots.clone(), worker.waker());
+        let navigation_writer = NavigationWriter::new(store.clone(), worker.waker());
         let mut top = TopBar::new("Home", false);
         top.border = false;
         top.serif = screen.w >= t.mm(80.0);
@@ -305,6 +307,7 @@ impl Books {
             folders: Vec::new(),
             navigation,
             navigation_unsaved: false,
+            navigation_writer,
             navigation_error: None,
             tabs,
             back: IconButton::new(Icon::ArrowLeft),
@@ -588,14 +591,28 @@ impl Books {
         self.navigation.set_sort(self.selected_sort());
         self.navigation_unsaved = true;
     }
-    /// Writes navigation once its frame is on screen. The synced write took
-    /// 5–951 ms on the Kindle (measured) and used to hold that frame back.
+    /// Hands navigation to its writer thread once its frame is on screen. The
+    /// synced write took 5–951 ms on the Kindle (measured); on the UI thread
+    /// it held back the frame, and later the next touch.
     fn persist_navigation(&mut self) {
         if std::mem::take(&mut self.navigation_unsaved)
-            && let Err(e) = self.store.save_navigation(&self.navigation)
+            && let Err(e) = self.navigation_writer.save(self.navigation.clone())
         {
-            self.navigation_error = Some(format!("Couldn't save library navigation: {e}"));
+            self.navigation_failed(e);
         }
+    }
+    /// Sleep and quit wait until the newest navigation is durably written.
+    fn flush_navigation(&mut self) {
+        self.persist_navigation();
+        if let Err(e) = self.navigation_writer.flush() {
+            // The writer reported this failure too; show it once.
+            self.navigation_writer.errors().for_each(drop);
+            self.navigation_failed(e);
+        }
+    }
+    /// Shown as a toast at the next tick.
+    fn navigation_failed(&mut self, e: anyhow::Error) {
+        self.navigation_error = Some(format!("Couldn't save library navigation: {e:#}"));
     }
     /// Shows another page of the browsing grid: arrows, swipes and the page jump.
     fn go_to_page(&mut self, page: usize, cx: &mut EventCx) {
@@ -1903,6 +1920,9 @@ impl Screen for Books {
         self.reader.as_mut().map_or(Action::None, |r| r.on_tick(cx))
     }
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Some(e) = self.navigation_writer.errors().last() {
+            self.navigation_failed(e);
+        }
         self.apply_folder_changes(cx);
         if let Some((mut home, revision)) = self.library.take_home() {
             // Reading records can change after the worker assembled this summary.
@@ -1981,7 +2001,7 @@ impl Screen for Books {
         }
     }
     fn on_sleep(&mut self) {
-        self.persist_navigation();
+        self.flush_navigation();
         self.touching = false;
         if let Some(r) = &mut self.reader {
             r.on_sleep();
@@ -2027,7 +2047,8 @@ impl Screen for Books {
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
         self.persist_paste();
-        self.persist_navigation();
+        // A failed navigation save is shown but doesn't keep the app open.
+        self.flush_navigation();
         if let Some(r) = &mut self.reader {
             r.on_quit()?;
         }
@@ -2749,9 +2770,10 @@ mod tests {
             tap(&mut books, p, cx);
             assert!(books.jump.is_none());
             assert_eq!((books.pager.page, books.grid.page), (2, 2));
-            // Navigation is written once the frame showing it is presented.
+            // Navigation goes to the writer once the frame showing it is presented.
             assert_ne!(store.navigation().page(), 2);
             books.after_present();
+            books.navigation_writer.flush().unwrap();
             assert_eq!(store.navigation().page(), 2);
             // Search results keep their own page.
             books.toggle_search(cx);
@@ -2764,6 +2786,52 @@ mod tests {
             tap(&mut books, p, cx);
             assert_eq!(books.search.as_ref().unwrap().page, 2);
         });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn sleep_and_quit_wait_for_navigation_and_failed_writes_show_a_toast() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("navigation-writer")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.navigation.tab = Tab::AllBooks;
+        books.pager.page = 1;
+        books.save_navigation();
+        // Sleep can come before the frame is presented; it still saves.
+        books.on_sleep();
+        assert_eq!(store.navigation().page(), 1);
+        books.pager.page = 2;
+        books.save_navigation();
+        books.on_quit()?;
+        assert_eq!(store.navigation().page(), 2);
+        // A directory in place of the temporary file makes every write fail.
+        let tmp = root.join("library-navigation.json.tmp");
+        std::fs::create_dir(&tmp)?;
+        books.pager.page = 0;
+        books.save_navigation();
+        books.after_present();
+        assert!(books.navigation_error.is_none(), "presenting never waits for the write");
+        with_cx(&t, screen, |cx| {
+            let started = std::time::Instant::now();
+            while books.navigation_error.is_none() && started.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::yield_now();
+                books.on_background(cx);
+            }
+            assert!(books.deadline().is_some());
+            books.on_tick(cx);
+            assert!(cx.toast.as_ref().unwrap().text.starts_with("Couldn't save library navigation"));
+        });
+        // Quitting retries the newest navigation and reports the failure once,
+        // without refusing to exit.
+        books.on_quit()?;
+        assert!(books.navigation_error.take().is_some());
+        assert_eq!(books.navigation_writer.errors().count(), 0);
+        std::fs::remove_dir(&tmp)?;
+        books.on_sleep();
+        assert_eq!(store.navigation().page(), 0);
+        assert!(books.navigation_error.is_none());
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -3153,6 +3221,7 @@ mod tests {
             tap(&mut books, p, cx);
             assert_eq!(books.pager.page, 1, "Back and reenter retain the folder page");
             books.after_present();
+            books.navigation_writer.flush().unwrap();
         });
         drop(books);
         let restored = browsing_books(&t, screen, worker, store.clone());
@@ -3179,6 +3248,7 @@ mod tests {
             books.pager.page = 2;
             books.save_navigation();
             books.after_present();
+            books.navigation_writer.flush().unwrap();
             let old = books.index.clone();
             books.pending = Some(Snapshot { partial: true, ..Default::default() });
             books.apply_pending(cx);
@@ -3206,6 +3276,7 @@ mod tests {
             books.details = None;
             books.apply_pending(cx);
             books.after_present();
+            books.navigation_writer.flush().unwrap();
             assert_eq!(books.navigation.folder, Some("/books".into()));
             assert_eq!(books.pager.page, 0);
             assert!(!store.navigation().folder_pages.contains_key(std::path::Path::new("/books/Fiction/Nested")));
