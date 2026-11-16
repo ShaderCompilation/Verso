@@ -15,6 +15,11 @@ pub fn set_enabled(on: bool) -> Result<()> {
 mod imp {
     use anyhow::{Context, Result, ensure};
     use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// How long to wait for wifid to report a change it has accepted.
+    const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
+    const SETTLE_POLL: Duration = Duration::from_millis(100);
 
     pub fn enabled() -> Result<bool> {
         let output = Command::new("lipc-get-prop")
@@ -48,6 +53,15 @@ mod imp {
             })();
             if result.is_ok() {
                 result = attempt;
+            }
+        }
+        if result.is_ok() {
+            // wifid applies the change asynchronously: the first read right
+            // after turning off can still return 1 (measured). Wait until it
+            // reports the requested state so the caller's read is current.
+            let deadline = Instant::now() + SETTLE_TIMEOUT;
+            while enabled().ok() != Some(on) && Instant::now() < deadline {
+                std::thread::sleep(SETTLE_POLL);
             }
         }
         result
