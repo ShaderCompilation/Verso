@@ -1,61 +1,105 @@
 #!/usr/bin/env python3
-"""Scan StarDict .idx files the way Verso's index builder reads them.
+"""Check every StarDict .idx/.idx.gz and .syn under a folder, read-only.
 
-Usage: scripts/check-dictionary-index.py <folder>
-Copy the dictionaries' .ifo/.idx files first, e.g. from the Kindle:
-  ssh kindle 'cd /mnt/us && find koreader/data/dict -name "*.ifo" -o -name "*.idx" | tar cf - -T -' | tar xf -
-Reports per dictionary: words and size against the .ifo, the longest
-headword, headwords Verso rejects (256 bytes or more with the NUL), and the
-first unterminated or truncated record, with byte offsets.
+Copy installed .ifo[.gz], .idx[.gz] and .syn files from the Kindle first.
+Reports counts, sizes, longest headwords and every invalid record with its
+zero-based record number and decompressed byte offset. Exit 1 means errors.
 """
-import gzip, os, sys
+import argparse
+import gzip
+import unicodedata
+from pathlib import Path
 
-LIMIT = 256  # Verso's read_word: take(256) including the NUL
+LIMIT = 4096  # Headword and folded key bytes, excluding the NUL.
 
-def ifo(path):
-    info = {}
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if "=" in line:
-                k, v = line.rstrip("\n").split("=", 1)
-                info[k.strip()] = v.strip()
-    return info
 
-def scan(ifo_path):
-    base = ifo_path[: -len(".ifo")]
-    info = ifo(ifo_path)
-    idx = base + ".idx"
-    data = open(idx, "rb").read() if os.path.exists(idx) else gzip.open(idx + ".gz").read()
-    wide = info.get("idxoffsetbits") == "64"
-    tail = 12 if wide else 8
-    pos = count = 0
-    longest = (0, "", 0)
-    over = []
-    err = None
+def read(path):
+    return gzip.open(path, 'rb').read() if path.suffix == '.gz' else path.read_bytes()
+
+
+def records(path, tail, expected_count, expected_size=None, targets=None):
+    data = read(path)
+    pos = count = errors = 0
+    longest = (0, 0)
+
+    def error(message):
+        nonlocal errors
+        errors += 1
+        print(f'   ERROR: {path}: record {count} at byte offset {pos}: {message}')
+
     while pos < len(data):
-        end = data.find(b"\0", pos)
+        end = data.find(b'\0', pos)
         if end < 0:
-            err = f"unterminated word at byte {pos} (record {count})"; break
+            error('Unterminated headword' if len(data) - pos <= LIMIT else 'Headword too long (limit 4096 bytes)')
+            break
         word = data[pos:end]
-        if len(word) + 1 > LIMIT:
-            over.append((count, pos, len(word), word[:80].decode("utf-8", "replace")))
         if len(word) > longest[0]:
-            longest = (len(word), word[:100].decode("utf-8", "replace"), pos)
+            longest = (len(word), pos)
+        if len(word) > LIMIT:
+            error(f'Headword too long: {len(word)} bytes (limit 4096 bytes)')
+        elif not word:
+            error('Empty headword')
+        else:
+            try:
+                text = word.decode('utf-8')
+                key = unicodedata.normalize('NFC', unicodedata.normalize('NFD', text).casefold())
+                if len(key.encode('utf-8')) > LIMIT:
+                    error('Folded headword too long (limit 4096 bytes)')
+            except UnicodeDecodeError:
+                error('Invalid UTF-8 headword')
         if end + 1 + tail > len(data):
-            err = f"truncated offset/size at byte {end + 1} (record {count})"; break
+            error('Truncated offset/size record' if targets is None else 'Truncated synonym target record')
+            break
+        if targets is not None and int.from_bytes(data[end + 1:end + 5], 'big') >= targets:
+            error('Invalid synonym target')
         pos = end + 1 + tail
         count += 1
-    print(f"== {os.path.relpath(ifo_path)}")
-    print(f"   words {count} / ifo {info.get('wordcount')}, bytes {len(data)} / ifo {info.get('idxfilesize')}, 64-bit={wide}")
-    print(f"   longest headword {longest[0]} bytes at offset {longest[2]}: {longest[1]!r}")
-    if over:
-        o = over[0]
-        print(f"   {len(over)} headword(s) >= 256 bytes incl. NUL; first: record {o[0]}, byte {o[1]}, {o[2]} bytes: {o[3]!r}")
-        print(f"   lengths: {sorted(x[2] for x in over)[-10:]}")
-    if err:
-        print(f"   ERROR: {err}")
+    if count != expected_count or expected_size is not None and len(data) != expected_size:
+        error(f'Count/size differs from .ifo: {count}/{expected_count} records, {len(data)}/{expected_size} bytes')
+    print(f'   {path.name}: {count} records, {len(data)} bytes; longest headword {longest[0]} bytes at offset {longest[1]}')
+    return errors
 
-for dirpath, _, files in sorted(os.walk(sys.argv[1])):
-    for name in sorted(files):
-        if name.endswith(".ifo"):
-            scan(os.path.join(dirpath, name))
+
+def scan(path):
+    base = Path(str(path)[:-7] if path.name.endswith('.ifo.gz') else str(path)[:-4])
+    info = dict(line.split('=', 1) for line in read(path).decode('utf-8').splitlines() if '=' in line)
+    idx = Path(str(base) + '.idx')
+    if not idx.exists():
+        idx = Path(str(idx) + '.gz')
+    print(f'== {path}')
+    count = int(info['wordcount'])
+    errors = records(idx, 12 if info.get('idxoffsetbits') == '64' else 8, count, int(info['idxfilesize']))
+    syn = Path(str(base) + '.syn')
+    if syn.exists():
+        errors += records(syn, 4, int(info['synwordcount']), targets=count)
+    elif int(info.get('synwordcount', 0)):
+        print(f'   ERROR: {syn}: Missing synonym file')
+        errors += 1
+    print('   CLEAN' if not errors else f'   {errors} error(s)')
+    return errors
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('folder', type=Path)
+    args = parser.parse_args()
+    errors = count = 0
+    for path in sorted(args.folder.rglob('*')):
+        if path.name.endswith('.ifo.gz') and path.with_suffix('').is_file():
+            continue  # Same precedence as Verso: plain metadata wins.
+        if not path.name.endswith(('.ifo', '.ifo.gz')):
+            continue
+        count += 1
+        try:
+            errors += scan(path)
+        except (OSError, EOFError, ValueError, KeyError) as e:
+            print(f'   ERROR: {path}: {e}')
+            errors += 1
+    if not count:
+        parser.error('No dictionary metadata found')
+    print(f'{count} dictionaries checked, {errors} error(s)')
+    return bool(errors)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

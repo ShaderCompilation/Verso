@@ -177,6 +177,150 @@ fn offsets_compression_homographs_unicode_synonyms_and_cache_reopen() -> Result<
     Ok(())
 }
 #[test]
+fn long_utf8_headwords_and_aliases_survive_build_lookup_and_cache_reopen() -> Result<()> {
+    for wide in [false, true] {
+        for compressed in [false, true] {
+            let f = Fixture::new();
+            let long = "я".repeat(2048); // Exactly 4096 bytes, excluding the NUL.
+            let alias = "ю".repeat(2048);
+            f.install_words(wide, compressed, &[(&long, "Long definition"), ("short", "Short definition")])?;
+            let mut syn = alias.as_bytes().to_vec();
+            syn.extend_from_slice(&[0, 0, 0, 0, 0]);
+            fs::write(f.path().with_extension("syn"), syn)?;
+            let mut backend = f.backend()?;
+            for query in [&long, &alias] {
+                let entries = backend.lookup(query)?;
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].headword, long);
+            }
+            drop(backend);
+            let cache = f.cache_files()?.pop().unwrap().0;
+            // Holding the inode open proves reopen did not replace it with a
+            // newly built, byte-identical cache.
+            use std::os::unix::fs::MetadataExt;
+            let held = fs::File::open(&cache)?;
+            assert_eq!(f.backend()?.lookup(&alias)?[0].headword, long);
+            assert_eq!(held.metadata()?.ino(), fs::metadata(cache)?.ino());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_records_report_source_record_offset_and_cause_without_a_cache() -> Result<()> {
+    for ext in ["idx", "syn"] {
+        for wide in [false, true] {
+            for compressed in [false, true] {
+                for (word, tail, cause) in [
+                    ("a".repeat(4097), vec![0; 12], "Headword too long"),
+                    ("я".repeat(2049), vec![0; 12], "Headword too long"),
+                    ("missing terminator".into(), vec![], "Unterminated headword"),
+                    (
+                        "x\0".into(),
+                        vec![
+                            0;
+                            if ext == "syn" {
+                                3
+                            } else if wide {
+                                11
+                            } else {
+                                7
+                            }
+                        ],
+                        "Truncated",
+                    ),
+                    // U+0130 folds from 2 bytes to 3: the source fits, its key doesn't.
+                    ("İ".repeat(1366), vec![0; 13], "Folded headword too long"),
+                ] {
+                    let f = Fixture::new();
+                    f.install_words(wide, compressed, &[("ok", "definition"), ("second", "definition")])?;
+                    if ext == "syn" {
+                        let info = fs::read_to_string(f.path())?.replace("synwordcount=1", "synwordcount=2");
+                        fs::write(f.path(), info)?;
+                    }
+                    let mut data = b"ok\0".to_vec();
+                    data.extend_from_slice(&vec![
+                        0;
+                        if ext == "syn" {
+                            4
+                        } else if wide {
+                            12
+                        } else {
+                            8
+                        }
+                    ]);
+                    let offset = data.len();
+                    data.extend_from_slice(word.as_bytes());
+                    data.extend_from_slice(&tail);
+                    // Long terminated words need a NUL before a valid zero tail;
+                    // all-zero tails above already include that NUL.
+                    let path = f.path().with_extension(if ext == "idx" && compressed { "idx.gz" } else { ext });
+                    fs::write(&path, if ext == "idx" && compressed { gzip(&data)? } else { data })?;
+                    let error = match f.backend() {
+                        Ok(_) => panic!("accepted {ext} {cause}"),
+                        Err(e) => format!("{e:#}"),
+                    };
+                    assert!(error.contains(&path.display().to_string()), "{error}");
+                    assert!(error.contains(&format!(".{ext} record 1 at byte offset {offset}")), "{error}");
+                    assert!(error.contains(cause), "{error}");
+                    assert!(fs::read_dir(f.0.join("cache"))?.next().is_none(), "failed build published files");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_v1_cache_opens_without_reading_or_rebuilding_source_records() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    f.install(false, false)?;
+    // Build a v1 cache with the same short records accepted before Phase 2.
+    drop(f.backend()?);
+    let cache = f.cache_files()?.pop().unwrap().0;
+    let held = fs::File::open(&cache)?;
+    use sha2::{Digest, Sha256};
+    let mut signature = Sha256::new();
+    signature.update(b"verso-stardict-index-v1");
+    for ext in ["ifo", "idx", "dict", "syn"] {
+        let source = f.path().with_extension(ext);
+        let meta = fs::metadata(&source)?;
+        signature.update(source.as_os_str().as_encoded_bytes());
+        signature.update(meta.len().to_le_bytes());
+        signature.update(meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_le_bytes());
+    }
+    assert_eq!(&fs::read(&cache)?[..64], format!("{:x}", signature.finalize()).as_bytes(), "legacy v1 signature");
+    let source = f.path().with_extension("idx");
+    let meta = fs::metadata(&source)?;
+    // Corrupt the source without changing its length or timestamp (the v1
+    // signature). A rebuild must fail, so a successful lookup proves reuse.
+    fs::write(&source, vec![b'x'; meta.len() as usize])?;
+    fs::File::options().write(true).open(&source)?.set_modified(meta.modified()?)?;
+    assert!(contents(&f.backend()?.lookup("Apple")?).contains("A fruit."));
+    assert_eq!(held.metadata()?.ino(), fs::metadata(cache)?.ino());
+    Ok(())
+}
+
+/// Run the backend directly on installed, read-only dictionary files. The
+/// caller supplies an isolated writable cache and a UTF-8 query file; this
+/// does not initialize the display/input backend or touch reader settings.
+#[test]
+#[ignore = "requires VERSO_TEST_IFO, VERSO_TEST_CACHE and VERSO_TEST_QUERY_FILE"]
+fn installed_dictionary_lookup() -> Result<()> {
+    let path = PathBuf::from(std::env::var("VERSO_TEST_IFO")?);
+    let cache = PathBuf::from(std::env::var("VERSO_TEST_CACHE")?);
+    let query = fs::read_to_string(std::env::var("VERSO_TEST_QUERY_FILE")?)?;
+    for _ in 0..2 {
+        let entries = Backend::open(&path, &cache, &|| true)?.lookup(&query)?;
+        ensure!(!entries.is_empty(), "Installed dictionary lookup missed");
+        ensure!(entries.iter().any(|e| e.blocks.iter().any(|b| !b.text.is_empty())), "No readable definition");
+        println!("{}-byte query: {} readable entries", query.len(), entries.len());
+    }
+    Ok(())
+}
+
+#[test]
 fn reads_beyond_four_gib_without_mapping_definitions() -> Result<()> {
     let f = Fixture::new();
     fs::create_dir_all(f.0.join("dictionaries"))?;

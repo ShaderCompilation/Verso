@@ -149,18 +149,9 @@ impl Inner {
         }
         let requested = selected.filter(|s| dictionaries.iter().any(|d| d.id == *s && !d.disabled));
         let mut outcomes = vec![None; dictionaries.len()];
-        if let Some(found) = self.search(query, None, requested.as_deref(), &mut outcomes, current) {
+        let forms = forms::candidates(query);
+        if let Some(found) = self.search(query, forms.as_ref(), requested.as_deref(), &mut outcomes, current) {
             return found;
-        }
-        if current()
-            && let Some(forms) = forms::candidates(query)
-        {
-            let started = std::time::Instant::now();
-            let found = self.search(query, Some(&forms), requested.as_deref(), &mut outcomes, current);
-            log::debug!("dictionary base-form pass: {:?}, {} generated candidates", started.elapsed(), forms.count());
-            if let Some(found) = found {
-                return found;
-            }
         }
         // Keep each dictionary's final outcome in preference order. A readable
         // dictionary with no result wins over an error, as in the exact-only lookup.
@@ -173,10 +164,8 @@ impl Inner {
         }
         fallback.map_or((None, State::NoResult), |(id, state)| (Some(id), state))
     }
-    /// One pass over the enabled (or requested) dictionaries in preference
-    /// order, for the exact query or, with `forms`, its base forms. Returns the
-    /// first definition and records every other outcome by catalog position.
-    /// The base-form pass skips dictionaries that failed in the exact pass.
+    /// Each enabled (or requested) dictionary tries exact, then base forms,
+    /// before moving to the next dictionary. Records misses/errors for fallback.
     fn search(
         &mut self,
         query: &str,
@@ -197,9 +186,6 @@ impl Inner {
             if !current() {
                 break;
             }
-            if forms.is_some() && matches!(outcomes[i], Some(State::Error(_))) {
-                continue;
-            }
             // The entries, plus the base-form count for a base-form lookup.
             let lookup = (|| -> anyhow::Result<(Vec<Entry>, Option<usize>)> {
                 if backend.as_ref().is_none_or(|(id, _)| id != &dictionary.id) {
@@ -208,10 +194,23 @@ impl Inner {
                     *backend = Some((dictionary.id.clone(), Backend::open(&dictionary.path, &cache, current)?));
                 }
                 let backend = &mut backend.as_mut().unwrap().1;
-                match forms {
-                    Some(forms) => backend.lookup_forms(forms, current).map(|(text, count)| (text, Some(count))),
-                    None => backend.lookup(query).map(|text| (text, None)),
+                let entries = backend.lookup(query)?;
+                if !current() {
+                    anyhow::bail!("Lookup cancelled");
                 }
+                if entries.is_empty()
+                    && let Some(forms) = forms
+                {
+                    let started = std::time::Instant::now();
+                    let result = backend.lookup_forms(forms, current);
+                    log::debug!(
+                        "dictionary base forms: {:?}, {} generated candidates",
+                        started.elapsed(),
+                        forms.count()
+                    );
+                    return result.map(|(entries, count)| (entries, Some(count)));
+                }
+                Ok((entries, None))
             })();
             outcomes[i] = Some(match lookup {
                 Ok((text, _)) if text.is_empty() => {

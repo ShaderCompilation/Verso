@@ -75,22 +75,36 @@ impl Drop for Fixture {
 /// A valid dictionary at `ifo` defining `word` as `name`'s text.
 fn install(ifo: &Path, name: &str, word: &str) {
     fs::create_dir_all(ifo.parent().unwrap()).unwrap();
-    let text = format!("{name} text");
-    let mut idx = format!("{word}\0").into_bytes();
-    idx.extend_from_slice(&0u32.to_be_bytes());
-    idx.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    install_entries(ifo, name, &[(word, &format!("{name} text"))], &[]);
+}
+fn install_entries(ifo: &Path, name: &str, entries: &[(&str, &str)], aliases: &[(&str, u32)]) {
+    fs::create_dir_all(ifo.parent().unwrap()).unwrap();
+    let mut idx = Vec::new();
+    let mut data = Vec::new();
+    for (word, text) in entries {
+        idx.extend_from_slice(word.as_bytes());
+        idx.push(0);
+        idx.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        idx.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        data.extend_from_slice(text.as_bytes());
+    }
     let base = basename(ifo).unwrap();
     fs::write(sibling(&base, "idx"), &idx).unwrap();
-    fs::write(sibling(&base, "dict"), text).unwrap();
-    fs::write(
-        ifo,
-        format!(
-            "StarDict's dict ifo file\nversion=3.0.0\nbookname={name}\nwordcount=1\nidxfilesize={}\nsametypesequence=m\n",
-            idx.len()
-        ),
-    )
-    .unwrap();
+    fs::write(sibling(&base, "dict"), data).unwrap();
+    if !aliases.is_empty() {
+        let mut syn = Vec::new();
+        for (word, ordinal) in aliases {
+            syn.extend_from_slice(word.as_bytes());
+            syn.push(0);
+            syn.extend_from_slice(&ordinal.to_be_bytes());
+        }
+        fs::write(sibling(&base, "syn"), syn).unwrap();
+    }
+    fs::write(ifo, format!(
+        "StarDict's dict ifo file\nversion=3.0.0\nbookname={name}\nwordcount={}\nsynwordcount={}\nidxfilesize={}\nsametypesequence=m\n",
+        entries.len(), aliases.len(), idx.len())).unwrap();
 }
+
 fn names(reply: &Reply) -> Vec<&str> {
     reply.dictionaries.iter().map(|d| d.name.as_str()).collect()
 }
@@ -217,42 +231,99 @@ fn preferences_survive_source_removal_and_re_adding() {
 }
 
 #[test]
-fn exact_pass_precedes_base_forms_and_selected_dictionary_still_tries_forms() {
+fn preferred_base_form_beats_lower_exact_and_selection_and_disabled_are_respected() {
     let f = Fixture::new();
-    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
-    install(&f.join("dictionaries/b.ifo"), "B", "thunders");
-    let reply = f.lookup("thunders");
-    assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
-    assert_eq!(
-        reply.state,
-        Some(State::Definition {
-            entries: vec![Entry {
-                headword: "thunders".into(),
-                blocks: super::super::text::definition(b"B text", "m").unwrap()
-            }],
-            base_forms: None
-        })
-    );
-    let id = f.worker.lookup("thunders".into(), Some("a.ifo".into()), false);
-    let reply = f.reply(id).0;
-    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
-    assert_eq!(
-        reply.state,
-        Some(State::Definition {
-            entries: vec![Entry {
-                headword: "thunder".into(),
-                blocks: super::super::text::definition(b"A text", "m").unwrap()
-            }],
-            base_forms: Some(BaseForms { query: "thunders".into(), count: 1 })
-        })
-    );
-    // Both passes use the same enabled filter.
-    f.worker.change("b.ifo".into(), false);
-    let reply = f.lookup("thunders");
+    install(&f.join("dictionaries/a.ifo"), "A", "box");
+    install(&f.join("dictionaries/b.ifo"), "B", "boxes");
+    let reply = f.lookup("boxes");
     assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
     assert!(matches!(reply.state, Some(State::Definition { base_forms: Some(_), .. })));
-    let reply = f.lookup("thunder");
+    let reply = f.reply(f.worker.lookup("boxes".into(), Some("b.ifo".into()), false)).0;
+    assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
     assert!(matches!(reply.state, Some(State::Definition { base_forms: None, .. })));
+    f.worker.change("b.ifo".into(), true);
+    assert_eq!(f.lookup("boxes").selected.as_deref(), Some("b.ifo"), "preference changes apply immediately");
+    f.worker.change("b.ifo".into(), false);
+    let reply = f.reply(f.worker.lookup("boxes".into(), Some("b.ifo".into()), false)).0;
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"), "disabled selection falls back to enabled dictionaries");
+    f.worker.change("a.ifo".into(), false);
+    assert_eq!(f.lookup("boxes").state, Some(State::Disabled));
+}
+
+#[test]
+fn exact_homographs_and_aliases_stay_together_without_base_forms() {
+    let f = Fixture::new();
+    install_entries(
+        &f.join("dictionaries/a.ifo"),
+        "A",
+        &[("boxes", "First exact"), ("boxes", "Second exact"), ("box", "Base form")],
+        &[("boxes", 0), ("containers", 1)],
+    );
+    install(&f.join("dictionaries/b.ifo"), "B", "boxes");
+    let reply = f.lookup("boxes");
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    let Some(State::Definition { entries, base_forms }) = reply.state else { panic!("expected exact entries") };
+    assert_eq!(base_forms, None);
+    assert_eq!(entries.iter().map(|e| e.headword.as_str()).collect::<Vec<_>>(), ["boxes", "boxes"]);
+    assert_eq!(entries[0].blocks[0].text, "First exact");
+    assert_eq!(entries[1].blocks[0].text, "Second exact");
+    let reply = f.lookup("containers");
+    let Some(State::Definition { entries, base_forms }) = reply.state else { panic!("expected alias") };
+    assert_eq!(base_forms, None);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].headword, "boxes");
+    assert_eq!(entries[0].blocks[0].text, "Second exact");
+}
+
+#[test]
+fn worker_forms_exceptions_possessives_function_words_and_non_english_exact() {
+    let f = Fixture::new();
+    install_entries(
+        &f.join("dictionaries/a.ifo"),
+        "A",
+        &[
+            ("box", "container"),
+            ("study", "learn"),
+            ("run", "move"),
+            ("hope", "expect"),
+            ("tree", "plant"),
+            ("lie", "recline"),
+            ("lye", "decoy"),
+            ("good", "fine"),
+            ("well", "fine"),
+            ("be", "decoy"),
+            ("ax", "tool"),
+            ("axe", "tool"),
+            ("axis", "line"),
+            ("hi", "decoy for his"),
+            ("again", "decoy for against"),
+            ("Слово", "word"),
+        ],
+        &[],
+    );
+    for (query, expected) in [
+        ("boxes", vec!["box"]),
+        ("studies", vec!["study"]),
+        ("running", vec!["run"]),
+        ("hoping", vec!["hope"]),
+        ("tree's", vec!["tree"]),
+        ("trees’", vec!["tree"]),
+        ("lying", vec!["lie"]),
+        ("best", vec!["good", "well"]),
+        ("axes", vec!["ax", "axe", "axis"]),
+    ] {
+        let reply = f.lookup(query);
+        let Some(State::Definition { entries, base_forms }) = reply.state else { panic!("no forms for {query}") };
+        assert_eq!(entries.iter().map(|e| e.headword.as_str()).collect::<Vec<_>>(), expected, "{query}");
+        assert_eq!(base_forms, Some(BaseForms { query: query.into(), count: expected.len() }));
+    }
+    for query in ["zzqxyings", "his", "against", "this", "two words"] {
+        assert_eq!(f.lookup(query).state, Some(State::NoResult), "{query}");
+    }
+    let reply = f.lookup("СЛОВО");
+    let Some(State::Definition { entries, base_forms }) = reply.state else { panic!("no non-English exact") };
+    assert_eq!(base_forms, None);
+    assert_eq!(entries[0].headword, "Слово");
 }
 
 #[test]
@@ -271,7 +342,7 @@ fn forms_search_dictionary_order_and_passages_get_no_base_forms() {
 }
 
 #[test]
-fn error_and_no_result_fallback_remain_in_preference_order_across_passes() {
+fn error_and_no_result_fallback_remain_in_preference_order_in_one_pass() {
     for query in ["absent", "thunders", "two words"] {
         let f = Fixture::new();
         install(&f.join("dictionaries/a.ifo"), "A", "other");
@@ -280,7 +351,7 @@ fn error_and_no_result_fallback_remain_in_preference_order_across_passes() {
         let reply = f.lookup(query);
         assert_eq!(reply.selected.as_deref(), Some("b.ifo"));
         assert_eq!(reply.state, Some(State::NoResult), "{query}");
-        assert!(reply.dictionaries[0].error.is_some(), "exact-pass errors remain visible");
+        assert!(reply.dictionaries[0].error.is_some(), "index errors remain visible");
         // An explicitly selected broken dictionary reports its error.
         let reply = f.reply(f.worker.lookup(query.into(), Some("a.ifo".into()), false)).0;
         assert!(matches!(reply.state, Some(State::Error(_))));
@@ -294,7 +365,7 @@ fn error_and_no_result_fallback_remain_in_preference_order_across_passes() {
         assert_eq!(reply.selected.as_deref(), Some("b.ifo"), "first error wins if all fail");
         assert!(matches!(reply.state, Some(State::Error(_))));
     }
-    // An exact-pass error does not prevent a later base-form hit.
+    // An index error does not prevent a later base-form hit.
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
     install(&f.join("dictionaries/b.ifo"), "B", "thunder");
@@ -346,13 +417,13 @@ fn base_form_read_error_is_reported_unless_another_dictionary_has_no_result() {
 }
 
 #[test]
-fn single_dictionary_reuses_its_backend_for_both_passes() {
+fn single_dictionary_reuses_its_backend_for_exact_and_forms() {
     let f = Fixture::new();
     let path = f.join("dictionaries/a.ifo");
     install(&path, "A", "thunder");
     let mut inner = inner(&f);
     assert_eq!(inner.lookup("other", None, &|| true).1, State::NoResult);
-    // The cached backend has everything needed. Reopening during either pass
+    // The cached backend has everything needed. Reopening during either lookup
     // would fail because its metadata is no longer on disk.
     fs::remove_file(path).unwrap();
     let (selected, state) = inner.lookup("thunders", None, &|| true);
@@ -367,7 +438,7 @@ fn cancellation_at_any_point_returns_no_definition_and_marks_no_errors() {
     install(&f.join("dictionaries/a.ifo"), "A", "other");
     install(&f.join("dictionaries/b.ifo"), "B", "thunder");
     let mut inner = inner(&f);
-    // Cancel at the nth check, through index building, both passes, the
+    // Cancel at the nth check, through index building, exact and forms, the
     // dictionary switches and every base-form candidate, until one completes.
     // The worker drops whatever a cancelled lookup returns; it must not
     // return a definition or record cancellation as a dictionary error.

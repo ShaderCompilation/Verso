@@ -11,6 +11,7 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
 };
+const MAX_WORD_BYTES: usize = 4096;
 const BUCKETS: usize = 4096;
 const SIGNATURE: u64 = 64;
 const HEADER: u64 = SIGNATURE + BUCKETS as u64 * 8;
@@ -30,11 +31,12 @@ fn hash(text: &str) -> usize {
 fn read_word(r: &mut impl BufRead) -> Result<Option<String>> {
     let mut data = Vec::with_capacity(256);
     // Limit before allocating: malformed sources cannot grow this buffer.
-    r.take(256).read_until(0, &mut data)?;
+    r.take(MAX_WORD_BYTES as u64 + 1).read_until(0, &mut data)?;
     if data.is_empty() {
         return Ok(None);
     }
-    ensure!(data.last() == Some(&0), "Unterminated or oversized index word");
+    ensure!(data.last() == Some(&0) || data.len() <= MAX_WORD_BYTES, "Headword too long (limit 4096 bytes)");
+    ensure!(data.last() == Some(&0), "Unterminated headword");
     data.pop();
     ensure!(!data.is_empty(), "Empty index word");
     Ok(Some(String::from_utf8(data)?))
@@ -59,6 +61,7 @@ impl Builder {
         let file = &mut self.output;
         let heads = &mut self.heads;
         let key = fold(word);
+        ensure!(key.len() <= MAX_WORD_BYTES, "Folded headword too long (limit 4096 bytes)");
         let bucket = hash(&key);
         let at = self.cursor;
         file.write_all(&heads[bucket].to_le_bytes())?;
@@ -83,7 +86,7 @@ fn record(file: &mut File, at: u64) -> Result<Record> {
     let size = u32::from_le_bytes(sizes[..4].try_into()?);
     let klen = u16::from_le_bytes(sizes[4..6].try_into()?) as usize;
     let wlen = u16::from_le_bytes(sizes[6..].try_into()?) as usize;
-    ensure!(klen <= 4096 && wlen < 256, "Invalid cached index word");
+    ensure!(klen <= MAX_WORD_BYTES && wlen <= MAX_WORD_BYTES, "Invalid cached index word");
     let mut key = vec![0; klen];
     let mut word = vec![0; wlen];
     file.read_exact(&mut key)?;
@@ -138,29 +141,42 @@ impl Index {
             let mut input = BufReader::new(input);
             let mut count = 0u32;
             let mut bytes = 0u64;
-            while let Some(word) = read_word(&mut input)? {
+            loop {
                 if count.is_multiple_of(128) {
                     ensure!(current(), "Lookup cancelled");
                 }
-                ensure!(count < info.count, "Index has more words than wordcount");
-                let offset = if info.wide {
-                    let mut b = [0; 8];
-                    input.read_exact(&mut b)?;
-                    u64::from_be_bytes(b)
-                } else {
-                    read_u32_be(&mut input)? as u64
-                };
-                let size = read_u32_be(&mut input)?;
-                ensure!(
-                    offset.checked_add(size as u64).is_some_and(|end| end <= data_len),
-                    "Index points outside definitions"
-                );
-                bytes += word.len() as u64 + 1 + if info.wide { 12 } else { 8 };
-                let at = builder.append(&word, &word, offset, size)?;
-                refs.write_all(&at.to_le_bytes())?;
-                count += 1;
+                let (ordinal, start) = (count, bytes);
+                let next = (|| -> Result<bool> {
+                    let Some(word) = read_word(&mut input)? else { return Ok(false) };
+                    ensure!(count < info.count, "Index has more words than wordcount");
+                    let offset = if info.wide {
+                        let mut b = [0; 8];
+                        input.read_exact(&mut b).context("Truncated offset/size record")?;
+                        u64::from_be_bytes(b)
+                    } else {
+                        read_u32_be(&mut input).context("Truncated offset/size record")? as u64
+                    };
+                    let size = read_u32_be(&mut input).context("Truncated offset/size record")?;
+                    ensure!(
+                        offset.checked_add(size as u64).is_some_and(|end| end <= data_len),
+                        "Index points outside definitions"
+                    );
+                    let at = builder.append(&word, &word, offset, size)?;
+                    refs.write_all(&at.to_le_bytes())?;
+                    bytes += word.len() as u64 + 1 + if info.wide { 12 } else { 8 };
+                    count += 1;
+                    Ok(true)
+                })()
+                .with_context(|| format!("{}: .idx record {ordinal} at byte offset {start}", idx.display()))?;
+                if !next {
+                    break;
+                }
             }
-            ensure!(count == info.count && bytes == info.index_size, "Index count or size differs from .ifo");
+            ensure!(
+                count == info.count && bytes == info.index_size,
+                "{}: .idx record {count} at byte offset {bytes}: Truncated index or count/size differs from .ifo",
+                idx.display()
+            );
             builder.output.flush()?;
             refs.flush()?;
             drop(refs);
@@ -169,20 +185,35 @@ impl Index {
                 let mut originals = File::open(&temp)?;
                 let mut input = BufReader::new(File::open(&syn)?);
                 let mut count = 0u32;
-                while let Some(word) = read_word(&mut input)? {
+                let mut bytes = 0u64;
+                loop {
                     if count.is_multiple_of(128) {
                         ensure!(current(), "Lookup cancelled");
                     }
-                    ensure!(count < info.syn_count, "Synonym count differs from .ifo");
-                    let ordinal = read_u32_be(&mut input)?;
-                    ensure!(ordinal < info.count, "Invalid synonym target");
-                    refs.seek(SeekFrom::Start(ordinal as u64 * 8))?;
-                    let at = read_u64(&mut refs)?;
-                    let original = record(&mut originals, at)?;
-                    builder.append(&word, &original.word, original.offset, original.size)?;
-                    count += 1;
+                    let (ordinal, start) = (count, bytes);
+                    let next = (|| -> Result<bool> {
+                        let Some(word) = read_word(&mut input)? else { return Ok(false) };
+                        ensure!(count < info.syn_count, "Synonym count differs from .ifo");
+                        let ordinal = read_u32_be(&mut input).context("Truncated synonym target record")?;
+                        ensure!(ordinal < info.count, "Invalid synonym target");
+                        refs.seek(SeekFrom::Start(ordinal as u64 * 8))?;
+                        let at = read_u64(&mut refs)?;
+                        let original = record(&mut originals, at)?;
+                        builder.append(&word, &original.word, original.offset, original.size)?;
+                        bytes += word.len() as u64 + 5;
+                        count += 1;
+                        Ok(true)
+                    })()
+                    .with_context(|| format!("{}: .syn record {ordinal} at byte offset {start}", syn.display()))?;
+                    if !next {
+                        break;
+                    }
                 }
-                ensure!(count == info.syn_count, "Synonym count differs from .ifo");
+                ensure!(
+                    count == info.syn_count,
+                    "{}: .syn record {count} at byte offset {bytes}: Truncated index or synonym count differs from .ifo",
+                    syn.display()
+                );
             }
             ensure!(current(), "Lookup cancelled");
             let mut out = builder.output;
@@ -200,8 +231,9 @@ impl Index {
         result
     }
     pub fn find(&mut self, query: &str) -> Result<Vec<Entry>> {
-        ensure!(query.len() <= 4096, "Query is too long");
+        ensure!(query.len() <= MAX_WORD_BYTES, "Query is too long");
         let key = fold(query.trim());
+        ensure!(key.len() <= MAX_WORD_BYTES, "Folded query is too long (limit 4096 bytes)");
         self.0.seek(SeekFrom::Start(SIGNATURE + hash(&key) as u64 * 8))?;
         let mut at = read_u64(&mut self.0)?;
         let mut entries = Vec::new();
@@ -209,7 +241,12 @@ impl Index {
             let entry = record(&mut self.0, at)?;
             ensure!(entry.next == 0 || entry.next < at, "Cyclic cached index");
             at = entry.next;
-            if entry.key == key && !entries.iter().any(|(_, o, s)| *o == entry.offset && *s == entry.size) {
+            if entry.key == key {
+                // Prefer the earliest source record for a repeated span. A
+                // later alias must not move a homograph ahead of its siblings.
+                if let Some(i) = entries.iter().position(|(_, o, s)| *o == entry.offset && *s == entry.size) {
+                    entries.remove(i);
+                }
                 entries.push((entry.word, entry.offset, entry.size));
                 ensure!(entries.len() <= 128, "Too many entries for this word");
             }
