@@ -34,3 +34,6 @@ licence](https://creativecommons.org/licenses/by-sa/3.0/).
 `ru.vwf` is an adaptation of this dictionary (forms folded, lemmas linked and
 re-encoded) and is distributed under the same licence: wherever the pack is
 installed, this licence text goes with it, with this attribution.
+`ATTRIBUTION.txt` is that attribution; `scripts/deploy.sh` installs both on the
+Kindle as `OpenCorpora-ATTRIBUTION.txt` and `OpenCorpora-LICENSE.txt` next to
+the pack.

@@ -28,6 +28,7 @@ cd "$ROOT"
 echo "==> building"
 cargo kindle-build
 scripts/build-ssh.sh
+scripts/build-wordforms.sh
 
 echo "==> stopping Verso if it's running"
 ssh "$HOST" sh -s <<'EOF'
@@ -61,6 +62,20 @@ fi
 # Book fonts and their licence, separate from crengine data.
 ssh "$HOST" "mkdir -p $APP/fonts"
 tar -C assets/fonts --owner=0 --group=0 -cf - Literata-Regular.ttf Literata-Italic.ttf Literata-SemiBold.ttf Literata-SemiBoldItalic.ttf Literata-LICENSE.txt | ssh "$HOST" "tar -xf - -C $APP/fonts"
+# The Russian word-form pack with its attribution and licence, only when one
+# of them changed. Unpacked next to the folder and moved in, so a broken
+# transfer never leaves half a pack; other packs in the folder are kept.
+WF_SRC=assets/wordforms/opencorpora
+WF_VERSION="$(cat target/wordforms/ru.vwf "$WF_SRC/ATTRIBUTION.txt" "$WF_SRC/LICENSE-CC-BY-SA-3.0.txt" | sha256sum | cut -d' ' -f1)"
+if [ "$(ssh "$HOST" "cat $APP/wordforms/.version 2>/dev/null")" != "$WF_VERSION" ]; then
+    echo "==> copying word forms"
+    tar --owner=0 --group=0 -cf - -C target/wordforms ru.vwf -C "$ROOT/$WF_SRC" \
+        --transform 's,^ATTRIBUTION\.txt$,OpenCorpora-ATTRIBUTION.txt,;s,^LICENSE-CC-BY-SA-3\.0\.txt$,OpenCorpora-LICENSE.txt,' \
+        ATTRIBUTION.txt LICENSE-CC-BY-SA-3.0.txt |
+        ssh "$HOST" "rm -rf $APP/wordforms.new && mkdir -p $APP/wordforms.new $APP/wordforms &&
+            tar -xf - -C $APP/wordforms.new && for f in $APP/wordforms.new/*; do mv -f \$f $APP/wordforms/; done &&
+            rmdir $APP/wordforms.new && echo $WF_VERSION > $APP/wordforms/.version"
+fi
 # The SSH server (Settings → Developer), its mDNS responder and the keys
 # folder. Unpacked next to bin/ and moved in, because a running server keeps
 # its binary open. (Verso restarts a responder left on the old binary.)

@@ -386,18 +386,25 @@ impl Inner {
                 let outcome = match outcome {
                     Ok(Some(hits)) if hits.records.is_empty() => {
                         let forms = forms.get_or_insert_with(|| {
+                            let generating = Instant::now();
                             let forms = self.word_forms.candidates(&languages, query);
                             log::debug!(
-                                "dictionary query: languages {languages:?}, {} generated candidates",
-                                forms.as_ref().map_or(0, forms::Candidates::count)
+                                "dictionary query: languages {languages:?}, {} generated candidates in {:?}",
+                                forms.as_ref().map_or(0, forms::Candidates::count),
+                                generating.elapsed()
                             );
                             forms
                         });
                         match forms {
                             // The backend is still open: this reuses it.
-                            Some(forms) => self
-                                .open_backend(&id, &progress, &preparing)
-                                .and_then(|backend| backend.find_forms(forms, &progress)),
+                            Some(forms) => {
+                                let checking = Instant::now();
+                                let hits = self
+                                    .open_backend(&id, &progress, &preparing)
+                                    .and_then(|backend| backend.find_forms(forms, &progress));
+                                log::debug!("dictionary base forms checked: {:?}", checking.elapsed());
+                                hits
+                            }
                             None => Ok(hits),
                         }
                     }

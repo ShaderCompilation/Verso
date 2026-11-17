@@ -468,3 +468,31 @@ reported slow-feeling definitions and blending during updates, and requested
 documentation without fixes. The 150 ms deadline is unchanged. Results and
 measurement limits:
 [dictionary.md](../../docs/dictionary.md#dictionary-improvements-kindle-verification-and-performance--2026-11-16).
+
+## Word-form lookups
+
+`wordforms.py` measures base-form lookups with the installed Russian pack
+(`/mnt/us/verso/wordforms/ru.vwf`). It reuses `dictionary.py`'s isolated
+state, one-word books, launcher copy and dictionary sets, so the same rules
+apply: install the latest build first (`scripts/deploy.sh --no-run`), build
+both probes, and choose a word that no installed dictionary has as an exact
+entry. Each call is one session: a long press (the first miss, which opens the
+pack), then **Look up** taps (warm misses). It records the pack-open,
+candidate and per-dictionary base-form debug lines and the pack's `Size`,
+`Rss` and `Pss` from `/proc/<pid>/smaps` after every search.
+
+```sh
+wf() {
+  python3 scripts/perf/wordforms.py "$@" \
+    --probe /tmp/probe --preload /tmp/probe.so --output /tmp/wordforms-results
+}
+wf --name wf-cold --word людей --language und --repeats 1
+# Read "state" from /tmp/wordforms-results/wf-cold.json.
+COLD_STATE=/mnt/us/verso/dictionary-performance-check/wf-cold-TIMESTAMP
+wf --name wf-russian --word людей --language rus --cache-state "$COLD_STATE"
+wf --name wf-all --word людей --language und --cache-state "$COLD_STATE"
+```
+
+`rus` selects the Russian set (five dictionaries), `und` Default (all 13).
+Afterwards remove the `wf-*` folders. Results:
+[dictionary.md](../../docs/dictionary.md#verification--2026-11-17-russian-base-forms-word-forms-phase-4).

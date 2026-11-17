@@ -1,0 +1,14 @@
+Russian word forms (ru.vwf)
+
+ru.vwf is an adaptation of the OpenCorpora morphological dictionary,
+© the OpenCorpora project (https://opencorpora.org), version 0.92,
+revision 417258, from the Internet Archive capture of 2024-04-23 of
+https://www.opencorpora.org/files/export/dict/dict.opcorpora.xml.bz2
+
+Changes: word forms folded (ё → е, stress marks removed), related lemmas
+linked, and the result re-encoded as a Verso word-form pack.
+
+Both the dictionary and this adaptation are licensed under the Creative
+Commons Attribution-ShareAlike 3.0 Unported licence
+(https://creativecommons.org/licenses/by-sa/3.0/). The full text is in
+OpenCorpora-LICENSE.txt next to this file.
