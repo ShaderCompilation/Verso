@@ -1,5 +1,6 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
 mod annotations;
+mod bars;
 mod search;
 mod selection;
 use crate::document::{
@@ -20,7 +21,7 @@ use crate::store::{
     position::{Presented, Writer},
 };
 use crate::ui::gesture::{Direction, Gesture};
-use crate::ui::theme::{INK2, PAPER, Theme};
+use crate::ui::theme::{PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use search::{BarEvent, Origin, SearchBar, SearchEvent, SearchView, Session};
 use selection::SelectionState;
@@ -628,8 +629,12 @@ impl Reader {
         )));
     }
     fn text(&mut self, t: &Theme) {
-        self.overlay =
-            Overlay::Text(Box::new(TextSheet::new(t, self.screen, &self.settings.typography, self.settings.footer)));
+        self.overlay = Overlay::Text(Box::new(TextSheet::new(
+            t,
+            self.screen,
+            &self.settings.typography,
+            &self.settings.page_layout,
+        )));
     }
     fn changed(&mut self) {
         if self.jump != 0 {
@@ -654,7 +659,7 @@ impl Reader {
         // Other settings screens may have saved while this reader was retained.
         let mut settings = self.store.settings();
         settings.typography = self.settings.typography.clone();
-        settings.footer = self.settings.footer;
+        settings.page_layout = self.settings.page_layout.clone();
         self.store.save_settings(&settings).map_err(|e| {
             log::error!("saving typography: {e:#}");
             anyhow::anyhow!("Couldn't save text settings: {e:#}")
@@ -726,18 +731,21 @@ impl Screen for Reader {
         let t = cx.theme;
         if let Some(page) = &self.shown {
             cx.canvas.set_gray(&page.pixels);
-            if self.settings.footer {
-                let r =
-                    Rect::new(t.mm(7.0), self.screen.bottom() - t.mm(9.0), self.screen.w - 2 * t.mm(7.0), t.mm(6.0));
-                cx.fill(r, PAPER);
-                cx.line(
-                    &reader::footer(&self.toc, page.number, self.pages),
-                    t.caption.gray(INK2),
-                    Rect { w: r.w * 4 / 5, ..r },
-                    HAlign::Left,
-                );
-                let progress = if page.number + 1 == self.pages { 100 } else { page.progress / 100 };
-                cx.line(&format!("{progress}%"), t.caption.gray(INK2), r, HAlign::Right);
+            let layout = &self.settings.page_layout;
+            if layout.top.on || layout.bottom.on {
+                let started = Instant::now();
+                let font_px = self.settings.typography.font_px(t.dpi);
+                let geometry = layout.geometry(self.screen.w, self.screen.h, t.dpi, font_px);
+                let data = reader::bars::BarData {
+                    toc: &self.toc,
+                    title: &self.metadata.title,
+                    author: &self.metadata.authors,
+                    page: page.number,
+                    pages: self.pages,
+                    progress: page.progress,
+                };
+                bars::draw(cx, layout, &geometry, &data);
+                log::debug!("bars drawn in {} us", started.elapsed().as_micros());
             }
         } else {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
@@ -987,7 +995,7 @@ impl Screen for Reader {
                 None => {}
             },
             Overlay::Text(sheet) => {
-                match sheet.on_gesture(&g, &mut self.settings.typography, &mut self.settings.footer) {
+                match sheet.on_gesture(&g, &mut self.settings.typography, &mut self.settings.page_layout) {
                     Some(TextEvent::Close) => self.overlay = Overlay::None,
                     Some(TextEvent::Fonts) => {
                         self.overlay = Overlay::Fonts(Box::new(FontList::new(
@@ -1089,7 +1097,7 @@ impl Screen for Reader {
             self.worker.send(Command::Layout {
                 generation: self.cache.generation,
                 typography: self.settings.typography.clone(),
-                footer: self.settings.footer,
+                page: self.settings.page_layout.clone(),
                 position: self.anchor.clone(),
             });
             // Hit pages belong to a layout: re-run the query for the new one.
@@ -1191,6 +1199,13 @@ mod tests {
     use super::*;
     use crate::store::BookState;
 
+    fn with_bars(top: bool, bottom: bool) -> Settings {
+        let mut settings = Settings::default();
+        settings.page_layout.top.on = top;
+        settings.page_layout.bottom.on = bottom;
+        settings
+    }
+
     fn test_reader(name: &str) -> (Reader, std::sync::mpsc::Receiver<Command>) {
         let (worker, commands) = Worker::recording_stub();
         let reader = Reader::new(
@@ -1199,7 +1214,7 @@ mod tests {
             Store::at(std::env::temp_dir().join(format!("verso-{name}-{}", std::process::id()))),
             "book".into(),
             1,
-            Settings { footer: false, ..Default::default() },
+            with_bars(false, false),
             vec![],
             Position::default(),
         );
@@ -1425,7 +1440,7 @@ mod tests {
         assert!(!r.settings_save_pending);
         let saved = r.store.settings();
         assert_eq!(saved.typography.size_pt, r.settings.typography.size_pt);
-        assert!(!saved.footer);
+        assert!(!saved.page_layout.bottom.on);
         assert_eq!(saved.orientation, settings.orientation);
         assert!(saved.developer);
         drop(r);
@@ -1646,7 +1661,7 @@ mod tests {
                 Store::at(std::env::temp_dir().join("verso-selection-draw-unused")),
                 "book".into(),
                 1,
-                Settings { footer: false, ..Settings::default() },
+                with_bars(false, false),
                 Vec::new(),
                 Position::default(),
             );
@@ -1829,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn grayscale_pages_restore_after_menus_usb_and_wake_with_or_without_footer() {
+    fn grayscale_pages_restore_after_menus_usb_and_wake_with_or_without_bars() {
         use crate::{
             app::App,
             geom::Point,
@@ -1838,7 +1853,7 @@ mod tests {
         let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
         let screen = Rect::new(0, 0, 600, 800);
         let root = std::env::temp_dir().join(format!("verso-gray-reader-{}", std::process::id()));
-        for footer in [false, true] {
+        for (top, bottom) in [(false, false), (false, true), (true, true)] {
             let page = |number| {
                 Arc::new(Page {
                     generation: 1,
@@ -1858,7 +1873,13 @@ mod tests {
                 Store::at(root.clone()),
                 "book".into(),
                 1,
-                Settings { footer, ..Settings::default() },
+                Settings {
+                    page_layout: crate::page_layout::PageLayout {
+                        progress: crate::page_layout::ProgressLine::Top,
+                        ..with_bars(top, bottom).page_layout
+                    },
+                    ..Settings::default()
+                },
                 Vec::new(),
                 Position::default(),
             );

@@ -5,6 +5,7 @@ use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::page_layout::PageLayout;
 use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
@@ -67,7 +68,12 @@ impl CreEngine {
     }
 
     /// Opens and lays out a book. Slow for big books (seconds on the Kindle).
-    pub fn open(&self, path: &Path, layout: &Layout, typography: Option<(&Typography, bool)>) -> Result<CreDocument> {
+    pub fn open(
+        &self,
+        path: &Path,
+        layout: &Layout,
+        typography: Option<(&Typography, &PageLayout)>,
+    ) -> Result<CreDocument> {
         let raw = unsafe { sys::verso_cre_new(layout.width as c_int, layout.height as c_int, self.dpi as c_int) };
         if raw.is_null() {
             bail!("crengine could not create a document view");
@@ -99,8 +105,8 @@ impl CreEngine {
             sys::verso_cre_set_margins(raw, l, t, r, b);
         }
 
-        if let Some((t, footer)) = typography {
-            doc.set_typography(t, self.dpi, footer)?;
+        if let Some((t, page)) = typography {
+            doc.set_typography(t, self.dpi, page)?;
         }
         let t = Instant::now();
         if unsafe { sys::verso_cre_load(raw, cstr(path)?.as_ptr()) } != 0 {
@@ -303,12 +309,14 @@ impl Document for CreDocument {
         (unsafe { sys::verso_cre_images(self.raw) }) > 0
     }
 
-    fn set_typography(&mut self, t: &Typography, dpi: u32, footer: bool) -> Result<()> {
+    fn set_typography(&mut self, t: &Typography, dpi: u32, layout: &PageLayout) -> Result<()> {
         let face = CString::new(if t.font == "Publisher font" { "Literata" } else { &t.font })?;
-        let mm = |v: f32| (v * dpi as f32 / 25.4).round() as c_int;
         let mut t = t.clone();
         t.normalize();
-        let px = (t.size_pt * dpi as f32 / 72.0).round() as c_int;
+        let px = t.font_px(dpi as f32);
+        let mut layout = layout.clone();
+        layout.normalize();
+        let g = layout.geometry(self.width as i32, self.height as i32, dpi as f32, px);
         let started = Instant::now();
         let rc = unsafe {
             sys::verso_cre_typography(
@@ -316,9 +324,9 @@ impl Document for CreDocument {
                 face.as_ptr(),
                 px,
                 [100, 120, 140][t.spacing],
-                side_margin(self.width, self.height, px, mm([4.0, 7.0, 10.0][t.margins]), t.margins),
-                mm(6.0),
-                mm(if footer { 12.0 } else { 6.0 }),
+                g.side,
+                g.top,
+                g.bottom,
                 t.justify as c_int,
                 (t.font == "Publisher font") as c_int,
             )
@@ -355,18 +363,6 @@ impl Drop for CreDocument {
         // Also writes the document cache.
         unsafe { sys::verso_cre_free(self.raw) };
     }
-}
-
-/// The left and right page margin in pixels. On a landscape page the
-/// margins grow so lines stay about 60–75 characters long: a column at most
-/// 33, 30 or 27 ems wide for Narrow, Normal and Wide margins. Portrait pages
-/// use the plain setting.
-fn side_margin(width: u32, height: u32, font_px: c_int, base: c_int, setting: usize) -> c_int {
-    if width <= height {
-        return base;
-    }
-    let column = (font_px as f32 * [33.0, 30.0, 27.0][setting.min(2)]) as c_int;
-    base.max((width as c_int - column) / 2)
 }
 
 fn cstr(path: &Path) -> Result<CString> {
@@ -411,22 +407,5 @@ impl CreDocument {
             sys::verso_cre_annotation_page(self.raw, page as c_int, ids.as_mut_ptr(), n);
         }
         ids.into_iter().map(|i| i as usize).collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::side_margin;
-
-    #[test]
-    fn landscape_pages_keep_a_readable_line_length() {
-        // Portrait keeps the chosen margin.
-        assert_eq!(side_margin(1272, 1696, 42, 83, 1), 83);
-        // Landscape at 10 pt (42 px): a 1260 px column, centred.
-        assert_eq!(side_margin(1696, 1272, 42, 83, 1), 218);
-        // Wider margins still mean a narrower column.
-        assert!(side_margin(1696, 1272, 42, 118, 2) > side_margin(1696, 1272, 42, 83, 1));
-        // Large type already makes short lines: the plain margin wins.
-        assert_eq!(side_margin(1696, 1272, 100, 83, 1), 83);
     }
 }

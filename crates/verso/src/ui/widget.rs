@@ -51,6 +51,12 @@ impl<'a> DrawCx<'a> {
         self.text.line(self.canvas, text, style, rect, align);
     }
 
+    /// One line without a width limit, from the left of `rect` and clipped
+    /// to it. Reuses the layout `text.width` measured.
+    pub fn line_measured(&mut self, text: &str, style: TextStyle, rect: Rect) {
+        self.text.line_measured(self.canvas, text, style, rect);
+    }
+
     /// Wrapped text, as many lines as fit.
     pub fn paragraph(&mut self, text: &str, style: TextStyle, rect: Rect, align: HAlign) {
         self.text.draw(self.canvas, text, style, rect, align);

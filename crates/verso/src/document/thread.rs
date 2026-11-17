@@ -5,6 +5,7 @@ use super::{
 };
 use crate::annotations::Annotation;
 use crate::geom::Rect;
+use crate::page_layout::PageLayout;
 use crate::platform::Waker;
 use anyhow::Result;
 use std::cell::RefCell;
@@ -107,7 +108,7 @@ pub enum Command {
         path: PathBuf,
         layout: Layout,
         typography: Typography,
-        footer: bool,
+        page: PageLayout,
         position: Position,
         /// The progress saved with `position`.
         progress: u32,
@@ -115,7 +116,7 @@ pub enum Command {
     Layout {
         generation: u64,
         typography: Typography,
-        footer: bool,
+        page: PageLayout,
         position: Position,
     },
     Page {
@@ -321,11 +322,11 @@ impl Worker {
                                 }
                                 return Ok(());
                             }
-                            Command::Open { generation: g, path, layout, typography, footer, position, progress } => {
+                            Command::Open { generation: g, path, layout, typography, page, position, progress } => {
                                 generation = g;
                                 doc = None;
                                 dimensions = (layout.width, layout.height);
-                                let mut d = engine.open(&path, &layout, Some((&typography, footer)))?;
+                                let mut d = engine.open(&path, &layout, Some((&typography, &page)))?;
                                 d.remember_progress(position.clone(), progress);
                                 if !position.0.is_empty()
                                     && let Err(e) = d.go_to_position(&position)
@@ -334,11 +335,11 @@ impl Worker {
                                 }
                                 doc = Some(d);
                             }
-                            Command::Layout { generation: g, typography, footer, position } => {
+                            Command::Layout { generation: g, typography, page, position } => {
                                 generation = g;
                                 if let Some(d) = &mut doc {
                                     d.go_to_position(&position)?;
-                                    d.set_typography(&typography, dpi, footer)?;
+                                    d.set_typography(&typography, dpi, &page)?;
                                 }
                             }
                             Command::Page { generation: g, number } => {
@@ -551,7 +552,7 @@ mod tests {
         let layout = |generation| Command::Layout {
             generation,
             typography: Typography::default(),
-            footer: true,
+            page: PageLayout::default(),
             position: Position::default(),
         };
         tx.send(layout(2)).unwrap();

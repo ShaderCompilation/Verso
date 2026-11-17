@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::page_layout::PageLayout;
+
 pub use crengine::{CreDocument, CreEngine};
 
 /// Page layout settings, in pixels.
@@ -46,15 +48,18 @@ impl TextShaping {
 pub struct Typography {
     pub font: String,
     pub size_pt: f32,
-    /// 0 = tight/narrow, 1 = normal, 2 = loose/wide.
+    /// 0 = tight, 1 = normal, 2 = loose.
     pub spacing: usize,
-    pub margins: usize,
     pub justify: bool,
+    /// The old Narrow/Normal/Wide preset, read once to migrate settings into
+    /// `PageLayout` and never written again.
+    #[serde(rename = "margins", skip_serializing)]
+    pub legacy_margins: Option<usize>,
 }
 
 impl Default for Typography {
     fn default() -> Self {
-        Self { font: "Literata".into(), size_pt: 10.0, spacing: 1, margins: 1, justify: true }
+        Self { font: "Literata".into(), size_pt: 10.0, spacing: 1, justify: true, legacy_margins: None }
     }
 }
 
@@ -62,7 +67,11 @@ impl Typography {
     pub fn normalize(&mut self) {
         self.size_pt = if self.size_pt.is_finite() { self.size_pt.clamp(6.0, 24.0) } else { 10.0 };
         self.spacing = self.spacing.min(2);
-        self.margins = self.margins.min(2);
+    }
+    /// The engine's font size in pixels.
+    pub fn font_px(&self, dpi: f32) -> i32 {
+        let size = if self.size_pt.is_finite() { self.size_pt.clamp(6.0, 24.0) } else { 10.0 };
+        (size * dpi / 72.0).round() as i32
     }
 }
 
@@ -172,7 +181,7 @@ pub trait Document {
     fn progress(&mut self) -> u32;
     fn toc(&mut self) -> Result<Vec<TocEntry>>;
     fn metadata(&mut self) -> Metadata;
-    fn set_typography(&mut self, t: &Typography, dpi: u32, footer: bool) -> Result<()>;
+    fn set_typography(&mut self, t: &Typography, dpi: u32, layout: &PageLayout) -> Result<()>;
     fn has_images(&mut self) -> bool;
 
     fn page_count(&mut self) -> usize;
@@ -266,16 +275,17 @@ mod tests {
         assert!(!metadata.title.is_empty());
         assert!(!engine.fonts().is_empty());
         assert!(doc.go_to_position(&Position("/no-such-element[999]".into())).is_err());
-        doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, true).unwrap();
+        doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &PageLayout::default())
+            .unwrap();
         assert!(doc.page_count() > pages, "a bigger font should need more pages");
         doc.go_to_position(&position).unwrap();
         let typography = Typography { size_pt: 12.0, justify: false, ..Typography::default() };
-        doc.set_typography(&typography, 150, true).unwrap();
+        doc.set_typography(&typography, 150, &PageLayout::default()).unwrap();
         doc.go_to_position(&position).unwrap();
         assert!(doc.progress().abs_diff(progress) < 100, "position should preserve text progress");
         doc.draw(&mut buf, 600).unwrap();
         let left = buf.clone();
-        doc.set_typography(&Typography { justify: true, ..typography }, 150, true).unwrap();
+        doc.set_typography(&Typography { justify: true, ..typography }, 150, &PageLayout::default()).unwrap();
         doc.draw(&mut buf, 600).unwrap();
         assert_ne!(left, buf, "justification changes rendering");
         drop(doc);
@@ -388,7 +398,8 @@ mod tests {
         // A relayout invalidates a running search; the same query then finds
         // the same ranges at new page numbers.
         doc.search_start("ada").unwrap();
-        doc.set_typography(&Typography { size_pt: 16.0, ..Typography::default() }, 150, true).unwrap();
+        doc.set_typography(&Typography { size_pt: 16.0, ..Typography::default() }, 150, &PageLayout::default())
+            .unwrap();
         assert_eq!(doc.search_step(std::time::Duration::from_secs(1)).unwrap().status, SearchStatus::Finished);
         let (relaid, _) = search_all(&mut doc, "ada", std::time::Duration::from_secs(1));
         assert_eq!(
@@ -459,7 +470,12 @@ mod tests {
             .unwrap();
         assert_eq!(crossed.range.start, fixed, "handle crossing keeps its opposite endpoint fixed");
         // Endpoints must remain text positions when typography changes.
-        doc.set_typography(&Typography { size_pt: 12.0, ..Typography::default() }, 150, false).unwrap();
+        doc.set_typography(
+            &Typography { size_pt: 12.0, ..Typography::default() },
+            150,
+            &PageLayout { bottom: crate::page_layout::Bar::default(), ..PageLayout::default() },
+        )
+        .unwrap();
         let restored = doc.select(0, &SelectionQuery::Range(hello.range.clone())).unwrap().unwrap();
         assert_eq!(restored.text, "Hello");
         assert_eq!(restored.range, hello.range);
@@ -515,7 +531,9 @@ mod tests {
         drop(doc);
         let restored = crate::annotations::Collection::load(&store, "milestone").unwrap();
         let mut landscape = engine.open(&path, &Layout { width: 800, height: 600, ..layout.clone() }, None).unwrap();
-        landscape.set_typography(&Typography { size_pt: 18.0, ..Typography::default() }, 150, true).unwrap();
+        landscape
+            .set_typography(&Typography { size_pt: 18.0, ..Typography::default() }, 150, &PageLayout::default())
+            .unwrap();
         let saved = &restored.records[0];
         let range = landscape.validate_range(&saved.range, &saved.quotation).unwrap().unwrap();
         assert_eq!(range.range, all);

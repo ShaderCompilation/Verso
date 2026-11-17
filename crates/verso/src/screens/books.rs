@@ -879,7 +879,7 @@ impl Books {
             path,
             layout,
             typography: settings.typography,
-            footer: settings.footer,
+            page: settings.page_layout,
             position: saved.position,
             progress: saved.progress,
         });

@@ -86,6 +86,8 @@ def main():
                         help='Controlled book font size; use a new size to measure layout-cache misses')
     parser.add_argument('--idle-seconds', type=int, default=0,
                         help='Sample settled idle CPU outside the timed turns (0 skips)')
+    parser.add_argument('--page-layout', type=json.loads,
+                        help='JSON for settings.page_layout (reader bars and margins); default is the old footer')
     parser.add_argument('--queued-input', action='store_true',
                         help='Allow updates after subsequent touches; require 24 taps, frames and saved-page advances')
     parser.add_argument('--annotation-count', type=int, choices=[0, 100, 1000])
@@ -122,6 +124,8 @@ def main():
                               'margins': 0, 'justify': True}, 'footer': True,
                 'library_folders': [APP + '/books'], 'library_sort': 'title',
                 'orientation': args.orientation, 'page_flash': args.page_flash}
+    if args.page_layout is not None:
+        settings['page_layout'] = args.page_layout
     upload(state + '/settings.json', json.dumps(settings).encode())
     if args.annotation_count is not None:
         assert args.experiment == 'annotations' and args.annotation_fixture

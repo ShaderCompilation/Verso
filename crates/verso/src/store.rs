@@ -6,6 +6,7 @@ pub mod position;
 use crate::document::{Position, TextShaping, Typography};
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 use crate::library::{LibraryIndex, Sort};
+use crate::page_layout::PageLayout;
 pub use crate::platform::Orientation;
 pub use crate::reader::TapZones;
 use anyhow::{Context, Result};
@@ -21,7 +22,12 @@ use std::path::{Path, PathBuf};
 #[serde(default)]
 pub struct Settings {
     pub typography: Typography,
-    pub footer: bool,
+    /// Margins and the reader's top and bottom bars.
+    pub page_layout: PageLayout,
+    /// The old progress-footer toggle, read once to migrate into
+    /// `page_layout` and never written again.
+    #[serde(rename = "footer", skip_serializing)]
+    pub legacy_footer: Option<bool>,
     pub sleep_screen: SleepScreen,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library_folder: Option<PathBuf>, // Legacy single-folder setting.
@@ -44,7 +50,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             typography: Typography::default(),
-            footer: true,
+            page_layout: PageLayout::default(),
+            legacy_footer: None,
             sleep_screen: SleepScreen::Cover,
             library_folder: None,
             library_folders: None,
@@ -56,6 +63,14 @@ impl Default for Settings {
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
             text_shaping: TextShaping::default(),
         }
+    }
+}
+impl Settings {
+    /// Moves old fields into their replacements and clamps out-of-range values.
+    pub fn normalize(&mut self) {
+        self.page_layout.migrate(self.legacy_footer.take(), self.typography.legacy_margins.take());
+        self.page_layout.normalize();
+        self.typography.normalize();
     }
 }
 pub const DEFAULT_PAGE_FLASH: u32 = 6;
@@ -118,7 +133,7 @@ impl Store {
     }
     pub fn settings(&self) -> Settings {
         let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
-        s.typography.normalize();
+        s.normalize();
         if !verso_mdns::valid_label(&s.hostname) {
             s.hostname = verso_mdns::DEFAULT_LABEL.to_owned();
         }
@@ -373,12 +388,36 @@ mod tests {
     #[test]
     fn existing_settings_default_to_covers_and_amazon_round_trips() -> Result<()> {
         let mut settings: Settings = serde_json::from_str(r#"{"footer":false}"#)?;
+        settings.normalize();
         assert_eq!(settings.sleep_screen, SleepScreen::Cover);
-        assert!(!settings.footer);
+        assert!(!settings.page_layout.bottom.on);
         settings.sleep_screen = SleepScreen::Amazon;
         let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
         assert_eq!(restored.sleep_screen, SleepScreen::Amazon);
-        assert!(!restored.footer);
+        assert!(!restored.page_layout.bottom.on);
+        Ok(())
+    }
+    #[test]
+    fn old_footer_and_margins_migrate_once_and_are_not_written() -> Result<()> {
+        let old = r#"{"typography":{"font":"Literata","size_pt":11.0,"spacing":0,"margins":2,"justify":false},"footer":false}"#;
+        let mut settings: Settings = serde_json::from_str(old)?;
+        settings.normalize();
+        assert_eq!(settings.page_layout.margins.sides, 10);
+        assert!(!settings.page_layout.bottom.on);
+        assert_eq!((settings.typography.size_pt, settings.typography.justify), (11.0, false));
+        let json = serde_json::to_string(&settings)?;
+        assert!(!json.contains("footer") && !json.contains(r#""margins":2"#), "{json}");
+        let mut restored: Settings = serde_json::from_str(&json)?;
+        restored.normalize();
+        assert_eq!(restored.page_layout, settings.page_layout);
+        // Normal margins and the footer on are exactly the new defaults.
+        let mut normal: Settings = serde_json::from_str(r#"{"typography":{"margins":1},"footer":true}"#)?;
+        normal.normalize();
+        assert_eq!(normal.page_layout, PageLayout::default());
+        // Out-of-range margins are clamped.
+        let mut wild: Settings = serde_json::from_str(r#"{"page_layout":{"margins":{"sides":1,"top":50}}}"#)?;
+        wild.normalize();
+        assert_eq!((wild.page_layout.margins.sides, wild.page_layout.margins.top), (2, 20));
         Ok(())
     }
     #[test]

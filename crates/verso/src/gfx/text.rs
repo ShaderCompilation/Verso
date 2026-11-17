@@ -270,8 +270,23 @@ impl TextRenderer {
             return;
         }
         let key = self.ensure_layout(text, style, Some(rect.w as f32), max_lines, align);
+        self.paint(canvas, &key, style, rect, align);
+    }
+
+    /// Draws one line laid out without a width limit, from the left of
+    /// `rect` and clipped to it. It shares its layout with `width`, so
+    /// measuring a text and then drawing it shapes it only once.
+    pub fn line_measured(&mut self, canvas: &mut Canvas, text: &str, style: TextStyle, rect: Rect) {
+        if rect.is_empty() || text.is_empty() {
+            return;
+        }
+        let key = self.ensure_layout(text, style, None, 0, HAlign::Left);
+        self.paint(canvas, &key, style, rect, HAlign::Left);
+    }
+
+    fn paint(&mut self, canvas: &mut Canvas, key: &Key, style: TextStyle, rect: Rect, align: HAlign) {
         let Self { fonts, glyphs, layouts, .. } = self;
-        let buffer = &layouts[&key];
+        let buffer = &layouts[key];
 
         // Centre the block from the top of the first line's capitals to the
         // last baseline.

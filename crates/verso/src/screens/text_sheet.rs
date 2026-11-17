@@ -2,6 +2,7 @@
 use crate::document::{FontFace, Typography};
 use crate::geom::Rect;
 use crate::gfx::{Family, HAlign};
+use crate::page_layout::PageLayout;
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -12,6 +13,12 @@ pub enum TextEvent {
     Close,
     Fonts,
     Changed,
+}
+/// Side margins of the old Narrow, Normal and Wide presets, in millimetres.
+const MARGIN_PRESETS: [u32; 3] = [4, 7, 10];
+/// The preset closest to a side margin.
+fn margin_preset(sides: u32) -> usize {
+    (0..3).min_by_key(|&i| MARGIN_PRESETS[i].abs_diff(sides)).unwrap_or(1)
 }
 pub struct TextSheet {
     sheet: Sheet,
@@ -25,7 +32,7 @@ pub struct TextSheet {
     footer: Toggle,
 }
 impl TextSheet {
-    pub fn new(t: &Theme, screen: Rect, typography: &Typography, footer: bool) -> Self {
+    pub fn new(t: &Theme, screen: Rect, typography: &Typography, layout: &PageLayout) -> Self {
         let sheet = Sheet::open("Text", t.mm(87.0), screen, t);
         let top = sheet.content(t).y;
         let rows: Vec<_> = ["Font", "Size", "Spacing", "Margins", "Justify", "Progress footer"]
@@ -44,11 +51,11 @@ impl TextSheet {
         size.place(control(1), t.mm(16.0));
         let mut spacing = Segmented::texts(&["Tight", "Normal", "Loose"], typography.spacing);
         spacing.place(control(2));
-        let mut margins = Segmented::texts(&["Narrow", "Normal", "Wide"], typography.margins);
+        let mut margins = Segmented::texts(&["Narrow", "Normal", "Wide"], margin_preset(layout.margins.sides));
         margins.place(control(3));
         let mut justify = Toggle::new(typography.justify);
         justify.place(screen.w - t.margin, rows[4].0.center().y, t);
-        let mut footer_toggle = Toggle::new(footer);
+        let mut footer_toggle = Toggle::new(layout.bottom.on);
         footer_toggle.place(screen.w - t.margin, rows[5].0.center().y, t);
         let mut result = Self {
             font: control(0),
@@ -84,7 +91,9 @@ impl TextSheet {
             false
         }
     }
-    pub fn on_gesture(&mut self, g: &Gesture, t: &mut Typography, footer: &mut bool) -> Option<TextEvent> {
+    /// Until the Page layout screen exists, Margins sets the side margin to
+    /// one of the old presets and the footer toggle switches the bottom bar.
+    pub fn on_gesture(&mut self, g: &Gesture, t: &mut Typography, layout: &mut PageLayout) -> Option<TextEvent> {
         if self.sheet.on_gesture(g) {
             return Some(TextEvent::Close);
         }
@@ -92,7 +101,7 @@ impl TextSheet {
             return Some(TextEvent::Fonts);
         }
         let before = t.clone();
-        let old_footer = *footer;
+        let old_layout = layout.clone();
         if let Some(step) = self.size.on_gesture(g) {
             self.step(step, t);
         }
@@ -100,15 +109,15 @@ impl TextSheet {
             t.spacing = i;
         }
         if let Some(i) = self.margins.on_gesture(g) {
-            t.margins = i;
+            layout.margins.sides = MARGIN_PRESETS[i.min(2)];
         }
         if self.justify.on_gesture(g).is_some() {
             t.justify = self.justify.on;
         }
         if self.footer.on_gesture(g).is_some() {
-            *footer = self.footer.on;
+            layout.bottom.on = self.footer.on;
         }
-        (before != *t || old_footer != *footer).then_some(TextEvent::Changed)
+        (before != *t || old_layout != *layout).then_some(TextEvent::Changed)
     }
     pub fn draw(&self, cx: &mut DrawCx, t: &Typography) {
         self.sheet.draw(cx);

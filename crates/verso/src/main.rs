@@ -18,6 +18,7 @@ mod geom;
 mod gfx;
 mod library;
 mod logging;
+mod page_layout;
 mod platform;
 mod reader;
 mod screens;

@@ -1,4 +1,5 @@
 //! Reader logic independent of widgets and crengine.
+pub mod bars;
 use crate::document::{TocEntry, thread::Page};
 use crate::geom::{Point, Rect};
 use crate::platform::RefreshMode;
@@ -50,12 +51,6 @@ pub fn tap_zone(screen: Rect, p: Point, zones: TapZones) -> Zone {
 }
 pub fn chapter(toc: &[TocEntry], page: usize) -> Option<usize> {
     toc.iter().enumerate().rev().find(|(_, c)| c.level <= 2 && c.page <= page).map(|(i, _)| i)
-}
-pub fn footer(toc: &[TocEntry], page: usize, pages: usize) -> String {
-    let title = chapter(toc, page).map(|i| toc[i].title.as_str()).unwrap_or("Book");
-    let end = toc.iter().find(|c| c.level <= 2 && c.page > page).map_or(pages, |c| c.page);
-    let left = end.saturating_sub(page + 1);
-    format!("{title} · {left} {} left", if left == 1 { "page" } else { "pages" })
 }
 #[derive(Default)]
 pub struct PageCache {
@@ -169,14 +164,7 @@ mod tests {
         assert!(!c.request(12));
     }
     #[test]
-    fn footer_ignores_deep_subsections_and_flash_counter_resets() {
-        let toc = vec![
-            TocEntry { title: "One".into(), level: 1, page: 0, position: Position::default() },
-            TocEntry { title: "Detail".into(), level: 3, page: 2, position: Position::default() },
-            TocEntry { title: "Two".into(), level: 1, page: 10, position: Position::default() },
-        ];
-        assert_eq!(footer(&toc, 8, 20), "One · 1 page left");
-        assert_eq!(footer(&toc, 19, 20), "Two · 0 pages left");
+    fn flash_counter_resets() {
         let mut f = Refresh::new(6);
         for _ in 0..5 {
             assert_eq!(f.turn(false, false), RefreshMode::Page);
