@@ -205,6 +205,7 @@ mod tests {
             position: Position("latest exact anchor".into()),
             page: 7,
             progress: 3456,
+            speed: None,
             at: 99,
         })?;
         writer.flush()?;

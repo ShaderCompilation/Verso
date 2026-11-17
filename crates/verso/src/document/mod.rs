@@ -179,6 +179,12 @@ pub trait Document {
     fn go_to_position(&mut self, position: &Position) -> Result<()>;
     /// Text offset in ten-thousandths; independent of page count.
     fn progress(&mut self) -> u32;
+    /// Characters of text before the current page; independent of layout.
+    /// None when not known cheaply (the saved page right after opening).
+    fn text_offset(&mut self) -> Option<u64>;
+    /// Text offsets of `positions` (e.g. chapter starts) and the book's
+    /// text length. None when the book has no text.
+    fn text_offsets(&mut self, positions: &[Position]) -> Option<(Vec<Option<u64>>, u64)>;
     fn toc(&mut self) -> Result<Vec<TocEntry>>;
     fn metadata(&mut self) -> Metadata;
     fn set_typography(&mut self, t: &Typography, dpi: u32, layout: &PageLayout) -> Result<()>;
@@ -295,10 +301,26 @@ mod tests {
         reopened.go_to_position(&position).unwrap();
         assert_eq!(reopened.current_page(), 5);
         assert_eq!(reopened.progress(), 4321);
+        assert_eq!(reopened.text_offset(), None, "the saved page isn't counted on open");
         reopened.go_to_page(6);
         assert!(reopened.progress().abs_diff(progress) < 1000, "other pages are counted");
+        let six = reopened.text_offset().expect("counted pages have an offset");
+        reopened.go_to_page(7);
+        assert!(reopened.text_offset().unwrap() > six, "offsets grow page by page");
+        // Chapter starts: in order, within the book, independent of layout.
+        let toc = reopened.toc().unwrap();
+        let positions: Vec<_> = toc.iter().map(|e| e.position.clone()).collect();
+        let (starts, length) = reopened.text_offsets(&positions).unwrap();
+        let starts: Vec<u64> = starts.into_iter().map(|s| s.expect("TOC entries are in the text")).collect();
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]), "{starts:?}");
+        assert!(starts.iter().all(|&s| s <= length));
+        reopened
+            .set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &PageLayout::default())
+            .unwrap();
+        assert_eq!(reopened.text_offsets(&positions).unwrap(), (starts.into_iter().map(Some).collect(), length));
         reopened.go_to_page(0);
         assert_eq!(reopened.progress(), 0, "the first page is the start");
+        assert_eq!(reopened.text_offset(), Some(0));
         drop(reopened);
         selection_checks(&engine, &layout);
         search_checks(&engine, &layout);

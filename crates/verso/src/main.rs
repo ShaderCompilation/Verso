@@ -12,6 +12,7 @@ compile_error!("Enable a backend: `desktop` (default) or `kindle`.");
 
 mod annotations;
 mod app;
+mod clock;
 mod dictionary;
 mod document;
 mod geom;

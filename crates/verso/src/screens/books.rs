@@ -865,6 +865,7 @@ impl Books {
             saved.position.clone(),
         ));
         self.reader.as_mut().unwrap().annotations(annotation_book);
+        self.reader.as_mut().unwrap().reading_speed(saved.reading_speed, self.store.reading_speed());
         let dpi = cx.theme.dpi;
         let margin = (7.0 * dpi / 25.4).round() as u32;
         let layout = Layout {

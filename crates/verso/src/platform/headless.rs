@@ -1,6 +1,7 @@
 //! A simulator without a window, for screenshots: plays scripted touches,
 //! saves the screen as a PNG after every update, then quits.
-//! Screen size and density follow the simulator's VERSO_SIM_SIZE / VERSO_SIM_DPI.
+//! Screen size, density and battery follow the simulator's VERSO_SIM_SIZE,
+//! VERSO_SIM_DPI and VERSO_SIM_BATTERY.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::desktop::sim_screen;
+use super::desktop::{sim_battery, sim_screen};
 use super::{DeviceInfo, Event, Frontlight, Orientation, Platform, ScriptStep, Touch, TouchPhase, Update, Waker};
 use crate::geom::Point;
 use crate::gfx::{Canvas, save_gray_png};
@@ -95,6 +96,9 @@ impl Headless {
 }
 
 impl Platform for Headless {
+    fn battery(&mut self) -> Option<super::Battery> {
+        sim_battery()
+    }
     fn set_busy(&mut self, busy: bool) {
         self.busy = busy;
     }

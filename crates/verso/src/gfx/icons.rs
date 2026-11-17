@@ -34,11 +34,13 @@ pub enum Icon {
     ClipboardPaste,
     Search,
     Trash,
+    Battery,
+    BatteryCharging,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 22] = [
+    pub const ALL: [Icon; 24] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -61,6 +63,8 @@ impl Icon {
         Icon::ClipboardPaste,
         Icon::Search,
         Icon::Trash,
+        Icon::Battery,
+        Icon::BatteryCharging,
     ];
 
     fn svg(self) -> &'static str {
@@ -87,6 +91,8 @@ impl Icon {
             Icon::ClipboardPaste => include_str!("../../../../assets/icons/clipboard-paste.svg"),
             Icon::Pencil => include_str!("../../../../assets/icons/pencil.svg"),
             Icon::Trash => include_str!("../../../../assets/icons/trash-2.svg"),
+            Icon::Battery => include_str!("../../../../assets/icons/battery.svg"),
+            Icon::BatteryCharging => include_str!("../../../../assets/icons/battery-charging.svg"),
         }
     }
 }

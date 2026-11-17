@@ -34,6 +34,8 @@ pub struct Kindle {
     sleeping: bool,
     native_sleep: bool,
     status: Option<(Instant, Option<super::power::Status>)>,
+    /// Battery and cable from sysfs; powerd (`lipc`) when missing.
+    power_files: Option<super::power::PowerFiles>,
 }
 
 impl Kindle {
@@ -70,14 +72,21 @@ impl Kindle {
             sleeping: false,
             native_sleep: false,
             status: None,
+            power_files: {
+                let files = super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply"));
+                log::info!("battery from {}", if files.is_some() { "sysfs" } else { "powerd" });
+                files
+            },
         })
     }
 
     fn system_status(&mut self) -> Option<super::power::Status> {
-        // Battery and USB queries in one event share one short-lived snapshot,
-        // avoiding three lipc subprocesses before the first frame.
+        // The fallback when sysfs is missing. Battery and USB queries share
+        // one snapshot: power events, USB and wake replace it at once, the
+        // once-a-minute poll only every 5 minutes, since each read starts a
+        // process (~29 ms) on the UI thread.
         if let Some((at, status)) = self.status
-            && at.elapsed() < Duration::from_millis(100)
+            && at.elapsed() < Duration::from_secs(5 * 60)
         {
             return status;
         }
@@ -101,6 +110,14 @@ impl Kindle {
 
 impl Platform for Kindle {
     fn battery(&mut self) -> Option<Battery> {
+        if let Some(files) = &self.power_files {
+            let started = Instant::now();
+            let battery = files.battery();
+            log::debug!("battery read in {} us: {battery:?}", started.elapsed().as_micros());
+            if battery.is_some() {
+                return battery;
+            }
+        }
         if let Some(battery) = self.system_status().and_then(|s| s.battery) {
             return Some(battery);
         }
@@ -112,6 +129,11 @@ impl Platform for Kindle {
     fn usb_connected(&mut self) -> Option<bool> {
         // Unlike isCharging, this stays true for a full battery on a cable.
         // usbState is an undocumented enum and does not mean "connected != 0".
+        // The charger supply's `online` matched powerd's `usb` plugged and
+        // unplugged (measured).
+        if let Some(usb) = self.power_files.as_ref().and_then(|f| f.usb()) {
+            return Some(usb);
+        }
         self.system_status()?.usb
     }
 
@@ -185,7 +207,8 @@ impl Platform for Kindle {
             }
             if !self.sleeping && Instant::now() >= self.battery_due {
                 self.battery_due = Instant::now() + Duration::from_secs(60);
-                return Ok(Some(self.system_event(Event::PowerChanged)));
+                // Unlike real power events, the poll keeps the powerd snapshot.
+                return Ok(Some(Event::PowerChanged));
             }
             // Poll at least once, even when the deadline has passed (a zero
             // timeout means "anything waiting?").

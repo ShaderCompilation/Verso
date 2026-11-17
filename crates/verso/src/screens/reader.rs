@@ -12,7 +12,8 @@ use crate::geom::Rect;
 use crate::gfx::HAlign;
 use crate::page_layout::PageLayout;
 use crate::platform::RefreshMode;
-use crate::reader::{self, PageCache, Refresh, Zone};
+use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
+use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
 use crate::screens::contents::{Contents, ContentsEvent};
 use crate::screens::dictionary::{Lookup, LookupEvent, SelectionAction, SelectionActions};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
@@ -75,6 +76,27 @@ pub struct Reader {
     annotations: annotations::State,
     extension: Option<annotations::ExtendBar>,
     lookup_query: Option<String>,
+    bars: BarState,
+}
+/// What the bars show beyond the page itself: chapter offsets, reading
+/// speed, and the clock and battery as of the last reader redraw.
+#[derive(Default)]
+struct BarState {
+    /// The generation the book was opened with; its text map carries it.
+    opened: u64,
+    text: Option<Arc<TextMap>>,
+    speed: ReadingSpeed,
+    sampler: Sampler,
+    /// The next page shown came from a single step (`go`), not a jump.
+    stepping: bool,
+    /// A sample was added since the global average was last written.
+    unsaved_seed: bool,
+    clock: Option<crate::clock::LocalTime>,
+    battery: Option<crate::platform::Battery>,
+    /// Clock and battery are read again at the next draw.
+    live_due: bool,
+    /// The last draw showed the bare page, with no overlay.
+    drawn_bare: bool,
 }
 /// Highlight requests share the selection reply; this bit keeps their IDs apart.
 const HIGHLIGHT_ID: u64 = 1 << 63;
@@ -149,7 +171,13 @@ impl Reader {
             annotations: annotations::State::default(),
             extension: None,
             lookup_query: None,
+            bars: BarState { opened: generation, live_due: true, ..BarState::default() },
         }
+    }
+    /// The book's saved reading speed and the average carried over from
+    /// previous books, for the time-left items.
+    pub fn reading_speed(&mut self, book: Option<ReadingSpeed>, global: Option<ReadingSpeed>) {
+        self.bars.speed = ReadingSpeed::start(book, global);
     }
     pub fn annotations(&mut self, mut book: crate::library::Book) {
         self.dictionary_language = book.metadata.language.clone();
@@ -237,6 +265,25 @@ impl Reader {
                     cx.redraw();
                 }
             }
+            Reply::TextMap { generation, map } if generation == self.bars.opened => {
+                self.bars.text = Some(map);
+                // Time left and ticks can now show; the first page is often up already.
+                let layout = &self.settings.page_layout;
+                let uses = |bar: &crate::page_layout::Bar| {
+                    bar.on
+                        && bar.slots.iter().flatten().any(|i| {
+                            matches!(
+                                i,
+                                crate::page_layout::BarItem::TimeLeftChapter
+                                    | crate::page_layout::BarItem::TimeLeftBook
+                            )
+                        })
+                };
+                let time_left = self.bars.speed.value().is_some() && (uses(&layout.top) || uses(&layout.bottom));
+                if self.shown.is_some() && (time_left || layout.progress != crate::page_layout::ProgressLine::Off) {
+                    cx.redraw();
+                }
+            }
             Reply::Page(page)
                 if page.generation == self.cache.generation
                     && (self.annotations.service.is_none()
@@ -313,6 +360,25 @@ impl Reader {
             return;
         }
         self.laying_out = false;
+        let previous = self.shown.as_ref().map(|p| p.number);
+        let turn = match previous {
+            Some(n) if std::mem::take(&mut self.bars.stepping) && !layout_changed => {
+                if page.number == n + 1 {
+                    Turn::Forward
+                } else if page.number + 1 == n {
+                    Turn::Back
+                } else {
+                    Turn::Jump
+                }
+            }
+            _ => Turn::Jump,
+        };
+        if let Some(sample) = self.bars.sampler.shown(cx.now, page.offset, turn) {
+            self.bars.speed.add(sample);
+            self.bars.unsaved_seed = true;
+        }
+        self.bars.stepping = false;
+        self.bars.live_due = true;
         if !self.selection.extending {
             self.selection.clear();
         }
@@ -366,6 +432,7 @@ impl Reader {
         self.jump_destination = None;
         self.target = page;
         self.turn_pending = true;
+        self.bars.stepping = true;
         if let Some(p) = self.cache.get(page) {
             self.display(p, cx);
         } else if self.cache.request(page) {
@@ -384,6 +451,7 @@ impl Reader {
         }
         self.pending_position = None;
         self.turn_pending = true;
+        self.bars.stepping = false;
         if let Some(p) = page.map(|p| p.min(self.pages.saturating_sub(1))).and_then(|p| self.cache.get(p)) {
             self.jump = 0;
             self.jump_destination = None;
@@ -705,6 +773,7 @@ impl Reader {
             position: page.position.clone(),
             page: page.number,
             progress: page.progress,
+            speed: (self.bars.speed.samples > 0).then_some(self.bars.speed),
             at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
         };
         match self.persistence.save(position) {
@@ -713,6 +782,14 @@ impl Reader {
                 self.save_error = Some(format!("{e:#}"));
                 self.worker.waker().wake();
             }
+        }
+    }
+    /// Carries this book's reading speed over to the next new book. Written
+    /// on close and sleep, not per page turn.
+    fn save_seed(&mut self) {
+        if self.bars.unsaved_seed && self.bars.speed.value().is_some() {
+            self.persistence.seed(self.bars.speed);
+            self.bars.unsaved_seed = false;
         }
     }
     fn flush_position(&mut self) -> anyhow::Result<()> {
@@ -731,6 +808,7 @@ impl Reader {
         self.flush_text_settings()?;
         self.annotations.flush()?;
         self.flush_position()?;
+        self.save_seed();
         if let Some(worker) = &self.dictionary {
             worker.flush()?;
         }
@@ -756,6 +834,7 @@ fn bar_data<'a>(
     page: Option<&Page>,
     target: usize,
     pages: usize,
+    bars: &'a BarState,
 ) -> reader::bars::BarData<'a> {
     reader::bars::BarData {
         toc,
@@ -764,94 +843,16 @@ fn bar_data<'a>(
         page: page.map_or(target, |p| p.number),
         pages,
         progress: page.map_or(0, |p| p.progress),
+        offset: page.and_then(|p| p.offset),
+        text: bars.text.as_deref(),
+        speed: bars.speed.value(),
+        clock: bars.clock,
+        battery: bars.battery,
     }
 }
 
-impl Screen for Reader {
-    fn fills_canvas(&self) -> bool {
-        self.shown.is_some()
-    }
-
-    fn draw(&mut self, cx: &mut DrawCx) {
-        let t = cx.theme;
-        if let Overlay::Layout(view) = &self.overlay {
-            // Full screen: the page underneath isn't drawn.
-            view.draw(cx, &bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages));
-            return;
-        }
-        if let Some(page) = &self.shown {
-            cx.canvas.set_gray(&page.pixels);
-            let layout = &self.settings.page_layout;
-            if layout.top.on || layout.bottom.on {
-                let started = Instant::now();
-                let font_px = self.settings.typography.font_px(t.dpi);
-                let geometry = layout.geometry(self.screen.w, self.screen.h, t.dpi, font_px);
-                let data = bar_data(&self.toc, &self.metadata, Some(page), self.target, self.pages);
-                bars::draw(cx, layout, &geometry, &data);
-                log::debug!("bars drawn in {} us", started.elapsed().as_micros());
-            }
-        } else {
-            cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
-        }
-        if let Some(page) = &self.shown {
-            for patch in &page.painted {
-                if patch.pixels.is_empty() {
-                    cx.canvas.highlight_rect(patch.rect);
-                } else {
-                    cx.canvas.blit_gray(patch.rect, &patch.pixels, patch.rect.w as usize);
-                }
-            }
-        }
-        if let Some((_, rects)) = &self.highlight {
-            for rect in rects {
-                cx.canvas.invert_rect(*rect);
-            }
-        }
-        self.selection.draw(cx);
-        if let Some(bar) = &mut self.extension {
-            bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
-        }
-        if !self.selection.extending
-            && let Some(bar) = &mut self.search_bar
-        {
-            bar.draw(cx, &self.search);
-        }
-        match &mut self.overlay {
-            Overlay::None => {}
-            Overlay::Menu(menu) => {
-                let title = reader::chapter(&self.toc, menu.progress.value as usize)
-                    .map(|i| self.toc[i].title.as_str())
-                    .unwrap_or("Book");
-                menu.draw(cx, title, self.pages, !self.laying_out && self.layout_at.is_none());
-            }
-            Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
-            Overlay::Layout(_) => {}
-            Overlay::Fonts(fonts) => fonts.draw(cx),
-            Overlay::Contents(contents) => contents.draw(cx),
-            Overlay::Lookup(lookup) => lookup.draw(cx),
-            Overlay::SelectionActions(actions) => actions.draw(cx),
-            Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
-            Overlay::Highlights(view) => view.draw(cx, &self.annotations),
-        }
-        if self.laying_out
-            || self.layout_at.is_some()
-            || self.error.is_some()
-            || self.save_error.is_some()
-            || self.settings_save_pending
-        {
-            let message = self
-                .error
-                .as_deref()
-                .or(self.save_error.as_ref().map(|_| "Couldn't save your place"))
-                .or(self.settings_save_pending.then_some("Couldn't save text settings"))
-                .unwrap_or(if self.shown.is_some() { "Laying out…" } else { "Opening book…" });
-            let width = self.screen.w - 2 * t.margin;
-            let r = Rect::new(t.margin, t.mm(16.0), width, t.mm(10.0));
-            cx.fill(r, PAPER);
-            cx.line(message, t.small, r, HAlign::Center);
-        }
-    }
-    fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+impl Reader {
+    fn gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         if self.selection.extending {
             if let Some(bar) = &mut self.extension {
                 let (owned, event) = bar.gesture(&g);
@@ -1061,7 +1062,8 @@ impl Screen for Reader {
                 None => {}
             },
             Overlay::Layout(view) => {
-                let data = bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages);
+                let data =
+                    bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages, &self.bars);
                 if let Some(LayoutEvent::Close) = view.on_gesture(&g, cx.theme, &data) {
                     self.leave_layout();
                     // Back to the Text sheet, with the new layout above it.
@@ -1113,6 +1115,112 @@ impl Screen for Reader {
             }
         }
         Action::None
+    }
+}
+
+impl Screen for Reader {
+    fn fills_canvas(&self) -> bool {
+        self.shown.is_some()
+    }
+
+    fn draw(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        // The clock and battery change only with the reader's own redraws
+        // (a new page, closing an overlay, wake), never with a battery poll
+        // alone. The layout screen shows them live.
+        let bare = matches!(self.overlay, Overlay::None);
+        if self.bars.live_due || bare && !self.bars.drawn_bare || matches!(self.overlay, Overlay::Layout(_)) {
+            self.bars.clock = crate::clock::LocalTime::now();
+            self.bars.battery = cx.battery;
+            self.bars.live_due = false;
+        }
+        self.bars.drawn_bare = bare;
+        if let Overlay::Layout(view) = &self.overlay {
+            // Full screen: the page underneath isn't drawn.
+            let data = bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages, &self.bars);
+            view.draw(cx, &data);
+            return;
+        }
+        if let Some(page) = &self.shown {
+            cx.canvas.set_gray(&page.pixels);
+            let layout = &self.settings.page_layout;
+            if layout.top.on || layout.bottom.on {
+                let started = Instant::now();
+                let font_px = self.settings.typography.font_px(t.dpi);
+                let geometry = layout.geometry(self.screen.w, self.screen.h, t.dpi, font_px);
+                let data = bar_data(&self.toc, &self.metadata, Some(page), self.target, self.pages, &self.bars);
+                bars::draw(cx, layout, &geometry, &data);
+                log::debug!("bars drawn in {} us", started.elapsed().as_micros());
+            }
+        } else {
+            cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
+        }
+        if let Some(page) = &self.shown {
+            for patch in &page.painted {
+                if patch.pixels.is_empty() {
+                    cx.canvas.highlight_rect(patch.rect);
+                } else {
+                    cx.canvas.blit_gray(patch.rect, &patch.pixels, patch.rect.w as usize);
+                }
+            }
+        }
+        if let Some((_, rects)) = &self.highlight {
+            for rect in rects {
+                cx.canvas.invert_rect(*rect);
+            }
+        }
+        self.selection.draw(cx);
+        if let Some(bar) = &mut self.extension {
+            bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
+        }
+        if !self.selection.extending
+            && let Some(bar) = &mut self.search_bar
+        {
+            bar.draw(cx, &self.search);
+        }
+        match &mut self.overlay {
+            Overlay::None => {}
+            Overlay::Menu(menu) => {
+                let title = reader::chapter(&self.toc, menu.progress.value as usize)
+                    .map(|i| self.toc[i].title.as_str())
+                    .unwrap_or("Book");
+                menu.draw(cx, title, self.pages, !self.laying_out && self.layout_at.is_none());
+            }
+            Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
+            Overlay::Layout(_) => {}
+            Overlay::Fonts(fonts) => fonts.draw(cx),
+            Overlay::Contents(contents) => contents.draw(cx),
+            Overlay::Lookup(lookup) => lookup.draw(cx),
+            Overlay::SelectionActions(actions) => actions.draw(cx),
+            Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
+            Overlay::Highlights(view) => view.draw(cx, &self.annotations),
+        }
+        if self.laying_out
+            || self.layout_at.is_some()
+            || self.error.is_some()
+            || self.save_error.is_some()
+            || self.settings_save_pending
+        {
+            let message = self
+                .error
+                .as_deref()
+                .or(self.save_error.as_ref().map(|_| "Couldn't save your place"))
+                .or(self.settings_save_pending.then_some("Couldn't save text settings"))
+                .unwrap_or(if self.shown.is_some() { "Laying out…" } else { "Opening book…" });
+            let width = self.screen.w - 2 * t.margin;
+            let r = Rect::new(t.margin, t.mm(16.0), width, t.mm(10.0));
+            cx.fill(r, PAPER);
+            cx.line(message, t.small, r, HAlign::Center);
+        }
+    }
+    fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        let action = self.gesture(g, cx);
+        // Menus, selection and lookups interrupt reading: the page shown
+        // now isn't timed for reading speed.
+        if !matches!(self.overlay, Overlay::None) || self.selection.selected.is_some() || self.selection.extending {
+            self.bars.sampler.reset();
+        }
+        action
     }
     fn busy(&self) -> bool {
         self.annotations.resolving
@@ -1243,6 +1351,10 @@ impl Screen for Reader {
         let _ = self.flush_text_settings();
         let _ = self.annotations.flush();
         let _ = self.flush_position();
+        self.save_seed();
+        // Sleep interrupts reading; after wake the bars show the new time.
+        self.bars.sampler.reset();
+        self.bars.live_due = true;
         // Dropping the controls cancels held steppers and slider drags. An open
         // note editor stays, so typed text survives sleep.
         if !matches!(&self.overlay, Overlay::Highlights(view) if view.editing_note()) {
@@ -1254,6 +1366,7 @@ impl Screen for Reader {
         self.flush_text_settings()?;
         self.annotations.flush()?;
         self.flush_position()?;
+        self.save_seed();
         if let Some(worker) = &self.dictionary {
             worker.flush()?;
         }
@@ -1294,6 +1407,7 @@ mod tests {
             pixels: vec![255; 600 * 800],
             position: Position(format!("page-{number}")),
             progress: 0,
+            offset: None,
             images: false,
             annotation_revision: 0,
             annotations: vec![],
@@ -1311,6 +1425,137 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
         });
+    }
+
+    /// Page `number` of a book with 600 characters per page.
+    fn text_page(number: usize) -> Arc<Page> {
+        let mut page = (*test_page(1, number)).clone();
+        page.offset = Some(number as u64 * 600);
+        Arc::new(page)
+    }
+    fn at(now: Instant, theme: &Theme, f: impl FnOnce(&mut EventCx)) {
+        f(&mut EventCx {
+            theme,
+            screen: Rect::new(0, 0, 600, 800),
+            now,
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut None,
+            forced: &mut vec![],
+            needs_redraw: &mut false,
+        });
+    }
+
+    #[test]
+    fn forward_turns_measure_reading_speed_and_it_is_saved_and_carried_over() -> anyhow::Result<()> {
+        use crate::geom::Point;
+        let theme = Theme::for_dpi(150);
+        let (mut r, _commands) = test_reader("reading-speed");
+        let store = r.store.clone();
+        r.reading_speed(None, None);
+        r.pages = 40;
+        r.laying_out = false;
+        let start = Instant::now();
+        let mut clock = start;
+        // Taps 30 s apart unless said otherwise; each turn reads 600 characters.
+        let mut tap = |r: &mut Reader, x: i32, wait: u64| {
+            clock += Duration::from_secs(wait);
+            let next = if x > 400 { r.target + 1 } else { r.target.saturating_sub(1) };
+            r.cache.insert(text_page(next), r.target);
+            at(clock, &theme, |cx| {
+                r.on_gesture(Gesture::Tap(Point::new(x, 400)), cx);
+            });
+            r.after_present();
+        };
+        at(start, &theme, |cx| r.receive(Reply::Page(text_page(0)), cx));
+        for _ in 0..4 {
+            tap(&mut r, 550, 30);
+        }
+        assert_eq!(r.bars.speed.value(), None, "four samples aren't enough");
+        tap(&mut r, 550, 30);
+        assert_eq!(r.bars.speed.value(), Some(20.0));
+        assert_eq!(r.bars.speed.samples, 5);
+        // Skimming and stepping away aren't samples.
+        tap(&mut r, 550, 1);
+        tap(&mut r, 550, 600);
+        assert_eq!(r.bars.speed.samples, 5);
+        // The menu interrupts the page shown under it.
+        tap(&mut r, 550, 30);
+        assert_eq!(r.bars.speed.samples, 6);
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Tap(Point::new(300, 400)), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::Menu(_)));
+        r.overlay = Overlay::None;
+        tap(&mut r, 550, 30);
+        assert_eq!(r.bars.speed.samples, 6, "the page under the menu isn't timed");
+        // Back and forward again re-reads: no sample until a new page is read.
+        tap(&mut r, 50, 30);
+        tap(&mut r, 550, 30);
+        assert_eq!(r.bars.speed.samples, 6);
+        tap(&mut r, 550, 30);
+        assert_eq!(r.bars.speed.samples, 7);
+        // Sleep interrupts too.
+        r.on_sleep();
+        tap(&mut r, 550, 30);
+        assert_eq!(r.bars.speed.samples, 7);
+
+        // Saved with the position, without an extra write per turn.
+        r.flush_position()?;
+        let saved = store.book("book").reading_speed.expect("speed saved with the position");
+        assert_eq!(saved, r.bars.speed);
+        // Sleep wrote the global average; closing writes it again only after new samples.
+        tap(&mut r, 550, 30);
+        r.close()?;
+        drop(r);
+        let global = store.reading_speed().expect("carried over to other books");
+        assert_eq!(global, store.book("book").reading_speed.unwrap());
+
+        // Another book starts from it; this book from its own.
+        let (mut other, _) = test_reader("reading-speed");
+        other.reading_speed(store.book("other").reading_speed, store.reading_speed());
+        assert_eq!(other.bars.speed.value(), Some(20.0));
+        assert_eq!(other.bars.speed.samples, crate::reader::speed::ESTABLISHED);
+        drop(other);
+        std::fs::remove_dir_all(std::env::temp_dir().join(format!("verso-reading-speed-{}", std::process::id())))?;
+        Ok(())
+    }
+
+    #[test]
+    fn bars_take_the_clock_and_battery_only_on_reader_redraws() {
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        use crate::platform::Battery;
+        let theme = Theme::for_dpi(150);
+        let (mut r, _commands) = test_reader("live-bars");
+        r.pages = 20;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 3));
+        let (mut canvas, mut text, mut icons) = (Canvas::new(600, 800), TextRenderer::new(), IconRenderer::default());
+        let mut draw = |r: &mut Reader, percent| {
+            let mut hints = vec![];
+            let mut cx = DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints);
+            cx.battery = Some(Battery { percent, charging: false });
+            r.draw(&mut cx);
+        };
+        draw(&mut r, 80);
+        assert_eq!(r.bars.battery.map(|b| b.percent), Some(80));
+        assert!(r.bars.clock.is_some());
+        // A battery poll redraws the screen but the bars keep their value.
+        draw(&mut r, 79);
+        assert_eq!(r.bars.battery.map(|b| b.percent), Some(80));
+        // Closing an overlay, a new page and wake take fresh values.
+        r.overlay = Overlay::Text(Box::new(TextSheet::new(&theme, r.screen, &r.settings.typography)));
+        draw(&mut r, 78);
+        r.overlay = Overlay::None;
+        draw(&mut r, 77);
+        assert_eq!(r.bars.battery.map(|b| b.percent), Some(77));
+        r.cache.insert(test_page(1, 4), 3);
+        test_cx(&theme, |cx| r.go(4, cx));
+        draw(&mut r, 76);
+        assert_eq!(r.bars.battery.map(|b| b.percent), Some(76));
+        r.on_sleep();
+        draw(&mut r, 75);
+        assert_eq!(r.bars.battery.map(|b| b.percent), Some(75));
     }
 
     #[test]
@@ -1833,6 +2078,7 @@ mod tests {
                 pixels: pixels.clone(),
                 position: Position("page0".into()),
                 progress: 0,
+                offset: None,
                 images: false,
                 annotation_revision: 0,
                 annotations: vec![],
@@ -1903,6 +2149,7 @@ mod tests {
                 pixels: vec![255; 600 * 800],
                 position: Position(format!("page-{number}")),
                 progress: 0,
+                offset: None,
                 images: false,
                 annotation_revision: 0,
                 annotations: vec![],
@@ -2044,6 +2291,7 @@ mod tests {
                     pixels: (0..600 * 800).map(|i| ((i + number * 31) % 256) as u8).collect(),
                     position: Position(format!("page-{number}")),
                     progress: 2500,
+                    offset: None,
                     images: false,
                     annotation_revision: 0,
                     annotations: vec![],
@@ -2135,6 +2383,7 @@ mod tests {
                 pixels: Vec::new(),
                 position: Position(format!("page-{number}")),
                 progress: 2500,
+                offset: None,
                 images: false,
                 annotation_revision: 0,
                 annotations: vec![],
@@ -2271,6 +2520,7 @@ mod tests {
                 pixels: vec![255; 400],
                 position: Position(format!("page-{number}")),
                 progress: 2500,
+                offset: None,
                 images: false,
                 annotation_revision: 0,
                 annotations: vec![],

@@ -84,6 +84,7 @@ impl CreEngine {
             width: layout.width,
             height: layout.height,
             known_progress: None,
+            counted: false,
         };
         let css = cstr(&self.paths.engine_data.join("epub.css"))?;
         let face = CString::new(self.paths.font_face.as_str())?;
@@ -147,6 +148,9 @@ pub struct CreDocument {
     /// A saved position and its progress, so reopening a book doesn't count
     /// the whole text before the first page.
     known_progress: Option<(Position, u32)>,
+    /// The engine has its table of text offsets (built on first use, about
+    /// 45–70 ms for a 1200-page book, dropped by a re-layout).
+    counted: bool,
 }
 
 impl CreDocument {
@@ -271,7 +275,36 @@ impl Document for CreDocument {
                 return *progress;
             }
         }
+        self.counted = true;
         unsafe { sys::verso_cre_progress(self.raw) }.clamp(0, 10000) as u32
+    }
+
+    fn text_offset(&mut self) -> Option<u64> {
+        if self.current_page() == 0 {
+            return Some(0);
+        }
+        // Like `progress`, don't count the whole book just for the saved page.
+        if !self.counted && self.known_progress.is_some() {
+            let here = self.position().ok();
+            if self.known_progress.as_ref().is_some_and(|(position, _)| here.as_ref() == Some(position)) {
+                return None;
+            }
+        }
+        self.counted = true;
+        u64::try_from(unsafe { sys::verso_cre_text_offset(self.raw, std::ptr::null()) }).ok()
+    }
+
+    fn text_offsets(&mut self, positions: &[Position]) -> Option<(Vec<Option<u64>>, u64)> {
+        self.counted = true;
+        let length = u64::try_from(unsafe { sys::verso_cre_text_length(self.raw) }).ok().filter(|&l| l > 0)?;
+        let offsets = positions
+            .iter()
+            .map(|p| {
+                let p = CString::new(p.0.as_str()).ok()?;
+                u64::try_from(unsafe { sys::verso_cre_text_offset(self.raw, p.as_ptr()) }).ok()
+            })
+            .collect();
+        Some((offsets, length))
     }
 
     fn toc(&mut self) -> Result<Vec<TocEntry>> {
@@ -332,6 +365,7 @@ impl Document for CreDocument {
             )
         };
         anyhow::ensure!(rc == 0, "couldn't apply text settings");
+        self.counted = false;
         log::info!("typography applied in {:?}", started.elapsed());
         Ok(())
     }

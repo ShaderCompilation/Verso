@@ -1,7 +1,7 @@
 //! Draws the reader's top and bottom bars over the rendered page, and the
 //! same bars in miniature for the Page layout sketch.
 use crate::geom::Rect;
-use crate::gfx::{HAlign, TextStyle};
+use crate::gfx::{HAlign, Icon, TextStyle};
 use crate::page_layout::{Bar, PageGeometry, PageLayout, ProgressLine};
 use crate::reader::bars::{BarData, ItemText, Need, fit};
 use crate::ui::theme::{INK2, LINE, PAPER, Theme};
@@ -67,10 +67,12 @@ fn texts(bar: &Bar, data: &BarData, gray: u8) -> [Option<(ItemText, u8)>; 3] {
 /// centred on `rect` vertically and clipped to it.
 pub(super) fn slots(cx: &mut DrawCx, texts: &[Option<(ItemText, u8)>; 3], rect: Rect, style: &BarStyle) {
     let mut widths = [(0, 0); 3];
+    let icon = battery_icon_size(style);
+    let lead = |text: &ItemText| if text.battery.is_some() { icon + style.text.size.round() as i32 / 4 } else { 0 };
     let needs: [Option<Need>; 3] = std::array::from_fn(|i| {
         let (text, _) = texts[i].as_ref()?;
         let mut width = |s: &str| if s.is_empty() { 0 } else { cx.text.width(s, style.text).ceil() as i32 };
-        let (head, tail) = (width(&text.head), width(&text.tail));
+        let (head, tail) = (width(&text.head), width(&text.tail) + lead(text));
         widths[i] = (head, tail);
         Some(Need { min: tail, full: head + tail })
     });
@@ -94,7 +96,31 @@ pub(super) fn slots(cx: &mut DrawCx, texts: &[Option<(ItemText, u8)>; 3], rect: 
             cx.line(&text.head, text_style, Rect::new(x, rect.y, w - tail_w, rect.h), HAlign::Left);
             x + w - tail_w
         };
-        cx.line_measured(&text.tail, text_style, from(tail_x));
+        if let Some(battery) = text.battery {
+            battery_icon(cx, Rect::new(tail_x, rect.y + (rect.h - icon) / 2, icon, icon), battery, *gray);
+        }
+        cx.line_measured(&text.tail, text_style, from(tail_x + lead(text)));
+    }
+}
+
+/// The battery icon's square: a little taller than the text.
+fn battery_icon_size(style: &BarStyle) -> i32 {
+    (style.text.size * 1.25).round() as i32
+}
+
+/// A battery outline filled to its level, or with a bolt while charging.
+fn battery_icon(cx: &mut DrawCx, square: Rect, battery: crate::platform::Battery, gray: u8) {
+    let icon = if battery.charging { Icon::BatteryCharging } else { Icon::Battery };
+    cx.icons.draw(cx.canvas, icon, square, gray);
+    if !battery.charging {
+        // Inside the 24-unit outline (body x 2–18, y 7–17, 2-unit stroke),
+        // one unit clear of the stroke: x 4–16, y 9–15.
+        let unit = square.w as f32 / 24.0;
+        let full = 12.0 * unit;
+        let w = (full * battery.percent.min(100) as f32 / 100.0).round() as i32;
+        let x = square.x + (4.0 * unit).round() as i32;
+        let y = square.y + (9.0 * unit).round() as i32;
+        cx.fill(Rect::new(x, y, w.max(1), (6.0 * unit).round() as i32), gray);
     }
 }
 
@@ -129,7 +155,16 @@ mod tests {
             .into_iter()
             .map(|(title, page)| TocEntry { title: title.into(), level: 1, page, position: Position::default() })
             .collect();
-        let data = BarData { toc: &toc, title: "Dune", author: "Frank Herbert", page: 4, pages: 20, progress: 2500 };
+        let data = BarData {
+            toc: &toc,
+            title: "Dune",
+            author: "Frank Herbert",
+            page: 4,
+            pages: 20,
+            progress: 2500,
+            battery: Some(crate::platform::Battery { percent: 50, charging: false }),
+            ..BarData::default()
+        };
         let geometry = layout.geometry(600, 800, t.dpi, 21);
         let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
         draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]), layout, &geometry, &data);
@@ -160,6 +195,48 @@ mod tests {
         // A tick at the second chapter (page 10 of 20) reaches into the bar.
         let tick_y = (bottom.y + Theme::for_dpi(150).mm(TICK_MM) - 1) as usize;
         assert_eq!(pixels[tick_y * 600 + (bottom.x + bottom.w / 2) as usize], INK2);
+    }
+
+    /// Draws only a battery item in the bottom bar's right slot at 300 dpi.
+    fn battery_bar(battery: Option<crate::platform::Battery>) -> (Vec<u8>, Rect) {
+        let t = Theme::for_dpi(300);
+        let (w, h) = (1272, 1696);
+        let mut canvas = Canvas::new(w, h);
+        canvas.fill(PAPER);
+        let mut layout = PageLayout::default();
+        layout.bottom.slots = [None, None, Some(BarItem::Battery)];
+        let data = BarData { pages: 20, battery, ..BarData::default() };
+        let geometry = layout.geometry(w as i32, h as i32, t.dpi, 42);
+        let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
+        draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]), &layout, &geometry, &data);
+        if let Some(dir) = std::env::var_os("VERSO_BAR_PNG") {
+            let name = format!("battery-{battery:?}.png").replace([' ', '{', '}', ':', ','], "");
+            crate::gfx::save_gray_png(&std::path::Path::new(&dir).join(name), w, h, canvas.gray_data()).unwrap();
+        }
+        (canvas.gray_data().to_vec(), geometry.bottom_bar.unwrap())
+    }
+
+    #[test]
+    fn the_battery_shows_an_icon_filled_to_its_level_or_a_bolt() {
+        use crate::platform::Battery;
+        let ink = |pixels: &[u8], r: Rect| {
+            (r.y..r.bottom())
+                .flat_map(|y| (r.x..r.right()).map(move |x| pixels[y as usize * 1272 + x as usize]))
+                .filter(|&p| p < PAPER)
+                .count()
+        };
+        let (empty, bar) = battery_bar(None);
+        assert_eq!(ink(&empty, bar), 0, "no battery reading, nothing drawn");
+        let (low, _) = battery_bar(Some(Battery { percent: 10, charging: false }));
+        let (full, _) = battery_bar(Some(Battery { percent: 100, charging: false }));
+        let (charging, _) = battery_bar(Some(Battery { percent: 100, charging: true }));
+        assert!(ink(&full, bar) > ink(&low, bar), "the fill follows the level");
+        assert_ne!(full, charging, "charging shows the bolt instead");
+        // The icon sits before the text, inside the bar, right-aligned with it.
+        let text_w = TextRenderer::new().width("100%", Theme::for_dpi(300).caption).ceil() as i32;
+        let icon_area = Rect::new(bar.x, bar.y, bar.w - text_w, bar.h);
+        assert!(ink(&full, icon_area) > 0);
+        assert_eq!(ink(&full, bar), ink(&full, Rect::new(0, 0, 1272, 1696)), "nothing outside the bar");
     }
 
     #[test]

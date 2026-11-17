@@ -87,6 +87,11 @@ int verso_cre_get_prop(VersoCreDoc *doc, const char *key, char *buf, int buf_len
 int verso_cre_position(VersoCreDoc *doc, char *buf, int len);
 int verso_cre_restore(VersoCreDoc *doc, const char *position);
 int verso_cre_progress(VersoCreDoc *doc);
+/* Characters of book text before `position` (an XPointer, e.g. a TOC entry's),
+ * or before the current page when NULL. Independent of layout. -1 if unknown. */
+long long verso_cre_text_offset(VersoCreDoc *doc, const char *position);
+/* Characters of text in the whole book. */
+long long verso_cre_text_length(VersoCreDoc *doc);
 int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,
                          int margin, int top, int bottom, int justify, int publisher);
 int verso_cre_toc_count(VersoCreDoc *doc);

@@ -26,6 +26,8 @@ pub struct Page {
     pub pixels: Vec<u8>,
     pub position: Position,
     pub progress: u32,
+    /// Characters of text before the page, when known (see `Document::text_offset`).
+    pub offset: Option<u64>,
     pub images: bool,
     pub annotation_revision: u64,
     pub annotations: Vec<(usize, Vec<Rect>)>,
@@ -133,15 +135,48 @@ pub enum Command {
     Shutdown,
 }
 pub enum Reply {
-    Resolved { generation: u64, revision: u64, entries: Vec<Resolved>, preview: bool },
-    Selection { request: SelectionRequest, result: Result<Option<Selection>, String> },
+    Resolved {
+        generation: u64,
+        revision: u64,
+        entries: Vec<Resolved>,
+        preview: bool,
+    },
+    Selection {
+        request: SelectionRequest,
+        result: Result<Option<Selection>, String>,
+    },
     Fonts(Vec<FontFace>),
-    Opened { generation: u64, metadata: Metadata, toc: Vec<TocEntry>, pages: usize, current: usize },
+    Opened {
+        generation: u64,
+        metadata: Metadata,
+        toc: Vec<TocEntry>,
+        pages: usize,
+        current: usize,
+    },
+    /// Sent once per open, after the first page: the book's text length and
+    /// the text offsets of chapter starts (top two TOC levels), by position.
+    TextMap {
+        generation: u64,
+        map: Arc<crate::reader::TextMap>,
+    },
     Page(Arc<Page>),
-    PageFailed { generation: u64, number: usize, message: String },
-    Jumped { jump: u64, page: Arc<Page> },
-    Search { request: SearchRequest, result: Result<SearchBatch, String> },
-    Error { generation: u64, message: String },
+    PageFailed {
+        generation: u64,
+        number: usize,
+        message: String,
+    },
+    Jumped {
+        jump: u64,
+        page: Arc<Page>,
+    },
+    Search {
+        request: SearchRequest,
+        result: Result<SearchBatch, String>,
+    },
+    Error {
+        generation: u64,
+        message: String,
+    },
 }
 pub struct Worker {
     waker: Waker,
@@ -276,6 +311,7 @@ impl Worker {
                         annotations.clear();
                         annotation_revision = 0;
                     }
+                    let mut opened = false;
                     let result: Result<()> = (|| {
                         match command {
                             Command::Resolve { generation: g, revision, records, preview } => {
@@ -334,6 +370,7 @@ impl Worker {
                                     log::warn!("{e}");
                                 }
                                 doc = Some(d);
+                                opened = true;
                             }
                             Command::Layout { generation: g, typography, page, position } => {
                                 generation = g;
@@ -384,7 +421,10 @@ impl Worker {
                                 metadata.authors,
                                 metadata.language
                             );
-                            send(Reply::Opened { generation, metadata, toc: d.toc()?, pages, current });
+                            let toc = d.toc()?;
+                            let chapters: Vec<_> =
+                                toc.iter().filter(|e| e.level <= 2).map(|e| e.position.clone()).collect();
+                            send(Reply::Opened { generation, metadata, toc, pages, current });
                             send(Reply::Page(render(
                                 d,
                                 generation,
@@ -393,6 +433,21 @@ impl Worker {
                                 annotation_revision,
                                 &annotations,
                             )?));
+                            // Text offsets don't depend on the layout: once per open,
+                            // after the first page is on its way.
+                            if opened {
+                                let started = Instant::now();
+                                if let Some((offsets, length)) = d.text_offsets(&chapters) {
+                                    let starts = chapters
+                                        .into_iter()
+                                        .zip(offsets)
+                                        .filter_map(|(p, o)| Some((p.0, o?)))
+                                        .collect();
+                                    log::info!("chapter offsets in {:?}", started.elapsed());
+                                    let map = Arc::new(crate::reader::TextMap { length, starts });
+                                    send(Reply::TextMap { generation, map });
+                                }
+                            }
                         }
                         Ok(())
                     })();
@@ -508,6 +563,7 @@ fn render(
         pixels,
         position: d.position()?,
         progress: d.progress(),
+        offset: d.text_offset(),
         images: d.has_images(),
         annotation_revision: revision,
         painted,

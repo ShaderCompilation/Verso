@@ -3,6 +3,7 @@
 //! - The window keeps the panel's aspect ratio and scales to fit (start size
 //!   set by `VERSO_SIM_SCALE`, default 0.5). Screen size and density can be
 //!   changed with `VERSO_SIM_SIZE=1072x1448` and `VERSO_SIM_DPI=300`.
+//! - `VERSO_SIM_BATTERY=82` shows a battery at 82%; `82+` is charging.
 //! - The left mouse button acts as a finger.
 //! - Keys: Q / Esc quit · S sleep/wake · V toggle refresh visualisation ·
 //!   P save a screenshot to `screenshots/`.
@@ -75,6 +76,9 @@ impl Desktop {
 }
 
 impl Platform for Desktop {
+    fn battery(&mut self) -> Option<super::Battery> {
+        sim_battery()
+    }
     fn waker(&self) -> Waker {
         let proxy = self.event_loop.create_proxy();
         Waker::new(move || {
@@ -446,6 +450,14 @@ fn tint(mode: RefreshMode) -> (u32, u32, u32) {
         RefreshMode::Page => (40, 170, 80),
         RefreshMode::Full => (240, 150, 30),
     }
+}
+
+/// VERSO_SIM_BATTERY: `82` is 82%, `82+` charging; unset, no battery.
+pub(super) fn sim_battery() -> Option<super::Battery> {
+    let value = std::env::var("VERSO_SIM_BATTERY").ok()?;
+    let charging = value.ends_with('+');
+    let percent = value.trim_end_matches('+').parse::<u8>().ok()?.min(100);
+    Some(super::Battery { percent, charging })
 }
 
 /// The simulated screen: width, height and dpi, from VERSO_SIM_SIZE and

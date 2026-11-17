@@ -418,7 +418,15 @@ mod tests {
     use crate::document::{Position, TocEntry};
 
     fn data(toc: &[TocEntry]) -> BarData<'_> {
-        BarData { toc, title: "Dune", author: "Frank Herbert", page: 4, pages: 20, progress: 2500 }
+        BarData {
+            toc,
+            title: "Dune",
+            author: "Frank Herbert",
+            page: 4,
+            pages: 20,
+            progress: 2500,
+            ..BarData::default()
+        }
     }
     fn tap(view: &mut LayoutView, p: Point, t: &Theme, data: &BarData) -> Option<LayoutEvent> {
         view.on_gesture(&Gesture::Down(p), t, data);

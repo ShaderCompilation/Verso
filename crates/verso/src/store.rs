@@ -92,6 +92,9 @@ pub struct BookState {
     pub hidden_from_continue: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dictionary_set: Option<String>,
+    /// Characters per second read in this book, for the time-left items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_speed: Option<crate::reader::speed::ReadingSpeed>,
 }
 #[derive(Clone)]
 pub struct Store {
@@ -156,6 +159,13 @@ impl Store {
         let result = atomic(&self.root.join("library-navigation.json"), navigation);
         log::debug!("navigation write: {:?}, ok={}", started.elapsed(), result.is_ok());
         result
+    }
+    /// The reading speed carried over from previous books.
+    pub fn reading_speed(&self) -> Option<crate::reader::speed::ReadingSpeed> {
+        read(&self.root.join("reading-speed.json"))
+    }
+    pub fn save_reading_speed(&self, speed: &crate::reader::speed::ReadingSpeed) -> Result<()> {
+        atomic(&self.root.join("reading-speed.json"), speed)
     }
     pub fn book(&self, id: &str) -> BookState {
         read(&self.book_path(id)).unwrap_or_default()
@@ -341,11 +351,14 @@ pub fn default_library_folders() -> Vec<PathBuf> {
 }
 
 impl BookState {
-    pub fn presented(&mut self, position: Position, page: usize, progress: u32, now: u64, fresh_open: bool) {
-        self.position = position;
-        self.page = page;
-        self.progress = progress;
-        self.last_opened = now;
+    pub fn presented(&mut self, p: &position::Presented, fresh_open: bool) {
+        self.position = p.position.clone();
+        self.page = p.page;
+        self.progress = p.progress;
+        self.last_opened = p.at;
+        if p.speed.is_some() {
+            self.reading_speed = p.speed;
+        }
         if fresh_open {
             self.finished = false;
             self.hidden_from_continue = false;

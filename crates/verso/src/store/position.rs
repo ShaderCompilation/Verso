@@ -1,7 +1,7 @@
 //! One FIFO for presented positions. Barriers retry the latest failed save and
 //! acknowledge only after the durable write; speculative pages never enter it.
 use super::Store;
-use crate::{document::Position, platform::Waker};
+use crate::{document::Position, platform::Waker, reader::speed::ReadingSpeed};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -11,10 +11,14 @@ pub struct Presented {
     pub position: Position,
     pub page: usize,
     pub progress: u32,
+    /// The book's reading speed, when it has samples.
+    pub speed: Option<ReadingSpeed>,
     pub at: u64,
 }
 enum Command {
     Save(Presented),
+    /// The global reading speed that seeds books opened for the first time.
+    Seed(ReadingSpeed),
     Flush(mpsc::Sender<Result<()>>),
     Stop,
 }
@@ -26,16 +30,29 @@ pub struct Writer {
 impl Writer {
     pub fn new(store: Store, id: String, waker: Waker) -> Self {
         let mut fresh_open = true;
-        Self::start(waker, move |p| {
-            // Keep library flags, including records written before this open.
-            let mut state = store.book(&id);
-            state.presented(p.position.clone(), p.page, p.progress, p.at, fresh_open);
-            store.save_book(&id, &state)?;
-            fresh_open = false;
-            Ok(())
-        })
+        let seeds = store.clone();
+        Self::start_with_seed(
+            waker,
+            move |p| {
+                // Keep library flags, including records written before this open.
+                let mut state = store.book(&id);
+                state.presented(p, fresh_open);
+                store.save_book(&id, &state)?;
+                fresh_open = false;
+                Ok(())
+            },
+            move |speed| seeds.save_reading_speed(speed),
+        )
     }
-    fn start(waker: Waker, mut write: impl FnMut(&Presented) -> Result<()> + Send + 'static) -> Self {
+    #[cfg(test)]
+    fn start(waker: Waker, write: impl FnMut(&Presented) -> Result<()> + Send + 'static) -> Self {
+        Self::start_with_seed(waker, write, |_| Ok(()))
+    }
+    fn start_with_seed(
+        waker: Waker,
+        mut write: impl FnMut(&Presented) -> Result<()> + Send + 'static,
+        mut seed: impl FnMut(&ReadingSpeed) -> Result<()> + Send + 'static,
+    ) -> Self {
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
         let join = std::thread::Builder::new()
@@ -68,6 +85,12 @@ impl Writer {
                             }
                             let _ = done.send(result);
                         }
+                        // Best effort: a missing seed only delays time left for a new book.
+                        Command::Seed(speed) => {
+                            if let Err(e) = seed(&speed) {
+                                log::warn!("saving reading speed: {e:#}");
+                            }
+                        }
                         Command::Stop => break,
                     }
                 }
@@ -77,6 +100,10 @@ impl Writer {
     }
     pub fn save(&self, position: Presented) -> Result<()> {
         self.tx.send(Command::Save(position)).context("position worker stopped")
+    }
+    /// Queues the global reading speed; nothing waits for it.
+    pub fn seed(&self, speed: ReadingSpeed) {
+        let _ = self.tx.send(Command::Seed(speed));
     }
     pub fn drain(&self) -> impl Iterator<Item = Result<()>> + '_ {
         self.results.try_iter()
@@ -102,7 +129,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     fn presented(page: usize) -> Presented {
-        Presented { position: Position(format!("page-{page}")), page, progress: 1234, at: 42 }
+        Presented { position: Position(format!("page-{page}")), page, progress: 1234, speed: None, at: 42 }
     }
     #[test]
     fn slow_writes_leave_submission_free_and_barrier_waits_for_every_save_in_order() {

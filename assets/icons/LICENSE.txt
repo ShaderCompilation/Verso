@@ -1,5 +1,7 @@
 Icons in this folder come from Lucide 1.71.0 (https://lucide.dev), lightly adapted
-(stroke colour set to black, whitespace removed). They are used under the ISC License:
+(stroke colour set to black, whitespace removed). `battery.svg` uses the same
+terminal as `battery-charging.svg`, so the two line up. They are used under the
+ISC License:
 
 ISC License
 

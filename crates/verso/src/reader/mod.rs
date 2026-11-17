@@ -1,11 +1,22 @@
 //! Reader logic independent of widgets and crengine.
 pub mod bars;
+pub mod speed;
 use crate::document::{TocEntry, thread::Page};
 use crate::geom::{Point, Rect};
 use crate::platform::RefreshMode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+
+/// Where chapters start in the book's text, for time left and the progress
+/// line's ticks. Text offsets don't depend on the layout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextMap {
+    /// Characters of text in the book.
+    pub length: u64,
+    /// Text offset of each chapter start (top two TOC levels), by position.
+    pub starts: std::collections::HashMap<String, u64>,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Zone {
@@ -147,6 +158,7 @@ mod tests {
                 pixels: vec![],
                 position: Position::default(),
                 progress: 0,
+                offset: None,
                 images: false,
                 annotation_revision: 0,
                 annotations: vec![],

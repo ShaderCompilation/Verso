@@ -80,6 +80,8 @@ unsafe extern "C" {
     pub fn verso_cre_position(doc: *mut VersoCreDoc, buf: *mut c_char, len: c_int) -> c_int;
     pub fn verso_cre_restore(doc: *mut VersoCreDoc, position: *const c_char) -> c_int;
     pub fn verso_cre_progress(doc: *mut VersoCreDoc) -> c_int;
+    pub fn verso_cre_text_offset(doc: *mut VersoCreDoc, position: *const c_char) -> std::os::raw::c_longlong;
+    pub fn verso_cre_text_length(doc: *mut VersoCreDoc) -> std::os::raw::c_longlong;
     pub fn verso_cre_typography(
         doc: *mut VersoCreDoc,
         face: *const c_char,

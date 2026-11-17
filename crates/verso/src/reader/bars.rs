@@ -1,9 +1,15 @@
 //! What the reader's top and bottom bars show, and how three items share a
 //! bar's width. Drawing lives in `screens::reader::bars`.
+use super::TextMap;
+use super::speed::format_duration;
+use crate::clock::LocalTime;
 use crate::document::TocEntry;
 use crate::page_layout::BarItem;
+use crate::platform::Battery;
 
-/// What the bar items are computed from: the displayed page and the book.
+/// What the bar items are computed from: the displayed page, the book, and
+/// the clock and battery as of the last reader redraw.
+#[derive(Default)]
 pub struct BarData<'a> {
     pub toc: &'a [TocEntry],
     pub title: &'a str,
@@ -13,21 +19,31 @@ pub struct BarData<'a> {
     pub pages: usize,
     /// Share of the book's text before this page, in hundredths of a percent.
     pub progress: u32,
+    /// Characters of text before this page, when known.
+    pub offset: Option<u64>,
+    /// Chapter starts in the text; None until the book thread sends them.
+    pub text: Option<&'a TextMap>,
+    /// Reading speed in characters per second, once it is known.
+    pub speed: Option<f32>,
+    pub clock: Option<LocalTime>,
+    pub battery: Option<Battery>,
 }
 
 /// An item's text in two parts. `head` may end in "…" when space is short;
-/// `tail` always shows in full. Short items have only a tail.
+/// `tail` always shows in full. Short items have only a tail. The battery
+/// item also has an icon before its text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ItemText {
     pub head: String,
     pub tail: String,
+    pub battery: Option<Battery>,
 }
 impl ItemText {
     pub fn short(text: String) -> Self {
-        Self { head: String::new(), tail: text }
+        Self { tail: text, ..Self::default() }
     }
     fn title(text: &str) -> Self {
-        Self { head: text.to_owned(), tail: String::new() }
+        Self { head: text.to_owned(), ..Self::default() }
     }
 }
 
@@ -66,7 +82,9 @@ impl BarData<'_> {
         Some(match item {
             BarItem::ChapterTitle => ItemText::title(self.chapter().0),
             BarItem::ChapterPagesLeft => {
-                ItemText { head: self.chapter().0.to_owned(), tail: format!(" · {}", self.pages_left()) }
+                ItemText {
+                    head: self.chapter().0.to_owned(), tail: format!(" · {}", self.pages_left()), battery: None
+                }
             }
             BarItem::BookTitle => ItemText::title(self.book_title()),
             BarItem::Author => ItemText::title(self.author.trim()),
@@ -78,19 +96,55 @@ impl BarData<'_> {
             }
             BarItem::Percent => ItemText::short(format!("{}%", self.percent())),
             BarItem::PageTotal => ItemText::short(format!("{} / {}", self.page + 1, self.pages.max(1))),
-            // Need reading speed, local time and the battery level (Phase 3).
-            BarItem::TimeLeftChapter
-            | BarItem::TimeLeftBook
-            | BarItem::Clock24
-            | BarItem::Clock12
-            | BarItem::Battery => return None,
+            BarItem::TimeLeftChapter => ItemText::short(format!("{} left in chapter", self.time_left(true)?)),
+            BarItem::TimeLeftBook => ItemText::short(format!("{} left in book", self.time_left(false)?)),
+            BarItem::Clock24 => ItemText::short(self.clock?.h24()),
+            BarItem::Clock12 => ItemText::short(self.clock?.h12()),
+            BarItem::Battery => {
+                let battery = self.battery?;
+                ItemText { battery: Some(battery), ..ItemText::short(format!("{}%", battery.percent)) }
+            }
         })
         .filter(|t| !t.head.is_empty() || !t.tail.is_empty())
     }
 
+    /// Characters of text from this page's start to the end of its chapter
+    /// (`chapter`) or of the book. The chapter is the one the bar names.
+    pub fn chars_left(&self, chapter: bool) -> Option<u64> {
+        let text = self.text?;
+        let here = self.offset.unwrap_or(text.length * self.progress.min(10_000) as u64 / 10_000);
+        let end = if chapter {
+            self.toc
+                .iter()
+                .filter(|c| c.level <= 2 && c.page > self.page)
+                .find_map(|c| text.starts.get(&c.position.0).copied())
+                .unwrap_or(text.length)
+        } else {
+            text.length
+        };
+        Some(end.saturating_sub(here))
+    }
+    fn time_left(&self, chapter: bool) -> Option<String> {
+        let speed = self.speed.filter(|s| *s > 0.0)?;
+        Some(format_duration(self.chars_left(chapter)? as f32 / speed))
+    }
+
     /// Where chapters start along the book, as fractions 0..1 for the
-    /// progress line's ticks. The first page gets no tick.
+    /// progress line's ticks: by text offset once known, else by page. The
+    /// first page gets no tick.
     pub fn chapter_starts(&self) -> Vec<f32> {
+        if let Some(text) = self.text.filter(|t| t.length > 0) {
+            let mut starts: Vec<f32> = self
+                .toc
+                .iter()
+                .filter(|c| c.level <= 2 && c.page > 0)
+                .filter_map(|c| text.starts.get(&c.position.0))
+                .filter(|&&o| o > 0 && o < text.length)
+                .map(|&o| o as f32 / text.length as f32)
+                .collect();
+            starts.dedup();
+            return starts;
+        }
         if self.pages < 2 {
             return Vec::new();
         }
@@ -149,7 +203,7 @@ mod tests {
         vec![entry("One", 1, 2), entry("Detail", 3, 4), entry("Two", 2, 10), entry("Three", 1, 15)]
     }
     fn data(toc: &[TocEntry], page: usize) -> BarData<'_> {
-        BarData { toc, title: "Dune", author: "Frank Herbert", page, pages: 20, progress: 3712 }
+        BarData { toc, title: "Dune", author: "Frank Herbert", page, pages: 20, progress: 3712, ..BarData::default() }
     }
     fn text(d: &BarData, item: BarItem) -> String {
         d.text(item).map(|t| t.head + &t.tail).unwrap_or_default()
@@ -162,7 +216,7 @@ mod tests {
         assert_eq!(text(&d, BarItem::ChapterTitle), "One");
         assert_eq!(
             d.text(BarItem::ChapterPagesLeft).unwrap(),
-            ItemText { head: "One".into(), tail: " · 2 pages left".into() }
+            ItemText { head: "One".into(), tail: " · 2 pages left".into(), battery: None }
         );
         assert_eq!(text(&d, BarItem::BookTitle), "Dune");
         assert_eq!(text(&d, BarItem::Author), "Frank Herbert");
@@ -197,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn later_phase_items_show_nothing_yet() {
+    fn live_items_show_nothing_without_a_value() {
         let toc = toc();
         for item in
             [BarItem::TimeLeftChapter, BarItem::TimeLeftBook, BarItem::Clock24, BarItem::Clock12, BarItem::Battery]
@@ -207,12 +261,88 @@ mod tests {
     }
 
     #[test]
+    fn clocks_and_battery() {
+        let toc = toc();
+        let d = BarData {
+            clock: Some(LocalTime { hour: 14, minute: 41 }),
+            battery: Some(Battery { percent: 82, charging: true }),
+            ..data(&toc, 5)
+        };
+        assert_eq!(text(&d, BarItem::Clock24), "14:41");
+        assert_eq!(text(&d, BarItem::Clock12), "2:41 PM");
+        let battery = d.text(BarItem::Battery).unwrap();
+        assert_eq!(battery.tail, "82%");
+        assert_eq!(battery.battery, Some(Battery { percent: 82, charging: true }), "drawn with its icon");
+    }
+
+    /// Chapters One (page 2), Two (10), Three (15) start at these offsets in
+    /// a 20 000-character book; "Detail" is a subsection and doesn't count.
+    fn text_map() -> TextMap {
+        let starts = [("one", 2_000), ("detail", 4_000), ("two", 10_000), ("three", 15_000)];
+        TextMap { length: 20_000, starts: starts.into_iter().map(|(p, o)| (p.to_owned(), o)).collect() }
+    }
+    fn toc_with_positions() -> Vec<TocEntry> {
+        let mut toc = toc();
+        for (entry, position) in toc.iter_mut().zip(["one", "detail", "two", "three"]) {
+            entry.position = Position(position.into());
+        }
+        toc
+    }
+
+    #[test]
+    fn chars_left_run_to_the_next_chapter_or_the_book_end() {
+        let (toc, map) = (toc_with_positions(), text_map());
+        let at = |page, offset| BarData { offset: Some(offset), text: Some(&map), ..data(&toc, page) };
+        assert_eq!(at(7, 7_000).chars_left(true), Some(3_000), "to Two, past the subsection");
+        assert_eq!(at(7, 7_000).chars_left(false), Some(13_000));
+        // Before the first chapter, the chapter is the book up to One.
+        assert_eq!(at(0, 0).chars_left(true), Some(2_000));
+        // The last chapter and the last page run to the end of the book.
+        assert_eq!(at(16, 16_000).chars_left(true), Some(4_000));
+        assert_eq!(at(19, 19_400).chars_left(true), Some(600));
+        assert_eq!(at(19, 19_400).chars_left(false), Some(600));
+        // Never negative, even if offsets disagree with page numbers.
+        assert_eq!(at(9, 12_000).chars_left(true), Some(0));
+        // Without this page's offset, the percentage stands in.
+        let estimated = BarData { offset: None, text: Some(&map), progress: 5_000, ..data(&toc, 9) };
+        assert_eq!(estimated.chars_left(false), Some(10_000));
+        // An unresolved chapter start is skipped for the next one.
+        let mut partial = text_map();
+        partial.starts.remove("two");
+        let d = BarData { offset: Some(7_000), text: Some(&partial), ..data(&toc, 7) };
+        assert_eq!(d.chars_left(true), Some(8_000));
+        assert_eq!(data(&toc, 7).chars_left(true), None, "nothing before the map arrives");
+    }
+
+    #[test]
+    fn time_left_needs_a_speed() {
+        let (toc, map) = (toc_with_positions(), text_map());
+        let d = BarData { offset: Some(7_000), text: Some(&map), speed: Some(20.0), ..data(&toc, 7) };
+        // 3 000 characters at 20 per second: 2.5 minutes, shown rounded.
+        assert_eq!(text(&d, BarItem::TimeLeftChapter), "3 min left in chapter");
+        assert_eq!(text(&d, BarItem::TimeLeftBook), "11 min left in book");
+        let slow = BarData { speed: Some(0.5), ..d };
+        assert_eq!(text(&slow, BarItem::TimeLeftBook), "7 h 13 min left in book");
+        let end = BarData { offset: Some(20_000), text: Some(&map), speed: Some(20.0), ..data(&toc, 19) };
+        assert_eq!(text(&end, BarItem::TimeLeftBook), "< 1 min left in book");
+        let unknown = BarData { speed: None, ..BarData { offset: Some(7_000), text: Some(&map), ..data(&toc, 7) } };
+        assert_eq!(unknown.text(BarItem::TimeLeftChapter), None);
+    }
+
+    #[test]
     fn ticks_mark_chapter_starts() {
         let toc = toc();
         assert_eq!(data(&toc, 0).chapter_starts(), vec![0.1, 0.5, 0.75]);
         let first = vec![TocEntry { title: "Start".into(), level: 1, page: 0, position: Position::default() }];
         assert!(data(&first, 0).chapter_starts().is_empty(), "no tick at the very start");
         assert!(BarData { pages: 1, ..data(&toc, 0) }.chapter_starts().is_empty());
+        // Once text offsets are known, ticks sit where the fill crosses them.
+        let (toc, map) = (toc_with_positions(), text_map());
+        let d = BarData { text: Some(&map), ..data(&toc, 0) };
+        assert_eq!(d.chapter_starts(), vec![0.1, 0.5, 0.75]);
+        let mut shifted = text_map();
+        shifted.starts.insert("two".into(), 9_000);
+        assert_eq!(BarData { text: Some(&shifted), ..data(&toc, 0) }.chapter_starts(), vec![0.1, 0.45, 0.75]);
     }
 
     #[test]

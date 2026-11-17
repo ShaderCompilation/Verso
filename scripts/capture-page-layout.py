@@ -5,6 +5,8 @@ Run cargo build first. Outputs live in gitignored screenshots/page-layout/.
 Coordinates assume the 1272 x 1696 simulator screen, turned for landscape.
 Between them, the layouts show every bar item somewhere: A and B in the
 sketch and on the page, the rest (and every item's value) in the picker.
+The state seeds a reading speed (20 characters a second) and the simulator
+reports an 82% battery, so time left and the battery show values.
 """
 import json
 import os
@@ -89,7 +91,10 @@ def capture(name, orientation, page_layout, steps, books):
     if page_layout:
         settings['page_layout'] = page_layout
     (state / 'settings.json').write_text(json.dumps(settings))
-    env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
+    # A reading speed carried over from earlier books, so time left shows.
+    (state / 'reading-speed.json').write_text(json.dumps({'chars_per_sec': 20.0, 'samples': 30}))
+    env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), VERSO_SIM_BATTERY='82',
+               RUST_LOG='error')
     subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps],
                    env=env, check=True, stderr=subprocess.DEVNULL)
 

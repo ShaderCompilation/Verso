@@ -611,18 +611,40 @@ int verso_cre_restore(VersoCreDoc *doc, const char *position) {
         return 0;
     })
 }
+// Characters of text before `pos`, counting every text node in document
+// order. Text offsets depend only on the book, not the layout. A pointer at
+// an element counts from the first text inside or after it. -1 if unknown.
+static long long text_offset(VersoCreDoc *doc, const ldomXPointer &pos) {
+    if (doc->offsets.empty()) collect_offsets(doc->view->getDocument()->getRootNode(), doc);
+    if (pos.isNull() || !doc->text_length) return -1;
+    ldomXPointerEx p(pos);
+    int offset = std::max(0, pos.getOffset());
+    if (!p.isText()) {
+        if (!p.nextText()) return (long long)doc->text_length;
+        offset = 0;
+    }
+    auto it = doc->offsets.find(p.getNode()->getDataIndex());
+    if (it == doc->offsets.end()) return -1;
+    return (long long)std::min<uint64_t>(it->second + offset, doc->text_length);
+}
 int verso_cre_progress(VersoCreDoc *doc) {
     GUARD(0, {
+        long long offset = text_offset(doc, doc->view->getBookmark());
+        if (offset < 0) return 0;
+        return std::min(10000, (int)(offset * 10000 / (long long)doc->text_length));
+    })
+}
+long long verso_cre_text_offset(VersoCreDoc *doc, const char *position) {
+    GUARD(-1, {
+        if (!position) return text_offset(doc, doc->view->getBookmark());
+        ldomXPointer pos = doc->view->getDocument()->createXPointer(Utf8ToUnicode(position));
+        return text_offset(doc, pos);
+    })
+}
+long long verso_cre_text_length(VersoCreDoc *doc) {
+    GUARD(-1, {
         if (doc->offsets.empty()) collect_offsets(doc->view->getDocument()->getRootNode(), doc);
-        ldomXPointer pos = doc->view->getBookmark();
-        if (pos.isNull() || !doc->text_length) return 0;
-        ldomNode *node = pos.getNode();
-        while (node && !node->isText() && node->getChildCount()) node = node->getChildNode(0);
-        if (!node) return 0;
-        auto it = doc->offsets.find(node->getDataIndex());
-        if (it == doc->offsets.end()) return 0;
-        uint64_t offset = it->second + std::max(0, pos.getOffset());
-        return std::min(10000, (int)(offset * 10000 / doc->text_length));
+        return (long long)doc->text_length;
     })
 }
 int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,

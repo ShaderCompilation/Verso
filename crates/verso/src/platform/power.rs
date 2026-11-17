@@ -1,5 +1,47 @@
-//! lipc-wait-event emits one event name followed by optional arguments.
+//! Battery and cable state, from sysfs or powerd. lipc-wait-event emits one
+//! event name followed by optional arguments.
 use super::{Battery, Event};
+use std::path::{Path, PathBuf};
+
+/// The kernel's battery and charger files (`/sys/class/power_supply`).
+/// Reading them takes well under a millisecond; `lipc-get-prop` starts a
+/// process, about 29 ms on the Paperwhite (measured).
+#[derive(Debug, PartialEq, Eq)]
+pub struct PowerFiles {
+    battery: PathBuf,
+    cable: Option<PathBuf>,
+}
+impl PowerFiles {
+    /// The first supply of type `Battery` with a `capacity`, and the first
+    /// `Mains` or `USB` supply with `online` as the cable. On the Paperwhite
+    /// these are `bd71827_bat` and `bd71827_ac`; the `USB_WET` moisture sensor
+    /// and the `Wireless` supply are not cables.
+    pub fn find(root: &Path) -> Option<Self> {
+        let mut entries: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| Some(e.ok()?.path())).collect();
+        entries.sort();
+        let kind = |dir: &Path| std::fs::read_to_string(dir.join("type")).map(|t| t.trim().to_owned()).ok();
+        let battery =
+            entries.iter().find(|d| kind(d).as_deref() == Some("Battery") && d.join("capacity").exists())?.clone();
+        let cable = entries
+            .iter()
+            .find(|d| matches!(kind(d).as_deref(), Some("Mains" | "USB")) && d.join("online").exists())
+            .cloned();
+        let files = Self { battery, cable };
+        files.battery().is_some().then_some(files)
+    }
+    pub fn battery(&self) -> Option<Battery> {
+        let read = |name| std::fs::read_to_string(self.battery.join(name)).ok();
+        let percent: i64 = read("capacity")?.trim().parse().ok()?;
+        // "Charging", "Discharging", "Full" or "Not charging".
+        let charging = read("status").is_some_and(|s| s.trim() == "Charging");
+        Some(Battery { percent: percent.clamp(0, 100) as u8, charging })
+    }
+    /// A cable is attached, charging or not.
+    pub fn usb(&self) -> Option<bool> {
+        let online = std::fs::read_to_string(self.cable.as_ref()?.join("online")).ok()?;
+        Some(online.trim() == "1")
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
@@ -38,6 +80,50 @@ pub fn parse(line: &str) -> Option<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Paperwhite's supplies, as measured unplugged.
+    fn paperwhite(root: &Path) {
+        let supply = |name: &str, files: &[(&str, &str)]| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (file, value) in files {
+                std::fs::write(dir.join(file), format!("{value}\n")).unwrap();
+            }
+        };
+        supply("Wireless", &[("type", "Wireless"), ("online", "0")]);
+        supply("bd71827_ac", &[("type", "Mains"), ("online", "0")]);
+        supply("bd71827_bat", &[("type", "Battery"), ("capacity", "38"), ("status", "Discharging"), ("online", "1")]);
+        supply("max20342_moisture", &[("type", "USB_WET"), ("online", "1")]);
+    }
+
+    #[test]
+    fn sysfs_gives_level_charging_and_cable() {
+        let root = std::env::temp_dir().join(format!("verso-power-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        paperwhite(&root);
+        let files = PowerFiles::find(&root).unwrap();
+        assert_eq!(files, PowerFiles { battery: root.join("bd71827_bat"), cable: Some(root.join("bd71827_ac")) });
+        assert_eq!(files.battery(), Some(Battery { percent: 38, charging: false }));
+        assert_eq!(files.usb(), Some(false), "the moisture sensor isn't a cable");
+        // Plugged in, as measured: Charging, and the Mains supply online.
+        std::fs::write(root.join("bd71827_bat/status"), "Charging\n").unwrap();
+        std::fs::write(root.join("bd71827_bat/capacity"), "41\n").unwrap();
+        std::fs::write(root.join("bd71827_ac/online"), "1\n").unwrap();
+        assert_eq!(files.battery(), Some(Battery { percent: 41, charging: true }));
+        assert_eq!(files.usb(), Some(true));
+        // Full on a cable: connected but not charging.
+        std::fs::write(root.join("bd71827_bat/status"), "Full\n").unwrap();
+        assert_eq!(files.battery(), Some(Battery { percent: 41, charging: false }));
+        // No cable supply: the cable state comes from powerd instead.
+        std::fs::remove_dir_all(root.join("bd71827_ac")).unwrap();
+        let files = PowerFiles::find(&root).unwrap();
+        assert_eq!(files.usb(), None);
+        // No battery at all: powerd it is.
+        std::fs::remove_dir_all(root.join("bd71827_bat")).unwrap();
+        assert_eq!(PowerFiles::find(&root), None);
+        assert_eq!(PowerFiles::find(&root.join("missing")), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
     #[test]
     fn a_full_usb_battery_is_connected_even_when_it_is_not_charging() {
         let full = br#"{"battInfo":[{"type":"PRIMARY","cap":100,"charging":false}],"aggr_batt":100,"usb":true}"#;
