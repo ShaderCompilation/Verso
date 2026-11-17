@@ -702,7 +702,7 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
         // The intact possessive wins even if more exceptions/rules exist.
         let candidates = forms::Candidates {
             possessive: Some("tree".into()),
-            exceptions: vec!["child"],
+            exceptions: strings(&["child"]),
             rules: vec!["thunder".into()],
         };
         let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
@@ -711,7 +711,7 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
         // twice; collect all exceptions before the first rule, capped at three.
         let candidates = forms::Candidates {
             possessive: None,
-            exceptions: vec!["axe", "axe", "fruit", "axis", "child"],
+            exceptions: strings(&["axe", "axe", "fruit", "axis", "child"]),
             rules: vec!["thunder".into()],
         };
         let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
@@ -719,8 +719,11 @@ fn base_forms_choose_exceptions_and_first_rule_with_bounded_headwords() -> Resul
         assert_eq!(contents(&text), "axe\n\nA tool.\n\naxis\n\nA line.\n\nchild\n\nA young person.");
         // `candidates` no longer combines exceptions and rules, but the backend
         // still treats a rule matching an exception's span as the first rule hit.
-        let candidates =
-            forms::Candidates { possessive: None, exceptions: vec!["use"], rules: vec!["use".into(), "us".into()] };
+        let candidates = forms::Candidates {
+            possessive: None,
+            exceptions: strings(&["use"]),
+            rules: vec!["use".into(), "us".into()],
+        };
         let (entries, count) = backend.lookup_forms(&candidates, &|| true)?;
         assert_eq!((contents(&entries), count), ("use\n\nEmploy.".into(), 1));
     }
@@ -738,7 +741,9 @@ fn base_form_count_ignores_case_variants_of_one_headword() -> Result<()> {
     assert_eq!(contents(&text), "apple\n\na lowercase entry\n\nApple\n\nA fruit.\n\nApple\n\nA tree.");
     // Case variants don't use up the cap either.
     let candidates =
-        forms::Candidates { possessive: None, exceptions: vec!["apple", "café", "слово"], rules: Vec::new() };
+        forms::Candidates {
+            possessive: None, exceptions: strings(&["apple", "café", "слово"]), rules: Vec::new()
+        };
     let (text, count) = backend.lookup_forms(&candidates, &|| true)?;
     assert_eq!(count, 3);
     assert!(contents(&text).ends_with("Слово\n\nРусское определение."), "{text:?}");
@@ -757,7 +762,8 @@ fn base_forms_cancel_between_candidates_before_reading_definitions() -> Result<(
         checks.set(n + 1);
         n < 1
     };
-    let candidates = forms::Candidates { possessive: None, exceptions: vec!["Apple", "missing"], rules: Vec::new() };
+    let candidates =
+        forms::Candidates { possessive: None, exceptions: strings(&["Apple", "missing"]), rules: Vec::new() };
     assert!(backend.lookup_forms(&candidates, &current).is_err());
     assert_eq!(checks.get(), 2);
     Ok(())
@@ -794,4 +800,8 @@ fn combined_output_is_capped_on_utf8_boundaries_with_an_omission_notice() -> Res
         }
     }
     Ok(())
+}
+
+fn strings(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| (*w).to_owned()).collect()
 }

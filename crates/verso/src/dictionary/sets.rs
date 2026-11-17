@@ -215,8 +215,32 @@ impl Preferences {
     }
 }
 impl Set {
-    pub fn english_forms(&self) -> bool {
-        self.languages.is_empty() || self.languages.iter().any(|l| l == "en")
+    /// The languages whose base forms to try for `query`, best first; the
+    /// lookup uses the first one with an analyzer. The set's own languages,
+    /// or for a set without any (Default) the book's language and then the
+    /// usual language of the word's script (Latin → English, Cyrillic →
+    /// Russian). Only languages written in the word's script are kept: the
+    /// script decides, since book language tags are often missing or wrong,
+    /// and the book language only breaks ties within a script.
+    pub fn form_languages(&self, book_language: &str, query: &str) -> Vec<String> {
+        let Some(script) = word_script(query) else { return Vec::new() };
+        let candidates = if self.languages.is_empty() {
+            let usual = match script {
+                Script::Latin => Some("en"),
+                Script::Cyrillic => Some("ru"),
+                _ => None,
+            };
+            std::iter::once(normalize_language(book_language)).chain(usual.map(str::to_owned)).collect()
+        } else {
+            self.languages.clone()
+        };
+        let mut languages = Vec::new();
+        for language in candidates {
+            if language_script(&language) == Some(script) && !languages.contains(&language) {
+                languages.push(language);
+            }
+        }
+        languages
     }
     pub fn apply(&self, dictionaries: &mut [Dictionary]) {
         dictionaries.sort_by_key(|d| self.dictionaries.iter().position(|p| p.id == d.id).unwrap_or(usize::MAX));
@@ -393,6 +417,36 @@ mod tests {
             p.choose(&Selection { book_set: Some("english".into()), language: "en".into() }, "слово").id,
             DEFAULT
         );
+    }
+    #[test]
+    fn form_languages_follow_the_set_then_book_and_script() {
+        let mut p = Preferences::default();
+        language_set(&mut p, "russian", &["ru"]);
+        language_set(&mut p, "slavic", &["uk", "be", "en"]);
+        language_set(&mut p, "unknown", &["zz"]);
+        for (set, book, word, expected) in [
+            // Default: the book's language, then the script's usual language.
+            (DEFAULT, "", "thunders", vec!["en"]),
+            (DEFAULT, "", "кошки", vec!["ru"]),
+            (DEFAULT, "ru", "thunders", vec!["en"]),
+            (DEFAULT, "en", "кошки", vec!["ru"]),
+            (DEFAULT, "uk-UA", "кошки", vec!["uk", "ru"]),
+            (DEFAULT, "fra", "chats", vec!["fr", "en"]),
+            (DEFAULT, "rus", "кошки", vec!["ru"]),
+            // A set's languages replace both, in their order, within the script.
+            ("russian", "uk", "кошки", vec!["ru"]),
+            ("russian", "en", "thunders", vec![]),
+            ("slavic", "ru", "кошки", vec!["uk", "be"]),
+            ("slavic", "", "thunders", vec!["en"]),
+            ("unknown", "", "thunders", vec![]),
+            // No single script: no base forms.
+            (DEFAULT, "en", "aя", vec![]),
+            (DEFAULT, "en", "123", vec![]),
+            (DEFAULT, "el", "λέξεις", vec!["el"]),
+            (DEFAULT, "", "λέξεις", vec![]),
+        ] {
+            assert_eq!(p.set(set).form_languages(book, word), expected, "{set} {book} {word}");
+        }
     }
     #[test]
     fn migration_preserves_missing_ids_order_and_disabled_flags() {

@@ -99,6 +99,8 @@ pub struct BookState {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    /// Bundled word-form packs (`<lang>.vwf`), outside the user's data.
+    wordforms: PathBuf,
     pub(crate) dictionary_service:
         std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::dictionary::worker::Service>>>,
     pub(crate) dictionary_folder_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -122,8 +124,21 @@ impl Store {
                     .join("verso")
             }
         });
+        // Installed next to the fonts on the Kindle; the simulator uses the
+        // packs `scripts/build-wordforms.sh` writes.
+        let wordforms = std::env::var_os("VERSO_WORDFORMS").map(PathBuf::from).unwrap_or_else(|| {
+            #[cfg(feature = "kindle")]
+            {
+                PathBuf::from("/mnt/us/verso/wordforms")
+            }
+            #[cfg(feature = "desktop")]
+            {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wordforms")
+            }
+        });
         Self {
             root,
+            wordforms,
             selected_home: Default::default(),
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
@@ -267,6 +282,9 @@ impl Store {
     pub fn dictionary_preferences(&self) -> PathBuf {
         self.root.join("dictionaries.json")
     }
+    pub fn wordforms_dir(&self) -> PathBuf {
+        self.wordforms.clone()
+    }
     pub fn library_folders(&self) -> Vec<PathBuf> {
         folder_paths(self.settings(), std::env::var_os("VERSO_BOOKS"))
     }
@@ -284,6 +302,7 @@ impl Store {
     #[cfg(test)]
     pub fn at(root: PathBuf) -> Self {
         Self {
+            wordforms: root.join("wordforms"),
             root,
             selected_home: Default::default(),
             settings_saves: Default::default(),

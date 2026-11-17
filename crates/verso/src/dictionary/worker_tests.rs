@@ -1,5 +1,5 @@
 use super::*;
-use crate::dictionary::{basename, sibling};
+use crate::dictionary::{WordFormsSource, basename, sibling};
 use crate::store::atomic;
 use std::{
     fs,
@@ -489,6 +489,7 @@ fn inner(f: &Fixture) -> Inner {
         backend: None,
         save_error: None,
         failed_queries: Default::default(),
+        word_forms: WordForms::new(f.store.wordforms_dir()),
         prefs_error: None,
     };
     assert!(inner.discover(&|| true));
@@ -872,7 +873,7 @@ fn publications(f: &Fixture, delay: impl Fn(&Mailbox) -> bool) -> Vec<Reply> {
         }
         true
     };
-    inner(f).lookup_session(&request, "boxes", &current);
+    inner(f).lookup_session(&request, "boxes", "", &current);
     results.lock().unwrap().clone()
 }
 
@@ -1021,4 +1022,221 @@ fn first_draw_wait_skips_a_stale_reply() {
     let reply = f.worker.receive_wait(Duration::from_secs(5));
     publisher.join().unwrap();
     assert_eq!(reply.map(|r| r.id), Some(2));
+}
+
+const RUSSIAN: &[(&str, &[&str])] = &[
+    ("кошки", &["кошка"]),
+    ("кошка", &["кошка"]),
+    ("прочитана", &["прочитанный", "прочитать"]),
+    ("стали", &["сталь", "стать", "стальной", "стая"]),
+    ("книги", &["книга"]),
+];
+fn russian_pack(f: &Fixture) {
+    forms::write_pack(&f.store.wordforms_dir().join("ru.vwf"), "ru", RUSSIAN);
+}
+/// The headwords and the base-form count of a definition.
+fn definition(reply: &Reply) -> (Vec<&str>, Option<usize>) {
+    let Some(State::Definition { entries, base_forms }) = &reply.state else {
+        panic!("no definition: {:?}", reply.state)
+    };
+    (entries.iter().map(|e| e.headword.as_str()).collect(), base_forms.as_ref().map(|b| b.count))
+}
+fn lookup_book(f: &Fixture, query: &str, book_set: Option<&str>, language: &str) -> Reply {
+    let selection = Selection { book_set: book_set.map(str::to_owned), language: language.into() };
+    let id = f.worker.lookup_in(query.into(), false, selection);
+    loop {
+        let reply = f.reply(id).0;
+        if reply.complete {
+            return reply;
+        }
+    }
+}
+
+#[test]
+fn default_set_gives_english_words_english_forms_and_russian_words_russian_forms() {
+    let f = Fixture::new();
+    russian_pack(&f);
+    install_entries(
+        &f.join("dictionaries/a.ifo"),
+        "A",
+        &[
+            ("thunder", "t"),
+            ("кошка", "cat"),
+            ("прочитанный", "read, adj."),
+            ("прочитать", "read"),
+            ("сталь", "steel"),
+            ("стать", "become"),
+            ("стальной", "steely"),
+            ("стая", "flock"),
+        ],
+        &[],
+    );
+    for (query, expected) in [
+        ("thunders", vec!["thunder"]),
+        ("кошки", vec!["кошка"]),
+        ("КОШКИ", vec!["кошка"]),
+        ("ко\u{301}шки", vec!["кошка"]),
+        // Linked lemmas, nearest first.
+        ("прочитана", vec!["прочитанный", "прочитать"]),
+        // At most three base forms, in the pack's order.
+        ("стали", vec!["сталь", "стать", "стальной"]),
+    ] {
+        let reply = f.lookup(query);
+        assert_eq!(definition(&reply), (expected.clone(), Some(expected.len())), "{query}");
+        let Some(State::Definition { base_forms: Some(forms), .. }) = &reply.state else { unreachable!() };
+        assert_eq!(forms.query, query);
+    }
+    // An exact entry has no label; unknown words and passages stay misses.
+    assert_eq!(definition(&f.lookup("кошка")), (vec!["кошка"], None));
+    for query in ["собаки", "две кошки", "книги"] {
+        assert_eq!(f.lookup(query).state, Some(State::NoResult), "{query}");
+    }
+}
+
+#[test]
+fn language_sets_get_forms_for_their_own_script_and_fall_back_by_script() {
+    let f = Fixture::new();
+    russian_pack(&f);
+    install_entries(&f.join("dictionaries/a.ifo"), "A", &[("thunder", "t"), ("кошка", "cat")], &[]);
+    f.catalog();
+    set(&f.worker, "english", "en", "a.ifo");
+    set(&f.worker, "russian", "ru", "a.ifo");
+    for (book_set, language, query, expected_set) in [
+        (Some("russian"), "ru", "кошки", "russian"),
+        (None, "ru", "кошки", "russian"),
+        (None, "en", "кошки", "russian"),
+        (Some("english"), "en", "кошки", "russian"),
+        (Some("english"), "en", "thunders", "english"),
+        (Some("russian"), "ru", "thunders", "english"),
+    ] {
+        let reply = lookup_book(&f, query, book_set, language);
+        assert_eq!(reply.active_set, expected_set, "{book_set:?} {query}");
+        assert_eq!(definition(&reply).1, Some(1), "{book_set:?} {query}");
+    }
+    // Without an English set, a Russian book's English word uses Default,
+    // which still gets English forms.
+    edit(&f.worker, Edit::Delete { set: "english".into() });
+    let reply = lookup_book(&f, "thunders", Some("russian"), "ru");
+    assert_eq!((reply.active_set.as_str(), definition(&reply).1), (DEFAULT, Some(1)));
+    // A set for another language of the script gets no Russian forms.
+    edit(&f.worker, Edit::Languages { set: "russian".into(), languages: vec!["be".into()] });
+    let reply = lookup_book(&f, "кошки", Some("russian"), "ru");
+    assert_eq!((reply.active_set.as_str(), reply.state), ("russian", Some(State::NoResult)));
+}
+
+#[test]
+fn the_book_language_breaks_ties_within_a_script() {
+    let f = Fixture::new();
+    russian_pack(&f);
+    forms::write_pack(&f.store.wordforms_dir().join("uk.vwf"), "uk", &[("книги", &["книжка"])]);
+    install_entries(&f.join("dictionaries/a.ifo"), "A", &[("книга", "book"), ("книжка", "booklet")], &[]);
+    for (language, expected) in [("uk", "книжка"), ("ukr", "книжка"), ("ru", "книга"), ("en", "книга"), ("", "книга")]
+    {
+        let reply = lookup_book(&f, "книги", None, language);
+        assert_eq!(definition(&reply), (vec![expected], Some(1)), "{language:?}");
+    }
+    let languages: Vec<_> = f.catalog().word_forms.into_iter().map(|s| s.language).collect();
+    assert_eq!(languages, ["en", "ru", "uk"]);
+}
+
+#[test]
+fn missing_or_corrupt_packs_keep_exact_lookup_and_rescan_recovers() {
+    let f = Fixture::new();
+    install_entries(&f.join("dictionaries/a.ifo"), "A", &[("thunder", "t"), ("кошка", "cat")], &[]);
+    let pack = f.store.wordforms_dir().join("ru.vwf");
+    let russian_source = |reply: &Reply| reply.word_forms.iter().find(|s| s.language == "ru").unwrap().source.clone();
+    for (broken, error) in [(None, "ru.vwf"), (Some(&b"not a pack"[..]), "Not a word-form pack")] {
+        if let Some(bytes) = broken {
+            fs::create_dir_all(pack.parent().unwrap()).unwrap();
+            fs::write(&pack, bytes).unwrap();
+        }
+        let reply = f.reply(f.worker.catalog(true)).0;
+        assert!(matches!(russian_source(&reply), WordFormsSource::Error(e) if e.contains(error)), "{error}");
+        assert_eq!(reply.word_forms[0].source, WordFormsSource::BuiltIn);
+        assert_eq!(definition(&f.lookup("кошка")), (vec!["кошка"], None));
+        assert_eq!(definition(&f.lookup("thunders")), (vec!["thunder"], Some(1)));
+        let reply = f.lookup("кошки");
+        assert_eq!(reply.state, Some(State::NoResult));
+        // A pack problem is not a dictionary problem.
+        assert!(reply.dictionaries.iter().all(|d| d.error.is_none()) && reply.warnings.is_empty());
+    }
+    russian_pack(&f);
+    // Settled until a rescan, like dictionary read errors.
+    assert!(matches!(russian_source(&f.catalog()), WordFormsSource::Error(_)));
+    assert_eq!(f.lookup("кошки").state, Some(State::NoResult));
+    let reply = f.reply(f.worker.catalog(true)).0;
+    assert_eq!(russian_source(&reply), WordFormsSource::Pack("Test pack, 2026-11-17".into()));
+    assert_eq!(definition(&f.lookup("кошки")), (vec!["кошка"], Some(1)));
+}
+
+#[test]
+fn russian_base_forms_keep_preference_first_precedence() {
+    let f = Fixture::new();
+    russian_pack(&f);
+    install(&f.join("dictionaries/a.ifo"), "A", "кошка");
+    install(&f.join("dictionaries/b.ifo"), "B", "кошки");
+    install_entries(&f.join("dictionaries/c.ifo"), "C", &[("кошка", "base"), ("кошки", "exact")], &[]);
+    // The preferred dictionary's base form beats a later exact entry, which
+    // is still one of the matches.
+    let reply = f.lookup("кошки");
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    assert_eq!(definition(&reply), (vec!["кошка"], Some(1)));
+    let counts: Vec<_> = reply.matches.iter().map(|m| (m.dictionary.as_str(), m.hits.forms)).collect();
+    assert_eq!(counts, [("a.ifo", Some(1)), ("b.ifo", None), ("c.ifo", None)]);
+    f.worker.open("b.ifo");
+    assert_eq!(definition(&f.reply(reply.id).0), (vec!["кошки"], None));
+    // An exact entry beats base forms in the same dictionary.
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "a.ifo".into(), disabled: true });
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "b.ifo".into(), disabled: true });
+    let reply = f.lookup("кошки");
+    assert_eq!(reply.selected.as_deref(), Some("c.ifo"));
+    assert_eq!(definition(&reply), (vec!["кошки"], None));
+}
+
+#[test]
+fn retry_repeats_a_failed_russian_base_form_read() {
+    let f = Fixture::new();
+    russian_pack(&f);
+    let ifo = f.store.dictionary_dir().join("a.ifo");
+    install(&ifo, "A", "кошка");
+    let data = ifo.with_extension("dict");
+    fs::write(&data, b"").unwrap();
+    let reply = f.lookup("кошки");
+    assert!(reply.dictionaries[0].error.is_some());
+    // Only the base form's definition is broken, so the retry must reach it.
+    let failed = wait_client(&f.worker, f.worker.retry(DEFAULT, "a.ifo"));
+    assert!(failed.dictionaries[0].error.is_some(), "the retry repeats the base-form lookup");
+    fs::write(&data, b"A text").unwrap();
+    let repaired = wait_client(&f.worker, f.worker.retry(DEFAULT, "a.ifo"));
+    assert!(repaired.dictionaries[0].error.is_none());
+    assert_eq!(definition(&f.lookup("кошки")), (vec!["кошка"], Some(1)));
+}
+
+#[test]
+fn russian_forms_cancel_at_any_point_without_errors() {
+    use std::cell::Cell;
+    let f = Fixture::new();
+    russian_pack(&f);
+    install(&f.join("dictionaries/a.ifo"), "A", "другое");
+    install_entries(&f.join("dictionaries/b.ifo"), "B", &[("прочитанный", "adj."), ("прочитать", "verb")], &[]);
+    let mut inner = inner(&f);
+    for n in 0.. {
+        assert!(n < 1000, "the lookup never completed");
+        let checks = Cell::new(0);
+        let current = || {
+            checks.set(checks.get() + 1);
+            checks.get() <= n
+        };
+        let (_, state) = inner.lookup("прочитана", &current);
+        if checks.get() <= n {
+            let State::Definition { entries, base_forms } = state else { panic!("{state:?}") };
+            assert_eq!(entries.len(), 2);
+            assert_eq!(base_forms.map(|b| b.count), Some(2));
+            break;
+        }
+        if let State::Definition { base_forms, .. } = state {
+            assert!(base_forms.is_some(), "cancelled at check {n}");
+        }
+        assert!(inner.catalog.dictionaries.iter().all(|d| d.error.is_none()), "cancelled at check {n}");
+    }
 }

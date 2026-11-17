@@ -36,3 +36,7 @@ default = ["desktop"]
 desktop = ["dep:winit", "dep:softbuffer"]
 # Kindle backend: FBInk display + raw evdev input.
 kindle = ["dep:fbink-sys"]
+
+[dev-dependencies]
+# Tests write small word-form packs with the builder.
+verso-wordforms = { path = "../verso-wordforms", features = ["build"] }

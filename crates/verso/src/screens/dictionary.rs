@@ -987,6 +987,7 @@ mod tests {
             sets: vec![],
             active_set: crate::dictionary::sets::DEFAULT.into(),
             change_error: None,
+            word_forms: vec![],
             dictionaries: Vec::new(),
             sources: Vec::new(),
             warnings: Vec::new(),

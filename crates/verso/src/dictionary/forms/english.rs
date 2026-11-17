@@ -1,13 +1,15 @@
-//! Bounded English base-form guesses. Callers must check real dictionary
-//! headwords; none of these transformations proves that a word is English.
+//! Bounded English base-form guesses, built into the binary. Callers must
+//! check real dictionary headwords; none of these transformations proves
+//! that a word is English.
+use super::{Analyzer, Candidates};
 
-const EXCEPTIONS: &str = include_str!("../../../../assets/wordforms/english-exceptions.txt");
+const EXCEPTIONS: &str = include_str!("../../../../../assets/wordforms/english-exceptions.txt");
 /// Verso's curated lemma lists, used instead of WordNet's row for the same
 /// form. Same format as `EXCEPTIONS`. Each row keeps every WordNet lemma and
 /// adds or reorders: forms WordNet lacks (`does`, where rules would pick
 /// `doe`), and regular readings that authoritative exceptions would otherwise
 /// hide (`lives → live`, `axes → axe`).
-const OVERRIDES: &str = include_str!("../../../../assets/wordforms/english-overrides.txt");
+const OVERRIDES: &str = include_str!("../../../../../assets/wordforms/english-overrides.txt");
 const MAX_QUERY_BYTES: usize = 64;
 
 /// Function words, fixed adverbs, archaic auxiliaries and interjections whose
@@ -128,27 +130,9 @@ const NO_RULES: &[&str] = &[
     "yonder",
 ];
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct Candidates {
-    /// Try this as an exact word before exceptions or rules.
-    pub possessive: Option<String>,
-    /// All curated lemmas, in source order. Authoritative: when present,
-    /// there are no rule guesses, even if no lemma has an entry.
-    pub exceptions: Vec<&'static str>,
-    /// Ordered, unique guesses for words without curated lemmas; only the
-    /// first rule with an entry counts.
-    pub rules: Vec<String>,
-}
-impl Candidates {
-    /// Every generated candidate, for diagnostics.
-    pub fn count(&self) -> usize {
-        usize::from(self.possessive.is_some()) + self.exceptions.len() + self.rules.len()
-    }
-}
-
 /// Accept only a single ASCII word, allowing a straight or curly possessive
 /// ending. The byte limit applies to the original query, before stripping.
-pub(super) fn candidates(query: &str) -> Option<Candidates> {
+pub(in crate::dictionary) fn candidates(query: &str) -> Option<Candidates> {
     if query.is_empty() || query.len() > MAX_QUERY_BYTES {
         return None;
     }
@@ -168,12 +152,21 @@ pub(super) fn candidates(query: &str) -> Option<Candidates> {
 
     let exceptions: Vec<_> = exception_lemmas(OVERRIDES, word)
         .or_else(|| exception_lemmas(EXCEPTIONS, word))
-        .map_or_else(Vec::new, |lemmas| lemmas.split(' ').collect());
+        .map_or_else(Vec::new, |lemmas| lemmas.split(' ').map(str::to_owned).collect());
     // Curated lemmas are authoritative: rules would add false readings
     // (`lying → lye`, `best → be`, `stepped → steppe`).
     let rules =
         if exceptions.is_empty() && NO_RULES.binary_search(&word).is_err() { rule_guesses(word) } else { Vec::new() };
     Some(Candidates { possessive: stripped.map(str::to_owned), exceptions, rules })
+}
+
+/// English rules and WordNet exceptions.
+pub(super) struct English;
+
+impl Analyzer for English {
+    fn candidates(&self, word: &str) -> anyhow::Result<Option<Candidates>> {
+        Ok(candidates(word))
+    }
 }
 
 /// Ordered, unique suffix guesses for a lowercase word.

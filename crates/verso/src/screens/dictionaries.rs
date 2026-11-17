@@ -1,7 +1,7 @@
 //! Shared dictionary management, reachable from Settings and a retained lookup.
 use crate::{
     dictionary::{
-        Dictionary, Source,
+        Dictionary, Source, WordFormsSource, WordFormsStatus,
         sets::{DEFAULT, Edit, Set},
         worker::Worker,
     },
@@ -112,6 +112,8 @@ pub struct Dictionaries {
     unprepared: Vec<String>,
     sources: Vec<Source>,
     warnings: Vec<String>,
+    /// Word-form languages, shown read-only below the sets.
+    word_forms: Vec<WordFormsStatus>,
     request: u64,
     pending: bool,
     returning: bool,
@@ -144,6 +146,7 @@ impl Dictionaries {
             unprepared: vec![],
             sources: vec![],
             warnings: vec![],
+            word_forms: vec![],
             request,
             pending: true,
             returning: false,
@@ -272,7 +275,18 @@ impl Dictionaries {
             self.list_rect = Rect::new(c.x, c.y, left_w, self.pager.rect().y - c.y);
         }
         let rows = match &self.view {
-            View::Sets => self.sets.iter().map(|s| Row::new(&s.name).sub(languages(s)).chevron()).collect(),
+            View::Sets => self
+                .sets
+                .iter()
+                .map(|s| Row::new(&s.name).sub(languages(s)).chevron())
+                .chain(self.word_forms.iter().map(|forms| {
+                    Row::new(format!("{} word forms", language_name(&forms.language))).sub(match &forms.source {
+                        WordFormsSource::BuiltIn => "Built-in".into(),
+                        WordFormsSource::Pack(source) => source.clone(),
+                        WordFormsSource::Error(_) => "Couldn’t be read · Tap for details".into(),
+                    })
+                }))
+                .collect(),
             View::Set(_) => self
                 .dictionaries
                 .iter()
@@ -440,7 +454,22 @@ impl Dictionaries {
     }
     fn row(&mut self, index: usize, cx: &mut EventCx) {
         match self.view.clone() {
-            View::Sets => self.open(View::Set(self.sets[index].id.clone()), cx.theme),
+            View::Sets if index < self.sets.len() => self.open(View::Set(self.sets[index].id.clone()), cx.theme),
+            View::Sets => {
+                let Some(forms) = self.word_forms.get(index - self.sets.len()) else { return };
+                let name = language_name(&forms.language);
+                let source = match &forms.source {
+                    WordFormsSource::BuiltIn => "Built into Verso.".into(),
+                    WordFormsSource::Pack(source) => format!("Source: {source}"),
+                    WordFormsSource::Error(error) => {
+                        format!("Couldn’t be read, so {name} words get no base forms. Rescan tries again.\n\n{error}")
+                    }
+                };
+                let text = format!(
+                    "{source}\n\nWhen a dictionary has no entry for a selected {name} word, Verso looks up its base forms instead."
+                );
+                self.details = Some(Details::from_text(cx.theme, self.screen, &format!("{name} word forms"), text));
+            }
             View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id().into()), cx.theme),
             View::Languages(set) => {
                 let code = self.language_choices()[index].0.clone();
@@ -542,6 +571,9 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("vi", "Vietnamese"),
     ("yi", "Yiddish"),
 ];
+fn language_name(code: &str) -> &str {
+    LANGUAGES.iter().find(|(c, _)| *c == code).map_or(code, |(_, name)| name)
+}
 fn languages(set: &Set) -> String {
     if set.id == DEFAULT {
         "Fallback for books without an assigned set".into()
@@ -720,6 +752,8 @@ impl Screen for Dictionaries {
             }
             self.sources = reply.sources;
             self.warnings = reply.warnings;
+            // Only catalog replies list word forms; a lookup reply never reaches here.
+            self.word_forms = reply.word_forms;
             if let Some(error) = reply.change_error {
                 cx.toast(error, None);
             }
@@ -817,7 +851,25 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}), None);
         wait(&mut s, &t);
-        assert_eq!(s.list.rows.len(), 1);
+        // Default, then the read-only word-form rows; this store has no packs.
+        let rows: Vec<_> = s.list.rows.iter().map(|r| (r.label.as_str(), r.sub.as_deref())).collect();
+        assert_eq!(
+            rows,
+            [
+                ("Default", Some("Fallback for books without an assigned set")),
+                ("English word forms", Some("Built-in")),
+                ("Russian word forms", Some("Couldn’t be read · Tap for details")),
+            ]
+        );
+        row(&mut s, 2, &t);
+        assert!(s.details.is_some(), "the error opens in details");
+        assert!(matches!(s.view, View::Sets));
+        s.details = None;
+        crate::dictionary::write_pack(&store.wordforms_dir().join("ru.vwf"), "ru", &[("кошки", &["кошка"])]);
+        let rescan = s.rescan.rect().center();
+        tap(&mut s, rescan, &t);
+        wait(&mut s, &t);
+        assert_eq!(s.list.rows[2].sub.as_deref(), Some("Test pack, 2026-11-17"), "Rescan reopens the pack");
         let new = s.toolbar[0].rect().center();
         tap(&mut s, new, &t);
         submit(&mut s, "English and Russian", &t);

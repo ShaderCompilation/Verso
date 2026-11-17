@@ -1,7 +1,8 @@
 //! One service per Store family, with independent cancellable client mailboxes.
 //! Discovery is lazy; edits and durable writes share the lookup command queue.
 use super::{
-    Backend, Catalog, Dictionary, Entry, Hits, Source, SourceStatus, discover_catalog, forms,
+    Backend, Catalog, Dictionary, Entry, Hits, Source, SourceStatus, discover_catalog,
+    forms::{self, WordForms, WordFormsStatus},
     sets::{DEFAULT, Edit, Preferences, Selection, Set},
 };
 use crate::{
@@ -70,6 +71,8 @@ impl Match {
 struct Session {
     query: String,
     active_set: String,
+    /// The query's word-form languages, for retrying a failed read.
+    form_languages: Vec<String>,
     matches: Vec<Match>,
     revision: u64,
 }
@@ -94,6 +97,8 @@ pub struct Reply {
     pub sets: Vec<Set>,
     pub active_set: String,
     pub change_error: Option<String>,
+    /// Catalog replies only: every word-form language and its source or error.
+    pub word_forms: Vec<WordFormsStatus>,
     /// `None` answers a catalog request.
     pub state: Option<State>,
     pub save_error: Option<String>,
@@ -170,7 +175,10 @@ struct Inner {
     fresh: bool,
     backend: Option<(String, Backend)>,
     save_error: Option<String>,
-    failed_queries: std::collections::HashMap<String, (String, bool)>,
+    /// The query that failed in each dictionary, with its word-form languages.
+    failed_queries: std::collections::HashMap<String, (String, Vec<String>)>,
+    /// Base-form analyzers; packs open on first use.
+    word_forms: WordForms,
     /// The preference file exists but couldn't be read or parsed. Automatic
     /// saves then leave it alone; the user's next change replaces it.
     prefs_error: Option<String>,
@@ -195,14 +203,14 @@ fn preference_bytes(preferences: &Preferences) -> anyhow::Result<Vec<u8>> {
 fn retry_read(
     dictionary: &Dictionary,
     cache: &std::path::Path,
-    query: Option<&(String, bool)>,
+    query: Option<&(String, Vec<String>)>,
+    word_forms: &mut WordForms,
     current: &impl Fn() -> bool,
 ) -> anyhow::Result<()> {
     let mut backend = Backend::open(&dictionary.path, cache, current)?;
-    if let Some((query, english_forms)) = query
+    if let Some((query, languages)) = query
         && backend.lookup(query)?.is_empty()
-        && *english_forms
-        && let Some(forms) = forms::candidates(query)
+        && let Some(forms) = word_forms.candidates(languages, query)
     {
         backend.lookup_forms(&forms, current)?;
     }
@@ -225,8 +233,10 @@ impl Inner {
     /// Rediscovers every source with the current folder configuration.
     /// `false` when cancelled: the catalog stays stale and nothing is published.
     fn discover(&mut self, current: &impl Fn() -> bool) -> bool {
-        // Files may have changed; reopen from the new catalog.
+        // Files may have changed; reopen from the new catalog. Word-form
+        // packs reopen too, which retries one that couldn't be read.
         self.backend = None;
+        self.word_forms.reset();
         self.fresh = false;
         // Read the counter first: a save during the read then forces another scan.
         self.folders_seen = self.store.dictionary_folder_revision.load(Ordering::Relaxed);
@@ -248,10 +258,15 @@ impl Inner {
                     if dictionary.error.is_none()
                         && self.catalog.dictionaries.iter().any(|d| d.id == dictionary.id && d.error.is_some())
                     {
-                        dictionary.error =
-                            retry_read(dictionary, &cache, self.failed_queries.get(&dictionary.id), current)
-                                .err()
-                                .map(|e| format!("{e:#}"));
+                        dictionary.error = retry_read(
+                            dictionary,
+                            &cache,
+                            self.failed_queries.get(&dictionary.id),
+                            &mut self.word_forms,
+                            current,
+                        )
+                        .err()
+                        .map(|e| format!("{e:#}"));
                         if !current() {
                             return false;
                         }
@@ -313,13 +328,15 @@ impl Inner {
     /// counting other dictionaries. Long searches also publish preparation
     /// progress after `PROGRESS_DELAY`; more matches alone wait for the
     /// final count to keep e-ink redraws few.
-    fn lookup_session(&mut self, request: &Request, query: &str, current: &impl Fn() -> bool) {
+    fn lookup_session(&mut self, request: &Request, query: &str, book_language: &str, current: &impl Fn() -> bool) {
         use std::{cell::RefCell, time::Instant};
         let started = Instant::now();
+        let languages = self.preferences.set(&self.active_set).form_languages(book_language, query);
         // Matches live only in the session; publications copy them.
         *request.mailbox.session.lock().unwrap() = Some(Session {
             query: query.into(),
             active_set: self.active_set.clone(),
+            form_languages: languages.clone(),
             matches: Vec::new(),
             revision: request.revision,
         });
@@ -351,10 +368,9 @@ impl Inner {
             valid
         };
         let progress = || publish_snapshot(false);
-        let forms = self.preferences.set(&self.active_set).english_forms().then(|| forms::candidates(query)).flatten();
-        if let Some(forms) = &forms {
-            log::debug!("dictionary query: {} generated candidates", forms.count());
-        }
+        // Generated on the first miss, once per query, so a pack opens only
+        // when a dictionary lacks the exact word.
+        let mut forms: Option<Option<forms::Candidates>> = None;
         if super::index::query_fits(query) {
             for id in ids {
                 if !progress() {
@@ -363,17 +379,31 @@ impl Inner {
                 let preparing = || snapshot.borrow_mut().preparing = Some(id.clone());
                 let outcome = self.open_backend(&id, &progress, &preparing).and_then(|backend| {
                     if !backend.displayable() {
-                        return Ok(Hits { records: vec![], forms: None });
+                        return Ok(None);
                     }
-                    let hits = backend.find(query)?;
-                    if hits.records.is_empty()
-                        && let Some(forms) = &forms
-                    {
-                        backend.find_forms(forms, &progress)
-                    } else {
-                        Ok(hits)
-                    }
+                    backend.find(query).map(Some)
                 });
+                let outcome = match outcome {
+                    Ok(Some(hits)) if hits.records.is_empty() => {
+                        let forms = forms.get_or_insert_with(|| {
+                            let forms = self.word_forms.candidates(&languages, query);
+                            log::debug!(
+                                "dictionary query: languages {languages:?}, {} generated candidates",
+                                forms.as_ref().map_or(0, forms::Candidates::count)
+                            );
+                            forms
+                        });
+                        match forms {
+                            // The backend is still open: this reuses it.
+                            Some(forms) => self
+                                .open_backend(&id, &progress, &preparing)
+                                .and_then(|backend| backend.find_forms(forms, &progress)),
+                            None => Ok(hits),
+                        }
+                    }
+                    Ok(hits) => Ok(hits.unwrap_or(Hits { records: vec![], forms: None })),
+                    Err(error) => Err(error),
+                };
                 snapshot.borrow_mut().preparing = None;
                 if !current() {
                     return;
@@ -396,7 +426,7 @@ impl Inner {
                                         snapshot.state = Some(definition);
                                         first_definition = true;
                                     }
-                                    Err(error) if current() => self.read_error(&id, query, forms.is_some(), error),
+                                    Err(error) if current() => self.read_error(&id, query, &languages, error),
                                     Err(_) => return,
                                 }
                             }
@@ -405,7 +435,7 @@ impl Inner {
                             }
                         }
                     }
-                    Err(error) => self.read_error(&id, query, forms.is_some(), error),
+                    Err(error) => self.read_error(&id, query, &languages, error),
                 }
                 // Keep the snapshot's errors in step without cloning the catalog.
                 let error = self.catalog.dictionaries.iter().find(|d| d.id == id).and_then(|d| d.error.clone());
@@ -449,7 +479,7 @@ impl Inner {
             waker: Waker::new(|| {}),
         });
         let request = Request { id: 0, mailbox: mailbox.clone(), revision: 0 };
-        self.lookup_session(&request, query, current);
+        self.lookup_session(&request, query, "", current);
         let Some(reply) = mailbox.result.lock().unwrap().take() else { return (None, State::NoResult) };
         (reply.selected, reply.state.unwrap())
     }
@@ -487,8 +517,8 @@ impl Inner {
             d.error = None;
         }
     }
-    fn read_error(&mut self, id: &str, query: &str, english: bool, error: anyhow::Error) {
-        self.failed_queries.insert(id.into(), (query.into(), english));
+    fn read_error(&mut self, id: &str, query: &str, form_languages: &[String], error: anyhow::Error) {
+        self.failed_queries.insert(id.into(), (query.into(), form_languages.to_vec()));
         if let Some(d) = self.catalog.dictionaries.iter_mut().find(|d| d.id == id) {
             d.error = Some(format!("{error:#}"));
         }
@@ -496,7 +526,7 @@ impl Inner {
 
     /// A catalog reply: everything management shows, including the per-file
     /// preparation check that lookups never need.
-    fn catalog_reply(&self, id: u64) -> Reply {
+    fn catalog_reply(&mut self, id: u64) -> Reply {
         let cache = self.store.dictionary_cache();
         let unprepared = self
             .catalog
@@ -513,7 +543,8 @@ impl Inner {
             .filter(|p| !self.catalog.dictionaries.iter().any(|d| d.id == p.id))
             .map(|p| p.id.clone())
             .collect();
-        Reply { unprepared, missing, ..self.reply(id, None, None) }
+        let word_forms = self.word_forms.status();
+        Reply { unprepared, missing, word_forms, ..self.reply(id, None, None) }
     }
     fn reply(&self, id: u64, selected: Option<String>, state: Option<State>) -> Reply {
         Reply {
@@ -540,6 +571,7 @@ impl Inner {
             sets: self.preferences.sets.clone(),
             active_set: self.active_set.clone(),
             change_error: None,
+            word_forms: vec![],
             state,
             save_error: self.save_error.clone(),
         }
@@ -562,6 +594,7 @@ impl Service {
                 // Even preference reads wait for an actual request.
                 let Ok(first) = commands.recv() else { return };
                 let prefs_path = store.dictionary_preferences();
+                let word_forms = WordForms::new(store.wordforms_dir());
                 let mut inner = Inner {
                     store,
                     prefs_path,
@@ -574,6 +607,7 @@ impl Service {
                     backend: None,
                     save_error: None,
                     failed_queries: Default::default(),
+                    word_forms,
                     prefs_error: None,
                 };
                 inner.load();
@@ -601,12 +635,7 @@ impl Service {
                                         state
                                     }
                                     Err(error) if current() => {
-                                        inner.read_error(
-                                            &dictionary,
-                                            &session.query,
-                                            matched.hits.forms.is_some(),
-                                            error,
-                                        );
+                                        inner.read_error(&dictionary, &session.query, &session.form_languages, error);
                                         State::Error(UNREADABLE.into())
                                     }
                                     Err(_) => continue,
@@ -670,6 +699,7 @@ impl Service {
                                     d,
                                     &inner.store.dictionary_cache(),
                                     inner.failed_queries.get(&dictionary),
+                                    &mut inner.word_forms,
                                     &current,
                                 );
                                 if !current() {
@@ -713,7 +743,7 @@ impl Service {
                             }
                             let set = inner.preferences.choose(&selection, &query).id.clone();
                             inner.apply_set(&set);
-                            inner.lookup_session(&request, &query, &current);
+                            inner.lookup_session(&request, &query, &selection.language, &current);
                         }
                     }
                 }

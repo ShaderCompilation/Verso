@@ -98,6 +98,7 @@ fn reply(lookup: &Lookup) -> crate::dictionary::worker::Reply {
         sets: lookup.sets.clone(),
         active_set: lookup.active_set.clone(),
         change_error: None,
+        word_forms: vec![],
         state: Some(lookup.state.clone()),
         save_error: None,
     }

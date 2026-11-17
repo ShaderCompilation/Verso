@@ -14,6 +14,9 @@ pub mod worker;
 use anyhow::{Context, Result, ensure};
 use dictzip::Definitions;
 pub use discovery::{Catalog, Source, SourceStatus, discover_catalog};
+#[cfg(test)]
+pub(crate) use forms::write_pack;
+pub use forms::{WordFormsSource, WordFormsStatus};
 use index::Index;
 pub use model::{Block, BlockKind, Entry, Span, Style};
 use serde::{Deserialize, Serialize};
