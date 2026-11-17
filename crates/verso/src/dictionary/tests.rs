@@ -272,14 +272,85 @@ fn malformed_records_report_source_record_offset_and_cause_without_a_cache() -> 
 }
 
 #[test]
-fn legacy_v1_cache_opens_without_reading_or_rebuilding_source_records() -> Result<()> {
+fn dictionary_keys_ignore_yo_and_stress_marks_but_keep_other_letters() {
+    use super::index::fold;
+    for (a, b) in [
+        ("ещё", "еще"),
+        ("Ёж", "еж"),
+        ("ёж", "ЕЖ"),
+        ("е\u{308}ж", "еж"),
+        ("молоко\u{301}", "молоко"),
+        ("моло\u{301}ко", "молоко"),
+        ("МОЛОКО\u{301}", "молоко"),
+        ("ё\u{301}лка", "елка"),
+        ("е\u{301}\u{308}лка", "елка"),
+        ("ѐ", "е"),
+        ("е\u{300}", "е"),
+        ("ѝ", "и"),
+        ("Ѝ", "и"),
+    ] {
+        assert_eq!(fold(a), fold(b), "{a} and {b}");
+    }
+    for (a, b) in [("ї", "і"), ("Їжак", "іжак"), ("й", "и"), ("йод", "иод"), ("café", "cafe"), ("ä", "a"), ("è", "e")]
+    {
+        assert_ne!(fold(a), fold(b), "{a} and {b}");
+    }
+    assert_eq!(fold("ї"), "ї", "Ukrainian ї recomposes");
+    assert_eq!(fold("Й"), "й", "й keeps its breve");
+    assert_eq!(fold("CAFE\u{301}"), "café", "a mark on a Latin letter stays");
+    assert_eq!(fold("ёлка"), "елка");
+}
+
+#[test]
+fn lookups_match_across_yo_and_stress_marks_and_exact_spelling_comes_first() -> Result<()> {
+    let f = Fixture::new();
+    f.install_words(
+        false,
+        false,
+        &[
+            ("еще", "Still."),
+            ("Ёж", "Hedgehog."),
+            ("молоко", "Milk."),
+            ("ель", "Spruce, plain."),
+            ("ёль", "Spruce, with ё."),
+            ("їжак", "Ukrainian hedgehog."),
+            ("йод", "Iodine."),
+        ],
+    )?;
+    let mut backend = f.backend()?;
+    for (query, meaning) in [
+        ("ещё", "Still."),
+        ("ЕЩЁ", "Still."),
+        ("ёж", "Hedgehog."),
+        ("еж", "Hedgehog."),
+        ("молоко\u{301}", "Milk."),
+        ("моло\u{300}ко", "Milk."),
+        ("їжак", "Ukrainian hedgehog."),
+        ("йод", "Iodine."),
+    ] {
+        assert!(contents(&backend.lookup(query)?).contains(meaning), "{query}");
+    }
+    for query in ["іжак", "иод"] {
+        assert!(backend.lookup(query)?.is_empty(), "{query}");
+    }
+    // Both spellings match; the one typed comes first.
+    for (query, first) in [("ель", "ель"), ("ёль", "ёль")] {
+        let entries = backend.lookup(query)?;
+        assert_eq!(entries.len(), 2, "{query}");
+        assert_eq!(entries[0].headword, first);
+    }
+    Ok(())
+}
+
+#[test]
+fn caches_from_before_the_key_fold_rebuild_once() -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let f = Fixture::new();
-    f.install(false, false)?;
-    // Build a v1 cache with the same short records accepted before Phase 2.
+    f.install_words(false, false, &[("еще", "Still."), ("apple", "A fruit.")])?;
     drop(f.backend()?);
     let cache = f.cache_files()?.pop().unwrap().0;
-    let held = fs::File::open(&cache)?;
+    // Stamp the cache with the fingerprint written before keys ignored ё,
+    // as if an older Verso had built it with the old `ещё`-blind keys.
     use sha2::{Digest, Sha256};
     let mut signature = Sha256::new();
     signature.update(b"verso-stardict-index-v1");
@@ -290,15 +361,20 @@ fn legacy_v1_cache_opens_without_reading_or_rebuilding_source_records() -> Resul
         signature.update(meta.len().to_le_bytes());
         signature.update(meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_le_bytes());
     }
-    assert_eq!(&fs::read(&cache)?[..64], format!("{:x}", signature.finalize()).as_bytes(), "legacy v1 signature");
-    let source = f.path().with_extension("idx");
-    let meta = fs::metadata(&source)?;
-    // Corrupt the source without changing its length or timestamp (the v1
-    // signature). A rebuild must fail, so a successful lookup proves reuse.
-    fs::write(&source, vec![b'x'; meta.len() as usize])?;
-    fs::File::options().write(true).open(&source)?.set_modified(meta.modified()?)?;
-    assert!(contents(&f.backend()?.lookup("Apple")?).contains("A fruit."));
-    assert_eq!(held.metadata()?.ino(), fs::metadata(cache)?.ino());
+    let old = format!("{:x}", signature.finalize());
+    let mut file = fs::File::options().write(true).open(&cache)?;
+    file.write_all(old.as_bytes())?;
+    drop(file);
+    let held = fs::File::open(&cache)?;
+    assert!(contents(&f.backend()?.lookup("ещё")?).contains("Still."));
+    assert_ne!(held.metadata()?.ino(), fs::metadata(&cache)?.ino(), "the old cache was replaced");
+    let rebuilt = f.cache_files()?;
+    assert_eq!(rebuilt.len(), 1);
+    assert_ne!(rebuilt[0].1, old.as_bytes(), "the new cache carries the new fingerprint");
+    // The rebuilt cache is then reused.
+    let held = fs::File::open(&cache)?;
+    assert!(contents(&f.backend()?.lookup("apple")?).contains("A fruit."));
+    assert_eq!(held.metadata()?.ino(), fs::metadata(&cache)?.ino());
     Ok(())
 }
 

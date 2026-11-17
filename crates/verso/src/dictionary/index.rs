@@ -2,8 +2,8 @@
 //! resident word list, and a single open index. The source ordinal map lets
 //! synonyms point to the original entry even when offsets are 64 bit.
 use super::{Info, basename, companion, sibling};
-use crate::library::search::fold;
 use anyhow::{Context, Result, ensure};
+use caseless::Caseless;
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,10 +11,14 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+use unicode_normalization::UnicodeNormalization;
 const MAX_WORD_BYTES: usize = 4096;
 const BUCKETS: usize = 4096;
 const SIGNATURE: u64 = 64;
 const HEADER: u64 = SIGNATURE + BUCKETS as u64 * 8;
+/// Part of the cache fingerprint: bump it whenever `fold` changes, so every
+/// cached index rebuilds once with the new keys.
+const KEY_VERSION: &[u8] = b"key-v2";
 static BUILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 type Entry = (String, u64, u32);
 struct Record {
@@ -25,6 +29,36 @@ struct Record {
     word: String,
 }
 pub struct Index(File);
+/// The dictionary key for a headword or query: case folded and normalized
+/// like the library search, and also blind to Russian ё/е and stress marks,
+/// so `ещё` finds `еще` and `молоко́` finds `молоко`. Marks are judged on the
+/// decomposed text, against the letter they follow:
+/// - acute and grave (U+0301, U+0300) after a Cyrillic letter are stress
+///   marks; dropping the grave too keeps `ѐ` and `ѝ` from recomposing into
+///   separate letters;
+/// - the diaeresis (U+0308) goes only after `е`, so Ukrainian `ї` keeps it;
+/// - `й`'s breve and every mark on Latin letters stay.
+pub fn fold(text: &str) -> String {
+    let mut base = '\0';
+    text.nfd()
+        .default_case_fold()
+        .filter(|&c| {
+            let drop = match c {
+                '\u{301}' | '\u{300}' => cyrillic(base),
+                '\u{308}' => base == 'е',
+                _ => false,
+            };
+            if !unicode_normalization::char::is_combining_mark(c) {
+                base = c;
+            }
+            !drop
+        })
+        .nfc()
+        .collect()
+}
+fn cyrillic(c: char) -> bool {
+    matches!(c as u32, 0x0400..=0x052f | 0x1c80..=0x1c8f | 0xa640..=0xa69f)
+}
 fn hash(text: &str) -> usize {
     text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) as usize % BUCKETS
 }
@@ -111,6 +145,7 @@ fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
     let syn = sibling(&base, "syn");
     let mut signature = Sha256::new();
     signature.update(b"verso-stardict-index-v1");
+    signature.update(KEY_VERSION);
     // `path` is the metadata actually read (`.ifo` or `.ifo.gz`), so
     // switching or replacing either variant changes the signature.
     for source in [path, &idx, &dict, &syn] {
