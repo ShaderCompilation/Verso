@@ -7,7 +7,7 @@
 use std::fs::{self, File};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::process::{alive, spawn_detached, wait_until};
 
@@ -63,10 +63,20 @@ pub fn wait_stopped() {
 }
 
 /// Waits up to `limit` for the responder to win a name, so Settings can
-/// show it right after starting SSH.
+/// show it right after starting SSH. Stops early if the responder exits.
 pub fn wait_for_name(limit: Duration) {
-    wait_until(limit, || hostname().is_some() || verso_mdns::running_pid().is_none());
+    let start = Instant::now();
+    // A freshly spawned responder writes its pidfile only after it has
+    // started, so until then "no pidfile" doesn't mean it has exited.
+    if !wait_until(PIDFILE_GRACE.min(limit), || verso_mdns::running_pid().is_some()) {
+        return;
+    }
+    let rest = limit.saturating_sub(start.elapsed());
+    wait_until(rest, || hostname().is_some() || verso_mdns::running_pid().is_none());
 }
+
+/// How long a just-started responder gets to write its pidfile.
+const PIDFILE_GRACE: Duration = Duration::from_millis(500);
 
 fn terminate(pid: i32) {
     // SAFETY: plain kill(2) on a PID just checked to be the responder.
