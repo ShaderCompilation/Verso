@@ -1,0 +1,24 @@
+[package]
+name = "verso-wordforms"
+description = "Word-form packs (.vwf): form → lemma lookup for Verso's dictionary, and the builder that makes them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+caseless = "0.2.2"
+fst = "0.4.7"
+memmap2 = "0.9.12"
+unicode-normalization = "0.1"
+quick-xml = { version = "0.41", optional = true }
+
+[features]
+# The builder: the OpenCorpora reader, the pack writer and `vwf-build`. The
+# app depends on this crate with `default-features = false` and only reads.
+default = ["build"]
+build = ["dep:quick-xml"]
+
+[[bin]]
+name = "vwf-build"
+required-features = ["build"]

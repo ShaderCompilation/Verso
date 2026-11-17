@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- A hand-written slice of the OpenCorpora export format, for unit tests. -->
+<dictionary version="0.92" revision="417258">
+<grammemes>
+    <grammeme parent="POST"><name>NOUN</name><alias>СУЩ</alias><description>имя существительное</description></grammeme>
+</grammemes>
+<restrictions>
+    <restr type="maybe" auto="0"><left type="lemma">NOUN</left><right type="lemma">anim</right></restr>
+</restrictions>
+<lemmata>
+    <lemma id="1" rev="1"><l t="ёж"><g v="NOUN"/><g v="anim"/></l><f t="ёж"><g v="sing"/><g v="nomn"/></f><f t="ежа"><g v="sing"/><g v="gent"/></f><f t="ежа"><g v="sing"/><g v="accs"/></f><f t="ежи"><g v="plur"/><g v="nomn"/></f></lemma>
+    <lemma id="2" rev="2"><l t="сталь"><g v="NOUN"/></l><f t="сталь"/><f t="стали"/><f t="сталью"/></lemma>
+    <lemma id="3" rev="3"><l t="стать"><g v="INFN"/></l><f t="стать"/></lemma>
+    <lemma id="4" rev="4"><l t="стал"><g v="VERB"/></l><f t="стал"/><f t="стала"/><f t="стали"/></lemma>
+    <lemma id="5" rev="5"><l t="читать"><g v="INFN"/></l><f t="читать"/></lemma>
+    <lemma id="6" rev="6"><l t="читающий"><g v="PRTF"/></l><f t="читающий"/><f t="читающего"/></lemma>
+    <lemma id="7" rev="7"><l t="читая"><g v="GRND"/></l><f t="читая"/></lemma>
+    <lemma id="8" rev="8"><l t="прочитанный"><g v="PRTF"/></l><f t="прочитанный"/><f t="прочитанного"/></lemma>
+    <lemma id="9" rev="9"><l t="прочитан"><g v="PRTS"/></l><f t="прочитан"/><f t="прочитана"/></lemma>
+    <lemma id="10" rev="10"><l t="прочитать"><g v="INFN"/></l><f t="прочитать"/></lemma>
+    <lemma id="11" rev="11"><l t="хороший"><g v="ADJF"/></l><f t="хороший"/><f t="хорошего"/></lemma>
+    <lemma id="12" rev="12"><l t="хорош"><g v="ADJS"/></l><f t="хорош"/><f t="хороша"/></lemma>
+    <lemma id="13" rev="13"><l t="лучше"><g v="COMP"/></l><f t="лучше"></f><f t="получше"><g v="Cmp2"/></f></lemma>
+    <lemma id="14" rev="14"><l t="хорошо"><g v="ADVB"/></l><f t="хорошо"/></lemma>
+    <lemma id="15" rev="15"><l t="идти"><g v="INFN"/></l><f t="идти"/></lemma>
+    <lemma id="16" rev="16"><l t="иду"><g v="VERB"/></l><f t="иду"/><f t="шёл"/><f t="шла"/></lemma>
+    <lemma id="17" rev="17"><l t="сделать"><g v="INFN"/><g v="perf"/></l><f t="сделать"/></lemma>
+    <lemma id="18" rev="18"><l t="делать"><g v="INFN"/><g v="impf"/></l><f t="делать"/></lemma>
+    <lemma id="19" rev="19"><l t="кое-кто"><g v="NPRO"/></l><f t="кое-кто"/><f t="кое-кого"/></lemma>
+    <lemma id="20" rev="20"><l t="1-й"><g v="ADJF"/></l><f t="1-й"/></lemma>
+    <lemma id="21" rev="21"><l t="ёлка"><g v="NOUN"/></l><f t="ёлка"/><f t="ёлки"/></lemma>
+    <lemma id="24" rev="24"><l t="прочитавший"><g v="PRTF"/><g v="perf"/><g v="actv"/></l><f t="прочитавший"/></lemma>
+    <lemma id="22" rev="22"><l t="нея"><g v="NOUN"/><g v="inan"/><g v="Geox"/></l><f t="нея"/><f t="нее"/></lemma>
+    <lemma id="23" rev="23"><l t="она"><g v="NPRO"/></l><f t="она"/><f t="её"/><f t="нее"/></lemma>
+</lemmata>
+<link_types>
+<type id="1">ADJF-ADJS</type>
+<type id="2">ADJF-COMP</type>
+<type id="3">INFN-VERB</type>
+<type id="4">INFN-PRTF</type>
+<type id="5">INFN-GRND</type>
+<type id="6">PRTF-PRTS</type>
+<type id="11">PERF-IMPF</type>
+<type id="26">ADVB-COMP</type>
+</link_types>
+<links>
+    <link id="1" from="3" to="4" type="3"/>
+    <link id="2" from="5" to="6" type="4"/>
+    <link id="3" from="5" to="7" type="5"/>
+    <link id="4" from="10" to="8" type="4"/>
+    <link id="5" from="8" to="9" type="6"/>
+    <link id="6" from="11" to="12" type="1"/>
+    <link id="7" from="11" to="13" type="2"/>
+    <link id="8" from="14" to="13" type="26"/>
+    <link id="9" from="15" to="16" type="3"/>
+    <link id="10" from="17" to="18" type="11"/>
+    <link id="11" from="999" to="1" type="1"/>
+    <link id="12" from="10" to="24" type="4"/>
+    <link id="13" from="24" to="9" type="6"/>
+</links>
+</dictionary>
