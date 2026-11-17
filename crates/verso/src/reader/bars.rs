@@ -23,7 +23,7 @@ pub struct ItemText {
     pub tail: String,
 }
 impl ItemText {
-    fn short(text: String) -> Self {
+    pub fn short(text: String) -> Self {
         Self { head: String::new(), tail: text }
     }
     fn title(text: &str) -> Self {

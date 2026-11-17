@@ -1,9 +1,10 @@
-//! Draws the reader's top and bottom bars over the rendered page.
+//! Draws the reader's top and bottom bars over the rendered page, and the
+//! same bars in miniature for the Page layout sketch.
 use crate::geom::Rect;
-use crate::gfx::HAlign;
+use crate::gfx::{HAlign, TextStyle};
 use crate::page_layout::{Bar, PageGeometry, PageLayout, ProgressLine};
-use crate::reader::bars::{BarData, Need, fit};
-use crate::ui::theme::{INK2, LINE, PAPER};
+use crate::reader::bars::{BarData, ItemText, Need, fit};
+use crate::ui::theme::{INK2, LINE, PAPER, Theme};
 use crate::ui::widget::DrawCx;
 
 /// Space kept between items in a bar.
@@ -12,9 +13,36 @@ const GAP_MM: f32 = 3.0;
 const LINE_MM: f32 = 0.5;
 const TICK_MM: f32 = 1.2;
 
+/// Sizes for drawing a bar: the page's own, or the sketch's smaller ones.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BarStyle {
+    pub text: TextStyle,
+    pub gap: i32,
+    pub line: i32,
+    pub tick: i32,
+    pub tick_w: i32,
+}
+impl BarStyle {
+    pub fn page(t: &Theme) -> Self {
+        Self {
+            text: t.caption.gray(INK2),
+            gap: t.mm(GAP_MM),
+            line: t.mm(LINE_MM).max(2),
+            tick: t.mm(TICK_MM),
+            tick_w: t.hairline,
+        }
+    }
+    /// The page's sizes scaled by `scale`, with text kept readable.
+    pub fn scaled(t: &Theme, scale: f32, text: TextStyle) -> Self {
+        let px = |mm: f32, min: i32| ((t.mm(mm) as f32 * scale).round() as i32).max(min);
+        Self { text, gap: px(GAP_MM, 2), line: px(LINE_MM, 2), tick: px(TICK_MM, 4), tick_w: t.hairline.max(2) }
+    }
+}
+
 /// Draws every bar that is on. Bars are part of the page frame, so they
 /// cost no extra screen update.
 pub fn draw(cx: &mut DrawCx, layout: &PageLayout, geometry: &PageGeometry, data: &BarData) {
+    let style = BarStyle::page(cx.theme);
     let bars = [
         (&layout.top, geometry.top_bar, ProgressLine::Top),
         (&layout.bottom, geometry.bottom_bar, ProgressLine::Bottom),
@@ -22,28 +50,34 @@ pub fn draw(cx: &mut DrawCx, layout: &PageLayout, geometry: &PageGeometry, data:
     for (bar, rect, line) in bars {
         let Some(rect) = rect else { continue };
         cx.fill(rect, PAPER);
-        slots(cx, bar, rect, data);
+        slots(cx, &texts(bar, data, style.text.gray), rect, &style);
         if layout.progress == line {
             // The line sits on the bar's edge towards the text.
-            progress(cx, rect, line == ProgressLine::Bottom, data);
+            progress(cx, rect, line == ProgressLine::Bottom, data, &style);
         }
     }
 }
 
-fn slots(cx: &mut DrawCx, bar: &Bar, rect: Rect, data: &BarData) {
-    let style = cx.theme.caption.gray(INK2);
-    let texts = bar.slots.map(|slot| slot.and_then(|item| data.text(item)));
+/// Each slot's text and gray: what the bar shows for its items.
+fn texts(bar: &Bar, data: &BarData, gray: u8) -> [Option<(ItemText, u8)>; 3] {
+    bar.slots.map(|slot| slot.and_then(|item| data.text(item)).map(|text| (text, gray)))
+}
+
+/// Draws three slot texts across `rect`, fitted as on the page. Text is
+/// centred on `rect` vertically and clipped to it.
+pub(super) fn slots(cx: &mut DrawCx, texts: &[Option<(ItemText, u8)>; 3], rect: Rect, style: &BarStyle) {
     let mut widths = [(0, 0); 3];
     let needs: [Option<Need>; 3] = std::array::from_fn(|i| {
-        let text = texts[i].as_ref()?;
-        let mut width = |s: &str| if s.is_empty() { 0 } else { cx.text.width(s, style).ceil() as i32 };
+        let (text, _) = texts[i].as_ref()?;
+        let mut width = |s: &str| if s.is_empty() { 0 } else { cx.text.width(s, style.text).ceil() as i32 };
         let (head, tail) = (width(&text.head), width(&text.tail));
         widths[i] = (head, tail);
         Some(Need { min: tail, full: head + tail })
     });
-    let given = fit(needs, rect.w, cx.theme.mm(GAP_MM));
-    for (i, text) in texts.iter().enumerate() {
-        let Some(text) = text else { continue };
+    let given = fit(needs, rect.w, style.gap);
+    for (i, slot) in texts.iter().enumerate() {
+        let Some((text, gray)) = slot else { continue };
+        let text_style = style.text.gray(*gray);
         let w = given[i];
         let x = match i {
             0 => rect.x,
@@ -54,20 +88,19 @@ fn slots(cx: &mut DrawCx, bar: &Bar, rect: Rect, data: &BarData) {
         // Glyphs are clipped to the bar, not to their measured width.
         let from = |x: i32| Rect::new(x, rect.y, rect.right() - x, rect.h);
         let tail_x = if head_w + tail_w <= w {
-            cx.line_measured(&text.head, style, from(x));
+            cx.line_measured(&text.head, text_style, from(x));
             x + head_w
         } else {
-            cx.line(&text.head, style, Rect::new(x, rect.y, w - tail_w, rect.h), HAlign::Left);
+            cx.line(&text.head, text_style, Rect::new(x, rect.y, w - tail_w, rect.h), HAlign::Left);
             x + w - tail_w
         };
-        cx.line_measured(&text.tail, style, from(tail_x));
+        cx.line_measured(&text.tail, text_style, from(tail_x));
     }
 }
 
-fn progress(cx: &mut DrawCx, rect: Rect, on_top_edge: bool, data: &BarData) {
-    let t = cx.theme;
-    let thickness = t.mm(LINE_MM).max(2);
-    let tick = t.mm(TICK_MM);
+/// The progress line along one edge of `rect`, with chapter ticks.
+pub(super) fn progress(cx: &mut DrawCx, rect: Rect, on_top_edge: bool, data: &BarData, style: &BarStyle) {
+    let (thickness, tick) = (style.line, style.tick);
     let y = if on_top_edge { rect.y } else { rect.bottom() - thickness };
     cx.fill(Rect::new(rect.x, y, rect.w, thickness), LINE);
     let filled = (rect.w as f32 * data.fraction()).round() as i32;
@@ -75,7 +108,7 @@ fn progress(cx: &mut DrawCx, rect: Rect, on_top_edge: bool, data: &BarData) {
     let tick_y = if on_top_edge { rect.y } else { rect.bottom() - tick };
     for start in data.chapter_starts() {
         let x = rect.x + (rect.w as f32 * start).round() as i32;
-        cx.fill(Rect::new(x - t.hairline / 2, tick_y, t.hairline, tick), INK2);
+        cx.fill(Rect::new(x - style.tick_w / 2, tick_y, style.tick_w, tick), INK2);
     }
 }
 

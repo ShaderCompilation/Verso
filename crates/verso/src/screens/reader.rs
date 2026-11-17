@@ -1,6 +1,7 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
 mod annotations;
 mod bars;
+mod layout;
 mod search;
 mod selection;
 use crate::document::{
@@ -9,6 +10,7 @@ use crate::document::{
 };
 use crate::geom::Rect;
 use crate::gfx::HAlign;
+use crate::page_layout::PageLayout;
 use crate::platform::RefreshMode;
 use crate::reader::{self, PageCache, Refresh, Zone};
 use crate::screens::contents::{Contents, ContentsEvent};
@@ -23,6 +25,7 @@ use crate::store::{
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{PAPER, Theme};
 use crate::ui::widget::DrawCx;
+use layout::{LayoutEvent, LayoutView};
 use search::{BarEvent, Origin, SearchBar, SearchEvent, SearchView, Session};
 use selection::SelectionState;
 use std::rc::Rc;
@@ -79,6 +82,7 @@ enum Overlay {
     None,
     Menu(Box<ReaderMenu>),
     Text(Box<TextSheet>),
+    Layout(Box<LayoutView>),
     Fonts(Box<FontList>),
     Contents(Box<Contents>),
     Lookup(Box<Lookup>),
@@ -629,12 +633,36 @@ impl Reader {
         )));
     }
     fn text(&mut self, t: &Theme) {
-        self.overlay = Overlay::Text(Box::new(TextSheet::new(
-            t,
-            self.screen,
-            &self.settings.typography,
-            &self.settings.page_layout,
-        )));
+        self.overlay = Overlay::Text(Box::new(TextSheet::new(t, self.screen, &self.settings.typography)));
+    }
+    /// Closes the Page layout screen, if open, and applies what it changed:
+    /// one re-layout when margins or bars moved the text, otherwise only a
+    /// save and a redraw.
+    fn leave_layout(&mut self) -> bool {
+        if !matches!(self.overlay, Overlay::Layout(_)) {
+            return false;
+        }
+        let Overlay::Layout(view) = std::mem::replace(&mut self.overlay, Overlay::None) else { unreachable!() };
+        self.apply_layout(view.layout);
+        true
+    }
+    fn apply_layout(&mut self, layout: PageLayout) {
+        if layout == self.settings.page_layout {
+            return;
+        }
+        let moves_text = layout.moves_text(&self.settings.page_layout);
+        self.settings.page_layout = layout;
+        if moves_text {
+            self.changed();
+        } else {
+            self.save_text_settings();
+        }
+    }
+    /// Text settings and the page layout are saved together; a failure stays
+    /// pending, shows a message and is retried on the next change, sleep and exit.
+    fn save_text_settings(&mut self) {
+        self.settings_save_pending = true;
+        let _ = self.flush_text_settings();
     }
     fn changed(&mut self) {
         if self.jump != 0 {
@@ -649,8 +677,7 @@ impl Reader {
         self.annotations.invalidate_import("Text layout changed. Preview the import again.");
         self.cache.reset(self.cache.generation + 1);
         self.layout_at = Some(Instant::now() + Duration::from_millis(180));
-        self.settings_save_pending = true;
-        let _ = self.flush_text_settings();
+        self.save_text_settings();
     }
     fn flush_text_settings(&mut self) -> anyhow::Result<()> {
         if !self.settings_save_pending {
@@ -722,6 +749,24 @@ impl Reader {
         })
     }
 }
+/// What the bars show for `page` (or the target page before one is shown).
+fn bar_data<'a>(
+    toc: &'a [TocEntry],
+    metadata: &'a Metadata,
+    page: Option<&Page>,
+    target: usize,
+    pages: usize,
+) -> reader::bars::BarData<'a> {
+    reader::bars::BarData {
+        toc,
+        title: &metadata.title,
+        author: &metadata.authors,
+        page: page.map_or(target, |p| p.number),
+        pages,
+        progress: page.map_or(0, |p| p.progress),
+    }
+}
+
 impl Screen for Reader {
     fn fills_canvas(&self) -> bool {
         self.shown.is_some()
@@ -729,6 +774,11 @@ impl Screen for Reader {
 
     fn draw(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
+        if let Overlay::Layout(view) = &self.overlay {
+            // Full screen: the page underneath isn't drawn.
+            view.draw(cx, &bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages));
+            return;
+        }
         if let Some(page) = &self.shown {
             cx.canvas.set_gray(&page.pixels);
             let layout = &self.settings.page_layout;
@@ -736,14 +786,7 @@ impl Screen for Reader {
                 let started = Instant::now();
                 let font_px = self.settings.typography.font_px(t.dpi);
                 let geometry = layout.geometry(self.screen.w, self.screen.h, t.dpi, font_px);
-                let data = reader::bars::BarData {
-                    toc: &self.toc,
-                    title: &self.metadata.title,
-                    author: &self.metadata.authors,
-                    page: page.number,
-                    pages: self.pages,
-                    progress: page.progress,
-                };
+                let data = bar_data(&self.toc, &self.metadata, Some(page), self.target, self.pages);
                 bars::draw(cx, layout, &geometry, &data);
                 log::debug!("bars drawn in {} us", started.elapsed().as_micros());
             }
@@ -782,6 +825,7 @@ impl Screen for Reader {
                 menu.draw(cx, title, self.pages, !self.laying_out && self.layout_at.is_none());
             }
             Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
+            Overlay::Layout(_) => {}
             Overlay::Fonts(fonts) => fonts.draw(cx),
             Overlay::Contents(contents) => contents.draw(cx),
             Overlay::Lookup(lookup) => lookup.draw(cx),
@@ -994,20 +1038,34 @@ impl Screen for Reader {
                 }
                 None => {}
             },
-            Overlay::Text(sheet) => {
-                match sheet.on_gesture(&g, &mut self.settings.typography, &mut self.settings.page_layout) {
-                    Some(TextEvent::Close) => self.overlay = Overlay::None,
-                    Some(TextEvent::Fonts) => {
-                        self.overlay = Overlay::Fonts(Box::new(FontList::new(
-                            cx.theme,
-                            self.screen,
-                            &self.fonts,
-                            self.metadata.publisher_fonts,
-                            &self.settings.typography.font,
-                        )))
-                    }
-                    Some(TextEvent::Changed) => self.changed(),
-                    None => {}
+            Overlay::Text(sheet) => match sheet.on_gesture(&g, &mut self.settings.typography) {
+                Some(TextEvent::Close) => self.overlay = Overlay::None,
+                Some(TextEvent::Layout) => {
+                    self.overlay = Overlay::Layout(Box::new(LayoutView::new(
+                        cx.theme,
+                        self.screen,
+                        &self.settings.page_layout,
+                        &self.settings.typography,
+                    )))
+                }
+                Some(TextEvent::Fonts) => {
+                    self.overlay = Overlay::Fonts(Box::new(FontList::new(
+                        cx.theme,
+                        self.screen,
+                        &self.fonts,
+                        self.metadata.publisher_fonts,
+                        &self.settings.typography.font,
+                    )))
+                }
+                Some(TextEvent::Changed) => self.changed(),
+                None => {}
+            },
+            Overlay::Layout(view) => {
+                let data = bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages);
+                if let Some(LayoutEvent::Close) = view.on_gesture(&g, cx.theme, &data) {
+                    self.leave_layout();
+                    // Back to the Text sheet, with the new layout above it.
+                    self.text(cx.theme);
                 }
             }
             Overlay::Fonts(fonts) => match fonts.on_gesture(&g) {
@@ -1075,6 +1133,7 @@ impl Screen for Reader {
     fn deadline(&self) -> Option<Instant> {
         let step = match &self.overlay {
             Overlay::Text(s) => s.deadline(),
+            Overlay::Layout(view) => view.deadline(),
             _ => None,
         };
         [self.layout_at, step].into_iter().flatten().min()
@@ -1090,6 +1149,11 @@ impl Screen for Reader {
             && s.on_tick(cx.now, &mut self.settings.typography)
         {
             self.changed();
+        }
+        if let Overlay::Layout(view) = &mut self.overlay
+            && view.on_tick(cx.now)
+        {
+            cx.redraw();
         }
         if self.layout_at.is_some_and(|t| cx.now >= t) {
             self.layout_at = None;
@@ -1174,6 +1238,8 @@ impl Screen for Reader {
         if let Some(worker) = &self.dictionary {
             worker.cancel();
         }
+        // Sleep closes the layout screen; keep what was set there.
+        self.leave_layout();
         let _ = self.flush_text_settings();
         let _ = self.annotations.flush();
         let _ = self.flush_position();
@@ -1184,6 +1250,7 @@ impl Screen for Reader {
         }
     }
     fn on_quit(&mut self) -> anyhow::Result<()> {
+        self.leave_layout();
         self.flush_text_settings()?;
         self.annotations.flush()?;
         self.flush_position()?;
@@ -1445,6 +1512,122 @@ mod tests {
         assert!(saved.developer);
         drop(r);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Opens the Page layout screen from the Text sheet's row.
+    fn open_layout(r: &mut Reader, theme: &Theme) {
+        test_cx(theme, |cx| {
+            r.text(theme);
+            let Overlay::Text(sheet) = &r.overlay else { unreachable!() };
+            let row = sheet.layout_row();
+            r.on_gesture(Gesture::Down(row.center()), cx);
+            r.on_gesture(Gesture::Tap(row.center()), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::Layout(_)));
+    }
+    fn settings_path(r: &Reader) -> std::path::PathBuf {
+        r.store.dictionary_preferences().parent().unwrap().join("settings.json")
+    }
+    fn edit_layout(r: &mut Reader, f: impl FnOnce(&mut PageLayout)) {
+        let Overlay::Layout(view) = &mut r.overlay else { panic!("layout screen is not open") };
+        f(&mut view.layout);
+    }
+    /// Taps the back arrow, then lets any debounced layout start.
+    fn leave_layout_screen(r: &mut Reader, theme: &Theme) {
+        let back = crate::geom::Point::new(theme.margin + theme.target / 2 - theme.mm(2.0), theme.top_bar / 2);
+        test_cx(theme, |cx| {
+            r.on_gesture(Gesture::Down(back), cx);
+            r.on_gesture(Gesture::Tap(back), cx);
+            assert!(matches!(r.overlay, Overlay::Text(_)), "back returns to the Text sheet");
+            cx.now += Duration::from_secs(1);
+            r.on_tick(cx);
+        });
+    }
+    fn layouts(commands: &std::sync::mpsc::Receiver<Command>) -> Vec<PageLayout> {
+        commands
+            .try_iter()
+            .filter_map(|c| match c {
+                Command::Layout { page, .. } => Some(page),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn leaving_page_layout_relays_out_once_only_when_the_text_moves() {
+        let (mut r, commands) = test_reader("page-layout-leave");
+        let _ = std::fs::remove_file(settings_path(&r));
+        let theme = Theme::for_dpi(150);
+        r.laying_out = false;
+        r.pages = 20;
+        r.shown = Some(test_page(1, 3));
+        // No changes: nothing to lay out or save.
+        open_layout(&mut r, &theme);
+        leave_layout_screen(&mut r, &theme);
+        assert!(layouts(&commands).is_empty());
+        assert_eq!(r.cache.generation, 1);
+        assert!(!settings_path(&r).exists(), "an unchanged layout is not saved");
+        // Slots and the progress line only redraw, but are saved.
+        open_layout(&mut r, &theme);
+        edit_layout(&mut r, |l| {
+            l.bottom.slots[1] = Some(crate::page_layout::BarItem::PageTotal);
+            l.progress = crate::page_layout::ProgressLine::Bottom;
+        });
+        leave_layout_screen(&mut r, &theme);
+        assert!(layouts(&commands).is_empty(), "slot picks keep the layout");
+        assert_eq!(r.cache.generation, 1);
+        assert!(r.layout_at.is_none() && !r.settings_save_pending);
+        let saved = r.store.settings().page_layout;
+        assert_eq!(saved.bottom.slots[1], Some(crate::page_layout::BarItem::PageTotal));
+        assert_eq!(saved, r.settings.page_layout);
+        // Several margin and bar changes in one visit: one layout, on leaving.
+        open_layout(&mut r, &theme);
+        edit_layout(&mut r, |l| {
+            l.margins.sides += 2;
+            l.margins.top = 9;
+            l.top.on = true;
+        });
+        test_cx(&theme, |cx| {
+            cx.now += Duration::from_secs(1);
+            r.on_tick(cx);
+        });
+        assert!(layouts(&commands).is_empty(), "nothing is laid out while the screen is open");
+        leave_layout_screen(&mut r, &theme);
+        let sent = layouts(&commands);
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].margins.sides, sent[0].margins.top, sent[0].top.on), (9, 9, true));
+        assert_eq!(r.cache.generation, 2);
+        assert_eq!(r.store.settings().page_layout, sent[0]);
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn page_layout_save_failures_stay_pending_and_retry() -> anyhow::Result<()> {
+        let (mut r, commands) = test_reader("page-layout-retry");
+        let theme = Theme::for_dpi(150);
+        let path = settings_path(&r);
+        std::fs::create_dir_all(&path)?; // Atomic file replacement must fail.
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 0));
+        open_layout(&mut r, &theme);
+        edit_layout(&mut r, |l| l.top.slots = [None, Some(crate::page_layout::BarItem::Author), None]);
+        leave_layout_screen(&mut r, &theme);
+        assert!(r.settings_save_pending, "a failed save stays pending");
+        assert!(layouts(&commands).is_empty());
+        assert!(r.on_quit().is_err(), "exit retries and reports a continuing failure");
+        std::fs::remove_dir(&path)?;
+        // Sleep with the screen open keeps its edits and retries the save.
+        open_layout(&mut r, &theme);
+        edit_layout(&mut r, |l| l.margins.bottom = 12);
+        r.on_sleep();
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(!r.settings_save_pending);
+        let saved = r.store.settings().page_layout;
+        assert_eq!(saved.top.slots[1], Some(crate::page_layout::BarItem::Author));
+        assert_eq!(saved.margins.bottom, 12);
+        assert!(r.layout_at.is_some(), "the margin change lays out once, after wake");
+        std::fs::remove_dir_all(path.parent().unwrap())?;
         Ok(())
     }
 

@@ -1,8 +1,8 @@
 //! Typography and font picker, with the page left visible above them.
 use crate::document::{FontFace, Typography};
 use crate::geom::Rect;
-use crate::gfx::{Family, HAlign};
-use crate::page_layout::PageLayout;
+use crate::gfx::{Family, HAlign, Icon};
+use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -12,30 +12,26 @@ use std::time::Instant;
 pub enum TextEvent {
     Close,
     Fonts,
+    Layout,
     Changed,
-}
-/// Side margins of the old Narrow, Normal and Wide presets, in millimetres.
-const MARGIN_PRESETS: [u32; 3] = [4, 7, 10];
-/// The preset closest to a side margin.
-fn margin_preset(sides: u32) -> usize {
-    (0..3).min_by_key(|&i| MARGIN_PRESETS[i].abs_diff(sides)).unwrap_or(1)
 }
 pub struct TextSheet {
     sheet: Sheet,
     rows: Vec<(Rect, &'static str)>,
     font: Rect,
     press: Press,
+    /// The whole "Page layout ›" row.
+    layout: Rect,
+    layout_press: Press,
     size: Stepper,
     spacing: Segmented,
-    margins: Segmented,
     justify: Toggle,
-    footer: Toggle,
 }
 impl TextSheet {
-    pub fn new(t: &Theme, screen: Rect, typography: &Typography, layout: &PageLayout) -> Self {
-        let sheet = Sheet::open("Text", t.mm(87.0), screen, t);
+    pub fn new(t: &Theme, screen: Rect, typography: &Typography) -> Self {
+        let sheet = Sheet::open("Text", t.mm(75.5), screen, t);
         let top = sheet.content(t).y;
-        let rows: Vec<_> = ["Font", "Size", "Spacing", "Margins", "Justify", "Progress footer"]
+        let rows: Vec<_> = ["Font", "Size", "Spacing", "Justify", "Page layout"]
             .into_iter()
             .enumerate()
             .map(|(i, n)| (Rect::new(t.margin, top + i as i32 * t.mm(11.5), screen.w - 2 * t.margin, t.mm(11.5)), n))
@@ -51,22 +47,19 @@ impl TextSheet {
         size.place(control(1), t.mm(16.0));
         let mut spacing = Segmented::texts(&["Tight", "Normal", "Loose"], typography.spacing);
         spacing.place(control(2));
-        let mut margins = Segmented::texts(&["Narrow", "Normal", "Wide"], margin_preset(layout.margins.sides));
-        margins.place(control(3));
         let mut justify = Toggle::new(typography.justify);
-        justify.place(screen.w - t.margin, rows[4].0.center().y, t);
-        let mut footer_toggle = Toggle::new(layout.bottom.on);
-        footer_toggle.place(screen.w - t.margin, rows[5].0.center().y, t);
+        justify.place(screen.w - t.margin, rows[3].0.center().y, t);
+        let layout = Rect::new(0, rows[4].0.y, screen.w, rows[4].0.h);
         let mut result = Self {
             font: control(0),
             sheet,
             rows,
             press: Press::default(),
+            layout,
+            layout_press: Press::default(),
             size,
             spacing,
-            margins,
             justify,
-            footer: footer_toggle,
         };
         result.sync(typography);
         result
@@ -80,6 +73,10 @@ impl TextSheet {
         t.size_pt = (t.size_pt + if step == Step::Less { -1.0 } else { 1.0 }).clamp(6.0, 24.0);
         self.sync(t);
     }
+    #[cfg(test)]
+    pub fn layout_row(&self) -> Rect {
+        self.layout
+    }
     pub fn deadline(&self) -> Option<Instant> {
         self.size.deadline()
     }
@@ -91,39 +88,43 @@ impl TextSheet {
             false
         }
     }
-    /// Until the Page layout screen exists, Margins sets the side margin to
-    /// one of the old presets and the footer toggle switches the bottom bar.
-    pub fn on_gesture(&mut self, g: &Gesture, t: &mut Typography, layout: &mut PageLayout) -> Option<TextEvent> {
+    pub fn on_gesture(&mut self, g: &Gesture, t: &mut Typography) -> Option<TextEvent> {
         if self.sheet.on_gesture(g) {
             return Some(TextEvent::Close);
         }
         if let Some(PressEvent::Tap) = self.press.on_gesture(g, self.font) {
             return Some(TextEvent::Fonts);
         }
+        if let Some(PressEvent::Tap) = self.layout_press.on_gesture(g, self.layout) {
+            return Some(TextEvent::Layout);
+        }
         let before = t.clone();
-        let old_layout = layout.clone();
         if let Some(step) = self.size.on_gesture(g) {
             self.step(step, t);
         }
         if let Some(i) = self.spacing.on_gesture(g) {
             t.spacing = i;
         }
-        if let Some(i) = self.margins.on_gesture(g) {
-            layout.margins.sides = MARGIN_PRESETS[i.min(2)];
-        }
         if self.justify.on_gesture(g).is_some() {
             t.justify = self.justify.on;
         }
-        if self.footer.on_gesture(g).is_some() {
-            layout.bottom.on = self.footer.on;
-        }
-        (before != *t || old_layout != *layout).then_some(TextEvent::Changed)
+        (before != *t).then_some(TextEvent::Changed)
     }
     pub fn draw(&self, cx: &mut DrawCx, t: &Typography) {
         self.sheet.draw(cx);
-        for (r, label) in &self.rows {
-            cx.line(label, cx.theme.body, *r, HAlign::Left);
+        let theme = cx.theme;
+        let layout_down = self.layout_press.is_down();
+        if layout_down {
+            cx.fill(self.layout, INK);
+            cx.hint(self.layout, RefreshMode::Fast);
         }
+        for (r, label) in &self.rows {
+            let gray = if layout_down && r.y == self.layout.y { PAPER } else { INK };
+            cx.line(label, theme.body.gray(gray), *r, HAlign::Left);
+        }
+        let (row, _) = self.rows[4];
+        let chevron = Rect::new(row.right() - theme.icon_small + theme.mm(0.6), row.y, theme.icon_small, row.h);
+        cx.icon(Icon::ChevronRight, chevron, theme.icon_small, if layout_down { PAPER } else { INK2 });
         let color = if self.press.is_down() {
             cx.fill(self.font, INK);
             PAPER
@@ -133,9 +134,7 @@ impl TextSheet {
         cx.line(&t.font, cx.theme.body.gray(color), self.font, HAlign::Right);
         self.size.draw(cx);
         self.spacing.draw(cx);
-        self.margins.draw(cx);
         self.justify.draw(cx);
-        self.footer.draw(cx);
     }
 }
 

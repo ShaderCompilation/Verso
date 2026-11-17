@@ -61,6 +61,43 @@ pub enum BarItem {
     Clock12,
     Battery,
 }
+impl BarItem {
+    /// Every item, in the order the slot picker lists them.
+    pub const ALL: [BarItem; 13] = [
+        BarItem::ChapterTitle,
+        BarItem::ChapterPagesLeft,
+        BarItem::BookTitle,
+        BarItem::Author,
+        BarItem::PagesLeft,
+        BarItem::PageInChapter,
+        BarItem::TimeLeftChapter,
+        BarItem::Percent,
+        BarItem::PageTotal,
+        BarItem::TimeLeftBook,
+        BarItem::Clock24,
+        BarItem::Clock12,
+        BarItem::Battery,
+    ];
+
+    /// The item's name in the slot picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            BarItem::ChapterTitle => "Chapter title",
+            BarItem::ChapterPagesLeft => "Chapter and pages left",
+            BarItem::BookTitle => "Book title",
+            BarItem::Author => "Author",
+            BarItem::PagesLeft => "Pages left in chapter",
+            BarItem::PageInChapter => "Page in chapter",
+            BarItem::TimeLeftChapter => "Time left in chapter",
+            BarItem::Percent => "Percent",
+            BarItem::PageTotal => "Page / total",
+            BarItem::TimeLeftBook => "Time left in book",
+            BarItem::Clock24 => "Clock (24 h)",
+            BarItem::Clock12 => "Clock (12 h)",
+            BarItem::Battery => "Battery",
+        }
+    }
+}
 
 /// A thin line across one bar, filled to the book percentage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +144,12 @@ impl PageLayout {
         if let Some(preset) = margins {
             self.margins.sides = [4, 7, 10][preset.min(2)];
         }
+    }
+
+    /// True when going from `other` to this layout moves the text: margins
+    /// and bar toggles do; slot contents and the progress line don't.
+    pub fn moves_text(&self, other: &PageLayout) -> bool {
+        self.margins != other.margins || self.top.on != other.top.on || self.bottom.on != other.bottom.on
     }
 
     pub fn normalize(&mut self) {
@@ -209,6 +252,26 @@ mod tests {
         layout.margins = Margins { sides: 0, top: 99, bottom: 5 };
         layout.normalize();
         assert_eq!(layout.margins, Margins { sides: 2, top: 20, bottom: 5 });
+    }
+
+    #[test]
+    fn only_margins_and_bar_toggles_move_the_text() {
+        let base = PageLayout::default();
+        let mut slots = base.clone();
+        slots.top.slots = [None, Some(BarItem::Battery), None];
+        slots.bottom.slots[1] = Some(BarItem::PageTotal);
+        slots.progress = ProgressLine::Bottom;
+        assert!(!slots.moves_text(&base), "slot contents and the line keep the layout");
+        let mut bar = base.clone();
+        bar.top.on = true;
+        assert!(bar.moves_text(&base));
+        for change in [|m: &mut Margins| m.sides += 1, |m: &mut Margins| m.top -= 1, |m: &mut Margins| m.bottom += 3] {
+            let mut margins = base.clone();
+            change(&mut margins.margins);
+            assert!(margins.moves_text(&base));
+        }
+        let labels: std::collections::HashSet<_> = BarItem::ALL.iter().map(|i| i.label()).collect();
+        assert_eq!(labels.len(), BarItem::ALL.len(), "every item has its own name");
     }
 
     #[test]

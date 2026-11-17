@@ -24,6 +24,8 @@ pub struct PopupMenu {
     /// A touch started outside the card.
     outside: bool,
     enabled: Vec<bool>,
+    /// The current choice, marked with a check at the right.
+    checked: Option<usize>,
 }
 
 impl PopupMenu {
@@ -61,7 +63,13 @@ impl PopupMenu {
             press: Press::default(),
             outside: false,
             enabled,
+            checked: None,
         }
+    }
+
+    /// Marks `item` as the current choice.
+    pub fn set_checked(&mut self, item: Option<usize>) {
+        self.checked = item;
     }
 
     pub fn set_enabled(&mut self, item: usize, enabled: bool) {
@@ -91,7 +99,8 @@ impl PopupMenu {
         [top && first, top && last, bottom && first, bottom && last]
     }
 
-    fn item_rects(&self, theme: &Theme) -> Vec<Rect> {
+    /// Where each item is, for routing taps (and tests).
+    pub fn item_rects(&self, theme: &Theme) -> Vec<Rect> {
         let top = self.rect.y + theme.mm(1.0);
         let columns = self.columns();
         let width = (self.rect.w - 2 * theme.border) / columns as i32;
@@ -168,7 +177,12 @@ impl PopupMenu {
                 cx.icon(icon, Rect::new(text_x, ir.y, t.icon_small, ir.h), t.icon_small, fg);
                 text_x += t.icon_small + t.mm(3.0);
             }
-            let text = Rect::new(text_x, ir.y, ir.right() - text_x - t.mm(3.0), ir.h);
+            let mut right = ir.right() - t.mm(3.0);
+            if self.checked == Some(k) {
+                cx.icon(Icon::Check, Rect::new(right - t.icon_small, ir.y, t.icon_small, ir.h), t.icon_small, fg);
+                right -= t.icon_small + t.mm(2.0);
+            }
+            let text = Rect::new(text_x, ir.y, right - text_x, ir.h);
             cx.line(&item.1, t.body.gray(fg), text, HAlign::Left);
         }
     }
