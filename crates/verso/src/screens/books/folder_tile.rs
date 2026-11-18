@@ -33,24 +33,33 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
     Some(match mode {
         FolderPreview::Icon => return None,
         FolderPreview::Covers => {
-            // The size of a book cover in the same cell.
-            let w = r.w.min(r.h * 2 / 3).max(1);
-            let h = (w * 3 / 2).min(r.h);
+            // The whole tile, no wider than 5:6 so a quarter keeps about four
+            // fifths of a cover's height, and no larger than four small
+            // thumbnails so a full grid decodes only small files.
+            let w = r.w.min(r.h * 5 / 6).min(2 * covers::SMALL_WIDTH as i32).max(1);
+            let h = r.h.min(2 * covers::SMALL_HEIGHT as i32);
             let area = Rect::new(r.x + (r.w - w) / 2, r.y, w, h);
-            let gap = t.mm(1.0);
-            let (sw, sh) = (((w - gap) / 2).max(1), ((h - gap) / 2).max(1));
-            let covers = if n == 1 {
-                // One book: a single quarter-size cover in the middle.
-                vec![(0, Rect::new(area.x + (w - sw) / 2, area.y + (h - sh) / 2, sw, sh), Fit::Preview)]
-            } else {
-                // Reading order; free slots stay empty.
-                (0..n)
-                    .map(|i| {
-                        let (col, row) = ((i % 2) as i32, (i / 2) as i32);
-                        (i, Rect::new(area.x + col * (sw + gap), area.y + row * (sh + gap), sw, sh), Fit::Preview)
-                    })
-                    .collect()
+            // No gaps; covers are cropped to fill their slots.
+            let (left, top) = (w / 2, h / 2);
+            let (right, bottom) = (w - left, h - top);
+            let (x2, y2) = (area.x + left, area.y + top);
+            let slots = match n {
+                1 => vec![area],
+                2 => vec![Rect::new(area.x, area.y, left, h), Rect::new(x2, area.y, right, h)],
+                // The first book takes the tall left half.
+                3 => vec![
+                    Rect::new(area.x, area.y, left, h),
+                    Rect::new(x2, area.y, right, top),
+                    Rect::new(x2, y2, right, bottom),
+                ],
+                _ => vec![
+                    Rect::new(area.x, area.y, left, top),
+                    Rect::new(x2, area.y, right, top),
+                    Rect::new(area.x, y2, left, bottom),
+                    Rect::new(x2, y2, right, bottom),
+                ],
             };
+            let covers = slots.into_iter().enumerate().map(|(i, s)| (i, s, Fit::Preview)).collect();
             Layout { covers, front: area, tab: None, bounds: area }
         }
         FolderPreview::Stack => {
@@ -141,7 +150,7 @@ mod tests {
 
     fn tile() -> (Theme, Rect) {
         // A portrait Collections tile on the Kindle (1272 × 1696).
-        (Theme::for_dpi(300), Rect::new(59, 609, 257, 306))
+        (Theme::for_dpi(300), Rect::new(59, 609, 257, 365))
     }
     fn inside(outer: Rect, inner: Rect) -> bool {
         inner.x >= outer.x && inner.y >= outer.y && inner.right() <= outer.right() && inner.bottom() <= outer.bottom()
@@ -157,38 +166,66 @@ mod tests {
     }
 
     #[test]
-    fn covers_fill_a_two_by_two_grid_in_reading_order() {
+    fn covers_fill_the_tile_in_a_two_by_two_grid_without_gaps() {
         let (t, r) = tile();
         let l = layout(FolderPreview::Covers, 4, r, &t).unwrap();
         assert!(inside(r, l.bounds));
+        assert_eq!((l.bounds.w, l.bounds.h), (r.w, r.h), "the whole portrait tile");
+        assert_eq!(l.front, l.bounds);
         assert_eq!(l.covers.iter().map(|c| c.0).collect::<Vec<_>>(), [0, 1, 2, 3]);
         let slots: Vec<_> = l.covers.iter().map(|c| c.1).collect();
-        assert!(slots.iter().all(|s| inside(l.bounds, *s) && s.w == slots[0].w && s.h == slots[0].h));
-        assert_eq!((slots[0].y, slots[1].y), (slots[0].y, slots[0].y));
-        assert!(slots[1].x > slots[0].right() && slots[2].y > slots[0].bottom());
-        assert!(slots[0].w as u32 <= covers::SMALL_WIDTH && slots[0].h as u32 <= covers::SMALL_HEIGHT);
-        // No overlaps: every slot is its own cover.
-        for (i, a) in slots.iter().enumerate() {
-            assert!(slots[i + 1..].iter().all(|b| a.intersect(b).is_none()));
-        }
+        // Reading order, left to right then down; the quarters meet exactly.
+        assert_eq!((slots[0].x, slots[0].y), (l.bounds.x, l.bounds.y));
+        assert_eq!((slots[1].x, slots[1].y), (slots[0].right(), slots[0].y));
+        assert_eq!((slots[2].x, slots[2].y), (slots[0].x, slots[0].bottom()));
+        assert_eq!((slots[3].x, slots[3].y), (slots[1].x, slots[2].y));
+        assert_eq!((slots[3].right(), slots[3].bottom()), (l.bounds.right(), l.bounds.bottom()));
+        assert_eq!(slots.iter().map(|s| s.w as i64 * s.h as i64).sum::<i64>(), l.bounds.w as i64 * l.bounds.h as i64);
+        // Small thumbnails cover every quarter.
+        assert!(slots.iter().all(|s| s.w as u32 <= covers::SMALL_WIDTH && s.h as u32 <= covers::SMALL_HEIGHT));
         assert!(l.covers.iter().all(|c| c.2 == Fit::Preview));
         // More books than slots draw only four.
         assert_eq!(layout(FolderPreview::Covers, 9, r, &t).unwrap(), l);
     }
 
     #[test]
-    fn short_folders_leave_slots_empty_or_centre_one_cover() {
+    fn covers_grid_keeps_most_of_each_cover_and_small_files_in_landscape() {
+        // Landscape tiles are wider than tall: the grid narrows instead of
+        // cropping covers to squares, and stays within four small thumbnails.
+        let (t, r) = (Theme::for_dpi(300), Rect::new(59, 609, 363, 402));
+        let l = layout(FolderPreview::Covers, 4, r, &t).unwrap();
+        assert!(inside(r, l.bounds) && l.bounds.w < r.w);
+        assert!((l.bounds.center().x - r.center().x).abs() <= 1);
+        for (_, s, _) in &l.covers {
+            assert!(s.w * 6 <= s.h * 5, "{s:?} no wider than 5:6");
+            assert!(s.w as u32 <= covers::SMALL_WIDTH && s.h as u32 <= covers::SMALL_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn short_folders_fill_the_same_grid() {
         let (t, r) = tile();
         let full = layout(FolderPreview::Covers, 4, r, &t).unwrap();
-        for n in 2..4 {
-            let l = layout(FolderPreview::Covers, n, r, &t).unwrap();
-            assert_eq!(l.covers[..], full.covers[..n], "the first {n} slots, the rest stay empty");
-            assert_eq!(l.front, full.front, "the badge keeps its corner");
-        }
+        let area = full.bounds;
+        let q = |i: usize| full.covers[i].1;
+        // One book: the whole grid.
         let one = layout(FolderPreview::Covers, 1, r, &t).unwrap();
-        let (slot, area) = (one.covers[0].1, one.bounds);
-        assert_eq!((slot.w, slot.h), (full.covers[0].1.w, full.covers[0].1.h));
-        assert!((slot.center().x - area.center().x).abs() <= 1 && (slot.center().y - area.center().y).abs() <= 1);
+        assert_eq!(one.covers, [(0, area, Fit::Preview)]);
+        // Two: tall halves side by side.
+        let two = layout(FolderPreview::Covers, 2, r, &t).unwrap();
+        let halves: Vec<_> = two.covers.iter().map(|c| (c.0, c.1)).collect();
+        assert_eq!(
+            halves,
+            [(0, Rect::new(area.x, area.y, q(0).w, area.h)), (1, Rect::new(q(1).x, area.y, q(1).w, area.h))]
+        );
+        // Three: the first book takes the tall left half, the next two the
+        // right quarters.
+        let three = layout(FolderPreview::Covers, 3, r, &t).unwrap();
+        let slots: Vec<_> = three.covers.iter().map(|c| (c.0, c.1)).collect();
+        assert_eq!(slots, [(0, halves[0].1), (1, q(1)), (2, q(3))]);
+        for l in [&one, &two, &three] {
+            assert_eq!((l.front, l.bounds), (area, area), "the badge keeps its corner");
+        }
     }
 
     #[test]
@@ -235,7 +272,7 @@ mod tests {
     #[test]
     fn layouts_fit_landscape_and_small_screens() {
         for (t, r) in
-            [(Theme::for_dpi(300), Rect::new(59, 609, 363, 343)), (Theme::for_dpi(167), Rect::new(33, 300, 120, 170))]
+            [(Theme::for_dpi(300), Rect::new(59, 609, 363, 402)), (Theme::for_dpi(167), Rect::new(33, 300, 120, 170))]
         {
             for mode in [FolderPreview::Covers, FolderPreview::Stack, FolderPreview::Latest] {
                 let l = layout(mode, 4, r, &t).unwrap();

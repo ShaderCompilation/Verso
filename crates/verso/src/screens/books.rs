@@ -1365,7 +1365,7 @@ fn load_cover<'a>(
                 let (w, h) = (w.max(1) as u32, h.max(1) as u32);
                 let image = match fit {
                     Fit::Book => image::imageops::resize(&image, w, h, image::imageops::FilterType::Triangle),
-                    Fit::Preview | Fit::Behind => image::imageops::thumbnail(&image, w, h),
+                    Fit::Preview | Fit::Behind => fill(&image, w, h),
                 };
                 cache.images.insert(cache_key.clone(), image);
             }
@@ -1377,6 +1377,19 @@ fn load_cover<'a>(
         }
     }
     cache.images.get(&cache_key)
+}
+/// Scales a cover with area averaging until it covers a `w` × `h` slot and
+/// crops what's left over: centred across, kept from the top down, where
+/// titles usually sit. Cover-shaped slots lose at most a rounding pixel.
+fn fill(image: &image::GrayImage, w: u32, h: u32) -> image::GrayImage {
+    let (iw, ih) = (image.width().max(1) as u64, image.height().max(1) as u64);
+    let (w64, h64) = (w as u64, h as u64);
+    let (sw, sh) = if w64 * ih >= h64 * iw { (w64, (ih * w64).div_ceil(iw)) } else { ((iw * h64).div_ceil(ih), h64) };
+    let scaled = image::imageops::thumbnail(image, sw as u32, sh as u32);
+    if (sw, sh) == (w64, h64) {
+        return scaled;
+    }
+    image::imageops::crop_imm(&scaled, (sw as u32 - w) / 2, 0, w, h).to_image()
 }
 fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &mut Thumbnails) {
     if let Some(image) = load_cover(cache, store, book, rect.w, rect.h, Fit::Book) {
@@ -1512,10 +1525,22 @@ impl Screen for Books {
         if !self.is_home() {
             self.sort.draw(cx);
         }
+        // Folders inside a folder share its parent, already shown in the path
+        // row, so their tiles give that line to the preview. Only configured
+        // roots at the top level can share a name; those keep their parent.
+        let shared_names: HashSet<String> = if self.navigation.folder.is_none() {
+            let mut seen = HashSet::new();
+            self.folders.iter().map(|p| collections::name(p)).filter(|name| !seen.insert(name.clone())).collect()
+        } else {
+            HashSet::new()
+        };
         for (i, cell) in self.grid.cells() {
             if let Some(path) = self.folders.get(i) {
                 let folder = &self.collections.folders[path];
-                let r = Rect::new(cell.x, cell.y, cell.w, (cell.h - t.mm(10.0)).min(cell.w * 3 / 2));
+                let name = collections::name(path);
+                let parent_line = shared_names.contains(&name);
+                let labels = t.mm(if parent_line { 10.0 } else { 5.0 });
+                let r = Rect::new(cell.x, cell.y, cell.w, (cell.h - labels).min(cell.w * 3 / 2));
                 let picks: Vec<&Book> = self
                     .previews
                     .get(path)
@@ -1551,20 +1576,17 @@ impl Screen for Books {
                         );
                     }
                 }
-                cx.line(
-                    &collections::name(path),
-                    t.button,
-                    Rect::new(cell.x, r.bottom() + t.mm(1.0), cell.w, t.mm(4.0)),
-                    HAlign::Left,
-                );
-                let context = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                let context = path_tail(cx.text, &context, t.caption, cell.w);
-                cx.line(
-                    &context,
-                    t.caption.gray(INK2),
-                    Rect::new(cell.x, r.bottom() + t.mm(5.0), cell.w, t.mm(4.0)),
-                    HAlign::Left,
-                );
+                cx.line(&name, t.button, Rect::new(cell.x, r.bottom() + t.mm(1.0), cell.w, t.mm(4.0)), HAlign::Left);
+                if parent_line {
+                    let context = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                    let context = path_tail(cx.text, &context, t.caption, cell.w);
+                    cx.line(
+                        &context,
+                        t.caption.gray(INK2),
+                        Rect::new(cell.x, r.bottom() + t.mm(5.0), cell.w, t.mm(4.0)),
+                        HAlign::Left,
+                    );
+                }
                 if self.grid.pressed() == Some(i) {
                     cx.canvas.stroke_rounded_rect(r, t.radius, (2 * t.border) as f32, INK);
                     cx.hint(r, RefreshMode::Fast);
@@ -3564,6 +3586,33 @@ mod tests {
         }
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
+    }
+    #[test]
+    fn preview_fill_crops_the_overflow_keeping_the_top_and_centre() {
+        // A 2:3 cover: the top third white, the rest black, with a gray
+        // middle column.
+        let cover = image::GrayImage::from_fn(144, 216, |x, y| {
+            image::Luma([if (66..78).contains(&x) {
+                0x80
+            } else if y < 72 {
+                0xff
+            } else {
+                0x00
+            }])
+        });
+        // A wide slot crops the bottom and keeps the top whole.
+        let wide = fill(&cover, 120, 150);
+        assert_eq!(wide.dimensions(), (120, 150));
+        assert_eq!(wide.get_pixel(0, 0).0[0], 0xff);
+        assert_eq!(wide.get_pixel(0, 59).0[0], 0xff, "a third of the scaled height, 180, is white");
+        assert_eq!(wide.get_pixel(0, 149).0[0], 0x00);
+        // A tall slot crops both sides evenly.
+        let tall = fill(&cover, 60, 216);
+        assert_eq!(tall.dimensions(), (60, 216));
+        assert_eq!(tall.get_pixel(30, 100).0[0], 0x80, "the middle column stays in the middle");
+        assert_eq!(tall.get_pixel(0, 100).0[0], 0x00);
+        // A cover-shaped slot is scaled, not cropped.
+        assert_eq!(fill(&cover, 96, 144), image::imageops::thumbnail(&cover, 96, 144));
     }
     #[test]
     fn folder_previews_decode_one_page_per_mode_and_icon_decodes_nothing() -> anyhow::Result<()> {
