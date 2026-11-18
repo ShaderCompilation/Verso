@@ -1,0 +1,34 @@
+[package]
+name = "verso-update"
+description = "Verso's release manifests: versions, component hashes and signature checks, and the `verso-release` packaging tool."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+minisign-verify = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+anyhow = { version = "1.0.104", optional = true }
+flate2 = { version = "1.1", optional = true }
+tar = { version = "0.4.46", default-features = false, optional = true }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
+
+[features]
+# The packaging side: reading staged components, writing archives, the
+# manifest and the first-install zip, and `verso-release`. The app depends on
+# this crate with `default-features = false` and only reads and verifies.
+default = ["release"]
+release = ["dep:anyhow", "dep:flate2", "dep:tar", "dep:zip"]
+
+[[bin]]
+name = "verso-release"
+required-features = ["release"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "release"
+required-features = ["release"]
