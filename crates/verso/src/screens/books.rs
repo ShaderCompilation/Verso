@@ -10,6 +10,7 @@ use crate::library::{
     collections::{self, Collections, Navigation, Tab},
     covers, files,
     home::Summary,
+    previews::Previews,
     search::{self, Scope, SearchCache},
     worker::{Snapshot, Worker as LibraryWorker},
 };
@@ -187,6 +188,8 @@ pub struct Books {
     pending_home_revision: u64,
     books: Vec<Book>,
     collections: Collections,
+    /// Preview picks for folder tiles shown so far.
+    previews: Previews,
     folders: Vec<PathBuf>,
     navigation: Navigation,
     /// Navigation changed since it was last sent to the writer; see `persist_navigation`.
@@ -304,6 +307,7 @@ impl Books {
             pending_home_revision: 0,
             books: Vec::new(),
             collections: Collections::default(),
+            previews: Previews::default(),
             folders: Vec::new(),
             navigation,
             navigation_unsaved: false,
@@ -384,7 +388,7 @@ impl Books {
         self.index = index;
         self.index_revision = revision;
         let started = std::time::Instant::now();
-        self.collections = Collections::from_index(&self.index, &self.roots);
+        self.rebuild_collections();
         log::info!(
             "startup stage: collections books={} elapsed_us={}",
             self.index.books.len(),
@@ -571,10 +575,42 @@ impl Books {
             .collect();
         self.thumbnails.retain(&keys);
     }
-    fn prioritize(&self) {
+    /// Covers of visible books come first, then those of visible previews.
+    fn prioritize(&mut self) {
+        self.pick_previews();
         let mut ids: Vec<_> = self.continue_id.iter().cloned().collect();
         ids.extend(self.grid.cells().iter().filter_map(|(i, _)| self.grid_book(*i)).map(|b| b.id.clone()));
+        for folder in self.visible_folders() {
+            let picks = self.previews.get(folder).unwrap_or_default();
+            ids.extend(picks.iter().filter_map(|&i| self.index.books.get(i)).map(|b| b.id.clone()));
+        }
         self.library.prioritize(ids);
+    }
+    fn visible_folders(&self) -> impl Iterator<Item = &PathBuf> {
+        self.grid.cells().into_iter().filter_map(|(i, _)| self.folders.get(i))
+    }
+    /// Picks previews for the visible folder tiles only. The opened order is
+    /// read on first need, so views without folders read nothing.
+    fn pick_previews(&mut self) {
+        if self.visible_folders().next().is_none() {
+            return;
+        }
+        if !self.previews.has_order() {
+            let started = std::time::Instant::now();
+            let opened = self.store.opened().unwrap_or_default();
+            self.previews.set_order(&opened);
+            log::debug!("opened order: {} books in {:?}", opened.books.len(), started.elapsed());
+        }
+        let started = std::time::Instant::now();
+        let folders: Vec<_> = self.visible_folders().cloned().collect();
+        self.previews.update(&self.index, &self.collections, &folders);
+        log::debug!("folder previews: {} folders in {:?}", folders.len(), started.elapsed());
+    }
+    /// Every new index or folder list goes through here, so preview picks,
+    /// which hold index positions, never outlive their index.
+    fn rebuild_collections(&mut self) {
+        self.collections = Collections::from_index(&self.index, &self.roots);
+        self.previews.index_changed();
     }
     fn grid_book(&self, i: usize) -> Option<&Book> {
         i.checked_sub(self.folders.len()).and_then(|i| self.books.get(i))
@@ -672,7 +708,7 @@ impl Books {
             self.working = true;
             if self.browsing_ready {
                 // Folders outside the new list leave Collections at once.
-                self.collections = Collections::from_index(&self.index, &self.roots);
+                self.rebuild_collections();
                 self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
             }
             self.refresh(cx.theme);
@@ -722,7 +758,7 @@ impl Books {
             self.index = snapshot.index;
             self.index_revision = snapshot.revision;
             self.prune_changes();
-            self.collections = Collections::from_index(&self.index, &self.roots);
+            self.rebuild_collections();
             if let Some(search) = &mut self.search {
                 search.cache.sync(&self.index);
             }
@@ -897,6 +933,10 @@ impl Books {
             self.generation = r.generation();
             let id = r.book_id();
             self.states.insert(id.to_owned(), self.store.book(id));
+            // The book now leads the opened order, unless it already did.
+            if !self.previews.leads(id) {
+                self.previews.forget_order();
+            }
         }
         self.apply_pending(cx);
         self.refresh(cx.theme);
@@ -1040,7 +1080,7 @@ impl Books {
         }
         self.changes.extend(changes);
         if self.browsing_ready {
-            self.collections = Collections::from_index(&self.index, &self.roots);
+            self.rebuild_collections();
             self.navigation.folder = self.collections.restore(self.navigation.folder.as_deref());
             self.navigation.folder_pages.retain(|p, _| self.collections.folders.contains_key(p));
             if let Some(search) = &mut self.search {
@@ -1940,6 +1980,12 @@ impl Screen for Books {
             self.pending_home_revision = revision;
             self.worker_home_revision = revision;
             self.prune_changes();
+        }
+        if self.library.take_opened_changed() {
+            self.previews.forget_order();
+            if self.browsing_ready && !self.is_home() && self.reader.is_none() {
+                self.prioritize();
+            }
         }
         let repaired = self.library.take_repaired();
         if !repaired.is_empty() {
@@ -3332,6 +3378,50 @@ mod tests {
         std::fs::write(store.small_cover_path("k"), b"corrupt")?;
         assert_eq!(draw(small, &mut cache), None);
         assert_eq!(cache.requests, vec![book.id.clone()]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn folder_previews_pick_visible_folders_only_and_follow_a_book_just_read() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("previews")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        assert!(!books.previews.has_order(), "views without folder tiles read no order");
+        books.states.clear();
+        books.navigation.tab = Tab::Collections;
+        books.navigation.folder = None;
+        books.refresh(&t);
+        let picked = |books: &Books, folder: &str| {
+            books
+                .previews
+                .get(std::path::Path::new(folder))
+                .map(|picks| picks.iter().map(|&i| books.index.books[i].id.clone()).collect::<Vec<_>>())
+        };
+        // Loose books before nested ones; pending covers count as art.
+        assert_eq!(picked(&books, "/books").unwrap(), ["20", "0", "1", "10"]);
+        assert_eq!(picked(&books, "/other/books").unwrap(), ["21"]);
+        assert!(picked(&books, "/books/Fiction").is_none(), "only visible folders are picked");
+        assert!(books.states.is_empty(), "previews read no reading states");
+        with_cx(&t, screen, |cx| {
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            books.open("5".into(), cx);
+            assert!(books.reader.is_some());
+            let state =
+                BookState { position: crate::document::Position("a".into()), last_opened: 50, ..Default::default() };
+            store.save_book("5", &state).unwrap();
+            books.returned(cx);
+            assert!(!books.previews.has_order(), "the order is read again when next needed");
+            books.navigate(None, cx);
+        });
+        assert_eq!(picked(&books, "/books").unwrap(), ["5", "20", "0", "1"]);
+        assert!(books.previews.leads("5"));
+        // A new index clears the picks; the visible ones are picked again.
+        let index = books.index.clone();
+        books.pending = Some(Snapshot { index, ..Default::default() });
+        with_cx(&t, screen, |cx| books.apply_pending(cx));
+        assert_eq!(picked(&books, "/books").unwrap(), ["5", "20", "0", "1"]);
+        drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

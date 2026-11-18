@@ -105,6 +105,9 @@ pub struct Store {
         std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::dictionary::worker::Service>>>,
     pub(crate) dictionary_folder_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     selected_home: std::sync::Arc<std::sync::Mutex<Option<crate::library::Book>>>,
+    /// The book known to lead `opened.json`, so its saves (page turns) skip
+    /// reading the file. None when unknown.
+    opened_leader: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Counts settings saves through this store and its clones, so screens
     /// can notice a change without rereading the file.
     settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -140,6 +143,7 @@ impl Store {
             root,
             wordforms,
             selected_home: Default::default(),
+            opened_leader: Default::default(),
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
@@ -309,6 +313,7 @@ impl Store {
             wordforms: root.join("wordforms"),
             root,
             selected_home: Default::default(),
+            opened_leader: Default::default(),
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),

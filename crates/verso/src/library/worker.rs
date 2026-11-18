@@ -47,6 +47,8 @@ struct Shared {
     status: Option<Status>,
     home_requested: bool,
     latest_home: Option<(Summary, u64)>,
+    /// `opened.json` was rebuilt with a different order.
+    opened_changed: bool,
     /// Book ids whose visible thumbnail failed to load, and those since repaired.
     repairs: Vec<String>,
     repaired: Vec<String>,
@@ -57,6 +59,9 @@ struct Shared {
     roots: Option<Vec<PathBuf>>,
 }
 const REPAIR_LIMIT: usize = 32;
+/// A page of book covers plus a page of folder previews (8 tiles × 4) and
+/// the Continue cover.
+const PRIORITY_LIMIT: usize = 48;
 const ERROR_LIMIT: usize = 32;
 /// Real cover changes are batched into one index publication per interval.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
@@ -119,6 +124,13 @@ impl Channel {
         self.lock().latest_home = Some((summary, revision));
         self.waker.wake();
     }
+    /// The Home rebuild returns whether it changed the opened order.
+    fn rebuilt(&self, (summary, opened_changed): (Summary, bool), revision: u64) {
+        if opened_changed {
+            self.lock().opened_changed = true;
+        }
+        self.home(summary, revision);
+    }
     fn take_home_request(&self) -> bool {
         std::mem::take(&mut self.lock().home_requested)
     }
@@ -151,7 +163,9 @@ struct Background {
 }
 impl Background {
     fn run(mut self) {
-        if self.store.home_summary().is_none_or(|summary| !summary.complete) {
+        if self.store.home_summary().is_none_or(|summary| !summary.complete)
+            || self.store.opened().is_none_or(|opened| !opened.complete)
+        {
             self.rebuild_home();
         }
         loop {
@@ -403,7 +417,7 @@ impl Background {
         errors.iter().for_each(|e| log::warn!("{e}"));
         // This also runs during shutdown, after cancellation was requested.
         match self.store.rebuild_home_summary_until(&self.index, &|| false) {
-            Ok(summary) => self.channel.home(summary, self.revision),
+            Ok(rebuilt) => self.channel.rebuilt(rebuilt, self.revision),
             Err(e) => log::warn!("rebuilding Home after file edits: {e:#}"),
         }
         self.publish();
@@ -439,7 +453,7 @@ impl Background {
     fn rebuild_home(&self) {
         let channel = &self.channel;
         match self.store.rebuild_home_summary_until(&self.index, &|| channel.stopped()) {
-            Ok(summary) => channel.home(summary, self.revision),
+            Ok(rebuilt) => channel.rebuilt(rebuilt, self.revision),
             Err(_) if channel.stopped() => {}
             Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
         }
@@ -523,6 +537,10 @@ impl Worker {
     pub fn take_home(&self) -> Option<(Summary, u64)> {
         self.shared.0.lock().unwrap().latest_home.take()
     }
+    /// True once after a rebuild changed `opened.json`; read it again then.
+    pub fn take_opened_changed(&self) -> bool {
+        std::mem::take(&mut self.shared.0.lock().unwrap().opened_changed)
+    }
     /// While paused (a book is opening or open), scan, cover and identity work
     /// stops at its next check: between files, covers or 64 KiB fingerprint reads.
     pub fn pause(&self, paused: bool) {
@@ -553,7 +571,7 @@ impl Worker {
         self.change_paths(vec![PathChange::AddEmpty(path)])
     }
     pub fn prioritize(&self, ids: Vec<String>) {
-        self.shared.0.lock().unwrap().priority = ids.into_iter().take(32).collect();
+        self.shared.0.lock().unwrap().priority = ids.into_iter().take(PRIORITY_LIMIT).collect();
     }
     /// The newest changed index, if any.
     pub fn take(&self) -> Option<Snapshot> {
@@ -1075,12 +1093,17 @@ mod tests {
         };
         store.save_book(&book.id, &reading)?;
         let _ = std::fs::remove_file(root.join("state/home.json"));
+        let _ = std::fs::remove_file(root.join("state/opened.json"));
         let record = std::fs::read(root.join("state/books").join(format!("{}.json", book.id)))?;
         let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
         finished(&worker);
         let (migrated, _) = worker.take_home().expect("a missing summary is rebuilt and published");
         assert!(migrated.complete && migrated.resume().is_some_and(|e| e.book.id == book.id));
         assert_eq!(store.home_summary(), Some(migrated));
+        // The same reads build the opened order for folder previews.
+        let opened = store.opened().expect("the opened order is rebuilt with Home");
+        assert!(opened.complete && opened.leader() == Some(book.id.as_str()));
+        assert!(worker.take_opened_changed() && !worker.take_opened_changed());
         assert_eq!(std::fs::read(root.join("state/books").join(format!("{}.json", book.id)))?, record);
         assert!(covers::load_small(&store, &key).is_ok_and(|s| s.width() == covers::SMALL_WIDTH));
         drop(worker);
