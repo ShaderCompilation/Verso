@@ -266,6 +266,10 @@ impl Store {
     pub fn cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}.png"))
     }
+    /// The quarter-size thumbnail for folder previews; same key as the full one.
+    pub fn small_cover_path(&self, key: &str) -> PathBuf {
+        self.root.join("covers").join(format!("{key}-s.png"))
+    }
     pub fn annotation_dir(&self) -> PathBuf {
         self.root.join("annotations")
     }

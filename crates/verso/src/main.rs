@@ -142,6 +142,11 @@ fn run() -> Result<()> {
         println!("{}", library::search::benchmark(&store::Store::new().library()));
         return Ok(());
     }
+    if std::env::var("VERSO_COVER_BENCH").as_deref() == Ok("1") {
+        let store = store::Store::new();
+        println!("{}", library::covers::benchmark(&store, &store.library()));
+        return Ok(());
+    }
     log::info!("Verso {} starting", env!("CARGO_PKG_VERSION"));
     let started = Instant::now();
     let opts = if cfg!(feature = "desktop") { parse_args()? } else { Options::default() };

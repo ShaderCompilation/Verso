@@ -1264,7 +1264,11 @@ fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &m
         let cache_key = (key.clone(), rect.w, rect.h);
         let failure = (book.id.clone(), key.clone());
         if !cache.images.contains_key(&cache_key) && !cache.failed.contains(&failure) {
-            match covers::load(&store.cover_path(key)) {
+            // Slots no larger than the small thumbnail decode it instead; a
+            // broken small file is repaired like a full one.
+            let small = rect.w <= covers::SMALL_WIDTH as i32 && rect.h <= covers::SMALL_HEIGHT as i32;
+            let loaded = if small { covers::load_small(store, key) } else { covers::load(&store.cover_path(key)) };
+            match loaded {
                 Ok(image) => {
                     // Refresh retains only visible keys; this only guards the bound.
                     if cache.images.len() >= Thumbnails::LIMIT {
@@ -3089,6 +3093,7 @@ mod tests {
         store.save_library(&index)?;
         std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
         std::fs::write(store.cover_path("doomedcover"), b"png")?;
+        std::fs::write(store.small_cover_path("doomedcover"), b"png")?;
         store.save_book("0", &BookState { progress: 1234, ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
@@ -3127,7 +3132,10 @@ mod tests {
             assert!(!books.books.iter().any(|b| b.id == "0"));
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while store.library().books.iter().any(|b| b.path == file) || store.cover_path("doomedcover").exists() {
+        while store.library().books.iter().any(|b| b.path == file)
+            || store.cover_path("doomedcover").exists()
+            || store.small_cover_path("doomedcover").exists()
+        {
             assert!(std::time::Instant::now() < deadline, "the library worker drops the deleted book");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -3289,6 +3297,41 @@ mod tests {
             assert_eq!(books.navigation.tab, Tab::Collections);
         });
         drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn small_slots_use_small_thumbnails_and_fall_back_to_the_full_one() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("small-covers")?;
+        let mut book = store.library().books[0].clone();
+        book.cover = Cover::Ready("k".into());
+        std::fs::create_dir_all(store.cover_path("k").parent().unwrap())?;
+        image::GrayImage::from_pixel(288, 432, image::Luma([128])).save(store.cover_path("k"))?;
+        let t = Theme::for_dpi(300);
+        let mut canvas = crate::gfx::Canvas::new(400, 400);
+        let (mut text, mut icons) = (crate::gfx::TextRenderer::new(), crate::gfx::IconRenderer::default());
+        let mut cache = Thumbnails::default();
+        let (small, large) = (Rect::new(0, 0, 100, 150), Rect::new(0, 0, 200, 300));
+        let mut draw = |rect: Rect, cache: &mut Thumbnails| {
+            cache.clear();
+            draw_cover(
+                &mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()),
+                &book,
+                rect,
+                &store,
+                cache,
+            );
+            cache.images.get(&("k".to_owned(), rect.w, rect.h)).map(|image| image.get_pixel(50, 50)[0])
+        };
+        // Until the worker backfills it, a small slot resizes the full thumbnail.
+        assert_eq!(draw(small, &mut cache), Some(128));
+        image::GrayImage::from_pixel(144, 216, image::Luma([40])).save(store.small_cover_path("k"))?;
+        assert_eq!(draw(small, &mut cache), Some(40));
+        assert_eq!(draw(large, &mut cache), Some(128), "larger slots keep the full thumbnail");
+        // A broken small file shows the title cover and asks for one repair.
+        std::fs::write(store.small_cover_path("k"), b"corrupt")?;
+        assert_eq!(draw(small, &mut cache), None);
+        assert_eq!(cache.requests, vec![book.id.clone()]);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
