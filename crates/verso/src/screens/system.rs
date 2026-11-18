@@ -28,6 +28,13 @@ enum Tab {
 }
 const TABS: [Tab; 5] = [Tab::Reading, Tab::Display, Tab::Library, Tab::Device, Tab::Advanced];
 
+/// While SSH is on but Wi-Fi hasn't connected yet (it takes up to about a
+/// minute after the Kindle wakes), the SSH row re-reads the status this
+/// often…
+const SSH_RECHECK: Duration = Duration::from_secs(2);
+/// …for at most this long after Settings opens, a toggle or a wake.
+const SSH_RECHECK_FOR: Duration = Duration::from_secs(90);
+
 /// Full-flash intervals offered in Settings (0 = never).
 const FLASH_CHOICES: [u32; 4] = [1, 6, 12, 0];
 
@@ -88,6 +95,12 @@ pub struct SystemSettings {
     /// then stays for this visit, so turning the server off doesn't make the
     /// switch vanish.
     ssh_was_running: bool,
+    /// When the SSH status was last read, and until when to keep re-reading
+    /// it while it's incomplete (see SSH_RECHECK).
+    ssh_read_at: Instant,
+    ssh_recheck_until: Instant,
+    /// The device slept: re-read the SSH status once it's awake.
+    ssh_read_on_wake: bool,
     dev_top: i32,
     // Advanced
     shaping: Segmented,
@@ -162,6 +175,7 @@ impl SystemSettings {
         wifi_toggle.place(device_left.right(), wifi_top + t.mm(4.0), t);
         let dev_top = if device_right == device_left { wifi_top + t.mm(22.0) } else { body };
         let ssh = ssh::status();
+        let ssh_read_at = Instant::now();
         let mut ssh_toggle = Toggle::new(ssh.running);
         ssh_toggle.place(device_right.right(), dev_top + t.mm(12.0), t);
         let version = Rect::new(content.x, screen.bottom() - t.mm(14.0), content.w, t.target);
@@ -205,6 +219,9 @@ impl SystemSettings {
             ssh,
             ssh_toggle,
             ssh_pending: None,
+            ssh_read_at,
+            ssh_recheck_until: ssh_read_at + SSH_RECHECK_FOR,
+            ssh_read_on_wake: false,
             dev_top,
             shaping,
         };
@@ -464,8 +481,24 @@ impl SystemSettings {
 
     fn read_ssh(&mut self) {
         self.ssh = ssh::status();
+        self.ssh_read_at = Instant::now();
         self.sync_ssh_toggle();
         self.remember_hostname();
+    }
+
+    /// The server runs and Wi-Fi is on, but there's no address yet, or the
+    /// name isn't claimed yet: Wi-Fi is still connecting (after a wake, or
+    /// a reconnect) and the row should catch up by itself.
+    fn ssh_incomplete(&self) -> bool {
+        self.ssh.running
+            && self.ssh_pending.is_none()
+            && self.wifi == Some(true)
+            && (self.ssh.address.is_none() || self.ssh.hostname.is_none())
+    }
+
+    /// Still re-reading an incomplete status (see SSH_RECHECK).
+    fn ssh_rechecking(&self) -> bool {
+        self.ssh_incomplete() && self.ssh_read_at < self.ssh_recheck_until
     }
 
     /// Keeps the name the responder won (`verso-2` if another device had
@@ -489,25 +522,7 @@ impl SystemSettings {
     }
 
     fn ssh_note(&self) -> String {
-        match (self.ssh_pending, &self.ssh) {
-            (Some(true), _) => "Starting…".into(),
-            (Some(false), _) => "Stopping…".into(),
-            (None, s) if s.running => match (&s.hostname, &s.address) {
-                (Some(host), Some(ip)) => format!(
-                    "ssh -p {} root@{host}.local\nor root@{ip}. Keeps running after Verso closes. Turn it off to save battery.",
-                    ssh::PORT
-                ),
-                (None, Some(ip)) => format!(
-                    "ssh -p {} root@{ip}\nKeeps running after Verso closes. Turn it off to save battery.",
-                    ssh::PORT
-                ),
-                (_, None) => "On, but there’s no network. Turn on Wi-Fi to connect.".into(),
-            },
-            (None, s) => match s.unavailable {
-                Some(reason) => reason.into(),
-                None => format!("Port {}, key login only", ssh::PORT),
-            },
-        }
+        ssh_note(self.ssh_pending, &self.ssh, self.wifi, self.ssh_rechecking())
     }
 
     fn tap_version(&mut self, cx: &mut EventCx) {
@@ -652,6 +667,36 @@ fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones) {
 /// The shaded back zone in the tap-zone preview (an exact panel gray).
 const FILL_ZONE: u8 = 0xdd;
 
+/// The note under the SSH switch. `rechecking`: Wi-Fi is on but still
+/// connecting, and the row is waiting for it (see SSH_RECHECK).
+fn ssh_note(pending: Option<bool>, s: &ssh::Status, wifi: Option<bool>, rechecking: bool) -> String {
+    match pending {
+        Some(true) => return "Starting…".into(),
+        Some(false) => return "Stopping…".into(),
+        None => {}
+    }
+    if !s.running {
+        return match s.unavailable {
+            Some(reason) => reason.into(),
+            None => format!("Port {}, key login only", ssh::PORT),
+        };
+    }
+    match (&s.hostname, &s.address) {
+        (Some(host), Some(ip)) => format!(
+            "ssh -p {} root@{host}.local\nor root@{ip}. Keeps running after Verso closes. Turn it off to save battery.",
+            ssh::PORT
+        ),
+        (None, Some(ip)) => {
+            format!("ssh -p {} root@{ip}\nKeeps running after Verso closes. Turn it off to save battery.", ssh::PORT)
+        }
+        (_, None) if wifi == Some(true) && rechecking => "On. Waiting for Wi-Fi to connect…".into(),
+        (_, None) if wifi == Some(true) => {
+            "On, but Wi-Fi hasn’t connected. Check the network in Kindle settings.".into()
+        }
+        (_, None) => "On, but there’s no network. Turn on Wi-Fi to connect.".into(),
+    }
+}
+
 impl Screen for SystemSettings {
     fn draw(&mut self, cx: &mut DrawCx) {
         self.top.draw(cx);
@@ -694,6 +739,30 @@ impl Screen for SystemSettings {
             }
         }
     }
+    /// Re-reads the SSH status while Wi-Fi is still connecting, and once
+    /// after a wake. Nothing otherwise.
+    fn deadline(&self) -> Option<Instant> {
+        if self.ssh_read_on_wake {
+            return Some(self.ssh_read_at);
+        }
+        let visible = self.tab == Tab::Device && self.show_developer();
+        (visible && self.ssh_rechecking()).then(|| (self.ssh_read_at + SSH_RECHECK).min(self.ssh_recheck_until))
+    }
+    fn on_tick(&mut self, cx: &mut EventCx) -> Action {
+        if std::mem::take(&mut self.ssh_read_on_wake) {
+            // Wi-Fi reconnects after a wake, which can take about a minute.
+            self.ssh_recheck_until = cx.now + SSH_RECHECK_FOR;
+        }
+        let before = (self.ssh.clone(), self.ssh_rechecking());
+        self.read_ssh();
+        if (self.ssh.clone(), self.ssh_rechecking()) != before {
+            cx.redraw();
+        }
+        Action::None
+    }
+    fn on_sleep(&mut self) {
+        self.ssh_read_on_wake = true;
+    }
     fn has_pending_work(&self) -> bool {
         self.wifi_pending.is_some() || self.ssh_pending.is_some()
     }
@@ -713,6 +782,7 @@ impl Screen for SystemSettings {
             self.wifi_toggle.on = self.wifi.unwrap_or(false);
             self.wifi_toggle.enabled = self.wifi.is_some();
             self.read_ssh();
+            self.ssh_recheck_until = self.ssh_read_at + SSH_RECHECK_FOR;
             cx.redraw();
         }
         if let Some(on) = self.ssh_pending.take() {
@@ -722,6 +792,7 @@ impl Screen for SystemSettings {
                 cx.toast(if on { "Couldn't start SSH" } else { "Couldn't stop SSH" }, None);
             }
             self.read_ssh();
+            self.ssh_recheck_until = self.ssh_read_at + SSH_RECHECK_FOR;
             cx.redraw();
         }
         Action::None
@@ -830,5 +901,37 @@ impl Screen for UsbPrompt {
         } else {
             Action::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn on(address: Option<&str>, hostname: Option<&str>) -> ssh::Status {
+        ssh::Status {
+            running: true,
+            unavailable: None,
+            address: address.map(str::to_owned),
+            hostname: hostname.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn ssh_note_waits_for_wifi_to_connect() {
+        let status = on(None, None);
+        assert_eq!(ssh_note(None, &status, Some(true), true), "On. Waiting for Wi-Fi to connect…");
+        assert!(ssh_note(None, &status, Some(true), false).contains("Wi-Fi hasn’t connected"));
+        assert!(ssh_note(None, &status, Some(false), true).contains("Turn on Wi-Fi"));
+        assert!(ssh_note(None, &status, None, true).contains("Turn on Wi-Fi"));
+    }
+
+    #[test]
+    fn ssh_note_shows_how_to_connect() {
+        let named = ssh_note(None, &on(Some("192.168.1.42"), Some("verso")), Some(true), false);
+        assert!(named.starts_with("ssh -p 2222 root@verso.local\nor root@192.168.1.42."));
+        let unnamed = ssh_note(None, &on(Some("192.168.1.42"), None), Some(true), true);
+        assert!(unnamed.starts_with("ssh -p 2222 root@192.168.1.42\n"));
+        assert_eq!(ssh_note(Some(true), &on(None, None), Some(true), true), "Starting…");
     }
 }
