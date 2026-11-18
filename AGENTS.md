@@ -29,6 +29,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 | `cargo kindle-build` | Release build for the Kindle (armv7, via cargo-zigbuild) |
 | `cargo test` | Unit tests |
 | `scripts/deploy.sh` | Build, copy to the Kindle, run through the launcher, stream the log (Kindle must be awake, KOReader closed) |
+| `scripts/kindle-awake.sh on\|off\|status` | Keep the Kindle from sleeping on its idle timeout during device work, and turn that off again |
 | `scripts/build-ssh.sh` | Build the Kindle SSH server (Dropbear, sftp-server); `deploy.sh` runs it |
 | `scripts/build-wordforms.sh` | Build the Russian word-form pack (`target/wordforms/ru.vwf`) from the kept OpenCorpora export and run its quality list |
 | `scripts/gen-fbink-bindings.sh` | Regenerate FBInk bindings after updating the submodule |
@@ -39,6 +40,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
   - Only write files inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`. Writing to `/dev/fb0` (the screen) is fine, and so is sending test touches to the touchscreen (`/dev/input/event1`) while Verso is running and has grabbed it.
   - Never run `mntroot`, factory reset, firmware updates, or `dd`, and never touch `/var/local`, `/etc` or the jailbreak files.
   - Before running Verso, check the Kindle is awake (`lipc-get-prop com.lab126.powerd state` is `active`) and no other app like KOReader is running. If it isn't ready, ask the user.
+  - **Keep the Kindle awake during device work.** The user may not be around, and a Kindle that falls asleep drops SSH and can't be woken remotely. Before device work, run `scripts/kindle-awake.sh status`. If `preventScreenSaver` is `0`, run `scripts/kindle-awake.sh on`, and run `scripts/kindle-awake.sh off` when the device work is done, even if it failed. If it was already `1`, leave it on. If the Kindle is already asleep, ask the user to wake it.
   - Never kill or pause other apps (KOReader, Amazon's UI) by hand. Only Verso's launcher may pause and resume the Kindle UI.
   - If the device is left in an odd state, put it back exactly as it was and tell the user.
   - **KUAL always runs the latest build.** The app is in active development and the user tests every change on the device, so there is no separate "production" build to protect. After device work, the normal `/mnt/us/verso/verso` (and the launcher and KUAL files) must match the latest build: `scripts/deploy.sh` (or `--no-run`) installs it. Isolated copies for experiments are fine, but install the latest build when done instead of leaving an older one in place. Keep the user's settings, reading state and books.
