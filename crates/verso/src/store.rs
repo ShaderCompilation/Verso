@@ -48,6 +48,8 @@ pub struct Settings {
     /// Check for updates when Verso starts (at most daily, only with Wi-Fi
     /// already connected). Settings → Device.
     pub check_updates: bool,
+    /// How folder tiles in Collections look. Older files read as Covers.
+    pub folder_preview: FolderPreview,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -66,6 +68,7 @@ impl Default for Settings {
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
             text_shaping: TextShaping::default(),
             check_updates: true,
+            folder_preview: FolderPreview::default(),
         }
     }
 }
@@ -75,6 +78,9 @@ impl Settings {
         self.page_layout.migrate(self.legacy_footer.take(), self.typography.legacy_margins.take());
         self.page_layout.normalize();
         self.typography.normalize();
+        if !FolderPreview::OFFERED.contains(&self.folder_preview) {
+            self.folder_preview = FolderPreview::default();
+        }
     }
 }
 pub const DEFAULT_PAGE_FLASH: u32 = 6;
@@ -84,6 +90,40 @@ pub enum SleepScreen {
     #[default]
     Cover,
     Amazon,
+}
+/// What a folder tile in Collections shows (docs/folder-previews.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderPreview {
+    /// A 2×2 grid of four covers. Disabled for now: it isn't in `OFFERED`,
+    /// so Settings doesn't show it and a saved choice reads as the default.
+    Covers,
+    /// Three covers, each shifted behind the one in front.
+    #[default]
+    Stack,
+    /// The cover of the book read most recently, under a folder tab.
+    Latest,
+    /// The folder icon and count.
+    Icon,
+}
+impl FolderPreview {
+    /// Every mode, including disabled ones, for tests.
+    #[cfg(test)]
+    pub const ALL: [FolderPreview; 4] =
+        [FolderPreview::Covers, FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Icon];
+    /// The modes Settings offers, in its order. Covers is left out until its
+    /// grid looks right on the panel (docs/folder-previews.md); add it back
+    /// here, with its label in Settings, to enable it again.
+    pub const OFFERED: [FolderPreview; 3] = [FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Icon];
+    /// How many of a folder's preview books the tile shows: a prefix of its pick.
+    pub fn slots(self) -> usize {
+        match self {
+            FolderPreview::Covers => 4,
+            FolderPreview::Stack => 3,
+            FolderPreview::Latest => 1,
+            FolderPreview::Icon => 0,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -109,6 +149,9 @@ pub struct Store {
         std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::dictionary::worker::Service>>>,
     pub(crate) dictionary_folder_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     selected_home: std::sync::Arc<std::sync::Mutex<Option<crate::library::Book>>>,
+    /// The book known to lead `opened.json`, so its saves (page turns) skip
+    /// reading the file. None when unknown.
+    opened_leader: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Counts settings saves through this store and its clones, so screens
     /// can notice a change without rereading the file.
     settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -146,6 +189,7 @@ impl Store {
             root,
             wordforms,
             selected_home: Default::default(),
+            opened_leader: Default::default(),
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
@@ -273,6 +317,10 @@ impl Store {
     pub fn cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}.png"))
     }
+    /// The quarter-size thumbnail for folder previews; same key as the full one.
+    pub fn small_cover_path(&self, key: &str) -> PathBuf {
+        self.root.join("covers").join(format!("{key}-s.png"))
+    }
     pub fn annotation_dir(&self) -> PathBuf {
         self.root.join("annotations")
     }
@@ -320,6 +368,7 @@ impl Store {
             wordforms: root.join("wordforms"),
             root,
             selected_home: Default::default(),
+            opened_leader: Default::default(),
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
@@ -434,14 +483,24 @@ fn folder_paths(settings: Settings, override_folders: Option<std::ffi::OsString>
 mod tests {
     use super::*;
     #[test]
-    fn existing_settings_default_to_covers_and_amazon_round_trips() -> Result<()> {
+    fn existing_settings_default_to_stack_and_amazon_round_trips() -> Result<()> {
         let mut settings: Settings = serde_json::from_str(r#"{"footer":false}"#)?;
         settings.normalize();
         assert_eq!(settings.sleep_screen, SleepScreen::Cover);
+        assert_eq!(settings.folder_preview, FolderPreview::Stack);
+        // Covers is disabled: a saved choice reads as Stack.
+        let mut covers: Settings = serde_json::from_str(r#"{"folder_preview":"covers"}"#)?;
+        covers.normalize();
+        assert_eq!(covers.folder_preview, FolderPreview::Stack);
         assert!(!settings.page_layout.bottom.on);
         settings.sleep_screen = SleepScreen::Amazon;
         let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
         assert_eq!(restored.sleep_screen, SleepScreen::Amazon);
+        for mode in FolderPreview::ALL {
+            settings.folder_preview = mode;
+            let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
+            assert_eq!(restored.folder_preview, mode);
+        }
         assert!(!restored.page_layout.bottom.on);
         Ok(())
     }

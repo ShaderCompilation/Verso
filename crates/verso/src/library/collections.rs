@@ -77,6 +77,8 @@ pub struct Folder {
     pub parent: Option<PathBuf>,
     pub children: BTreeSet<PathBuf>,
     pub books: BTreeSet<PathBuf>,
+    /// Positions of the same direct books in the index this was built from.
+    pub indices: Vec<usize>,
     pub count: usize,
 }
 
@@ -90,7 +92,7 @@ impl Collections {
         let roots = distinct_roots(roots);
         let mut result = Self::default();
         let mut seen = BTreeSet::new();
-        for book in index.books.iter().filter(|b| b.available) {
+        for (i, book) in index.books.iter().enumerate().filter(|(_, b)| b.available) {
             let path = normalize(&book.path);
             let Some(root) = roots.iter().find(|r| path.starts_with(r)) else { continue };
             if !seen.insert(path.clone()) {
@@ -102,7 +104,9 @@ impl Collections {
             if !folder.starts_with(root) {
                 continue;
             }
-            result.folders.entry(folder.to_owned()).or_default().books.insert(path.clone());
+            let node = result.folders.entry(folder.to_owned()).or_default();
+            node.books.insert(path.clone());
+            node.indices.push(i);
             loop {
                 let node = result.folders.entry(folder.to_owned()).or_default();
                 node.count += 1;
