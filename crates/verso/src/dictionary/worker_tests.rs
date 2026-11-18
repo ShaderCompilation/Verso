@@ -213,8 +213,9 @@ fn preferences_survive_source_removal_and_re_adding() {
     let b = f.join("ext/b.ifo").to_string_lossy().into_owned();
     let a = f.join("ext/a.ifo").to_string_lossy().into_owned();
     edit(&f.worker, Edit::MoveDictionary { set: DEFAULT.into(), dictionary: b.clone(), position: 0 }); // B, A, Native
-    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: a.clone(), disabled: true }); // A disabled
-    assert_eq!(names(&f.catalog()), ["B", "A", "Native"]);
+    // Disabled dictionaries follow the enabled ones.
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: a.clone(), disabled: true }); // B, Native, A
+    assert_eq!(names(&f.catalog()), ["B", "Native", "A"]);
 
     f.store.save_dictionary_folders(&[]).unwrap();
     assert_eq!(names(&f.catalog()), ["Native"]);
@@ -227,7 +228,7 @@ fn preferences_survive_source_removal_and_re_adding() {
     let mut f = f;
     (f.worker, f.wake) = Fixture::worker(&f.store);
     let reply = f.catalog();
-    assert_eq!(names(&reply), ["B", "A", "Native"]);
+    assert_eq!(names(&reply), ["B", "Native", "A"]);
     let flags: Vec<_> = reply.dictionaries.iter().map(|d| d.disabled).collect();
     assert_eq!(flags, [false, true, true]);
 }
@@ -568,13 +569,15 @@ fn migration_new_dictionary_placement_and_missing_positions_survive_restart() {
     install(&f.join("dictionaries/b.ifo"), "B", "word");
     let reply = f.reply(f.worker.catalog(true)).0;
     let saved: Preferences = serde_json::from_slice(&fs::read(f.store.dictionary_preferences()).unwrap()).unwrap();
+    // New enabled dictionaries join the end of the enabled ones; turning one
+    // on in a set does the same; new disabled ones go last.
     assert_eq!(
         saved.set(DEFAULT).dictionaries.iter().map(|d| (&*d.id, d.disabled)).collect::<Vec<_>>(),
-        [("gone.ifo", true), ("a.ifo", true), ("b.ifo", false)]
+        [("b.ifo", false), ("gone.ifo", true), ("a.ifo", true)]
     );
     assert_eq!(
         saved.set("english").dictionaries.iter().map(|d| (&*d.id, d.disabled)).collect::<Vec<_>>(),
-        [("gone.ifo", true), ("a.ifo", false), ("b.ifo", true)]
+        [("a.ifo", false), ("gone.ifo", true), ("b.ifo", true)]
     );
     assert_eq!(reply.sets, saved.sets);
     // A new Store models a process restart, not just another client.
@@ -585,7 +588,7 @@ fn migration_new_dictionary_placement_and_missing_positions_survive_restart() {
     let reply = wait_client(&restarted, restarted.catalog(true));
     assert_eq!(
         reply.dictionaries.iter().map(|d| (&*d.id, d.disabled)).collect::<Vec<_>>(),
-        [("gone.ifo", true), ("a.ifo", true), ("b.ifo", false)]
+        [("b.ifo", false), ("gone.ifo", true), ("a.ifo", true)]
     );
 }
 #[test]

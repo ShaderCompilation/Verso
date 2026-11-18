@@ -2,7 +2,7 @@
 use crate::{
     dictionary::{
         Dictionary, Source, WordFormsSource, WordFormsStatus,
-        sets::{DEFAULT, Edit, Set},
+        sets::{DEFAULT, Edit, Preferences, Set},
         worker::Worker,
     },
     geom::Rect,
@@ -96,6 +96,12 @@ impl Item {
         match self {
             Item::Found(d) => d.disabled,
             Item::Missing { disabled, .. } => *disabled,
+        }
+    }
+    fn set_disabled(&mut self, value: bool) {
+        match self {
+            Item::Found(d) => d.disabled = value,
+            Item::Missing { disabled, .. } => *disabled = value,
         }
     }
 }
@@ -214,6 +220,32 @@ impl Dictionaries {
         self.request = self.worker.edit(edit);
         self.pending = true;
     }
+    /// Applies an on/off or order change here first, so the list answers
+    /// each tap at once, then saves it through the worker. Rows stay enabled
+    /// meanwhile: the worker applies edits in order and its reply to the
+    /// latest one replaces this state.
+    fn apply(&mut self, edit: Edit, cx: &mut EventCx) {
+        let mut preferences = Preferences { sets: self.sets.clone() };
+        if let Err(error) = preferences.edit(edit.clone()) {
+            cx.toast(error.to_string(), None);
+            return;
+        }
+        self.sets = preferences.sets;
+        if let Edit::Disabled { dictionary, disabled, .. } = &edit
+            && let Some(item) = self.dictionaries.iter_mut().find(|d| d.id() == dictionary)
+        {
+            item.set_disabled(*disabled);
+        }
+        let set = self.set_id().to_owned();
+        self.order_items(&set);
+        self.request = self.worker.edit(edit);
+    }
+    /// Sorts the rows by their saved place in `set`.
+    fn order_items(&mut self, set: &str) {
+        let Some(set) = self.sets.iter().find(|s| s.id == set) else { return };
+        let position = |id: &str| set.dictionaries.iter().position(|p| p.id == id).unwrap_or(usize::MAX);
+        self.dictionaries.sort_by_key(|d| position(d.id()));
+    }
     fn layout(&mut self, t: &Theme) {
         let title = if let Some(editor) = &self.editor {
             match editor.field {
@@ -287,29 +319,36 @@ impl Dictionaries {
                     })
                 }))
                 .collect(),
-            View::Set(_) => self
-                .dictionaries
-                .iter()
-                .map(|item| {
-                    let on = if item.disabled() { "Off" } else { "On" };
-                    let Item::Found(d) = item else {
-                        return Row::new(item.id()).sub(format!("{on} · Missing")).chevron();
-                    };
-                    Row::new(&d.name)
-                        .sub(format!(
-                            "{on}{} · {}",
-                            if self.unprepared.contains(&d.id) {
-                                " · Needs preparation"
-                            } else if d.error.is_some() {
-                                " · Read error"
-                            } else {
-                                ""
-                            },
-                            d.location(&self.sources)
-                        ))
-                        .chevron()
-                })
-                .collect(),
+            View::Set(_) => {
+                // Enabled dictionaries come first, numbered in lookup order;
+                // only they can move.
+                let enabled = self.dictionaries.iter().filter(|d| !d.disabled()).count();
+                let mut rank = 0;
+                self.dictionaries
+                    .iter()
+                    .map(|item| {
+                        let row = match item {
+                            Item::Found(d) => Row::new(&d.name).sub(format!(
+                                "{}{}",
+                                if self.unprepared.contains(&d.id) {
+                                    "Needs preparation · "
+                                } else if d.error.is_some() {
+                                    "Read error · "
+                                } else {
+                                    ""
+                                },
+                                d.location(&self.sources)
+                            )),
+                            Item::Missing { id, .. } => Row::new(id).sub("Missing"),
+                        };
+                        if item.disabled() {
+                            return row.rank(None).dim();
+                        }
+                        rank += 1;
+                        row.rank(Some(rank)).reorder(rank > 1, rank < enabled)
+                    })
+                    .collect()
+            }
             View::Languages(_) => self
                 .language_choices()
                 .iter()
@@ -335,14 +374,10 @@ impl Dictionaries {
                     let mut rows = vec![
                         Row::new("Details").sub(&d.name).chevron(),
                         Row::new(if d.disabled { "Enable" } else { "Disable" }),
-                        Row::new("Move up"),
-                        Row::new("Move down"),
                         Row::new("Retry reading"),
                     ];
-                    rows[2].enabled = index > 0;
-                    rows[3].enabled = index + 1 < self.dictionaries.len();
                     // Retry only after a read failed; it reopens the dictionary.
-                    rows[4].enabled = d.error.is_some();
+                    rows[2].enabled = d.error.is_some();
                     rows
                 })
                 .unwrap_or_default(),
@@ -353,6 +388,7 @@ impl Dictionaries {
                 row.enabled = false;
             }
         }
+        self.list.slot = t.target;
         self.list.place(self.list_rect, t.row2, 0);
         self.pager.set(self.list.page, self.list.paging().pages());
         self.list.page = self.pager.page;
@@ -408,7 +444,7 @@ impl Dictionaries {
             },
         };
         // Use the backend's validation before closing the editor.
-        let mut preferences = crate::dictionary::sets::Preferences { sets: self.sets.clone() };
+        let mut preferences = Preferences { sets: self.sets.clone() };
         if let Err(error) = preferences.edit(edit.clone()) {
             cx.toast(error.to_string(), None);
             return;
@@ -438,6 +474,28 @@ impl Dictionaries {
             },
             View::Languages(set) => self.start_editor(Field::Languages(set), languages, cx.theme),
             _ => {}
+        }
+    }
+    /// Turns a set's dictionary on (it becomes the last numbered one) or off.
+    fn toggle(&mut self, index: usize, cx: &mut EventCx) {
+        let (View::Set(set), Some(item)) = (self.view.clone(), self.dictionaries.get(index)) else { return };
+        let edit = Edit::Disabled { set, dictionary: item.id().into(), disabled: !item.disabled() };
+        self.apply(edit, cx);
+        self.layout(cx.theme);
+    }
+    /// Moves a numbered dictionary one place and keeps it in view.
+    fn shift(&mut self, index: usize, up: bool, cx: &mut EventCx) {
+        let (View::Set(set), Some(item)) = (self.view.clone(), self.dictionaries.get(index)) else { return };
+        let dictionary = item.id().to_owned();
+        let Some(position) = self.move_target(&dictionary, up) else {
+            cx.toast("Couldn’t move this dictionary. Tap Rescan and try again.", None);
+            return;
+        };
+        self.apply(Edit::MoveDictionary { set, dictionary: dictionary.clone(), position }, cx);
+        self.layout(cx.theme);
+        if let Some(moved) = self.dictionaries.iter().position(|d| d.id() == dictionary) {
+            self.list.page = self.list.paging().page_of(moved);
+            self.pager.set(self.list.page, self.list.paging().pages());
         }
     }
     fn language_choices(&self) -> Vec<(String, String)> {
@@ -513,14 +571,7 @@ impl Dictionaries {
                         return;
                     }
                     1 => Edit::Disabled { set, dictionary, disabled: !d.disabled },
-                    2 | 3 => {
-                        let Some(position) = self.move_target(&dictionary, index == 2) else {
-                            cx.toast("Couldn’t move this dictionary. Tap Rescan and try again.", None);
-                            return;
-                        };
-                        Edit::MoveDictionary { set, dictionary, position }
-                    }
-                    4 => {
+                    2 => {
                         self.request = self.worker.retry(&set, &dictionary);
                         self.pending = true;
                         self.layout(cx.theme);
@@ -591,7 +642,7 @@ impl Screen for Dictionaries {
             let hint = if matches!(editor.field, Field::Languages(_)) {
                 "Language codes, separated by commas: en, ru, fr. Empty clears them. Assigning a language moves it from its previous set."
             } else if matches!(editor.field, Field::New) {
-                "New sets copy Default’s order with every dictionary off."
+                "New sets start with every dictionary off. Turn them on in the order you want them tried."
             } else {
                 "Choose a name for this dictionary set."
             };
@@ -612,6 +663,8 @@ impl Screen for Dictionaries {
             "Some folders or preferences had problems. Tap here for details."
         } else if matches!(self.view, View::Set(_)) && self.list.rows.is_empty() {
             "No dictionaries found. Add a folder or copy StarDict files into Verso’s dictionaries folder."
+        } else if matches!(self.view, View::Set(_)) {
+            "Lookups try the numbered dictionaries in order. Tap a circle to turn one on or off."
         } else {
             "Changes save immediately. Tap a row to manage it."
         };
@@ -704,8 +757,12 @@ impl Screen for Dictionaries {
         if page != self.pager.page {
             self.list.page = self.pager.page;
         }
-        if let Some(ListEvent::Tapped(i)) = self.list.on_gesture(&g) {
-            self.row(i, cx);
+        match self.list.on_gesture(&g) {
+            Some(ListEvent::Tapped(i)) => self.row(i, cx),
+            Some(ListEvent::Lead(i)) => self.toggle(i, cx),
+            Some(ListEvent::Up(i)) => self.shift(i, true, cx),
+            Some(ListEvent::Down(i)) => self.shift(i, false, cx),
+            _ => {}
         }
         Action::None
     }
@@ -743,12 +800,11 @@ impl Screen for Dictionaries {
             // missing ones take their saved place and state.
             self.dictionaries = reply.dictionaries.into_iter().map(Item::Found).collect();
             if let Some(set) = self.sets.iter().find(|s| s.id == reply.active_set) {
-                let position = |id: &str| set.dictionaries.iter().position(|p| p.id == id).unwrap_or(usize::MAX);
                 self.dictionaries.extend(reply.missing.into_iter().map(|id| Item::Missing {
                     disabled: set.dictionaries.iter().find(|p| p.id == id).is_none_or(|p| p.disabled),
                     id,
                 }));
-                self.dictionaries.sort_by_key(|d| position(d.id()));
+                self.order_items(&reply.active_set);
             }
             self.sources = reply.sources;
             self.warnings = reply.warnings;
@@ -810,6 +866,40 @@ mod tests {
     fn row(s: &mut Dictionaries, index: usize, t: &Theme) {
         let p = Point::new(s.list_rect.center().x, s.list_rect.y + (index as i32 * t.row2) + t.row2 / 2);
         tap(s, p, t);
+    }
+    #[derive(Clone, Copy)]
+    enum Part {
+        Lead,
+        Up,
+        Down,
+    }
+    /// Taps the rank circle or an arrow of the `index`th visible row.
+    fn part(s: &mut Dictionaries, index: usize, part: Part, t: &Theme) {
+        let y = s.list_rect.y + index as i32 * t.row2 + t.row2 / 2;
+        let x = match part {
+            Part::Lead => s.list_rect.x + t.target / 2,
+            Part::Up => s.list_rect.right() - t.target * 3 / 2,
+            Part::Down => s.list_rect.right() - t.target / 2,
+        };
+        tap(s, Point::new(x, y), t);
+    }
+    /// Waits for the worker's reply to the latest quick edit.
+    fn confirm(s: &mut Dictionaries, t: &Theme) {
+        s.pending = true;
+        wait(s, t);
+    }
+    fn order(s: &Dictionaries) -> Vec<(&str, Option<usize>)> {
+        s.dictionaries
+            .iter()
+            .zip(&s.list.rows)
+            .map(|(d, r)| {
+                let rank = match r.lead {
+                    crate::ui::widgets::list::Lead::Rank(rank) => rank,
+                    crate::ui::widgets::list::Lead::None => panic!("set rows have a rank"),
+                };
+                (d.id(), rank)
+            })
+            .collect()
     }
     fn submit(s: &mut Dictionaries, value: &str, t: &Theme) {
         with_cx(t, s.screen, |cx| {
@@ -899,17 +989,43 @@ mod tests {
         assert_eq!(s.current_set().unwrap().languages, ["en", "ru"]);
         s.back(&t);
         wait(&mut s, &t);
+        // The dictionary page can still turn one on.
+        assert_eq!(order(&s), [("a.ifo", None), ("b.ifo", None), ("c.ifo", None)]);
+        assert!(s.list.rows.iter().all(|r| r.dim));
         row(&mut s, 0, &t);
         row(&mut s, 1, &t);
         wait(&mut s, &t);
         assert!(!s.dictionary().unwrap().disabled());
-        assert!(!s.list.rows[4].enabled, "Retry needs a read error");
-        row(&mut s, 3, &t);
+        assert_eq!(s.list.rows.len(), 3);
+        assert!(!s.list.rows[2].enabled, "Retry needs a read error");
+        s.back(&t);
         wait(&mut s, &t);
-        assert_eq!(s.dictionaries.iter().map(Item::id).collect::<Vec<_>>(), ["b.ifo", "a.ifo", "c.ifo"]);
-        row(&mut s, 2, &t);
-        wait(&mut s, &t);
-        assert_eq!(s.dictionaries[0].id(), "a.ifo");
+        // Circles turn dictionaries on in tap order, at once and without
+        // graying the list while the worker saves.
+        assert_eq!(order(&s), [("a.ifo", Some(1)), ("b.ifo", None), ("c.ifo", None)]);
+        part(&mut s, 2, Part::Lead, &t);
+        assert_eq!(order(&s), [("a.ifo", Some(1)), ("c.ifo", Some(2)), ("b.ifo", None)]);
+        assert!(!s.pending && s.list.rows.iter().all(|r| r.enabled));
+        assert!(s.list.rows[2].dim && !s.list.rows[1].dim);
+        part(&mut s, 2, Part::Lead, &t);
+        assert_eq!(order(&s), [("a.ifo", Some(1)), ("c.ifo", Some(2)), ("b.ifo", Some(3))]);
+        // Arrows move numbered ones; ▲ on the first and ▼ on the last do nothing.
+        part(&mut s, 0, Part::Up, &t);
+        part(&mut s, 2, Part::Down, &t);
+        assert_eq!(order(&s), [("a.ifo", Some(1)), ("c.ifo", Some(2)), ("b.ifo", Some(3))]);
+        part(&mut s, 0, Part::Down, &t);
+        part(&mut s, 2, Part::Up, &t);
+        assert_eq!(order(&s), [("c.ifo", Some(1)), ("b.ifo", Some(2)), ("a.ifo", Some(3))]);
+        // Off moves it below the numbered ones.
+        part(&mut s, 0, Part::Lead, &t);
+        assert_eq!(order(&s), [("b.ifo", Some(1)), ("a.ifo", Some(2)), ("c.ifo", None)]);
+        confirm(&mut s, &t);
+        assert_eq!(order(&s), [("b.ifo", Some(1)), ("a.ifo", Some(2)), ("c.ifo", None)]);
+        let saved: Vec<_> = s.current_set().unwrap().dictionaries.iter().map(|d| (d.id.as_str(), d.disabled)).collect();
+        assert_eq!(saved, [("b.ifo", false), ("a.ifo", false), ("c.ifo", true)]);
+        // The name still opens the dictionary page.
+        row(&mut s, 0, &t);
+        assert!(matches!(&s.view, View::Dictionary(_, d) if d == "b.ifo"));
         row(&mut s, 0, &t);
         assert!(s.details.is_some());
         s.details = None;
@@ -940,6 +1056,29 @@ mod tests {
         let prefs: crate::dictionary::sets::Preferences =
             serde_json::from_slice(&fs::read(store.dictionary_preferences()).unwrap()).unwrap();
         assert_eq!(prefs.sets.len(), 1);
+        drop(s);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn moving_across_a_page_edge_follows_the_dictionary() {
+        let (root, store) = temp_store("management-pages");
+        install(&store, &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+        let t = Theme::for_dpi(300);
+        let mut s = Dictionaries::new(&t, Rect::new(0, 0, 1072, 1448), store, Waker::new(|| {}), Some(DEFAULT));
+        wait(&mut s, &t);
+        let per_page = s.list.paging().range(0).len();
+        assert!(s.list.paging().pages() > 1, "the test needs a second page");
+        let last = s.dictionaries[per_page - 1].id().to_owned();
+        part(&mut s, per_page - 1, Part::Down, &t);
+        assert_eq!(s.dictionaries[per_page].id(), last);
+        assert_eq!((s.list.page, s.pager.page), (1, 1));
+        part(&mut s, 0, Part::Up, &t);
+        assert_eq!(s.dictionaries[per_page - 1].id(), last);
+        assert_eq!((s.list.page, s.pager.page), (0, 0));
+        // Turning one on or off stays on the page.
+        part(&mut s, 0, Part::Lead, &t);
+        assert_eq!(s.list.page, 0);
+        confirm(&mut s, &t);
         drop(s);
         let _ = fs::remove_dir_all(root);
     }

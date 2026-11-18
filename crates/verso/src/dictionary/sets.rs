@@ -1,4 +1,8 @@
 //! Durable dictionary sets. Missing installations keep their position and flags.
+//!
+//! Each set keeps its enabled dictionaries first, in lookup order, and the
+//! disabled ones after them: turning one on adds it at the end of the enabled
+//! ones, and turning one off moves it to the top of the disabled ones.
 use super::{Dictionary, Preference};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -85,7 +89,8 @@ impl Edit {
 }
 
 impl Preferences {
-    /// Legacy arrays migrate verbatim. For an invalid record the caller uses
+    /// Legacy arrays migrate in order, with enabled dictionaries first (lookups
+    /// skip disabled ones, so lookup order is kept). For an invalid record the caller uses
     /// empty preferences and leaves the file alone until the user changes one.
     pub fn parse(text: &str) -> Result<(Self, bool)> {
         #[derive(Deserialize)]
@@ -111,6 +116,7 @@ impl Preferences {
             ensure!(set.id != DEFAULT || set.languages.is_empty(), "Default has no languages");
             let mut dictionaries = std::collections::HashSet::new();
             ensure!(set.dictionaries.iter().all(|d| dictionaries.insert(&d.id)), "Duplicate dictionary ID");
+            set.group();
             set.languages = clean_languages(&set.languages)?;
             ensure!(set.languages.iter().all(|l| languages.insert(l.clone())), "Language assigned twice");
         }
@@ -125,7 +131,9 @@ impl Preferences {
         for set in &mut self.sets {
             for dictionary in dictionaries {
                 if !set.dictionaries.iter().any(|p| p.id == dictionary.id) {
-                    set.dictionaries.push(Preference { id: dictionary.id.clone(), disabled: set.id != DEFAULT });
+                    let disabled = set.id != DEFAULT;
+                    let at = if disabled { set.dictionaries.len() } else { set.boundary() };
+                    set.dictionaries.insert(at, Preference { id: dictionary.id.clone(), disabled });
                     changed = true;
                 }
             }
@@ -189,10 +197,16 @@ impl Preferences {
                 self.find_mut(&set)?.languages = languages;
             }
             Edit::Disabled { set, dictionary, disabled } => {
-                let dictionaries = &mut self.find_mut(&set)?.dictionaries;
-                let entry = dictionaries.iter_mut().find(|d| d.id == dictionary);
-                let Some(entry) = entry else { anyhow::bail!("Unknown dictionary") };
-                entry.disabled = disabled;
+                let set = self.find_mut(&set)?;
+                let Some(index) = set.dictionaries.iter().position(|d| d.id == dictionary) else {
+                    anyhow::bail!("Unknown dictionary")
+                };
+                if set.dictionaries[index].disabled != disabled {
+                    let mut entry = set.dictionaries.remove(index);
+                    entry.disabled = disabled;
+                    let at = set.boundary();
+                    set.dictionaries.insert(at, entry);
+                }
             }
             Edit::Forget { dictionary, .. } => {
                 for set in &mut self.sets {
@@ -215,6 +229,14 @@ impl Preferences {
     }
 }
 impl Set {
+    /// The index after the last enabled dictionary.
+    pub fn boundary(&self) -> usize {
+        self.dictionaries.iter().rposition(|d| !d.disabled).map_or(0, |i| i + 1)
+    }
+    /// Enabled dictionaries first, each group in its current order.
+    fn group(&mut self) {
+        self.dictionaries.sort_by_key(|d| d.disabled);
+    }
     /// The languages whose base forms to try for `query`, best first; the
     /// lookup uses the first one with an analyzer. The set's own languages,
     /// or for a set without any (Default) the book's language and then the
@@ -449,6 +471,48 @@ mod tests {
         }
     }
     #[test]
+    fn enabled_dictionaries_stay_first_in_lookup_order() {
+        fn order(p: &Preferences, set: &str) -> String {
+            let set = p.set(set);
+            set.dictionaries.iter().map(|d| if d.disabled { d.id.to_lowercase() } else { d.id.clone() }).collect()
+        }
+        let dictionary = |id: &str| Dictionary {
+            id: id.into(),
+            name: id.into(),
+            path: id.into(),
+            relative: id.into(),
+            source: 0,
+            error: None,
+            disabled: false,
+        };
+        let mut p = Preferences::default();
+        p.discover(&[dictionary("A"), dictionary("B"), dictionary("C")]);
+        language_set(&mut p, "x", &[]);
+        assert_eq!(order(&p, DEFAULT), "ABC");
+        assert_eq!(order(&p, "x"), "abc");
+        let toggle = |p: &mut Preferences, id: &str, disabled| {
+            p.edit(Edit::Disabled { set: "x".into(), dictionary: id.into(), disabled }).unwrap();
+        };
+        // Turning on appends to the enabled ones, in the order they were turned on.
+        toggle(&mut p, "C", false);
+        toggle(&mut p, "A", false);
+        assert_eq!(order(&p, "x"), "CAb");
+        // Turning off moves to the top of the disabled ones; a repeat is a no-op.
+        toggle(&mut p, "C", true);
+        assert_eq!(order(&p, "x"), "Acb");
+        toggle(&mut p, "C", true);
+        assert_eq!(order(&p, "x"), "Acb");
+        // New dictionaries: enabled ones join the end of Default's enabled
+        // group, disabled ones go last elsewhere.
+        toggle(&mut p, "A", true);
+        p.edit(Edit::Disabled { set: DEFAULT.into(), dictionary: "B".into(), disabled: true }).unwrap();
+        p.discover(&[dictionary("D")]);
+        assert_eq!(order(&p, DEFAULT), "ACDb");
+        assert_eq!(order(&p, "x"), "acbd");
+        assert_eq!(p.set(DEFAULT).boundary(), 3);
+        assert_eq!(p.set("x").boundary(), 0);
+    }
+    #[test]
     fn migration_preserves_missing_ids_order_and_disabled_flags() {
         let legacy = r#"[{"id":"missing.ifo","disabled":true},{"id":"/external/b.ifo","disabled":false},{"id":"a.ifo","disabled":true}]"#;
         let (p, migrated) = Preferences::parse(legacy).unwrap();
@@ -456,7 +520,9 @@ mod tests {
         assert_eq!(p.sets.len(), 1);
         assert_eq!(p.set(DEFAULT).name, "Default");
         assert!(p.set(DEFAULT).languages.is_empty());
-        assert_eq!(serde_json::to_string(&p.set(DEFAULT).dictionaries).unwrap(), legacy);
+        // Enabled first; each group keeps its order and flags.
+        let grouped = r#"[{"id":"/external/b.ifo","disabled":false},{"id":"missing.ifo","disabled":true},{"id":"a.ifo","disabled":true}]"#;
+        assert_eq!(serde_json::to_string(&p.set(DEFAULT).dictionaries).unwrap(), grouped);
         let text = serde_json::to_string(&p).unwrap();
         let (restored, migrated) = Preferences::parse(&text).unwrap();
         assert!(!migrated);

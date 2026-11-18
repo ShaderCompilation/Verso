@@ -971,8 +971,11 @@ mod tests {
         worker.flush()?;
         let prefs: crate::dictionary::sets::Preferences =
             serde_json::from_slice(&std::fs::read(store.dictionary_preferences())?)?;
-        assert_eq!(prefs.set(crate::dictionary::sets::DEFAULT).dictionaries[0].id, "b.ifo");
-        assert!(prefs.set(crate::dictionary::sets::DEFAULT).dictionaries[0].disabled);
+        // Disabled, it moves below the enabled dictionaries.
+        let default = prefs.set(crate::dictionary::sets::DEFAULT);
+        let b = default.dictionaries.iter().position(|d| d.id == "b.ifo").unwrap();
+        assert!(default.dictionaries[b].disabled);
+        assert_eq!(b, default.boundary());
         // An obsolete worker reply must not replace a newer request.
         let old = lookup.request;
         lookup.request += 1;
