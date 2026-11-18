@@ -2040,7 +2040,7 @@ impl Screen for Books {
         if book.metadata.cover.is_none() {
             book.metadata = library::epub::read(&book.path).ok()?;
         }
-        match covers::sleep_cover(&book, width, height) {
+        match covers::sleep_cover(&book, width, height, 0) {
             Ok(image) => Some(image),
             Err(e) => {
                 log::debug!("sleep cover unavailable: {e:#}");

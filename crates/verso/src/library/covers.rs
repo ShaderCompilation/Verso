@@ -73,7 +73,8 @@ fn svg(bytes: &[u8], width: u32, height: u32) -> Result<RgbaImage> {
     }
     Ok(image)
 }
-pub fn sleep_cover(book: &Book, width: u32, height: u32) -> Result<GrayImage> {
+/// Fits the cover inside `width` x `height`, centred on a `background` gray.
+pub fn sleep_cover(book: &Book, width: u32, height: u32, background: u8) -> Result<GrayImage> {
     let cover = book.metadata.cover.as_ref().context("no cover")?;
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&book.path)?)?;
     let bytes = epub::entry(&mut zip, cover, epub::IMAGE_LIMIT)?;
@@ -82,12 +83,12 @@ pub fn sleep_cover(book: &Book, width: u32, height: u32) -> Result<GrayImage> {
     } else {
         raster(&bytes, width, height)?
     };
-    let mut gray = GrayImage::from_pixel(width, height, image::Luma([255]));
+    let mut gray = GrayImage::from_pixel(width, height, image::Luma([background]));
     let dx = (width - image.width()) / 2;
     let dy = (height - image.height()) / 2;
     for (x, y, p) in image.enumerate_pixels() {
         let a = p[3] as u32;
-        let g = (luma(p[0], p[1], p[2]) as u32 * a + 255 * (255 - a) + 127) / 255;
+        let g = (luma(p[0], p[1], p[2]) as u32 * a + background as u32 * (255 - a) + 127) / 255;
         gray.put_pixel(dx + x, dy + y, image::Luma([g as u8]));
     }
     Ok(gray)
@@ -117,7 +118,7 @@ pub fn repair(book: &Book, store: &Store) -> Result<Cover> {
     if load(&path).is_ok() {
         return Ok(Cover::Ready(key));
     }
-    let image = match sleep_cover(book, WIDTH, HEIGHT) {
+    let image = match sleep_cover(book, WIDTH, HEIGHT, 255) {
         Ok(image) => image,
         Err(e) => {
             log::debug!("title cover for {}: {e:#}", book.path.display());
@@ -151,7 +152,8 @@ mod tests {
             let image = load(&store.cover_path(&k))?;
             assert_eq!(image.dimensions(), (WIDTH, HEIGHT));
             assert!(image.pixels().any(|p| p[0] < 200));
-            let sleep = sleep_cover(&book, 600, 800)?;
+            let sleep = sleep_cover(&book, 600, 800, 0)?;
+            assert_eq!(sleep.get_pixel(0, 0)[0], 0, "padding is black");
             assert_eq!(sleep.dimensions(), (600, 800));
             assert!(sleep.pixels().any(|p| p[0] < 200));
             book.cover = Cover::Ready(k.clone());
