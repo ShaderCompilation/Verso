@@ -3620,6 +3620,8 @@ mod tests {
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        // Covers is disabled in Settings but kept working; set it directly.
+        books.folder_preview = FolderPreview::Covers;
         books.navigation.tab = Tab::Collections;
         books.navigation.folder = Some("/books".into());
         books.refresh(&t);

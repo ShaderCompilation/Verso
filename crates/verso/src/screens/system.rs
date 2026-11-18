@@ -141,8 +141,9 @@ impl SystemSettings {
         let mut flash =
             Segmented::texts(&["Every page", "Every 6", "Every 12", "Never"], flash_choice(settings.page_flash));
         flash.place(Rect::new(left_column.x, orientation.rect().bottom() + t.mm(24.0), left_column.w, t.button_h));
-        let selected = FolderPreview::ALL.iter().position(|&m| m == settings.folder_preview).unwrap_or(0);
-        let mut previews = Segmented::texts(&["Covers", "Stack", "Latest", "Icon"], selected);
+        let selected = FolderPreview::OFFERED.iter().position(|&m| m == settings.folder_preview).unwrap_or(0);
+        // Covers is disabled for now; see FolderPreview::OFFERED.
+        let mut previews = Segmented::texts(&["Stack", "Latest", "Icon"], selected);
         // In one column, below the refresh note: its two lines and a label.
         let previews_y =
             if right_column == left_column { flash.rect().bottom() + t.mm(20.0) } else { body + t.mm(8.0) };
@@ -319,7 +320,7 @@ impl SystemSettings {
         let c = self.right_column;
         cx.section_label("Folder previews", Rect::new(c.x, self.previews.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
         self.previews.draw(cx);
-        let note = match FolderPreview::ALL[self.previews.selected] {
+        let note = match FolderPreview::OFFERED[self.previews.selected] {
             FolderPreview::Covers => "Folders in Collections show four covers, the books read most recently first.",
             FolderPreview::Stack => {
                 "Folders in Collections show three covers stacked, the book read most recently in front."
@@ -336,10 +337,10 @@ impl SystemSettings {
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
         // Collections shows the new previews when Settings closes.
         if let Some(i) = self.previews.on_gesture(g)
-            && !self.save(cx, "folder previews", |s| s.folder_preview = FolderPreview::ALL[i])
+            && !self.save(cx, "folder previews", |s| s.folder_preview = FolderPreview::OFFERED[i])
         {
             let current = self.store.settings().folder_preview;
-            self.previews.selected = FolderPreview::ALL.iter().position(|&m| m == current).unwrap_or(0);
+            self.previews.selected = FolderPreview::OFFERED.iter().position(|&m| m == current).unwrap_or(0);
         }
         if let Some(i) = self.flash.on_gesture(g)
             && !self.save(cx, "page refresh", |s| s.page_flash = FLASH_CHOICES[i])

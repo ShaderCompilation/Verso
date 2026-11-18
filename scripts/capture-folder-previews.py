@@ -129,15 +129,17 @@ if __name__ == '__main__':
     tile = {'portrait': '1080,750', 'landscape': '1450,750'}
     select = {'portrait': '400,720', 'landscape': '768,650'}
     for orientation in ['portrait', 'landscape']:
-        for mode in ['covers', 'stack', 'latest', 'icon']:
+        # Covers is disabled in the app (FolderPreview::OFFERED) and reads as
+        # Stack, so it isn't captured; add it back here when it returns.
+        for mode in ['stack', 'latest', 'icon']:
             capture(f'{orientation}-{mode}', mode, orientation)
-        capture(f'{orientation}-covers-pressed', 'covers', orientation, ['--press', tile[orientation]])
-        capture(f'{orientation}-covers-selected', 'covers', orientation,
+        capture(f'{orientation}-stack-pressed', 'stack', orientation, ['--press', tile[orientation]])
+        capture(f'{orientation}-stack-selected', 'stack', orientation,
                 ['--long-press', tile[orientation], '--tap', select[orientation]])
     # Settings → Display, where the choice lives.
     capture('portrait-settings', 'stack', 'portrait', ['--tap', '652,77', '--tap', '405,272'])
     capture('landscape-settings', 'stack', 'landscape', ['--tap', '1076,77', '--tap', '532,272'])
     capture('small-settings', 'latest', 'portrait', ['--tap', '255,43', '--tap', '193,151'],
             size=(600, 800), dpi=167)
-    capture('small-covers', 'covers', 'portrait', size=(600, 800), dpi=167)
+    capture('small-stack', 'stack', 'portrait', size=(600, 800), dpi=167)
     print(OUT)
