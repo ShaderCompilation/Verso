@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use verso_update::check::{self, Outcome, Refusal, State};
+use verso_update::launcher::{self, Rollback};
 use verso_update::stage::AWAKE_MARKER;
 use verso_update::{INSTALLED_PATH, Installed, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, Manifest, Version};
 
@@ -672,6 +673,54 @@ impl Updates {
             }
             Err(e) => log::warn!("turning off keep-awake: {e:#}"),
         }
+    }
+
+    /// At startup: if the launcher went back from a version (it didn't
+    /// start, or the person asked), that version counts as skipped, so it
+    /// isn't offered again. `rollback.json` stays for the message.
+    pub fn note_rollback(&self) {
+        let Some(rollback) = Rollback::read(&self.paths.root) else { return };
+        let Some(version) = rollback.from else { return };
+        let mut inner = self.lock();
+        if inner.state.is_skipped(&version) {
+            return;
+        }
+        log::info!("the launcher went back from Verso {version} ({:?}); skipping that version", rollback.reason);
+        inner.state.skip(&version);
+        self.save(&inner.state);
+        inner.revision += 1;
+    }
+}
+
+/// How long Verso runs after its first frame before it counts as started.
+/// A version that crashes right after drawing (say, in the library scan
+/// that follows) is still rolled back.
+pub const STARTED_DELAY: Duration = Duration::from_secs(5);
+
+/// Tells the launcher, after [`STARTED_DELAY`], that this version works:
+/// a version on trial that exits before then is rolled back. Call once
+/// the first frame is on screen. Does nothing without a launcher that asks.
+pub fn mark_started_soon() {
+    if std::env::var_os(launcher::STARTED_ENV).is_none() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("started".into()).spawn(|| {
+        std::thread::sleep(STARTED_DELAY);
+        mark_started();
+    });
+    if let Err(e) = spawned {
+        log::warn!("starting the started-marker thread: {e}");
+        mark_started();
+    }
+}
+
+/// Creates the started marker now: after the delay, or when the person
+/// quits sooner (a clean exit after the first frame).
+pub fn mark_started() {
+    if let Some(path) = std::env::var_os(launcher::STARTED_ENV)
+        && let Err(e) = std::fs::write(&path, b"")
+    {
+        log::warn!("creating the started marker {}: {e}", Path::new(&path).display());
     }
 }
 

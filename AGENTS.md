@@ -29,6 +29,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 | `cargo kindle-build` | Release build for the Kindle (armv7, via cargo-zigbuild) |
 | `cargo test` | Unit tests |
 | `scripts/deploy.sh` | Build, copy to the Kindle, run through the launcher, stream the log (Kindle must be awake, KOReader closed) |
+| `scripts/test-launcher.sh` | Test the launcher's update switch-over and rollback with fake Kindle commands and app versions, including a power loss before every step (docs/setup.md) |
 | `scripts/kindle-awake.sh on\|off\|status` | Keep the Kindle from sleeping on its idle timeout during device work, and turn that off again |
 | `scripts/build-ssh.sh` | Build the Kindle SSH server (Dropbear, sftp-server); `deploy.sh` runs it |
 | `scripts/build-wordforms.sh` | Build the Russian word-form pack (`target/wordforms/ru.vwf`) from the kept OpenCorpora export and run its quality list |

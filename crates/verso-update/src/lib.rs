@@ -4,6 +4,7 @@
 //! stages with it; `verso-release` (the `release` feature) writes releases.
 //! See docs/updates.md.
 pub mod check;
+pub mod launcher;
 mod manifest;
 #[cfg(feature = "release")]
 pub mod release;

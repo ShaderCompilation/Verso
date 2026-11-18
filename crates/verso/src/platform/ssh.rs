@@ -42,7 +42,8 @@ pub fn stop() -> Result<()> {
 
 /// Advertises a server that's already running (left on when Verso last
 /// exited, or started by KOReader) under `hostname`, unless that's already
-/// happening. Call at startup.
+/// happening. Our server left on an older binary (after an update or a
+/// deploy) is restarted on the new one, in the background. Call at startup.
 pub fn advertise(hostname: &str) {
     imp::advertise(hostname)
 }
@@ -61,7 +62,7 @@ fn local_address() -> Option<String> {
 #[cfg(feature = "kindle")]
 mod imp {
     use super::super::mdns;
-    use super::super::process::{alive, spawn_detached, wait_until};
+    use super::super::process::{alive, runs_replaced, spawn_detached, wait_until};
     use super::{PORT, Status, local_address};
     use anyhow::{Context, Result, bail};
     use std::fs;
@@ -101,9 +102,37 @@ mod imp {
     }
 
     pub fn advertise(hostname: &str) {
-        if let Some(pid) = running_pid() {
+        let Some(pid) = running_pid() else { return };
+        if !runs_replaced(pid, BINARY) {
             mdns::ensure(hostname, pid);
+            return;
         }
+        // Takes a few seconds (the name is claimed again); not on the UI thread.
+        let hostname = hostname.to_owned();
+        let spawned = std::thread::Builder::new().name("ssh-restart".into()).spawn(move || {
+            if let Err(e) = restart(pid, &hostname) {
+                log::warn!("SSH: restarting the server on its new binary: {e:#}");
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("SSH: starting the restart thread: {e}");
+        }
+    }
+
+    /// Restarts the listening server `pid` on the current binary. Open
+    /// sessions are its children and keep running on the old one until
+    /// they end. The responder follows the old server out and starts
+    /// again with the new one.
+    fn restart(pid: i32, hostname: &str) -> Result<()> {
+        log::info!("SSH: restarting the server to run the updated binary");
+        // SAFETY: plain kill(2) on a PID just checked to be dropbear.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        if !wait_until(Duration::from_secs(2), || !alive(pid)) {
+            bail!("the old server didn't stop");
+        }
+        let _ = fs::remove_file(PIDFILE);
+        mdns::wait_stopped();
+        start(hostname)
     }
 
     fn unavailable() -> Option<&'static str> {

@@ -21,17 +21,28 @@ pub const DOWNLOAD_DIR: &str = "verso/update/download";
 pub const STAGED_DIR: &str = "verso/update/staged";
 /// Written last into [`STAGED_DIR`]: the staged update is complete.
 pub const STAGED_FILE: &str = "staged.json";
+/// Written into [`STAGED_DIR`] before [`STAGED_FILE`]: the new
+/// `installed.json`, which the launcher moves into place like a file.
+pub const STAGED_INSTALLED: &str = "installed.json";
+/// Written into [`STAGED_DIR`] before [`STAGED_FILE`]: the launcher's list
+/// of moves, as plain text (see [`Staged::plan_text`]). Not a valid
+/// component id, so it can't clash with a component's folder.
+pub const PLAN_FILE: &str = "plan.txt";
 /// Present while Verso keeps the Kindle awake for a download; the launcher
 /// turns the setting back off if Verso exits without doing so.
 pub const AWAKE_MARKER: &str = "verso/update/awake";
 
 /// A staged update, as `staged.json` records it. The launcher moves each
 /// component's files from `staged/<id>/<path>` to `<install>/<path>`,
-/// deletes `remove`, and writes `installed` as the new `installed.json`.
+/// moves `remove` aside, and moves `installed` into place as the new
+/// `installed.json`; it reads all this from [`PLAN_FILE`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Staged {
     pub format: u32,
     pub version: Version,
+    /// The version it replaces; None when nothing was recorded.
+    #[serde(default)]
+    pub from: Option<Version>,
     /// The staged components, in manifest order.
     pub components: Vec<InstalledComponent>,
     /// Files, relative to the storage root, that the replaced components
@@ -78,6 +89,7 @@ impl Staged {
         Staged {
             format: FORMAT,
             version: manifest.version.clone(),
+            from: installed.map(|i| i.version.clone()),
             components: staged.into_iter().map(record).collect(),
             remove,
             installed: Installed { format: FORMAT, version: manifest.version.clone(), dev: false, components },
@@ -92,18 +104,71 @@ impl Staged {
         Ok(staged)
     }
 
-    /// Writes `staged.json` into `dir` durably: a temporary file, synced,
-    /// then renamed into place. Every staged file must be synced first.
+    /// The launcher's list of moves, one per line, fields separated by
+    /// tabs, paths relative to the storage root (they can't hold tabs or
+    /// line breaks: see `is_safe_path`):
+    ///
+    /// ```text
+    /// verso-plan  1
+    /// version     0.3.0
+    /// from        0.2.1                 (left out when unknown)
+    /// remove      <path>                (moved to previous/; nothing replaces it)
+    /// install     <staged path>  <path> (the old file, if any, moved to previous/)
+    /// replace     <staged path>  <path> (the old file copied to previous/, then
+    ///                                    the new one renamed over it)
+    /// ```
+    ///
+    /// `replace` is for the files Verso is started from ([`ENTRY_COMPONENTS`]):
+    /// a power loss between moving the old file aside and the new one in
+    /// would leave nothing to start Verso, or to finish the update, with.
+    /// The last `install` is the new `installed.json`.
+    pub fn plan_text(&self) -> String {
+        let mut text = format!("verso-plan\t{PLAN_FORMAT}\nversion\t{}\n", self.version);
+        if let Some(from) = &self.from {
+            text.push_str(&format!("from\t{from}\n"));
+        }
+        for path in &self.remove {
+            text.push_str(&format!("remove\t{path}\n"));
+        }
+        for c in &self.components {
+            let op = if ENTRY_COMPONENTS.contains(&c.id.as_str()) { "replace" } else { "install" };
+            for f in &c.files {
+                text.push_str(&format!("{op}\t{STAGED_DIR}/{}/{f}\t{}/{f}\n", c.id, c.install));
+            }
+        }
+        text.push_str(&format!("install\t{STAGED_DIR}/{STAGED_INSTALLED}\t{}\n", crate::INSTALLED_PATH));
+        text
+    }
+
+    /// Writes the new `installed.json`, the plan and last `staged.json`
+    /// into `dir`, durably: each a temporary file, synced, then renamed
+    /// into place. Every staged file must be synced first.
     pub fn write(&self, dir: &Path) -> io::Result<()> {
+        let mut installed = serde_json::to_vec_pretty(&self.installed).map_err(io::Error::other)?;
+        installed.push(b'\n');
+        write_synced(dir, STAGED_INSTALLED, &installed)?;
+        write_synced(dir, PLAN_FILE, self.plan_text().as_bytes())?;
         let mut json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         json.push(b'\n');
-        let tmp = dir.join(format!("{STAGED_FILE}.tmp"));
-        let mut file = File::create(&tmp)?;
-        file.write_all(&json)?;
-        file.sync_all()?;
-        fs::rename(&tmp, dir.join(STAGED_FILE))?;
+        write_synced(dir, STAGED_FILE, &json)?;
         sync_dir(dir)
     }
+}
+
+/// The plan format the launcher reads; it refuses others.
+pub const PLAN_FORMAT: u32 = 1;
+
+/// The components whose files start Verso: the launcher, and the KUAL menu
+/// that runs it. Their paths must never be empty, even for a moment.
+pub const ENTRY_COMPONENTS: [&str; 2] = ["launcher", "kual"];
+
+/// Writes `name` in `dir` through a synced temporary file and a rename.
+fn write_synced(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let tmp = dir.join(format!("{name}.tmp"));
+    let mut file = File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(&tmp, dir.join(name))
 }
 
 /// Why a component couldn't be staged.
@@ -209,7 +274,7 @@ pub fn unpack(
     Ok(())
 }
 
-/// Syncs a folder after a rename. The Kindle's FAT storage behind FUSE may
+/// Syncs a folder after a rename. The Kindle's storage behind FUSE may
 /// not support it, which is fine.
 fn sync_dir(dir: &Path) -> io::Result<()> {
     match File::open(dir)?.sync_all() {
@@ -450,28 +515,44 @@ mod tests {
                 comp("app", "verso", &["data/moved.bin", "verso"]),
                 comp("fonts", "verso/fonts2", &["A.ttf", "OFL.txt"]),
                 comp("data", "verso/data", &["x.bin"]),
+                comp("launcher", "verso", &["verso.sh"]),
             ],
         );
-        let staged = Staged::plan(&new, &["app".into(), "fonts".into()], Some(&installed));
+        let staged = Staged::plan(&new, &["app".into(), "fonts".into(), "launcher".into()], Some(&installed));
         assert_eq!(staged.version.to_string(), "0.3.0");
-        assert_eq!(staged.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["app", "fonts"]);
+        assert_eq!(staged.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["app", "fonts", "launcher"]);
         assert_eq!(staged.remove, ["verso/fonts/A.ttf", "verso/fonts/B.ttf", "verso/fonts/OFL.txt"]);
         let after = &staged.installed;
         assert!(!after.dev);
         assert_eq!(after.version.to_string(), "0.3.0");
         let ids: Vec<&str> = after.components.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["app", "fonts", "data", "gone"]);
+        assert_eq!(ids, ["app", "fonts", "data", "launcher", "gone"]);
         assert_eq!(after.component("fonts").unwrap().install, "verso/fonts2");
         assert_eq!(after.component("data").unwrap(), installed.component("data").unwrap(), "unchanged stays");
         // data's moved.bin is still listed by the old data record, and now
         // owned by app too: it isn't removed.
         let json = serde_json::to_vec(&staged).unwrap();
         assert_eq!(Staged::parse(&json).unwrap(), staged);
+        assert_eq!(staged.from.as_ref().map(ToString::to_string).as_deref(), Some("0.2.0"));
+        // The launcher's moves: removals, then each staged file, then the
+        // record.
+        assert_eq!(
+            staged.plan_text(),
+            "verso-plan\t1\nversion\t0.3.0\nfrom\t0.2.0\n\
+             remove\tverso/fonts/A.ttf\nremove\tverso/fonts/B.ttf\nremove\tverso/fonts/OFL.txt\n\
+             install\tverso/update/staged/app/data/moved.bin\tverso/data/moved.bin\n\
+             install\tverso/update/staged/app/verso\tverso/verso\n\
+             install\tverso/update/staged/fonts/A.ttf\tverso/fonts2/A.ttf\n\
+             install\tverso/update/staged/fonts/OFL.txt\tverso/fonts2/OFL.txt\n\
+             replace\tverso/update/staged/launcher/verso.sh\tverso/verso.sh\n\
+             install\tverso/update/staged/installed.json\tverso/installed.json\n"
+        );
 
         // Nothing installed: everything staged, nothing removed.
         let fresh = Staged::plan(&new, &ids_of(&new), None);
         assert!(fresh.remove.is_empty());
-        assert_eq!(fresh.installed.components.len(), 3);
+        assert_eq!(fresh.installed.components.len(), 4);
+        assert!(fresh.plan_text().starts_with("verso-plan\t1\nversion\t0.3.0\ninstall\t"), "no from line");
     }
 
     fn ids_of(m: &Manifest) -> Vec<String> {
@@ -484,9 +565,13 @@ mod tests {
         let m = release("0.3.0", vec![comp("app", "verso", &["verso"])]);
         let staged = Staged::plan(&m, &ids_of(&m), None);
         staged.write(dir.path()).unwrap();
-        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names, [STAGED_FILE]);
+        let mut names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, [STAGED_INSTALLED, PLAN_FILE, STAGED_FILE]);
         assert_eq!(Staged::parse(&fs::read(dir.path().join(STAGED_FILE)).unwrap()).unwrap(), staged);
+        assert_eq!(fs::read_to_string(dir.path().join(PLAN_FILE)).unwrap(), staged.plan_text());
+        let installed = Installed::parse(&fs::read(dir.path().join(STAGED_INSTALLED)).unwrap()).unwrap();
+        assert_eq!(installed, staged.installed);
         assert!(Staged::parse(br#"{"format":2}"#).is_err());
     }
 }

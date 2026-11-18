@@ -420,8 +420,9 @@ fn replaces_leftovers_from_earlier_attempts() {
     assert!(downloads(root.path()).iter().all(|n| n != "0000.tar.gz"));
     assert!(!staged(root.path()).exists());
     stage_all(root.path(), &rel, &server, PLENTY, &mut all).unwrap();
-    let names: Vec<_> = fs::read_dir(staged(root.path())).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(names.len(), 3, "{names:?}"); // app, fonts, staged.json
+    let mut names: Vec<_> = fs::read_dir(staged(root.path())).unwrap().map(|e| e.unwrap().file_name()).collect();
+    names.sort();
+    assert_eq!(names, ["app", "fonts", "installed.json", "plan.txt", "staged.json"]);
 }
 
 #[test]

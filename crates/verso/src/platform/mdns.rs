@@ -4,12 +4,12 @@
 //! and exits when it does, whoever stops it (Verso or KOReader).
 //! See docs/device-tools.md.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::process::{alive, spawn_detached, wait_until};
+use super::process::{alive, runs_replaced, spawn_detached, wait_until};
 
 const BINARY: &str = "/mnt/us/verso/bin/verso-mdns";
 /// A few lines per run: start, address, the name won, why it stopped.
@@ -20,11 +20,12 @@ const INTERFACE: &str = "wlan0";
 /// running the current build.
 pub fn ensure(label: &str, ssh_pid: i32) {
     if let Some(pid) = verso_mdns::running_pid() {
-        if !replaced(pid) {
+        if !runs_replaced(pid, BINARY) {
             return;
         }
-        // deploy.sh renames the new binary into place; the old process
-        // keeps running the old code until restarted.
+        // deploy.sh renames the new binary into place, and an update moves
+        // the old one aside; the old process keeps running the old code
+        // until restarted.
         log::info!("mDNS: restarting the responder to run the updated binary");
         terminate(pid);
     }
@@ -84,9 +85,4 @@ fn terminate(pid: i32) {
     if !wait_until(Duration::from_secs(1), || !alive(pid)) {
         log::warn!("mDNS: the responder didn't stop");
     }
-}
-
-/// The process runs a binary that has since been replaced on disk.
-fn replaced(pid: i32) -> bool {
-    fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe.to_string_lossy().ends_with(" (deleted)"))
 }

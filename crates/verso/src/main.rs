@@ -205,9 +205,13 @@ fn run() -> Result<()> {
                 // name back. After the first frame, so startup isn't delayed.
                 let settings = store.settings();
                 platform::ssh::advertise(&settings.hostname);
+                // A version on trial counts as started a little later.
+                update::mark_started_soon();
                 // An update download cut short may have left the Kindle
                 // kept awake (a file check; rare lipc call).
                 store.updates().restore_awake_after_crash();
+                // A version the launcher went back from isn't offered again.
+                store.updates().note_rollback();
                 // The update check reads its files and Wi-Fi on its own thread.
                 if settings.check_updates {
                     store.updates().check_on_start(&platform.waker());
@@ -327,6 +331,10 @@ fn run() -> Result<()> {
     }
 
     platform.wait_for_complete()?;
+    if !first_frame {
+        // Closed cleanly before the started delay ran out: it works.
+        update::mark_started();
+    }
     log::info!("bye");
     Ok(())
 }

@@ -19,7 +19,8 @@ mod kindle;
 mod mdns;
 #[cfg(any(feature = "kindle", test))]
 mod power;
-#[cfg(feature = "kindle")]
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod process;
 pub mod ssh;
 pub mod wifi;

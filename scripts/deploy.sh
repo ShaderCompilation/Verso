@@ -56,7 +56,12 @@ exit 1
 EOF
 
 echo "==> copying to $HOST:$APP and $EXT"
-ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json"
+# An update staged or downloaded earlier would replace this build on the next
+# start, and an earlier update's previous files, trial or journal would "go
+# back" over it (docs/updates.md). A development install starts clean.
+U=$APP/update
+ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json &&
+    rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json.new $U/journal-*"
 tar -C "$STAGE/kual" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $EXT"
 tar -C "$STAGE/launcher" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP"
 # crengine's style sheets and hyphenation patterns, only when they changed.
