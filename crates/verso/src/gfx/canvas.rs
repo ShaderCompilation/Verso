@@ -120,6 +120,18 @@ impl Canvas {
         }
     }
 
+    /// Fills the closed polygon through `points`.
+    pub fn fill_polygon(&mut self, points: &[(f32, f32)], gray: u8) {
+        let mut pb = PathBuilder::new();
+        for (i, &(x, y)) in points.iter().enumerate() {
+            if i == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
+        }
+        pb.close();
+        if let Some(path) = pb.finish() {
+            self.draw_path(&path, None, gray, None);
+        }
+    }
+
     /// Seed shape-sized RGBA surfaces with the opaque destination before using
     /// the existing rasterizer, preserving antialiasing and blend rounding.
     fn draw_path(&mut self, path: &Path, stroke: Option<&Stroke>, gray: u8, corner_radius: Option<f32>) {

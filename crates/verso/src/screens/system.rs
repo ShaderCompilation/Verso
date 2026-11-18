@@ -10,7 +10,7 @@ use crate::platform::{Waker, ssh, wifi};
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::{Action, EventCx, Screen};
-use crate::store::{Orientation, Settings, SleepScreen, Store, TapZones};
+use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -62,9 +62,10 @@ pub struct SystemSettings {
     // Reading
     zones: Segmented,
     zones_preview: Rect,
-    // Display
+    // Display: one column, or (landscape) folder previews on the right.
     orientation: Segmented,
     flash: Segmented,
+    previews: Segmented,
     // Library: folders on the left, dictionaries below or (landscape) right.
     library: Rect,
     dictionaries: Rect,
@@ -74,9 +75,9 @@ pub struct SystemSettings {
     folder_row: i32,
     folder_pager: Pager,
     add_folder: Button,
-    // Device: one column, or two side by side in landscape.
-    device_left: Rect,
-    device_right: Rect,
+    // Device and Display: one column, or two side by side in landscape.
+    left_column: Rect,
+    right_column: Rect,
     sleep: Segmented,
     /// Tap it five times to show or hide the developer options.
     version: Rect,
@@ -125,12 +126,27 @@ impl SystemSettings {
         let preview_w = preview_h * screen.w / screen.h.max(1);
         let zones_preview = Rect::new(content.x, preview_top, preview_w, preview_h);
 
+        // Landscape is too short for everything in one column.
+        let (left_column, right_column) = if screen.w > screen.h {
+            let gap = t.mm(10.0);
+            let w = (content.w - gap) / 2;
+            (Rect { w, ..content }, Rect { x: content.right() - w, w, ..content })
+        } else {
+            (content, content)
+        };
+
         let mut orientation =
             Segmented::texts(&["Portrait", "Landscape"], usize::from(settings.orientation == Orientation::Landscape));
-        orientation.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
+        orientation.place(Rect::new(left_column.x, body + t.mm(8.0), left_column.w, t.button_h));
         let mut flash =
             Segmented::texts(&["Every page", "Every 6", "Every 12", "Never"], flash_choice(settings.page_flash));
-        flash.place(Rect::new(content.x, orientation.rect().bottom() + t.mm(24.0), content.w, t.button_h));
+        flash.place(Rect::new(left_column.x, orientation.rect().bottom() + t.mm(24.0), left_column.w, t.button_h));
+        let selected = FolderPreview::ALL.iter().position(|&m| m == settings.folder_preview).unwrap_or(0);
+        let mut previews = Segmented::texts(&["Covers", "Stack", "Latest", "Icon"], selected);
+        // In one column, below the refresh note: its two lines and a label.
+        let previews_y =
+            if right_column == left_column { flash.rect().bottom() + t.mm(20.0) } else { body + t.mm(8.0) };
+        previews.place(Rect::new(right_column.x, previews_y, right_column.w, t.button_h));
 
         let mut add_folder = Button::new("Add folder", ButtonKind::Secondary).with_icon(Icon::Folder);
         add_folder.place(Rect::new(content.x, 0, content.w, t.button_h), t);
@@ -158,26 +174,19 @@ impl SystemSettings {
         dictionary_entry.place(entry_row, t.row2, pad);
 
         // Landscape is too short for the developer section below the rest.
-        let (device_left, device_right) = if screen.w > screen.h {
-            let gap = t.mm(10.0);
-            let w = (content.w - gap) / 2;
-            (Rect { w, ..content }, Rect { x: content.right() - w, w, ..content })
-        } else {
-            (content, content)
-        };
         let mut sleep =
             Segmented::texts(&["Book cover", "Amazon"], usize::from(settings.sleep_screen == SleepScreen::Amazon));
-        sleep.place(Rect::new(device_left.x, body + t.mm(8.0), device_left.w, t.button_h));
+        sleep.place(Rect::new(left_column.x, body + t.mm(8.0), left_column.w, t.button_h));
         let wifi_top = sleep.rect().bottom() + t.mm(20.0);
         let wifi = Self::read_wifi();
         let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
         wifi_toggle.enabled = wifi.is_some();
-        wifi_toggle.place(device_left.right(), wifi_top + t.mm(4.0), t);
-        let dev_top = if device_right == device_left { wifi_top + t.mm(22.0) } else { body };
+        wifi_toggle.place(left_column.right(), wifi_top + t.mm(4.0), t);
+        let dev_top = if right_column == left_column { wifi_top + t.mm(22.0) } else { body };
         let ssh = ssh::status();
         let ssh_read_at = Instant::now();
         let mut ssh_toggle = Toggle::new(ssh.running);
-        ssh_toggle.place(device_right.right(), dev_top + t.mm(12.0), t);
+        ssh_toggle.place(right_column.right(), dev_top + t.mm(12.0), t);
         let version = Rect::new(content.x, screen.bottom() - t.mm(14.0), content.w, t.target);
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
         let mut shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
@@ -196,6 +205,7 @@ impl SystemSettings {
             zones_preview,
             orientation,
             flash,
+            previews,
             library,
             dictionaries,
             dictionary_entry,
@@ -204,8 +214,8 @@ impl SystemSettings {
             folder_row: t.row,
             folder_pager,
             add_folder,
-            device_left,
-            device_right,
+            left_column,
+            right_column,
             sleep,
             version,
             version_press: Press::default(),
@@ -289,7 +299,7 @@ impl SystemSettings {
 
     fn draw_display(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.content;
+        let c = self.left_column;
         cx.section_label("Orientation", Rect::new(c.x, self.orientation.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
         self.orientation.draw(cx);
         cx.paragraph(
@@ -303,12 +313,34 @@ impl SystemSettings {
         cx.paragraph(
             "A brief flash clears ghosting. Chapter starts and pictures always refresh fully.",
             t.small.gray(INK2),
-            Rect::new(c.x, self.flash.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0)),
+            Rect::new(c.x, self.flash.rect().bottom() + t.mm(2.0), c.w, t.mm(9.0)),
             HAlign::Left,
         );
+        let c = self.right_column;
+        cx.section_label("Folder previews", Rect::new(c.x, self.previews.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        self.previews.draw(cx);
+        let note = match FolderPreview::ALL[self.previews.selected] {
+            FolderPreview::Covers => "Folders in Collections show four covers, the books read most recently first.",
+            FolderPreview::Stack => {
+                "Folders in Collections show three covers stacked, the book read most recently in front."
+            }
+            FolderPreview::Latest => "Folders in Collections show the cover of the book read most recently in them.",
+            FolderPreview::Icon => "Folders in Collections show a folder icon and how many books they hold.",
+        };
+        // As many lines as fit above the bottom edge on small screens.
+        let y = self.previews.rect().bottom() + t.mm(2.0);
+        let h = (self.content.bottom() - y).clamp(0, t.mm(11.0));
+        cx.paragraph(note, t.small.gray(INK2), Rect::new(c.x, y, c.w, h), HAlign::Left);
     }
 
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
+        // Collections shows the new previews when Settings closes.
+        if let Some(i) = self.previews.on_gesture(g)
+            && !self.save(cx, "folder previews", |s| s.folder_preview = FolderPreview::ALL[i])
+        {
+            let current = self.store.settings().folder_preview;
+            self.previews.selected = FolderPreview::ALL.iter().position(|&m| m == current).unwrap_or(0);
+        }
         if let Some(i) = self.flash.on_gesture(g)
             && !self.save(cx, "page refresh", |s| s.page_flash = FLASH_CHOICES[i])
         {
@@ -543,7 +575,7 @@ impl SystemSettings {
 
     fn draw_device(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.device_left;
+        let c = self.left_column;
         cx.section_label("Sleep screen", Rect::new(c.x, self.body, c.w, t.mm(8.0)));
         self.sleep.draw(cx);
         cx.paragraph(
@@ -561,7 +593,7 @@ impl SystemSettings {
             Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(14.0)),
             HAlign::Left,
         );
-        let c = self.device_right;
+        let c = self.right_column;
         if self.show_developer() {
             cx.section_label("Developer", Rect::new(c.x, self.dev_top, c.w, t.mm(8.0)));
             // A label line centred on the toggle, then the note under it.

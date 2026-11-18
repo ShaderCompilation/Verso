@@ -45,6 +45,8 @@ pub struct Settings {
     pub hostname: String,
     /// Settings → Advanced. Applies from the next book open.
     pub text_shaping: TextShaping,
+    /// How folder tiles in Collections look. Older files read as Covers.
+    pub folder_preview: FolderPreview,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -62,6 +64,7 @@ impl Default for Settings {
             developer: false,
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
             text_shaping: TextShaping::default(),
+            folder_preview: FolderPreview::default(),
         }
     }
 }
@@ -80,6 +83,33 @@ pub enum SleepScreen {
     #[default]
     Cover,
     Amazon,
+}
+/// What a folder tile in Collections shows (docs/folder-previews.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderPreview {
+    /// A 2×2 grid of four covers.
+    #[default]
+    Covers,
+    /// Three covers, each shifted behind the one in front.
+    Stack,
+    /// The cover of the book read most recently, under a folder tab.
+    Latest,
+    /// The folder icon and count.
+    Icon,
+}
+impl FolderPreview {
+    pub const ALL: [FolderPreview; 4] =
+        [FolderPreview::Covers, FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Icon];
+    /// How many of a folder's preview books the tile shows: a prefix of its pick.
+    pub fn slots(self) -> usize {
+        match self {
+            FolderPreview::Covers => 4,
+            FolderPreview::Stack => 3,
+            FolderPreview::Latest => 1,
+            FolderPreview::Icon => 0,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -431,10 +461,16 @@ mod tests {
         let mut settings: Settings = serde_json::from_str(r#"{"footer":false}"#)?;
         settings.normalize();
         assert_eq!(settings.sleep_screen, SleepScreen::Cover);
+        assert_eq!(settings.folder_preview, FolderPreview::Covers);
         assert!(!settings.page_layout.bottom.on);
         settings.sleep_screen = SleepScreen::Amazon;
         let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
         assert_eq!(restored.sleep_screen, SleepScreen::Amazon);
+        for mode in FolderPreview::ALL {
+            settings.folder_preview = mode;
+            let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&settings)?)?;
+            assert_eq!(restored.folder_preview, mode);
+        }
         assert!(!restored.page_layout.bottom.on);
         Ok(())
     }
