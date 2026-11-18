@@ -2,6 +2,7 @@
 //! what is installed, version ordering, component hashes and signature
 //! checks. The app reads and verifies with it; `verso-release` (the `release`
 //! feature) writes releases. See docs/updates.md.
+pub mod check;
 mod manifest;
 #[cfg(feature = "release")]
 pub mod release;

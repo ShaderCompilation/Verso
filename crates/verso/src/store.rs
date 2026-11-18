@@ -45,6 +45,9 @@ pub struct Settings {
     pub hostname: String,
     /// Settings → Advanced. Applies from the next book open.
     pub text_shaping: TextShaping,
+    /// Check for updates when Verso starts (at most daily, only with Wi-Fi
+    /// already connected). Settings → Device.
+    pub check_updates: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -62,6 +65,7 @@ impl Default for Settings {
             developer: false,
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
             text_shaping: TextShaping::default(),
+            check_updates: true,
         }
     }
 }
@@ -108,6 +112,8 @@ pub struct Store {
     /// Counts settings saves through this store and its clones, so screens
     /// can notice a change without rereading the file.
     settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The update check, shared by startup and Settings; made on first use.
+    updates: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::update::Updates>>>,
 }
 impl Store {
     pub fn new() -> Self {
@@ -143,6 +149,7 @@ impl Store {
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
+            updates: Default::default(),
         }
     }
     /// A worker keeps the data paths and counters, without owning its service registry.
@@ -282,6 +289,14 @@ impl Store {
     pub fn dictionary_preferences(&self) -> PathBuf {
         self.root.join("dictionaries.json")
     }
+    pub fn updates(&self) -> std::sync::Arc<crate::update::Updates> {
+        self.updates
+            .get_or_init(|| {
+                let paths = crate::update::Paths::for_device(&self.root);
+                std::sync::Arc::new(crate::update::Updates::new(paths, crate::update::Source::configured()))
+            })
+            .clone()
+    }
     pub fn wordforms_dir(&self) -> PathBuf {
         self.wordforms.clone()
     }
@@ -308,6 +323,7 @@ impl Store {
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
+            updates: Default::default(),
         }
     }
     fn book_path(&self, id: &str) -> PathBuf {

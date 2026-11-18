@@ -1,7 +1,7 @@
 //! Verso — a calm, lightweight e-reader. See docs/plan.md.
 //!
 //! Simulator only: `--screenshot out.png` renders without a window, saves a
-//! grayscale PNG at device size and exits. `--screen books|gallery` picks the
+//! grayscale PNG at device size and exits. `--screen books|settings|gallery` picks the
 //! start screen; `--tap x,y`, `--press x,y` (finger down, not lifted) and
 //! `--swipe x1,y1,x2,y2` (all repeatable, played in order) run first.
 
@@ -25,6 +25,7 @@ mod reader;
 mod screens;
 mod store;
 mod ui;
+mod update;
 
 use std::time::{Duration, Instant};
 
@@ -133,7 +134,8 @@ fn start_screen(
         "home" | "library" | "books" | "reader" => {
             Box::new(screens::books::Books::with_store(theme, rect, worker, store))
         }
-        other => bail!("unknown screen {other:?}; try home, library or gallery"),
+        "settings" => Box::new(screens::system::SystemSettings::new(theme, rect, store, worker.waker())),
+        other => bail!("unknown screen {other:?}; try home, library, settings or gallery"),
     })
 }
 
@@ -201,7 +203,12 @@ fn run() -> Result<()> {
                 first_frame = false;
                 // An SSH server left running (or started by KOReader) gets its
                 // name back. After the first frame, so startup isn't delayed.
-                platform::ssh::advertise(&store.settings().hostname);
+                let settings = store.settings();
+                platform::ssh::advertise(&settings.hostname);
+                // The update check reads its files and Wi-Fi on its own thread.
+                if settings.check_updates {
+                    store.updates().check_on_start(&platform.waker());
+                }
             }
         }
         if quit || app.wants_exit() {

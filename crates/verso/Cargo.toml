@@ -29,6 +29,8 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 unicode-segmentation = "1.13.3"
 unicode-normalization = "0.1"
 caseless = "0.2.2"
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+verso-update = { path = "../verso-update", default-features = false }
 
 [features]
 default = ["desktop"]
@@ -38,5 +40,6 @@ desktop = ["dep:winit", "dep:softbuffer"]
 kindle = ["dep:fbink-sys"]
 
 [dev-dependencies]
+tempfile = "3"
 # Tests write small word-form packs with the builder.
 verso-wordforms = { path = "../verso-wordforms", features = ["build"] }

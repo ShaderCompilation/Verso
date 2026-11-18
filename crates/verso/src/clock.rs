@@ -1,4 +1,4 @@
-//! Local wall-clock time for the reader's clock items.
+//! Local wall-clock time for the reader's clock items and Settings.
 //!
 //! The C library reads the time zone from `TZ` or `/etc/localtime`. On the
 //! Kindle `/etc/localtime` links to `/var/local/system/tz`, which the Kindle's
@@ -36,9 +36,77 @@ impl LocalTime {
     }
 }
 
+/// A moment in local time, for saying when something happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalDateTime {
+    pub year: i32,
+    /// 1–12.
+    pub month: u8,
+    pub day: u8,
+    pub time: LocalTime,
+}
+impl LocalDateTime {
+    /// `unix` seconds in the local time zone.
+    pub fn at(unix: u64) -> Option<Self> {
+        let t = libc::time_t::try_from(unix).ok()?;
+        // SAFETY: as in LocalTime::now.
+        unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&t, &mut tm).is_null() {
+                return None;
+            }
+            Some(Self {
+                year: tm.tm_year + 1900,
+                month: (tm.tm_mon + 1).clamp(1, 12) as u8,
+                day: tm.tm_mday.clamp(1, 31) as u8,
+                time: LocalTime { hour: tm.tm_hour.clamp(0, 23) as u8, minute: tm.tm_min.clamp(0, 59) as u8 },
+            })
+        }
+    }
+    /// Days since 1970-01-01 for the calendar date (Howard Hinnant's
+    /// days_from_civil), so "yesterday" works across months and years.
+    fn days(self) -> i64 {
+        let (m, d) = (i64::from(self.month), i64::from(self.day));
+        let y = i64::from(self.year) - i64::from(m <= 2);
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+        era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+    }
+    /// When `self` was, seen from `now`: `today at 14:02`, `yesterday at
+    /// 9:05`, `on 3 Nov` or `on 3 Nov 2025`.
+    pub fn since(self, now: Self) -> String {
+        const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let time = self.time.h24();
+        match now.days() - self.days() {
+            0 => format!("today at {time}"),
+            1 => format!("yesterday at {time}"),
+            _ if self.year == now.year => format!("on {} {}", self.day, MONTHS[usize::from(self.month - 1)]),
+            _ => format!("on {} {} {}", self.day, MONTHS[usize::from(self.month - 1)], self.year),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn says_when_relative_to_now() {
+        let at = |year, month, day, hour, minute| LocalDateTime { year, month, day, time: LocalTime { hour, minute } };
+        let now = at(2026, 3, 1, 10, 0);
+        assert_eq!(at(2026, 3, 1, 9, 5).since(now), "today at 09:05");
+        assert_eq!(at(2026, 2, 28, 23, 59).since(now), "yesterday at 23:59");
+        assert_eq!(at(2026, 2, 27, 8, 0).since(now), "on 27 Feb");
+        assert_eq!(at(2025, 12, 31, 8, 0).since(at(2026, 1, 1, 0, 1)), "yesterday at 08:00");
+        assert_eq!(at(2025, 11, 3, 8, 0).since(now), "on 3 Nov 2025");
+        // A time ahead of the clock (it was set back) shows its date.
+        assert_eq!(at(2026, 3, 4, 8, 0).since(now), "on 4 Mar");
+        assert_eq!(at(1970, 1, 1, 0, 0).days(), 0);
+        assert_eq!(at(2000, 3, 1, 0, 0).days(), 11_017);
+        let local = LocalDateTime::at(1_800_000_000).unwrap();
+        assert!(local.year == 2027 && local.month == 1, "{local:?}");
+    }
 
     #[test]
     fn formats_both_clocks() {

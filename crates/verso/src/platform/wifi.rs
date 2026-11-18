@@ -11,6 +11,25 @@ pub fn set_enabled(on: bool) -> Result<()> {
     imp::set_enabled(on)
 }
 
+/// Whether Wi-Fi can be used right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Off,
+    /// Enabled, but there's no route to the internet yet (still joining a
+    /// network, or none in range).
+    Connecting,
+    Connected,
+}
+
+/// Reads the link without changing anything. One `lipc` call and a route
+/// lookup on the Kindle, so call it off the UI thread.
+pub fn link() -> Result<Link> {
+    if !enabled()? {
+        return Ok(Link::Off);
+    }
+    Ok(if imp::has_route() { Link::Connected } else { Link::Connecting })
+}
+
 #[cfg(feature = "kindle")]
 mod imp {
     use anyhow::{Context, Result, ensure};
@@ -32,6 +51,18 @@ mod imp {
             b"1" => Ok(true),
             _ => anyhow::bail!("unexpected Wi-Fi state"),
         }
+    }
+
+    /// Connecting a UDP socket sends nothing; it only asks the kernel for a
+    /// route, which exists once Wi-Fi has joined a network.
+    pub fn has_route() -> bool {
+        let route = || -> Option<()> {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            socket.connect("192.0.2.1:9").ok()?; // TEST-NET-1: any routable address works.
+            let ip = socket.local_addr().ok()?.ip();
+            (!ip.is_unspecified() && !ip.is_loopback()).then_some(())
+        };
+        route().is_some()
     }
 
     pub fn set_enabled(on: bool) -> Result<()> {
@@ -83,5 +114,10 @@ mod imp {
     pub fn set_enabled(on: bool) -> Result<()> {
         ENABLED.store(on, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The simulator's computer is assumed to be online.
+    pub fn has_route() -> bool {
+        true
     }
 }

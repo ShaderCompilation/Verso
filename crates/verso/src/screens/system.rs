@@ -1,8 +1,10 @@
 //! Settings (reading, library and dictionary folders, device) and the small system prompts
 //! shared by the library and USB notification.
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::clock::LocalDateTime;
 use crate::document::TextShaping;
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
@@ -12,11 +14,12 @@ use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER, Theme};
+use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
     Button, ButtonKind, IconButton, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, Toggle, TopBar,
 };
+use crate::update::{self, Updates};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -74,11 +77,12 @@ pub struct SystemSettings {
     folder_row: i32,
     folder_pager: Pager,
     add_folder: Button,
-    // Device: one column, or two side by side in landscape.
+    // Device (and Advanced): one column, or two side by side in landscape.
     device_left: Rect,
     device_right: Rect,
     sleep: Segmented,
-    /// Tap it five times to show or hide the developer options.
+    /// The version in the Updates section. Tap it five times to show or
+    /// hide the developer options (on the Advanced tab).
     version: Rect,
     version_press: Press,
     version_taps: (u8, Instant),
@@ -101,9 +105,20 @@ pub struct SystemSettings {
     ssh_recheck_until: Instant,
     /// The device slept: re-read the SSH status once it's awake.
     ssh_read_on_wake: bool,
+    // Updates
+    updates: Arc<Updates>,
+    update_status: update::Status,
+    update_top: i32,
+    /// Room for the check's note: two lines, three in a landscape column.
+    update_note_h: i32,
+    check_button: Button,
+    auto_check: Toggle,
+    // Advanced: text shaping, then (below, or on the right in landscape)
+    // the developer section.
     dev_top: i32,
-    // Advanced
     shaping: Segmented,
+    /// Height of each text-shaping note: taller in a landscape column.
+    shaping_note_h: i32,
 }
 impl SystemSettings {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
@@ -173,15 +188,31 @@ impl SystemSettings {
         let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
         wifi_toggle.enabled = wifi.is_some();
         wifi_toggle.place(device_left.right(), wifi_top + t.mm(4.0), t);
-        let dev_top = if device_right == device_left { wifi_top + t.mm(22.0) } else { body };
+        // Updates: below Wi-Fi, or on the right in landscape.
+        let landscape = device_right != device_left;
+        let update_top = if landscape { body } else { wifi_top + t.mm(21.0) };
+        let u = device_right;
+        let mut check_button = Button::new("Check for updates", ButtonKind::Secondary);
+        let check_w = t.mm(40.0).min(u.w / 2);
+        check_button.place(Rect::new(u.right() - check_w, update_top + t.mm(8.0), check_w, t.button_h), t);
+        let version = Rect::new(u.x, update_top + t.mm(8.0), u.w - check_w, t.button_h);
+        let update_note_h = if landscape { t.mm(16.0) } else { t.mm(11.0) };
+        let mut auto_check = Toggle::new(settings.check_updates);
+        auto_check.place(u.right(), Self::auto_check_top(update_top, update_note_h, t) + t.mm(4.0), t);
+        let updates = store.updates();
+        let update_status = updates.status();
+        check_button.enabled = !update_status.checking;
+        // Advanced: text shaping on the left, the developer section below
+        // it or on the right.
+        let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
+        let mut shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
+        shaping.place(Rect::new(device_left.x, body + t.mm(8.0), device_left.w, t.button_h));
+        let shaping_note_h = if landscape { t.mm(16.0) } else { t.mm(11.0) };
+        let dev_top = if landscape { body } else { shaping.rect().bottom() + 2 * shaping_note_h + t.mm(12.0) };
         let ssh = ssh::status();
         let ssh_read_at = Instant::now();
         let mut ssh_toggle = Toggle::new(ssh.running);
         ssh_toggle.place(device_right.right(), dev_top + t.mm(12.0), t);
-        let version = Rect::new(content.x, screen.bottom() - t.mm(14.0), content.w, t.target);
-        let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
-        let mut shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
-        shaping.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
         let mut this = Self {
             top,
             tabs,
@@ -222,8 +253,15 @@ impl SystemSettings {
             ssh_read_at,
             ssh_recheck_until: ssh_read_at + SSH_RECHECK_FOR,
             ssh_read_on_wake: false,
+            updates,
+            update_status,
+            update_top,
+            update_note_h,
+            check_button,
+            auto_check,
             dev_top,
             shaping,
+            shaping_note_h,
         };
         this.load_folders(t);
         this.sync_ssh_toggle();
@@ -536,7 +574,7 @@ impl SystemSettings {
         let developer = !self.store.settings().developer;
         if self.save(cx, "settings", |s| s.developer = developer) {
             self.developer = developer;
-            let text = if self.developer { "Developer options shown" } else { "Developer options hidden" };
+            let text = if self.developer { "Developer options shown in Advanced" } else { "Developer options hidden" };
             cx.toast(text, None);
         }
     }
@@ -561,19 +599,60 @@ impl SystemSettings {
             Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(14.0)),
             HAlign::Left,
         );
+        self.draw_updates(cx);
+    }
+
+    // ---- Updates (on the Device tab) ----
+
+    /// The "Check automatically" row: below the section label, the version
+    /// row and the check's note.
+    fn auto_check_top(update_top: i32, note_h: i32, t: &Theme) -> i32 {
+        update_top + t.mm(8.0) + t.button_h + note_h + t.mm(2.0)
+    }
+
+    fn refresh_update_status(&mut self) {
+        self.update_status = self.updates.status();
+        self.check_button.enabled = !self.update_status.checking;
+    }
+
+    fn draw_updates(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
         let c = self.device_right;
-        if self.show_developer() {
-            cx.section_label("Developer", Rect::new(c.x, self.dev_top, c.w, t.mm(8.0)));
-            // A label line centred on the toggle, then the note under it.
-            let label = Rect::new(c.x, self.dev_top + t.mm(8.0), c.w - t.mm(12.0), t.mm(8.0));
-            cx.line("SSH server", t.body, label, HAlign::Left);
-            self.ssh_toggle.draw(cx);
-            let note = self.ssh_note();
-            let note_rect = Rect::new(c.x, label.bottom() - t.mm(1.0), c.w - t.mm(12.0), t.mm(14.0));
-            cx.paragraph(&note, t.small.gray(INK2), note_rect, HAlign::Left);
+        cx.section_label("Updates", Rect::new(c.x, self.update_top, c.w, t.mm(8.0)));
+        cx.line(&format!("Verso {}", env!("CARGO_PKG_VERSION")), t.body, self.version, HAlign::Left);
+        self.check_button.draw(cx);
+        let now = LocalDateTime::at(update::unix_now());
+        let note = self.update_status.note(|at| match (LocalDateTime::at(at), now) {
+            (Some(at), Some(now)) => at.since(now),
+            _ => "earlier".into(),
+        });
+        let note_rect = Rect::new(c.x, self.version.bottom() + t.mm(1.0), c.w, self.update_note_h);
+        cx.paragraph(&note, t.small.gray(INK2), note_rect, HAlign::Left);
+        let top = Self::auto_check_top(self.update_top, self.update_note_h, t);
+        let label = Rect::new(c.x, top, c.w - t.mm(12.0), t.mm(8.0));
+        cx.line("Check automatically", t.body, label, HAlign::Left);
+        self.auto_check.draw(cx);
+        let note = if !self.auto_check.on {
+            "Off. Verso checks only when you ask."
+        } else if self.update_status.dev {
+            "Off for development installs."
+        } else {
+            "Once a day, when Verso starts with Wi-Fi on."
+        };
+        let note_rect = Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(6.0));
+        cx.paragraph(note, t.small.gray(INK2), note_rect, HAlign::Left);
+    }
+
+    fn updates_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+        if self.check_button.on_gesture(g) {
+            self.updates.check_now(&self.waker);
+            self.refresh_update_status();
         }
-        let version = format!("Verso {}", env!("CARGO_PKG_VERSION"));
-        cx.line(&version, t.caption.gray(INK3), self.version, HAlign::Center);
+        if let Some(on) = self.auto_check.on_gesture(g)
+            && !self.save(cx, "update checks", |s| s.check_updates = on)
+        {
+            self.auto_check.on = self.store.settings().check_updates;
+        }
     }
 
     fn device_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
@@ -589,13 +668,7 @@ impl SystemSettings {
         {
             self.wifi_pending = Some(on);
         }
-        if self.show_developer()
-            && self.wifi_pending.is_none()
-            && self.ssh_pending.is_none()
-            && let Some(on) = self.ssh_toggle.on_gesture(g)
-        {
-            self.ssh_pending = Some(on);
-        }
+        self.updates_gesture(g, cx);
         if let Some(PressEvent::Tap) = self.version_press.on_gesture(g, self.version) {
             self.tap_version(cx);
         }
@@ -606,8 +679,28 @@ impl SystemSettings {
     // ---- Advanced ----
 
     fn draw_advanced(&mut self, cx: &mut DrawCx) {
+        self.draw_shaping(cx);
+        if self.show_developer() {
+            self.draw_developer(cx);
+        }
+    }
+
+    fn draw_developer(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.content;
+        let c = self.device_right;
+        cx.section_label("Developer", Rect::new(c.x, self.dev_top, c.w, t.mm(8.0)));
+        // A label line centred on the toggle, then the note under it.
+        let label = Rect::new(c.x, self.dev_top + t.mm(8.0), c.w - t.mm(12.0), t.mm(8.0));
+        cx.line("SSH server", t.body, label, HAlign::Left);
+        self.ssh_toggle.draw(cx);
+        let note = self.ssh_note();
+        let note_rect = Rect::new(c.x, label.bottom() - t.mm(1.0), c.w - t.mm(12.0), t.mm(14.0));
+        cx.paragraph(&note, t.small.gray(INK2), note_rect, HAlign::Left);
+    }
+
+    fn draw_shaping(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        let c = self.device_left;
         cx.section_label("Text shaping", Rect::new(c.x, self.shaping.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
         self.shaping.draw(cx);
         let note = match TextShaping::ALL[self.shaping.selected] {
@@ -621,7 +714,7 @@ impl SystemSettings {
                 "The simplest shaping. Books lay out about three times faster, but without ligatures, and spacing and hyphenation can look rougher."
             }
         };
-        let note_rect = Rect::new(c.x, self.shaping.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0));
+        let note_rect = Rect::new(c.x, self.shaping.rect().bottom() + t.mm(2.0), c.w, self.shaping_note_h);
         cx.paragraph(note, t.small.gray(INK2), note_rect, HAlign::Left);
         cx.paragraph(
             "Applies from the next book you open. Each book is laid out again once.",
@@ -632,6 +725,13 @@ impl SystemSettings {
     }
 
     fn advanced_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+        if self.show_developer()
+            && self.wifi_pending.is_none()
+            && self.ssh_pending.is_none()
+            && let Some(on) = self.ssh_toggle.on_gesture(g)
+        {
+            self.ssh_pending = Some(on);
+        }
         if let Some(i) = self.shaping.on_gesture(g)
             && !self.save(cx, "text shaping", |s| s.text_shaping = TextShaping::ALL[i])
         {
@@ -727,8 +827,15 @@ impl Screen for SystemSettings {
         }
         Action::None
     }
-    /// Called when the folder picker closes: show its addition.
+    /// Called when the folder picker closes (show its addition) and when
+    /// the update check finishes.
     fn on_background(&mut self, cx: &mut EventCx) {
+        if self.updates.revision() != self.update_status.revision {
+            self.refresh_update_status();
+            if self.tab == Tab::Device {
+                cx.redraw();
+            }
+        }
         let saves = self.store.settings_saves();
         if saves != self.settings_seen {
             self.settings_seen = saves;
@@ -745,7 +852,7 @@ impl Screen for SystemSettings {
         if self.ssh_read_on_wake {
             return Some(self.ssh_read_at);
         }
-        let visible = self.tab == Tab::Device && self.show_developer();
+        let visible = self.tab == Tab::Advanced && self.show_developer();
         (visible && self.ssh_rechecking()).then(|| (self.ssh_read_at + SSH_RECHECK).min(self.ssh_recheck_until))
     }
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
@@ -765,6 +872,10 @@ impl Screen for SystemSettings {
     }
     fn has_pending_work(&self) -> bool {
         self.wifi_pending.is_some() || self.ssh_pending.is_some()
+    }
+    /// Scripted screenshots wait for a running update check.
+    fn busy(&self) -> bool {
+        self.update_status.checking
     }
     fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
         if let Some(on) = self.wifi_pending.take() {
