@@ -2519,6 +2519,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "softbuffer",
+ "tar",
  "tempfile",
  "tiny-skia 0.12.0",
  "unicode-normalization",

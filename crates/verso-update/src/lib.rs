@@ -1,12 +1,14 @@
 //! Verso's in-app updates, the shared part: release manifests, the record of
 //! what is installed, version ordering, component hashes and signature
-//! checks. The app reads and verifies with it; `verso-release` (the `release`
-//! feature) writes releases. See docs/updates.md.
+//! checks, and staging a downloaded update. The app reads, verifies and
+//! stages with it; `verso-release` (the `release` feature) writes releases.
+//! See docs/updates.md.
 pub mod check;
 mod manifest;
 #[cfg(feature = "release")]
 pub mod release;
 mod sign;
+pub mod stage;
 mod version;
 
 pub use manifest::{

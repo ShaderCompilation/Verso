@@ -43,3 +43,6 @@ kindle = ["dep:fbink-sys"]
 tempfile = "3"
 # Tests write small word-form packs with the builder.
 verso-wordforms = { path = "../verso-wordforms", features = ["build"] }
+# Tests pack releases to download and stage.
+verso-update = { path = "../verso-update", features = ["release"] }
+tar = { version = "0.4.46", default-features = false }

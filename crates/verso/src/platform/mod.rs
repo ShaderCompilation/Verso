@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::geom::{Point, Rect};
 use crate::gfx::Canvas;
 
+pub mod awake;
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]

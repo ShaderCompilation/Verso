@@ -205,6 +205,9 @@ fn run() -> Result<()> {
                 // name back. After the first frame, so startup isn't delayed.
                 let settings = store.settings();
                 platform::ssh::advertise(&settings.hostname);
+                // An update download cut short may have left the Kindle
+                // kept awake (a file check; rare lipc call).
+                store.updates().restore_awake_after_crash();
                 // The update check reads its files and Wi-Fi on its own thread.
                 if settings.check_updates {
                     store.updates().check_on_start(&platform.waker());

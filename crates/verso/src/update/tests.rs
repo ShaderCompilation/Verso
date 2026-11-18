@@ -1,16 +1,19 @@
-//! The update check end to end against a local HTTP server serving the
-//! signed fixtures in `crates/verso-update/testdata` (release 0.3.0: a
-//! required `app` and an optional `fonts` that needs app 0.3.0).
+//! The update check and download end to end against a local HTTP server
+//! serving the signed fixtures in `crates/verso-update/testdata` (release
+//! 0.3.0: a required `app` and an optional `fonts` that needs app 0.3.0).
 use super::fetch::tests::{Reply, Server};
 use super::*;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64};
 use verso_update::InstalledComponent;
+use verso_update::stage::{STAGED_DIR, STAGED_FILE, Staged};
 
 const MANIFEST: &[u8] = include_bytes!("../../../verso-update/testdata/latest.json");
 const SIG: &str = include_str!("../../../verso-update/testdata/latest.json.minisig");
 const SIG_OTHER: &str = include_str!("../../../verso-update/testdata/latest.json.other.minisig");
 const SIG_COMMENT: &str = include_str!("../../../verso-update/testdata/latest.json.comment.minisig");
 const TEST_KEY: &str = include_str!("../../../verso-update/testdata/test.pub");
+const APP_ARCHIVE: &[u8] = include_bytes!("../../../verso-update/testdata/app-0.3.0.tar.gz");
+const FONTS_ARCHIVE: &[u8] = include_bytes!("../../../verso-update/testdata/fonts-0.3.0.tar.gz");
 
 const START: u64 = 1_800_000_000;
 const HOUR: u64 = 3600;
@@ -27,7 +30,10 @@ struct Bench {
     now: Arc<AtomicU64>,
     /// 0 off, 1 connecting, 2 connected.
     link: Arc<AtomicU8>,
-    updates: Updates,
+    /// The device's keep-awake setting, and every change made to it.
+    awake: Arc<Mutex<(bool, Vec<bool>)>>,
+    free: Arc<AtomicU64>,
+    updates: Arc<Updates>,
 }
 
 fn serve(manifest: &[u8], signature: &str) -> Server {
@@ -37,27 +43,46 @@ fn serve(manifest: &[u8], signature: &str) -> Server {
     ])
 }
 
+/// The signed release with its archives.
+fn serve_release() -> Server {
+    Server::start(vec![
+        ("/latest.json", Reply::Ok(MANIFEST.to_vec())),
+        ("/latest.json.minisig", Reply::Ok(SIG.as_bytes().to_vec())),
+        ("/app-0.3.0.tar.gz", Reply::Ranged(APP_ARCHIVE.to_vec())),
+        ("/fonts-0.3.0.tar.gz", Reply::Ranged(FONTS_ARCHIVE.to_vec())),
+    ])
+}
+
 fn bench(server: Server) -> Bench {
     let root = tempfile::tempdir().unwrap();
     let now = Arc::new(AtomicU64::new(START));
     let link = Arc::new(AtomicU8::new(2));
     let source = Source { url: server.url("/latest.json"), keys: vec![TEST_KEY.to_owned()] };
-    let (clock, wifi) = (now.clone(), link.clone());
-    let mut updates = Updates::with(
-        Paths { root: root.path().to_owned() },
-        source,
-        v("0.1.0"),
-        Box::new(move || {
+    let awake = Arc::new(Mutex::new((false, Vec::new())));
+    let free = Arc::new(AtomicU64::new(1 << 40));
+    let (clock, wifi, get, set, space) = (now.clone(), link.clone(), awake.clone(), awake.clone(), free.clone());
+    let device = Device {
+        link: Box::new(move || {
             Ok(match wifi.load(Ordering::Relaxed) {
                 0 => Link::Off,
                 1 => Link::Connecting,
                 _ => Link::Connected,
             })
         }),
-        Box::new(move || clock.load(Ordering::Relaxed)),
-    );
-    updates.timeouts = Timeouts { connect: Duration::from_millis(500), total: Duration::from_millis(500) };
-    Bench { root, server, now, link, updates }
+        clock: Box::new(move || clock.load(Ordering::Relaxed)),
+        kept_awake: Box::new(move || Ok(get.lock().unwrap().0)),
+        keep_awake: Box::new(move |on| {
+            let mut state = set.lock().unwrap();
+            state.0 = on;
+            state.1.push(on);
+            Ok(())
+        }),
+        free_space: Box::new(move |_| Ok(space.load(Ordering::Relaxed))),
+    };
+    let mut updates = Updates::with(Paths { root: root.path().to_owned() }, source, v("0.1.0"), device);
+    let short = Duration::from_millis(500);
+    updates.timeouts = Timeouts { connect: short, total: short, idle: short };
+    Bench { root, server, now, link, awake, free, updates: Arc::new(updates) }
 }
 
 impl Bench {
@@ -281,4 +306,189 @@ fn sources_and_sizes() {
     assert_eq!(megabytes(6_095_497), "6.1 MB");
     assert_eq!(megabytes(94), "0.1 MB");
     assert_eq!(app_version().to_string(), env!("CARGO_PKG_VERSION"));
+}
+
+impl Bench {
+    /// What `download` does, on this thread.
+    fn download(&self, version: &str, battery: Option<Battery>) -> DownloadState {
+        {
+            let mut inner = self.updates.lock();
+            assert!(!inner.running, "a job is already running");
+            (inner.running, inner.downloading) = (true, true);
+        }
+        let waker = Waker::new(|| {});
+        self.updates.run_download(&v(version), battery, &waker);
+        let status = self.updates.status();
+        assert!(!status.cancelling);
+        status.download.unwrap()
+    }
+
+    fn awake_changes(&self) -> Vec<bool> {
+        self.awake.lock().unwrap().1.clone()
+    }
+
+    fn marker(&self) -> bool {
+        self.root.path().join(AWAKE_MARKER).exists()
+    }
+
+    fn staged(&self) -> Option<Staged> {
+        let path = self.root.path().join(STAGED_DIR).join(STAGED_FILE);
+        Some(Staged::parse(&std::fs::read(path).ok()?).unwrap())
+    }
+}
+
+const CHARGED: Option<Battery> = Some(Battery { percent: 80, charging: false });
+
+#[test]
+fn downloads_and_stages_the_offer_keeping_the_device_awake() {
+    let b = bench(serve_release());
+    b.install("0.2.0", false, &[("app", "old"), ("fonts", "old")]);
+    b.check(true);
+    assert_eq!(b.download("0.3.0", CHARGED), DownloadState::Ready(v("0.3.0")));
+    let staged = b.staged().unwrap();
+    assert_eq!(staged.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["app", "fonts"]);
+    assert_eq!(staged.installed.version, v("0.3.0"));
+    assert!(!staged.installed.dev);
+    let app = b.root.path().join(STAGED_DIR).join("app/verso");
+    assert_eq!(std::fs::read(app).unwrap().len(), 6);
+    // Kept awake during the download only, and the marker is gone.
+    assert_eq!(b.awake_changes(), [true, false]);
+    assert!(!b.marker());
+    // The release was fetched again, then the archives.
+    assert_eq!(
+        b.server.paths()[2..],
+        ["/latest.json", "/latest.json.minisig", "/app-0.3.0.tar.gz", "/fonts-0.3.0.tar.gz"]
+    );
+    assert!(b.updates.begin(true), "jobs can run again");
+}
+
+#[test]
+fn a_device_already_kept_awake_stays_so() {
+    let b = bench(serve_release());
+    b.awake.lock().unwrap().0 = true;
+    assert_eq!(b.download("0.3.0", None), DownloadState::Ready(v("0.3.0")));
+    assert!(b.awake_changes().is_empty());
+    assert!(b.awake.lock().unwrap().0);
+    assert!(!b.marker());
+}
+
+#[test]
+fn failures_restore_keep_awake_and_stage_nothing() {
+    // The archive is missing on the server.
+    let server = Server::start(vec![
+        ("/latest.json", Reply::Ok(MANIFEST.to_vec())),
+        ("/latest.json.minisig", Reply::Ok(SIG.as_bytes().to_vec())),
+    ]);
+    let b = bench(server);
+    let state = b.download("0.3.0", CHARGED);
+    assert!(matches!(state, DownloadState::Failed(DownloadError::Network(FetchError::Status(404)))), "{state:?}");
+    assert_eq!(b.awake_changes(), [true, false]);
+    assert!(!b.marker());
+    assert!(b.staged().is_none());
+    assert!(!b.root.path().join(STAGED_DIR).exists());
+    // Not enough space.
+    let b = bench(serve_release());
+    b.free.store(1000, Ordering::Relaxed);
+    let state = b.download("0.3.0", CHARGED);
+    assert!(matches!(state, DownloadState::Failed(DownloadError::NotEnoughSpace { .. })), "{state:?}");
+    assert_eq!(b.awake_changes(), [true, false]);
+    // A tampered manifest: refused before any archive.
+    let tampered = String::from_utf8(MANIFEST.to_vec()).unwrap().replace("Faster", "Fastest");
+    let b = bench(serve(tampered.as_bytes(), SIG));
+    let state = b.download("0.3.0", CHARGED);
+    assert!(matches!(state, DownloadState::Failed(DownloadError::Check(CheckError::Release(_)))), "{state:?}");
+    assert_eq!(b.server.paths(), ["/latest.json", "/latest.json.minisig"]);
+}
+
+#[test]
+fn battery_and_wifi_are_checked_first() {
+    let b = bench(serve_release());
+    let low = Some(Battery { percent: 19, charging: false });
+    assert_eq!(b.download("0.3.0", low), DownloadState::Failed(DownloadError::LowBattery(19)));
+    b.link.store(0, Ordering::Relaxed);
+    let charging = Some(Battery { percent: 5, charging: true });
+    assert_eq!(b.download("0.3.0", charging), DownloadState::Failed(DownloadError::Check(CheckError::WifiOff)));
+    assert!(b.server.paths().is_empty());
+    assert!(b.awake_changes().is_empty(), "never kept awake");
+    b.link.store(2, Ordering::Relaxed);
+    let enough = Some(Battery { percent: 20, charging: false });
+    assert_eq!(b.download("0.3.0", enough), DownloadState::Ready(v("0.3.0")));
+}
+
+#[test]
+fn the_release_must_still_be_the_one_agreed_to() {
+    let b = bench(serve_release());
+    assert_eq!(b.download("0.2.5", CHARGED), DownloadState::Failed(DownloadError::ReleaseChanged(v("0.3.0"))));
+    // What the server said is saved like a check's result.
+    assert_eq!(b.saved().available.unwrap().version, v("0.3.0"));
+    b.install("0.3.0", false, &[]);
+    b.updates.forget();
+    assert_eq!(b.download("0.3.0", CHARGED), DownloadState::Failed(DownloadError::UpToDate));
+    assert_eq!(b.saved().available, None);
+    assert!(b.staged().is_none());
+}
+
+#[test]
+fn cancel_stops_the_download_and_restores_keep_awake() {
+    let b = bench(serve_release());
+    {
+        let mut inner = b.updates.lock();
+        (inner.running, inner.downloading) = (true, true);
+    }
+    b.updates.cancel_download();
+    assert!(b.updates.status().cancelling);
+    b.updates.run_download(&v("0.3.0"), CHARGED, &Waker::new(|| {}));
+    let status = b.updates.status();
+    assert_eq!(status.download, Some(DownloadState::Failed(DownloadError::Cancelled)));
+    assert!(!status.cancelling);
+    assert!(b.server.paths().is_empty());
+    // Cancel without a download does nothing.
+    b.updates.cancel_download();
+    assert_eq!(b.download("0.3.0", CHARGED), DownloadState::Ready(v("0.3.0")));
+}
+
+#[test]
+fn checks_and_downloads_run_one_at_a_time() {
+    let b = bench(serve_release());
+    let waker = Waker::new(|| {});
+    assert!(b.updates.begin(false));
+    assert!(!b.updates.download(&v("0.3.0"), CHARGED, &waker), "a check is running");
+    b.updates.run();
+    {
+        let mut inner = b.updates.lock();
+        (inner.running, inner.downloading) = (true, true);
+    }
+    assert!(!b.updates.begin(true), "a download is running");
+    assert!(!b.updates.status().checking, "and no check is shown");
+    assert!(!b.updates.download(&v("0.3.0"), CHARGED, &waker));
+}
+
+#[test]
+fn the_download_thread_reports_back() {
+    let b = bench(serve_release());
+    let woken = Arc::new(AtomicU64::new(0));
+    let count = woken.clone();
+    let waker = Waker::new(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+    });
+    assert!(b.updates.download(&v("0.3.0"), CHARGED, &waker));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while b.updates.status().download != Some(DownloadState::Ready(v("0.3.0"))) {
+        assert!(Instant::now() < deadline, "{:?}", b.updates.status().download);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(woken.load(Ordering::Relaxed) >= 2, "woken for progress and the end");
+}
+
+#[test]
+fn keep_awake_left_by_a_crash_is_restored_at_start() {
+    let b = bench(serve_release());
+    b.updates.restore_awake_after_crash();
+    assert!(b.awake_changes().is_empty(), "no marker, nothing to do");
+    let marker = b.root.path().join(AWAKE_MARKER);
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "0\n").unwrap();
+    b.updates.restore_awake_after_crash();
+    assert_eq!(b.awake_changes(), [false]);
+    assert!(!marker.exists());
 }

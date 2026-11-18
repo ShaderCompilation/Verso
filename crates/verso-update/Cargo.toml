@@ -10,17 +10,17 @@ minisign-verify = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+flate2 = "1.1"
+tar = { version = "0.4.46", default-features = false }
 anyhow = { version = "1.0.104", optional = true }
-flate2 = { version = "1.1", optional = true }
-tar = { version = "0.4.46", default-features = false, optional = true }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
 
 [features]
 # The packaging side: reading staged components, writing archives, the
 # manifest and the first-install zip, and `verso-release`. The app depends on
-# this crate with `default-features = false` and only reads and verifies.
+# this crate with `default-features = false`: it reads, verifies and unpacks.
 default = ["release"]
-release = ["dep:anyhow", "dep:flate2", "dep:tar", "dep:zip"]
+release = ["dep:anyhow", "dep:zip"]
 
 [[bin]]
 name = "verso-release"

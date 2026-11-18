@@ -14,6 +14,7 @@ LOCKFILE="/tmp/verso-launcher.lock"
 OWNERFILE="/tmp/verso-launcher-$$.owner"
 FB_DUMP="/tmp/verso-fb.dump"
 SELF="/tmp/verso-launcher-$$.sh"
+AWAKE_MARKER="${APP_DIR}/update/awake"
 
 # Run from a copy in /tmp. /mnt/us is a FUSE filesystem; if this file were
 # replaced there (e.g. by a deploy) while running, the restore step could break.
@@ -121,6 +122,12 @@ restore() {
         rm -f "${PIDFILE}"
     fi
     rm -f "${VERSO_SYSTEM_ACK}"
+    # An update download keeps the Kindle awake and leaves this marker until
+    # it turns that off again. If Verso died first, turn it off here.
+    if [ -f "${AWAKE_MARKER}" ]; then
+        lipc-set-prop com.lab126.powerd preventScreenSaver 0 && rm -f "${AWAKE_MARKER}"
+        log "turned off keep-awake left by an update download"
+    fi
     log "done"
     # Last: a pending USB insertion may unmount /mnt/us immediately. Finish
     # all app storage access before handing it back to volumd.

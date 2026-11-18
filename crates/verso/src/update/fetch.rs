@@ -2,7 +2,9 @@
 //! built into Verso (`webpki-roots`) rather than the firmware's. See
 //! docs/updates.md ("HTTPS client").
 use std::fmt;
-use std::io::ErrorKind;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
 /// Every request names the app and its version, and nothing else.
@@ -54,20 +56,117 @@ impl fmt::Display for FetchError {
 
 impl std::error::Error for FetchError {}
 
+/// Why saving a download to a file stopped.
+#[derive(Debug)]
+pub enum SaveError {
+    Fetch(FetchError),
+    /// Writing the file failed.
+    Io(std::io::Error),
+    Cancelled,
+}
+
 impl Client {
     /// `connect` limits each connection attempt (including DNS); `total` the
     /// whole request, body included. With `https_only`, plain `http://`
     /// addresses and redirects to them are refused.
     pub fn new(connect: Duration, total: Duration, https_only: bool) -> Self {
+        Self::build(connect, Some(total), None, https_only)
+    }
+
+    /// A client for archives: no limit on a whole transfer, which depends on
+    /// the network, but every read must arrive within `idle`.
+    pub fn for_downloads(connect: Duration, idle: Duration, https_only: bool) -> Self {
+        Self::build(connect, None, Some(idle), https_only)
+    }
+
+    fn build(connect: Duration, total: Option<Duration>, idle: Option<Duration>, https_only: bool) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_connect(Some(connect))
-            .timeout_global(Some(total))
+            .timeout_global(total)
+            .timeout_per_read(idle)
             .max_redirects(MAX_REDIRECTS)
             .https_only(https_only)
             .user_agent(user_agent())
             .build()
             .into();
         Self { agent }
+    }
+
+    /// Downloads `url` into the file at `path`, which should end up `size`
+    /// bytes long. What the file already holds is kept and only the rest is
+    /// asked for (an HTTP range); a server that ignores ranges sends it all
+    /// again. `progress` hears the file's length after every chunk and
+    /// returns false to stop. The file is synced when complete; after a
+    /// failure it keeps what arrived, for the next try.
+    pub fn save(
+        &self,
+        url: &str,
+        path: &Path,
+        size: u64,
+        progress: &mut dyn FnMut(u64) -> bool,
+    ) -> Result<(), SaveError> {
+        let mut have = std::fs::metadata(path).map_or(0, |m| m.len());
+        if have > size {
+            have = 0;
+        }
+        if have == size && size > 0 {
+            return Ok(());
+        }
+        let mut request = self.agent.get(url);
+        if have > 0 {
+            request = request.header("Range", format!("bytes={have}-"));
+        }
+        let mut response = match request.call() {
+            // The part we have is no longer valid (the file changed): start over.
+            Err(ureq::Error::StatusCode(416)) if have > 0 => {
+                std::fs::remove_file(path).map_err(SaveError::Io)?;
+                return self.save(url, path, size, progress);
+            }
+            other => other.map_err(|e| SaveError::Fetch(classify(e, size)))?,
+        };
+        let start = match response.status().as_u16() {
+            206 => {
+                let range = response.headers().get("content-range").and_then(|v| v.to_str().ok()).unwrap_or("");
+                if !range.starts_with(&format!("bytes {have}-")) {
+                    // Not the part asked for: forget the old part.
+                    let _ = std::fs::remove_file(path);
+                    return Err(SaveError::Fetch(FetchError::Other(format!("unexpected range {range:?}"))));
+                }
+                have
+            }
+            _ => 0,
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(start > 0)
+            .truncate(start == 0)
+            .open(path)
+            .map_err(SaveError::Io)?;
+        let remaining = size - start;
+        let mut body = response.body_mut().with_config().limit(remaining).reader();
+        let mut buf = vec![0; 64 * 1024];
+        let mut length = start;
+        loop {
+            let n = match body.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => return Err(SaveError::Fetch(classify(ureq::Error::from(e), remaining))),
+            };
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(SaveError::Io)?;
+            length += n as u64;
+            if !progress(length) {
+                return Err(SaveError::Cancelled);
+            }
+        }
+        if length != size {
+            return Err(SaveError::Fetch(FetchError::Other(format!(
+                "the download ended after {length} of {size} bytes"
+            ))));
+        }
+        file.sync_all().map_err(SaveError::Io)
     }
 
     /// Downloads `url` into memory, following redirects, refusing bodies
@@ -122,6 +221,11 @@ pub(crate) mod tests {
         Stall(usize),
         /// Never answers.
         Silent,
+        /// Like `Ok`, and answers `Range: bytes=N-` with 206.
+        Ranged(Vec<u8>),
+        /// Promises the whole body, sends the first `n` bytes (of the part
+        /// asked for, honouring ranges) and closes the connection.
+        Cut(Vec<u8>, usize),
     }
 
     /// A tiny HTTP/1.1 server on 127.0.0.1 for tests. It records each
@@ -129,7 +233,11 @@ pub(crate) mod tests {
     pub(crate) struct Server {
         pub base: String,
         pub requests: Arc<Mutex<Vec<(String, String)>>>,
+        /// Each request's path and Range header, if it had one.
+        pub ranges: Arc<RangeLog>,
     }
+
+    type RangeLog = Mutex<Vec<(String, Option<String>)>>;
 
     impl Server {
         pub(crate) fn start(routes: Vec<(&str, Reply)>) -> Self {
@@ -137,16 +245,17 @@ pub(crate) mod tests {
             let base = format!("http://{}", listener.local_addr().unwrap());
             let routes: Vec<(String, Reply)> = routes.into_iter().map(|(p, r)| (p.to_string(), r)).collect();
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let log = requests.clone();
+            let ranges = Arc::new(Mutex::new(Vec::new()));
+            let (log, range_log) = (requests.clone(), ranges.clone());
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };
                     let routes = routes.clone();
-                    let log = log.clone();
-                    std::thread::spawn(move || serve(stream, &routes, &log));
+                    let (log, range_log) = (log.clone(), range_log.clone());
+                    std::thread::spawn(move || serve(stream, &routes, &log, &range_log));
                 }
             });
-            Self { base, requests }
+            Self { base, requests, ranges }
         }
 
         pub(crate) fn url(&self, path: &str) -> String {
@@ -158,7 +267,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn serve(mut stream: TcpStream, routes: &[(String, Reply)], log: &Mutex<Vec<(String, String)>>) {
+    fn serve(mut stream: TcpStream, routes: &[(String, Reply)], log: &Mutex<Vec<(String, String)>>, ranges: &RangeLog) {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() {
@@ -166,18 +275,24 @@ pub(crate) mod tests {
         }
         let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
         let mut agent = String::new();
+        let mut range = None;
         loop {
             let mut header = String::new();
             if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
                 break;
             }
-            if let Some((name, value)) = header.split_once(':')
-                && name.eq_ignore_ascii_case("user-agent")
-            {
-                agent = value.trim().to_string();
+            if let Some((name, value)) = header.split_once(':') {
+                if name.eq_ignore_ascii_case("user-agent") {
+                    agent = value.trim().to_string();
+                } else if name.eq_ignore_ascii_case("range") {
+                    range = Some(value.trim().to_string());
+                }
             }
         }
         log.lock().unwrap().push((path.clone(), agent));
+        ranges.lock().unwrap().push((path.clone(), range.clone()));
+        // The offset a `bytes=N-` range asks for.
+        let from = range.as_deref().and_then(|r| r.strip_prefix("bytes=")?.strip_suffix('-')?.parse::<usize>().ok());
         let reply = routes.iter().find(|(p, _)| *p == path).map_or(Reply::Status(404), |(_, r)| r.clone());
         let head = |status: &str, extra: &str, len: usize| {
             format!("HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n{extra}\r\n")
@@ -196,6 +311,26 @@ pub(crate) mod tests {
             Reply::Silent => {
                 std::thread::sleep(Duration::from_secs(5));
                 Ok(())
+            }
+            Reply::Ranged(body) | Reply::Cut(body, _) if from.is_some_and(|n| n >= body.len()) => {
+                let extra = format!("Content-Range: bytes */{}\r\n", body.len());
+                stream.write_all(head("416 Range Not Satisfiable", &extra, 0).as_bytes())
+            }
+            Reply::Ranged(ref body) | Reply::Cut(ref body, _) => {
+                let start = from.unwrap_or(0);
+                let part = &body[start..];
+                let send = match reply {
+                    Reply::Cut(_, n) => &part[..n.min(part.len())],
+                    _ => part,
+                };
+                let header = match from {
+                    Some(n) => {
+                        let extra = format!("Content-Range: bytes {n}-{}/{}\r\n", body.len() - 1, body.len());
+                        head("206 Partial Content", &extra, part.len())
+                    }
+                    None => head("200 OK", "", part.len()),
+                };
+                stream.write_all(header.as_bytes()).and_then(|()| stream.write_all(send))
             }
         };
     }
@@ -247,6 +382,112 @@ pub(crate) mod tests {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let result = client(1000).get(&format!("http://127.0.0.1:{port}/latest.json"), 100);
         assert!(matches!(result, Err(FetchError::Unreachable(_))), "{result:?}");
+    }
+
+    fn downloader() -> Client {
+        Client::for_downloads(Duration::from_millis(500), Duration::from_millis(500), false)
+    }
+
+    fn body() -> Vec<u8> {
+        (0..200_000u32).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn saves_and_resumes_with_a_range() {
+        let data = body();
+        let server = Server::start(vec![
+            ("/cut", Reply::Cut(data.clone(), 70_000)),
+            ("/a.tar.gz", Reply::Redirect("/download/a.tar.gz".into())),
+            ("/download/a.tar.gz", Reply::Ranged(data.clone())),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.part");
+        let size = data.len() as u64;
+        // The connection drops: what arrived is kept.
+        let result = downloader().save(&server.url("/cut"), &path, size, &mut |_| true);
+        assert!(matches!(result, Err(SaveError::Fetch(_))), "{result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), data[..70_000]);
+        // The next try asks only for the rest, through a redirect.
+        let mut seen = Vec::new();
+        downloader()
+            .save(&server.url("/a.tar.gz"), &path, size, &mut |n| {
+                seen.push(n);
+                true
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+        assert!(seen.first().is_some_and(|n| *n > 70_000) && seen.last() == Some(&size), "{seen:?}");
+        let ranges = server.ranges.lock().unwrap().clone();
+        assert_eq!(
+            ranges[1..],
+            [
+                ("/a.tar.gz".to_string(), Some("bytes=70000-".to_string())),
+                ("/download/a.tar.gz".to_string(), Some("bytes=70000-".to_string())),
+            ]
+        );
+        // Already complete: no request at all.
+        downloader().save(&server.url("/a.tar.gz"), &path, size, &mut |_| true).unwrap();
+        assert_eq!(server.paths().len(), 3);
+    }
+
+    #[test]
+    fn servers_without_ranges_send_it_all_again() {
+        let data = body();
+        let server = Server::start(vec![("/a", Reply::Ok(data.clone()))]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.part");
+        std::fs::write(&path, &data[..1000]).unwrap();
+        downloader().save(&server.url("/a"), &path, data.len() as u64, &mut |_| true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+    }
+
+    #[test]
+    fn an_oversized_part_starts_over() {
+        let data = body();
+        let server = Server::start(vec![("/a", Reply::Ranged(data.clone()))]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.part");
+        std::fs::write(&path, vec![0; data.len() + 5]).unwrap();
+        downloader().save(&server.url("/a"), &path, data.len() as u64, &mut |_| true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+        assert_eq!(server.ranges.lock().unwrap()[0].1, None, "no range asked for");
+    }
+
+    #[test]
+    fn range_not_satisfiable_restarts() {
+        let data = body();
+        // The server's file is shorter than our part claims to continue.
+        let server = Server::start(vec![("/a", Reply::Ranged(data[..1000].to_vec()))]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.part");
+        std::fs::write(&path, vec![9; 1000]).unwrap();
+        // 1000 bytes kept of a 2000-byte file: asks for 1000-, gets 416, starts over.
+        let result = downloader().save(&server.url("/a"), &path, 2000, &mut |_| true);
+        assert!(matches!(result, Err(SaveError::Fetch(FetchError::Other(_)))), "{result:?}");
+        let ranges: Vec<_> = server.ranges.lock().unwrap().iter().map(|(_, r)| r.clone()).collect();
+        assert_eq!(ranges, [Some("bytes=1000-".to_string()), None]);
+        assert_eq!(std::fs::read(&path).unwrap(), data[..1000], "the new start is kept");
+    }
+
+    #[test]
+    fn cancels_between_chunks_and_keeps_the_part() {
+        let data = body();
+        let server = Server::start(vec![("/a", Reply::Ranged(data.clone()))]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.part");
+        let result = downloader().save(&server.url("/a"), &path, data.len() as u64, &mut |_| false);
+        assert!(matches!(result, Err(SaveError::Cancelled)), "{result:?}");
+        let kept = std::fs::metadata(&path).unwrap().len();
+        assert!(kept > 0 && kept < data.len() as u64, "{kept}");
+    }
+
+    #[test]
+    fn a_larger_body_than_expected_is_refused() {
+        let data = body();
+        let server = Server::start(vec![("/a", Reply::Ok(data.clone()))]);
+        let dir = tempfile::tempdir().unwrap();
+        let result = downloader().save(&server.url("/a"), &dir.path().join("a"), 1000, &mut |_| true);
+        assert!(matches!(result, Err(SaveError::Fetch(FetchError::TooLarge(_)))), "{result:?}");
     }
 
     #[test]
