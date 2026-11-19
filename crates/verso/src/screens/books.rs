@@ -3358,15 +3358,26 @@ mod tests {
     #[test]
     fn delete_asks_first_then_removes_file_state_index_and_cover() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("delete")?;
-        let file = root.join("doomed.epub");
+        // The book lives in a library folder with its real stamp and a ready
+        // cover under its real key, so the library worker's startup pass
+        // finds nothing to change. Otherwise, if that pass finished before
+        // the test, the book would be unavailable and gone from the view.
+        let library = root.join("Library");
+        std::fs::create_dir_all(&library)?;
+        let mut settings = store.settings();
+        settings.library_folders.get_or_insert_default().push(library.clone());
+        store.save_settings(&settings)?;
+        let file = library.join("doomed.epub");
         std::fs::write(&file, b"not really an epub")?;
         let mut index = store.library();
         index.books[0].path = file.clone();
-        index.books[0].cover = Cover::Ready("doomedcover".into());
+        index.books[0].stamp = library::worker::stamp(&std::fs::metadata(&file)?)?;
+        let cover = library::covers::key(&index.books[0]);
+        index.books[0].cover = Cover::Ready(cover.clone());
         store.save_library(&index)?;
         std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
-        std::fs::write(store.cover_path("doomedcover"), b"png")?;
-        std::fs::write(store.small_cover_path("doomedcover"), b"png")?;
+        std::fs::write(store.cover_path(&cover), b"png")?;
+        std::fs::write(store.small_cover_path(&cover), b"png")?;
         store.save_book("0", &BookState { progress: 1234, ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
@@ -3406,8 +3417,8 @@ mod tests {
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while store.library().books.iter().any(|b| b.path == file)
-            || store.cover_path("doomedcover").exists()
-            || store.small_cover_path("doomedcover").exists()
+            || store.cover_path(&cover).exists()
+            || store.small_cover_path(&cover).exists()
         {
             assert!(std::time::Instant::now() < deadline, "the library worker drops the deleted book");
             std::thread::sleep(std::time::Duration::from_millis(20));

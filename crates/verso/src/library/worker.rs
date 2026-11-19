@@ -641,7 +641,7 @@ pub struct Scan {
     pub errors: Vec<String>,
     pub metadata_reads: usize,
 }
-fn stamp(meta: &std::fs::Metadata) -> Result<Stamp> {
+pub(crate) fn stamp(meta: &std::fs::Metadata) -> Result<Stamp> {
     let modified = meta.modified()?.duration_since(UNIX_EPOCH).unwrap_or_default();
     Ok(Stamp { size: meta.len(), modified_secs: modified.as_secs(), modified_nanos: modified.subsec_nanos() })
 }

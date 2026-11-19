@@ -249,6 +249,10 @@ mod tests {
             let mut b = book(i);
             b.path = library.join(name);
             std::fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub"), &b.path)?;
+            // The real stamp keeps the library worker's startup scan from
+            // reading the copies as changed books and giving them new IDs,
+            // which would orphan book 0's saved position.
+            b.stamp = crate::library::worker::stamp(&std::fs::metadata(&b.path)?)?;
             entries.push(b);
         }
         std::fs::create_dir(library.join("Source/A.sdr"))?;

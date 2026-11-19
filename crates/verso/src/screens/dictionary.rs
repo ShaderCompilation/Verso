@@ -978,6 +978,11 @@ mod tests {
         let b = default.dictionaries.iter().position(|d| d.id == "b.ifo").unwrap();
         assert!(default.dictionaries[b].disabled);
         assert_eq!(b, default.boundary());
+        // The edit changed the service revision, so the next receive repeats
+        // the query. Let that finish first: a repeat would clear the injected
+        // reply below, and its real reply could end the pending request.
+        lookup.receive(&mut cx);
+        wait(&mut lookup, &mut cx);
         // An obsolete worker reply must not replace a newer request.
         let old = lookup.request;
         lookup.request += 1;
