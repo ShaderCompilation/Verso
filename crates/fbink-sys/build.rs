@@ -35,7 +35,7 @@ fn main() {
         .define("FBINK_MINIMAL", None)
         .define("FBINK_WITH_INPUT", None)
         .define("FBINK_VERSION", format!("\"{version}\"").as_str())
-        .flag_if_supported("-mcpu=cortex-a7")
+        .flag_if_supported("-mcpu=cortex-a9")
         .warnings(false)
         .opt_level(2)
         .compile("fbink");

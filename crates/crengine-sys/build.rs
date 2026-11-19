@@ -70,7 +70,7 @@ impl Ctx {
         let mut b = cc::Build::new();
         b.warnings(false).cargo_metadata(false).define("NDEBUG", None).flag_if_supported("-fvisibility=hidden");
         if self.arm {
-            b.flag("-mcpu=cortex-a7");
+            b.flag("-mcpu=cortex-a9");
         }
         b
     }
