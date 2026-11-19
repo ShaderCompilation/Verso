@@ -42,6 +42,11 @@ int verso_cre_search_hit(VersoCreDoc *doc, int index, int field, char *buf, int 
  * on-disk document cache (may be NULL). Returns 0 on success. */
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes);
 
+/* Reads the document cache index again from disk, after another process
+ * (Verso's background pre-layout) changed it. Call with no document open
+ * that was opened before the other process ran. Returns 0 on success. */
+int verso_cre_cache_reload(void);
+
 /* Makes a font file available to all documents. Returns 0 on success. */
 int verso_cre_register_font(const char *path);
 

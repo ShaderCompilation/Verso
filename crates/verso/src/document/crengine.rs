@@ -56,6 +56,14 @@ impl CreEngine {
         Ok(Self { paths, dpi })
     }
 
+    /// Reads crengine's cache index again: the pre-layout process changed it.
+    pub fn reload_cache(&self) -> Result<()> {
+        if self.paths.cache.is_some() {
+            anyhow::ensure!(unsafe { sys::verso_cre_cache_reload() } == 0, "couldn't reload the book cache index");
+        }
+        Ok(())
+    }
+
     pub fn fonts(&self) -> Vec<FontFace> {
         (0..unsafe { sys::verso_cre_font_count() })
             .filter_map(|i| {

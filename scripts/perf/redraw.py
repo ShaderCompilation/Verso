@@ -227,7 +227,9 @@ def main():
                    'body_hash': remote(f'cat {APP}/{run}.body.hash').split()[0]}
         setup_log = remote(f'cat {APP}/{run}.setup.log')
         results['open_stats'] = [dict(parse_ms=int(p), layout_ms=int(l), pages=int(n)) for p, l, n in
-                                 re.findall(r': parse (\d+) ms, layout (\d+) ms, (\d+) pages', setup_log)]
+                                 re.findall(r': parse (\d+) ms, layout (\d+) ms, (\d+) pages',
+                                            '\n'.join(line for line in setup_log.splitlines()
+                                                      if 'prelayout]' not in line))]
         results['saved_after_turns'] = position()
         results['timed_position_after_turns'] = results['saved_after_turns']
         for label in ['start', 'end']:

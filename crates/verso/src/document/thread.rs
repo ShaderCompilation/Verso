@@ -1,4 +1,5 @@
 //! The only thread that touches crengine. Results carry a book/layout generation.
+use super::prelayout::{self, Job, Runner};
 use super::{
     CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchStatus,
     Selection, SelectionQuery, TocEntry, Typography,
@@ -132,6 +133,18 @@ pub enum Command {
         jump: u64,
     },
     Close,
+    /// Lays out the books likely to be opened next in a background process
+    /// (docs/prelayout.md), at these settings. Closes the open book first; a
+    /// run at other settings is replaced. Send only while no reader is open.
+    Prelayout {
+        layout: Layout,
+        typography: Typography,
+        page: PageLayout,
+    },
+    /// Stops a background layout at once (sleep).
+    StopPrelayout,
+    /// From the thread reading a background layout's reports.
+    PrelayoutEvent(prelayout::Event),
     /// Loads fonts and hyphenation, once the first frame is on screen. A
     /// command sent before it, such as opening a book at once, loads them first.
     Start,
@@ -193,6 +206,8 @@ impl Worker {
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
         let thread_waker = waker.clone();
+        // For the background layout's report reader.
+        let own = tx.clone();
         let join = std::thread::Builder::new()
             .name("verso-book".into())
             .spawn(move || {
@@ -207,6 +222,7 @@ impl Worker {
                     Ok(Command::Shutdown) | Err(_) => return,
                     Ok(command) => Some(command),
                 };
+                let mut prelayout = Runner::new(paths.cache.as_deref());
                 let engine = CreEngine::new(paths, dpi);
                 let engine = match engine {
                     Ok(e) => e,
@@ -217,6 +233,8 @@ impl Worker {
                 };
                 send(Reply::Fonts(engine.fonts()));
                 let mut doc: Option<CreDocument> = None;
+                // The open book's file and page size, for the pre-layout record.
+                let mut open_book: Option<(PathBuf, Layout)> = None;
                 let mut generation = 0;
                 let mut dimensions = (0, 0);
                 let mut pending = first;
@@ -315,7 +333,10 @@ impl Worker {
                     if matches!(command, Command::Shutdown) {
                         break;
                     }
-                    if matches!(command, Command::Open { .. } | Command::Layout { .. } | Command::Close) {
+                    if matches!(
+                        command,
+                        Command::Open { .. } | Command::Layout { .. } | Command::Close | Command::Prelayout { .. }
+                    ) {
                         search = None;
                         resolution = None;
                         annotations.clear();
@@ -371,8 +392,12 @@ impl Worker {
                             Command::Open { generation: g, path, layout, typography, page, position, progress } => {
                                 generation = g;
                                 doc = None;
+                                open_book = None;
+                                prelayout.before_open(&engine);
                                 dimensions = (layout.width, layout.height);
                                 let mut d = engine.open(&path, &layout, Some((&typography, &page)))?;
+                                prelayout.laid_out(&prelayout::key(&layout, &typography, &page, dpi), &path);
+                                open_book = Some((path, layout));
                                 d.remember_progress(position.clone(), progress);
                                 if !position.0.is_empty()
                                     && let Err(e) = d.go_to_position(&position)
@@ -387,6 +412,9 @@ impl Worker {
                                 if let Some(d) = &mut doc {
                                     d.go_to_position(&position)?;
                                     d.set_typography(&typography, dpi, &page)?;
+                                    if let Some((path, layout)) = &open_book {
+                                        prelayout.laid_out(&prelayout::key(layout, &typography, &page, dpi), path);
+                                    }
                                 }
                             }
                             Command::Page { generation: g, number } => {
@@ -417,6 +445,25 @@ impl Worker {
                             }
                             Command::Close => {
                                 doc = None;
+                                open_book = None;
+                                return Ok(());
+                            }
+                            Command::Prelayout { layout, typography, page } => {
+                                // Its cache file is final before another process may touch it.
+                                doc = None;
+                                open_book = None;
+                                let own = own.clone();
+                                prelayout.start(&Job { layout, typography, page, dpi }, move |event| {
+                                    let _ = own.send(Command::PrelayoutEvent(event));
+                                });
+                                return Ok(());
+                            }
+                            Command::StopPrelayout => {
+                                prelayout.stop("asked to");
+                                return Ok(());
+                            }
+                            Command::PrelayoutEvent(event) => {
+                                prelayout.on_event(event);
                                 return Ok(());
                             }
                             Command::Start | Command::Shutdown => return Ok(()),
@@ -465,6 +512,7 @@ impl Worker {
                         send(Reply::Error { generation, message: format!("{e:#}") });
                     }
                 }
+                prelayout.shutdown();
             })
             .expect("start book thread");
         Self { waker, tx, rx: RefCell::new(rx), join: Some(join), fonts: RefCell::new(Vec::new()) }

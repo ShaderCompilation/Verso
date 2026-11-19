@@ -2,6 +2,7 @@
 //! engine directly, so the engine could be swapped (e.g. for MuPDF) later.
 
 mod crengine;
+pub mod prelayout;
 pub mod thread;
 
 use std::path::PathBuf;
@@ -13,7 +14,7 @@ use crate::page_layout::PageLayout;
 pub use crengine::{CreDocument, CreEngine};
 
 /// Page layout settings, in pixels.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub width: u32,
     pub height: u32,
@@ -213,7 +214,7 @@ pub struct Paths {
 
 impl Paths {
     /// Device defaults, overridable with VERSO_FONT_DIRS
-    /// (colon-separated) and VERSO_FONT_FACE.
+    /// (colon-separated), VERSO_FONT_FACE and VERSO_CACHE.
     pub fn for_device() -> Self {
         #[cfg(feature = "kindle")]
         let mut p = Self {
@@ -237,6 +238,9 @@ impl Paths {
         }
         if let Ok(v) = std::env::var("VERSO_FONT_FACE") {
             p.font_face = v;
+        }
+        if let Some(v) = std::env::var_os("VERSO_CACHE") {
+            p.cache = Some(v.into());
         }
         p
     }

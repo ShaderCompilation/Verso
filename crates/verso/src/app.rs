@@ -549,6 +549,10 @@ impl App {
 
     pub fn on_wake(&mut self) {
         self.asleep = false;
+        let now = Instant::now();
+        for s in &mut self.stack {
+            s.on_wake(now);
+        }
         self.on_background();
         self.refresh_all(RefreshMode::Full);
         // Use a bounded cleanup on every wake; firmware hibernation detection is

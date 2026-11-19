@@ -51,6 +51,7 @@ unsafe extern "C" {
         len: c_int,
     ) -> c_int;
     pub fn verso_cre_init(hyph_dir: *const c_char, cache_dir: *const c_char, cache_max_bytes: c_int) -> c_int;
+    pub fn verso_cre_cache_reload() -> c_int;
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;
 
     pub fn verso_cre_new(width: c_int, height: c_int, dpi: c_int) -> *mut VersoCreDoc;

@@ -1,6 +1,6 @@
 //! Paginated library, engine-independent discovery, and the existing reader flow.
 use crate::document::{
-    FontFace, Layout,
+    FontFace, Layout, Typography,
     thread::{Command, Reply, Worker},
 };
 use crate::geom::{Point, Rect};
@@ -14,6 +14,7 @@ use crate::library::{
     search::{self, Scope, SearchCache},
     worker::{Snapshot, Worker as LibraryWorker},
 };
+use crate::page_layout::PageLayout;
 use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
 use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
@@ -41,6 +42,11 @@ use selection::Selection;
 use thumbnails::{CoverSpec, Fit, Thumbnails};
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+/// Untouched this long with the library settled, books likely to be opened
+/// next are laid out in the background (docs/prelayout.md).
+const PRELAYOUT_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Below this charge, unless charging, nothing is laid out in the background.
+const PRELAYOUT_MIN_BATTERY: u8 = 20;
 
 struct SearchSession {
     field: TextField,
@@ -243,6 +249,11 @@ pub struct Books {
     notice_rect: Rect,
     notice_press: Press,
     offer: Option<OfferSheet>,
+    /// Background pre-layout should run at the next idle moment: set on start,
+    /// on returning from a book, on settings and library changes and on sleep.
+    prelayout_due: bool,
+    /// The last touch, for the idle delay.
+    last_input: std::time::Instant,
 }
 impl Books {
     pub fn new(t: &Theme, screen: Rect, worker: Rc<Worker>) -> Self {
@@ -370,6 +381,8 @@ impl Books {
             notice_rect: Rect::default(),
             notice_press: Press::default(),
             offer: None,
+            prelayout_due: true,
+            last_input: std::time::Instant::now(),
         };
         s.pager.page = s.navigation.page();
         s.refresh(t);
@@ -807,6 +820,7 @@ impl Books {
             return;
         }
         self.settings_seen = saves;
+        self.prelayout_due = true;
         let mode = self.store.settings().folder_preview;
         if mode != self.folder_preview {
             log::info!("folder previews: {mode:?}");
@@ -838,6 +852,7 @@ impl Books {
     /// A published index waits for touches and overlays in `pending`. The
     /// saved index, unchanged, is only of use before browsing has read one.
     fn receive(&mut self, snapshot: Snapshot, cx: &mut EventCx) {
+        self.prelayout_due = true;
         if snapshot.cached && self.browsing_ready {
             return;
         }
@@ -1043,6 +1058,7 @@ impl Books {
         self.library.pause(true);
         self.thumbnails.clear();
         let settings = self.store.settings();
+        let (layout, typography, page) = self.open_settings(&settings, cx.theme);
         let saved = self.store.book(&id);
         self.generation += 1;
         self.reader = Some(Reader::new(
@@ -1057,27 +1073,53 @@ impl Books {
         ));
         self.reader.as_mut().unwrap().annotations(annotation_book);
         self.reader.as_mut().unwrap().reading_speed(saved.reading_speed, self.store.reading_speed());
-        let dpi = cx.theme.dpi;
-        let margin = (7.0 * dpi / 25.4).round() as u32;
-        let layout = Layout {
-            width: self.screen.w as u32,
-            height: self.screen.h as u32,
-            margins: [margin; 4],
-            font_size: cx.theme.pt(settings.typography.size_pt) as u32,
-            shaping: settings.text_shaping,
-        };
         self.worker.send(Command::Open {
             generation: self.generation,
             path,
             layout,
-            typography: settings.typography,
-            page: settings.page_layout,
+            typography,
+            page,
             position: saved.position,
             progress: saved.progress,
         });
     }
+    /// What a book opens with. Background pre-layout uses the same, so the
+    /// layout it caches is the one the reader asks for.
+    fn open_settings(&self, settings: &crate::store::Settings, t: &Theme) -> (Layout, Typography, PageLayout) {
+        let margin = (7.0 * t.dpi / 25.4).round() as u32;
+        let layout = Layout {
+            width: self.screen.w as u32,
+            height: self.screen.h as u32,
+            margins: [margin; 4],
+            font_size: t.pt(settings.typography.size_pt) as u32,
+            shaping: settings.text_shaping,
+        };
+        (layout, settings.typography.clone(), settings.page_layout.clone())
+    }
+    /// When background pre-layout should start, if it's due: once the engine
+    /// is up, the library has settled and nothing was touched for a while.
+    fn prelayout_at(&self) -> Option<std::time::Instant> {
+        (self.prelayout_due
+            && self.reader.is_none()
+            && self.engine_error.is_none()
+            && !self.fonts.is_empty()
+            && !self.scanning
+            && !self.working)
+            .then(|| self.last_input + PRELAYOUT_IDLE)
+    }
+    fn start_prelayout(&mut self, cx: &EventCx) {
+        self.prelayout_due = false;
+        if cx.battery.is_some_and(|b| b.percent < PRELAYOUT_MIN_BATTERY && !b.charging) {
+            log::info!("prelayout: skipped on low battery");
+            return;
+        }
+        let (layout, typography, page) = self.open_settings(&self.store.settings(), cx.theme);
+        self.worker.send(Command::Prelayout { layout, typography, page });
+    }
     fn returned(&mut self, cx: &mut EventCx) {
         self.library.pause(false);
+        self.prelayout_due = true;
+        self.last_input = cx.now;
         self.reload_home();
         if self.pending_home.as_ref().is_none_or(|summary| !summary.complete) {
             self.library.refresh_home();
@@ -1822,6 +1864,7 @@ impl Screen for Books {
         self.thumbnails.prefetch(neighbours);
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
+        self.last_input = cx.now;
         if matches!(g, Gesture::Down(_)) {
             self.touching = true;
         }
@@ -2227,7 +2270,7 @@ impl Screen for Books {
         if let Some(reader) = &self.reader {
             return reader.deadline();
         }
-        self.search.as_ref().and_then(|s| s.debounce_at)
+        [self.search.as_ref().and_then(|s| s.debounce_at), self.prelayout_at()].into_iter().flatten().min()
     }
     fn has_idle_work(&self) -> bool {
         self.reader.as_ref().is_some_and(Screen::has_idle_work)
@@ -2244,6 +2287,9 @@ impl Screen for Books {
         }
         if self.search.as_ref().and_then(|s| s.debounce_at).is_some_and(|at| cx.now >= at) {
             self.apply_search(cx);
+        }
+        if self.prelayout_at().is_some_and(|at| cx.now >= at) {
+            self.start_prelayout(cx);
         }
         Action::None
     }
@@ -2335,9 +2381,16 @@ impl Screen for Books {
     fn on_sleep(&mut self) {
         self.flush_navigation();
         self.touching = false;
+        // Nothing runs while asleep; it starts over after waking.
+        self.worker.send(Command::StopPrelayout);
+        self.prelayout_due = true;
         if let Some(r) = &mut self.reader {
             r.on_sleep();
         }
+    }
+    fn on_wake(&mut self, now: std::time::Instant) {
+        // Waking is usually for reading: wait for the idle delay again.
+        self.last_input = now;
     }
     fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
         let book = if let Some(reader) = &self.reader {

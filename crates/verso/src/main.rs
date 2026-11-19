@@ -41,6 +41,14 @@ use ui::gesture::{GestureConfig, GestureDetector};
 const MAX_BATCH: usize = 64;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(document::prelayout::ARG) {
+        logging::init_tagged("prelayout");
+        if let Err(e) = document::prelayout::run_child() {
+            log::error!("prelayout: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     logging::init();
     match run() {
         Ok(0) => {}

@@ -322,6 +322,31 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "static inline void *verso_malloc16(size_t size) {\n    void *p = NULL;\n    return posix_memalign(&p, 16, size) == 0 ? p : NULL;\n}\n\nstruct LVFontGlyphCacheItem\n{",
     ),
     ("crengine/include/lvfntman.h", "(LVFontGlyphCacheItem *)malloc(", "(LVFontGlyphCacheItem *)verso_malloc16("),
+    // The document cache index (`cr3cache.inx`) is rewritten in place. Verso's
+    // background pre-layout process can be killed at any moment, and an index
+    // cut short there would drop every cached book at the next start. Write a
+    // temporary file and rename it over the index instead (docs/prelayout.md).
+    (
+        "crengine/src/lvtinydom.cpp",
+        "            LVStreamRef stream = LVOpenFileStream(filename.c_str(), LVOM_WRITE);\n            if ( !stream )\n                return false;\n            if ( stream->Write( buf.buf(), buf.pos(), NULL )!=LVERR_OK )\n                return false;\n            _oldStreamCRC = newCRC;",
+        "            lString32 tmpname = filename + \".tmp\";\n            {\n                LVStreamRef stream = LVOpenFileStream(tmpname.c_str(), LVOM_WRITE);\n                if ( !stream )\n                    return false;\n                if ( stream->Write( buf.buf(), buf.pos(), NULL )!=LVERR_OK )\n                    return false;\n            }\n            if ( !LVRenameFile( tmpname, filename ) )\n                return false;\n            _oldStreamCRC = newCRC;",
+    ),
+    // crengine skips writing the index when its CRC32 matches the last one
+    // written. That CRC covers the index's own trailing CRC, and CRC32 over data
+    // followed by its own CRC is the same for every index of one length. So a
+    // reopened book moved to the top of the index was never saved, and eviction
+    // (oldest first) could drop a book read every day. Leave the trailing CRC
+    // out on both sides (docs/prelayout.md).
+    (
+        "crengine/src/lvtinydom.cpp",
+        "                _oldStreamCRC = (lUInt32)oldStream->getcrc32();",
+        "                _oldStreamCRC = 0;\n                lUInt8 * old = _oldStreamSize > 4 ? (lUInt8 *)malloc( _oldStreamSize ) : NULL;\n                lvsize_t got = 0;\n                if ( old && oldStream->Read( old, _oldStreamSize, &got ) == LVERR_OK && got == _oldStreamSize )\n                    _oldStreamCRC = lStr_crc32( 0, old, (int)_oldStreamSize - 4 );\n                free( old );",
+    ),
+    (
+        "crengine/src/lvtinydom.cpp",
+        "        lUInt32 newCRC = buf.getCRC();",
+        "        lUInt32 newCRC = lStr_crc32( 0, buf.buf(), buf.pos() - 4 );",
+    ),
     // Some repackaged EPUBs leave out the `mimetype` entry. crengine then
     // treats the book as a plain ZIP and shows the first file in it (often a
     // stray text file). Accept a ZIP without `mimetype` as an EPUB when it has

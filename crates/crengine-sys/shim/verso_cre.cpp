@@ -405,6 +405,9 @@ int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity
         return count;
     })
 }
+static lString32 cache_dir_saved;
+static lvsize_t cache_max_saved = 0;
+
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes) {
     GUARD(-1, {
         CRLog::setStderrLogger();
@@ -416,9 +419,22 @@ int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_by
         // Hyphenate with the patterns of each book's (and each element's) language.
         TextLangMan::setEmbeddedLangsEnabled(true);
         TextLangMan::setHyphenationEnabled(true);
-        if (cache_dir && cache_max_bytes > 0)
-            ldomDocCache::init(Utf8ToUnicode(cache_dir), (lvsize_t)cache_max_bytes);
+        if (cache_dir && cache_max_bytes > 0) {
+            cache_dir_saved = Utf8ToUnicode(cache_dir);
+            cache_max_saved = (lvsize_t)cache_max_bytes;
+            ldomDocCache::init(cache_dir_saved, cache_max_saved);
+        }
         return 0;
+    })
+}
+
+int verso_cre_cache_reload(void) {
+    GUARD(-1, {
+        if (cache_dir_saved.empty())
+            return -1;
+        // init() replaces the in-memory index with the one on disk, drops
+        // entries whose files are gone and deletes cache files it doesn't list.
+        return ldomDocCache::init(cache_dir_saved, cache_max_saved) ? 0 : -1;
     })
 }
 

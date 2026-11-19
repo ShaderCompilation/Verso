@@ -496,3 +496,22 @@ wf --name wf-all --word людей --language und --cache-state "$COLD_STATE"
 `rus` selects the Russian set (five dictionaries), `und` Default (all 13).
 Afterwards remove the `wf-*` folders. Results:
 [dictionary.md](../../docs/dictionary.md#verification--2026-11-17-russian-base-forms-word-forms-phase-4).
+
+## Background pre-layout
+
+`prelayout.py` checks [background pre-layout](../../docs/prelayout.md) through the
+launcher. Each launch uses isolated state under `/mnt/us/verso/prelayout-check`:
+a fresh copy of the real library data and an empty book cache
+(`VERSO_CACHE`). Scenarios (`--scenario`, repeatable; all by default):
+`control` (`VERSO_PRELAYOUT=0`), `run`, `kill` (open a book during a run),
+`orphan` (SIGKILL the app during a run) and `sleep` (powerd button press during
+a run; `preventScreenSaver` is set to 0 for the press and restored afterwards).
+
+```sh
+python3 scripts/perf/prelayout.py target/armv7-unknown-linux-gnueabihf/release/verso \
+  --probe /tmp/probe --preload /tmp/probe.so --output /tmp/perf/prelayout.json
+```
+
+Install the build first (`scripts/deploy.sh --no-run`); the script checks its
+hash. Pre-layout lines in `verso.log` carry a `prelayout` tag after the
+module name. `redraw.py` and `analyze-startup.py` ignore them.

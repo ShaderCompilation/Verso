@@ -32,7 +32,9 @@ def summarize(run, name):
         mark = float(marks[0][0])
         update = next(s for s in sends if s[2] == first[2] and float(s[0]) >= mark)
         collections = round((float(update[0]) - mark) * 1000, 4)
-    fonts = re.search(r'crengine ready: \d+ fonts registered in ([\d.]+)(ns|µs|ms|s)', logs)
+    # The background pre-layout process logs its own engine start ("prelayout]").
+    fonts = re.search(r'crengine ready: \d+ fonts registered in ([\d.]+)(ns|µs|ms|s)',
+                      '\n'.join(line for line in logs.splitlines() if 'prelayout]' not in line))
     font_ms = float(fonts[1]) * {'ns': 1e-6, 'µs': .001, 'ms': 1, 's': 1000}[fonts[2]] if fonts else ''
     row = dict(run=name, variant=run['variant'], binary_sha256=run.get('binary_sha256', ''),
                fixture=run['fixture'], mode=run['mode'],

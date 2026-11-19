@@ -113,6 +113,8 @@ pub trait Screen {
 
     /// The device is going to sleep.
     fn on_sleep(&mut self) {}
+    /// The device woke up.
+    fn on_wake(&mut self, _now: Instant) {}
     /// Bounded cover decoding; no art means the native screensaver is used.
     fn sleep_cover(&self, _width: u32, _height: u32) -> Option<image::GrayImage> {
         None
