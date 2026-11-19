@@ -510,6 +510,36 @@ fn rollback_reasons_and_details_read_plainly() {
     .into();
     assert_eq!(rollback_details(&log, 8), ["thread 'main' panicked at src/x.rs:1:1:", "index out of bounds"]);
     assert_eq!(rollback_details(&log[..2], 1), ["INFO library ready"]);
+    // As the Kindle wrote them for a build that panicked (Phase 6): the log
+    // hook's copy of the panic is skipped, and so is the backtrace advice.
+    let kindle: Vec<String> = [
+        "2026-11-19 04:38:01 launcher: starting Verso",
+        "[2026-11-19T00:38:01.961Z INFO  verso] screen: PaperWhite 6 1272x1696 @ 300 dpi, Portrait",
+        "[2026-11-19T00:38:01.962Z ERROR verso::logging] panic: panicked at crates/verso/src/main.rs:178:5:",
+        "    Phase 6 test build: this version panics on start on purpose",
+        "",
+        "thread 'main' (24597) panicked at crates/verso/src/main.rs:178:5:",
+        "Phase 6 test build: this version panics on start on purpose",
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        "2026-11-19 04:38:02 launcher: Verso exited with code 134",
+        "2026-11-19 04:38:02 launcher: the new version didn't start",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(
+        rollback_details(&kindle, 8),
+        [
+            "thread 'main' (24597) panicked at crates/verso/src/main.rs:178:5:",
+            "Phase 6 test build: this version panics on start on purpose",
+            "launcher: Verso exited with code 134",
+            "launcher: the new version didn't start",
+        ]
+    );
+    // A crash: the last lines, without their times.
+    assert_eq!(
+        rollback_details(&kindle[..2], 8),
+        ["launcher: starting Verso", "INFO verso: screen: PaperWhite 6 1272x1696 @ 300 dpi, Portrait"]
+    );
 }
 
 #[test]

@@ -779,23 +779,53 @@ pub fn rollback_reason(reason: &Reason) -> Option<String> {
 /// The log lines worth showing from a failed start: from the panic message
 /// if there is one, else the last `max` lines, without their timestamps.
 pub fn rollback_details(log: &[String], max: usize) -> Vec<String> {
-    let start = log.iter().position(|l| l.contains("panicked at")).unwrap_or(log.len().saturating_sub(max));
+    // Rust's own panic message ("thread 'main' (123) panicked at …") is the
+    // whole of it; the log hook's copy just before it would say it twice.
+    let start = log
+        .iter()
+        .position(|l| l.starts_with("thread '") && l.contains("panicked at"))
+        .or_else(|| log.iter().position(|l| l.contains("panicked at")))
+        .unwrap_or(log.len().saturating_sub(max));
     log[start..]
         .iter()
+        // Advice for developers, which someone reading the sheet can't follow.
+        .filter(|l| !l.starts_with("note: run with `RUST_BACKTRACE"))
         .take(max)
-        .map(|line| {
-            // "2026/11/19 03:48:50.6053 ERROR message" → "ERROR message".
-            let mut parts = line.splitn(3, ' ');
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some(date), Some(time), Some(rest))
-                    if date.len() == 10 && date.as_bytes()[4] == b'/' && time.contains(':') =>
-                {
-                    rest.to_owned()
-                }
-                _ => line.clone(),
-            }
-        })
+        .map(|line| without_time(line))
         .collect()
+}
+
+/// A log line without its date and time, as the Kindle writes them
+/// **(measured, Phase 6)**: Verso's `[2026-11-19T00:38:01.962Z ERROR verso::x]
+/// message` becomes `ERROR verso::x: message`; the launcher's `2026-11-19
+/// 04:38:02 launcher: …` and FBInk's `2026/11/19 03:48:50.6053 WARN …` keep
+/// what follows the time.
+fn without_time(line: &str) -> String {
+    let is_date = |s: &str| {
+        let b = s.as_bytes();
+        b.len() >= 10 && b[..4].iter().all(u8::is_ascii_digit) && (b[4] == b'-' || b[4] == b'/') && b[7] == b[4]
+    };
+    if let Some(rest) = line.strip_prefix('[')
+        && let Some((header, message)) = rest.split_once("] ")
+    {
+        let mut parts = header.split_whitespace();
+        if let (Some(time), Some(level)) = (parts.next(), parts.next())
+            && is_date(time)
+            && time.contains('T')
+        {
+            return match parts.next() {
+                Some(target) => format!("{level} {target}: {message}"),
+                None => format!("{level} {message}"),
+            };
+        }
+    }
+    let mut parts = line.splitn(3, ' ');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(date), Some(time), Some(rest)) if date.len() == 10 && is_date(date) && time.contains(':') => {
+            rest.to_owned()
+        }
+        _ => line.to_owned(),
+    }
 }
 
 /// How long Verso runs after its first frame before it counts as started.

@@ -697,7 +697,8 @@ impl SystemSettings {
         let t = cx.theme;
         let c = self.device_right;
         cx.section_label("Updates", Rect::new(c.x, self.update_top, c.w, t.mm(8.0)));
-        cx.line(&format!("Verso {}", env!("CARGO_PKG_VERSION")), t.body, self.version, HAlign::Left);
+        // The installed release, which a data-only release moves past the app's own version.
+        cx.line(&format!("Verso {}", self.update_status.current), t.body, self.version, HAlign::Left);
         self.check_button.draw(cx);
         let now = LocalDateTime::at(update::unix_now());
         let note = self.update_status.note(|at| match (LocalDateTime::at(at), now) {

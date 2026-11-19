@@ -56,21 +56,32 @@ exit 1
 EOF
 
 echo "==> copying to $HOST:$APP and $EXT"
+# Each component's hash on the device, from its installed.json (written last
+# by a deploy, an update or the release zip), read before it is removed. An
+# update replaces components too, so this, not a marker of our own, says
+# whether the large data components need copying.
+DEVICE_HASHES="$(ssh "$HOST" "cat $APP/installed.json 2>/dev/null" | python3 -I -c '
+import json, sys
+try:
+    for c in json.load(sys.stdin)["components"]:
+        print(c["id"], c["hash"])
+except Exception:
+    pass
+' || true)"
+device_hash_of() { awk -v id="$1" '$1 == id { print $2 }' <<<"$DEVICE_HASHES"; }
 # An update staged or downloaded earlier would replace this build on the next
 # start, and an earlier update's previous files, trial or journal would "go
 # back" over it (docs/updates.md). A development install starts clean.
 U=$APP/update
-ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json &&
+ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json $APP/data/cre/.version $APP/wordforms/.version &&
     rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json.new $U/journal-*"
 tar -C "$STAGE/kual" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $EXT"
 tar -C "$STAGE/launcher" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP"
 # crengine's style sheets and hyphenation patterns, only when they changed.
-CRE_VERSION="$(hash_of crengine-data)"
-if [ "$(ssh "$HOST" "cat $APP/data/cre/.version 2>/dev/null")" != "$CRE_VERSION" ]; then
+if [ "$(device_hash_of crengine-data)" != "$(hash_of crengine-data)" ]; then
     echo "==> copying crengine data"
     ssh "$HOST" "rm -rf $APP/data/cre && mkdir -p $APP/data/cre"
     tar -C "$STAGE/crengine-data" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP/data/cre"
-    echo "$CRE_VERSION" | ssh "$HOST" "cat > $APP/data/cre/.version"
 fi
 # Book fonts and their licence, separate from crengine data.
 ssh "$HOST" "mkdir -p $APP/fonts"
@@ -78,13 +89,12 @@ tar -C "$STAGE/fonts" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $A
 # The Russian word-form pack with its attribution and licence, only when one
 # of them changed. Unpacked next to the folder and moved in, so a broken
 # transfer never leaves half a pack; other packs in the folder are kept.
-WF_VERSION="$(hash_of wordforms-ru)"
-if [ "$(ssh "$HOST" "cat $APP/wordforms/.version 2>/dev/null")" != "$WF_VERSION" ]; then
+if [ "$(device_hash_of wordforms-ru)" != "$(hash_of wordforms-ru)" ]; then
     echo "==> copying word forms"
     tar -C "$STAGE/wordforms-ru" --owner=0 --group=0 -cf - . |
         ssh "$HOST" "rm -rf $APP/wordforms.new && mkdir -p $APP/wordforms.new $APP/wordforms &&
             tar -xf - -C $APP/wordforms.new && for f in $APP/wordforms.new/*; do mv -f \$f $APP/wordforms/; done &&
-            rmdir $APP/wordforms.new && echo $WF_VERSION > $APP/wordforms/.version"
+            rmdir $APP/wordforms.new"
 fi
 # The SSH server (Settings → Developer), its mDNS responder and the keys
 # folder. Unpacked next to bin/ and moved in, because a running server keeps

@@ -31,9 +31,6 @@ while [ $# -gt 0 ]; do
 done
 
 VERSION="$(cargo pkgid -p verso | sed 's/.*[#@]//')"
-KUAL_VERSION="$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' dist/kindle/extensions/verso/config.xml)"
-[ "$KUAL_VERSION" = "$VERSION" ] ||
-    die "Cargo.toml says $VERSION but dist/kindle/extensions/verso/config.xml says $KUAL_VERSION"
 NOTES="${NOTES:-dist/release-notes/$VERSION.txt}"
 [ -f "$NOTES" ] || die "write the release notes for $VERSION in $NOTES first"
 if [ "$ALLOW_DIRTY" = 0 ] && [ -n "$(git status --porcelain --ignore-submodules=none)" ]; then
