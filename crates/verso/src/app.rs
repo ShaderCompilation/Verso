@@ -239,6 +239,13 @@ impl App {
             self.diff.commit_full(&self.canvas);
             vec![Update { rect: self.canvas.bounds(), mode }]
         } else {
+            // Pixels covered by a forced Full refresh will be sent to the panel
+            // with the strongest mode anyway; commit them first so tile diffing
+            // skips them and doesn't emit a redundant Ui update along unaligned
+            // edges of the forced rect.
+            for u in forced.iter().filter(|u| u.mode == RefreshMode::Full) {
+                self.diff.commit_rect(&self.canvas, u.rect);
+            }
             let tiles = self.diff.changed(&self.canvas);
             let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
@@ -739,6 +746,25 @@ mod tests {
         let local = Update { rect: Rect::new(0, 0, 16, 16), mode: RefreshMode::Full };
         app.forced.push(local);
         assert_eq!(app.frame(), vec![Update { rect: bounds, mode: RefreshMode::Page }, local]);
+    }
+
+    #[test]
+    fn partial_full_refresh_drops_inner_fast_debt_and_orders_outer_cleanup_first() {
+        let mut app = book_app(false);
+        app.frame();
+        let grid = Rect::new(20, 30, 200, 150);
+        let inner = Rect::new(40, 50, 32, 32);
+        let outer = Rect::new(20, 220, 48, 32);
+        app.fast_debt.push(inner);
+        app.fast_debt.push(outer);
+        app.forced.push(Update { rect: grid, mode: RefreshMode::Full });
+        app.needs_redraw = true;
+        let updates = app.frame();
+        assert_eq!(
+            updates,
+            vec![Update { rect: outer, mode: RefreshMode::Ui }, Update { rect: grid, mode: RefreshMode::Full }]
+        );
+        assert!(!app.diff.changed(&app.canvas).any());
     }
 
     #[test]

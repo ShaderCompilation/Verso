@@ -46,6 +46,10 @@ impl Grid {
         self.page = self.paging().clamp(self.page);
     }
 
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
+
     pub fn paging(&self) -> Paging {
         Paging::new(self.count, self.cols * self.rows)
     }

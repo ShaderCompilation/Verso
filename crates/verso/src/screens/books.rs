@@ -742,13 +742,28 @@ impl Books {
     fn navigation_failed(&mut self, e: anyhow::Error) {
         self.navigation_error = Some(format!("Couldn't save library navigation: {e:#}"));
     }
+    /// Flashes only the browsing grid (covering its previous and current bounds)
+    /// so the top bar, tabs and other chrome stay steady.
+    fn refresh_grid(&self, cx: &mut EventCx, previous: Rect) {
+        let current = self.grid.rect();
+        let rect = match (previous.w > 0 && previous.h > 0, current.w > 0 && current.h > 0) {
+            (true, true) => previous.union(&current),
+            (true, false) => previous,
+            (false, true) => current,
+            (false, false) => {
+                cx.redraw();
+                return;
+            }
+        };
+        cx.refresh(rect, RefreshMode::Full);
+    }
     /// Shows another page of the browsing grid: arrows, swipes and the page jump.
     fn go_to_page(&mut self, page: usize, cx: &mut EventCx) {
         self.pager.set(page, self.pager.pages);
         self.grid.page = self.pager.page;
         self.prioritize();
         self.save_navigation();
-        cx.refresh(self.screen, RefreshMode::Full);
+        self.refresh_grid(cx, self.grid.rect());
     }
     /// What the jump sheet shows for `page`: the first folder or book on it,
     /// by the name the current sort uses.
@@ -770,6 +785,7 @@ impl Books {
             self.end_selection(cx);
         }
         let started = std::time::Instant::now();
+        let old_grid = self.grid.rect();
         self.home_active = false;
         self.prepare_browsing();
         self.navigation.set_page(self.pager.page);
@@ -777,7 +793,7 @@ impl Books {
         self.pager.page = self.navigation.page();
         self.refresh(cx.theme);
         self.save_navigation();
-        cx.refresh(self.screen, RefreshMode::Full);
+        self.refresh_grid(cx, old_grid);
         log::info!("collection switch {:?}: prepared in {:?}", self.navigation.folder, started.elapsed());
     }
     /// Library folders edited in Settings: scan the new list. The index that
@@ -886,6 +902,7 @@ impl Books {
             if old_folder != self.navigation.folder && !self.carrying() {
                 self.end_selection(cx);
             }
+            let old_grid = self.grid.rect();
             let page = self.pager.page;
             self.pager.page = self.search.as_ref().map_or_else(|| self.navigation.page(), |s| s.page);
             self.refresh(cx.theme);
@@ -896,7 +913,7 @@ impl Books {
                 self.navigation_unsaved |= old_navigation != self.navigation;
             }
             if self.search.is_none() && (self.pager.page != page || old_folder != self.navigation.folder) {
-                cx.refresh(self.screen, RefreshMode::Full);
+                self.refresh_grid(cx, old_grid);
             }
             log::info!(
                 "startup stage: snapshot application books={} elapsed_us={}",
@@ -1201,9 +1218,14 @@ impl Books {
                 search.cache.sync(&self.index);
             }
         }
+        let old_grid = self.grid.rect();
         self.refresh(cx.theme);
         self.save_navigation();
-        cx.refresh(self.screen, RefreshMode::Full);
+        if self.is_home() {
+            cx.refresh(self.screen, RefreshMode::Full);
+        } else {
+            self.refresh_grid(cx, old_grid);
+        }
     }
     fn ask_delete_folder(&mut self, path: PathBuf, cx: &mut EventCx) {
         if self.folder_protected(&path) {
@@ -1972,7 +1994,9 @@ impl Screen for Books {
                 && let Some(selected) = self.tabs.on_gesture(&g)
             {
                 self.end_selection(cx);
-                if !self.is_home() {
+                let was_home = self.is_home();
+                let old_grid = self.grid.rect();
+                if !was_home {
                     self.navigation.set_page(self.pager.page);
                     self.navigation.set_sort(self.selected_sort());
                 }
@@ -1989,7 +2013,11 @@ impl Screen for Books {
                 self.pager.page = self.navigation.page();
                 self.refresh(cx.theme);
                 self.save_navigation();
-                cx.refresh(self.screen, RefreshMode::Full);
+                if was_home || self.home_active {
+                    cx.refresh(self.screen, RefreshMode::Full);
+                } else {
+                    self.refresh_grid(cx, old_grid);
+                }
                 self.apply_pending(cx);
                 return Action::None;
             }
@@ -2036,10 +2064,11 @@ impl Screen for Books {
                 if let Err(e) = self.store.save_settings(&settings) {
                     cx.toast(format!("Couldn't save sort: {e}"), None);
                 }
+                let old_grid = self.grid.rect();
                 self.pager.page = 0;
                 self.refresh(cx.theme);
                 self.save_navigation();
-                cx.refresh(self.screen, RefreshMode::Full);
+                self.refresh_grid(cx, old_grid);
             }
             if !self.is_home() {
                 let old_page = self.pager.page;
@@ -3036,6 +3065,7 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         books.navigation.tab = Tab::AllBooks;
+        books.top.title = "Library".into();
         books.refresh(&t);
         assert!(books.continue_id.is_none(), "a resumable book stays on Home only");
         assert_eq!(books.continue_rect, Rect::default());
@@ -3488,6 +3518,70 @@ mod tests {
         assert!(!app.on_text_input(&TextInput::Insert("q".into())), "unfocused input can reach simulator shortcuts");
         app.on_sleep();
         assert!(!app.on_text_input(&TextInput::Insert("x".into())));
+        drop(app);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn paging_and_folder_navigation_flash_only_the_grid() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("grid-only-refresh")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        books.navigation.tab = Tab::AllBooks;
+        books.top.title = "Library".into();
+        books.refresh(&t);
+        let all_grid = books.grid.rect();
+        let tabs_bottom = books.tabs.rect().bottom();
+        let next_pos = Point::new(books.pager.rect().right() - t.target / 2, books.pager.rect().center().y);
+        let collections_tab = Point::new(books.tabs.rect().center().x, books.tabs.rect().center().y);
+        let info = crate::platform::DeviceInfo { name: "test".into(), width: 1272, height: 1696, dpi: 300 };
+        let mut app = crate::app::App::new(&info, t.clone(), Box::new(books));
+        app.frame();
+
+        // Paging All books: top bar and tabs stay untouched; Full is confined to
+        // the grid and ordered last (after pager Ui cleanup).
+        app.on_gesture(Gesture::Down(next_pos));
+        app.frame();
+        app.on_gesture(Gesture::Tap(next_pos));
+        let updates = app.frame();
+        assert!(!updates.is_empty());
+        assert_eq!(updates.last(), Some(&crate::platform::Update { rect: all_grid, mode: RefreshMode::Full }));
+        assert!(
+            updates[..updates.len() - 1].iter().all(|u| u.mode != RefreshMode::Full),
+            "non-flashing updates must precede Full: {updates:?}"
+        );
+        assert!(
+            updates.iter().all(|u| u.rect.y >= tabs_bottom),
+            "paging must not touch the top bar or tabs: {updates:?}"
+        );
+
+        // Switching All books → Collections: top bar stays untouched, Full stays below tabs.
+        app.on_gesture(Gesture::Down(collections_tab));
+        app.frame();
+        app.on_gesture(Gesture::Tap(collections_tab));
+        let updates = app.frame();
+        let fulls: Vec<_> = updates.iter().filter(|u| u.mode == RefreshMode::Full).collect();
+        assert_eq!(fulls.len(), 1);
+        assert!(fulls[0].rect.y >= tabs_bottom, "tab switch flash must stay below tabs: {fulls:?}");
+        assert!(updates.iter().all(|u| u.rect.y >= t.top_bar), "top bar stays steady: {updates:?}");
+
+        // Entering a folder: top bar and tabs stay untouched, Full is confined to the grid.
+        let first_tile = Point::new(all_grid.x + 80, all_grid.y + 180);
+        app.on_gesture(Gesture::Down(first_tile));
+        app.frame();
+        app.on_gesture(Gesture::Tap(first_tile));
+        let updates = app.frame();
+        let fulls: Vec<_> = updates.iter().filter(|u| u.mode == RefreshMode::Full).collect();
+        assert_eq!(fulls.len(), 1);
+        assert_eq!(updates.last().map(|u| u.mode), Some(RefreshMode::Full));
+        assert!(fulls[0].rect.y >= tabs_bottom, "folder flash must stay below tabs: {fulls:?}");
+        assert!(
+            updates.iter().all(|u| u.rect.y >= tabs_bottom),
+            "folder navigation must not touch top bar or tabs: {updates:?}"
+        );
+
         drop(app);
         std::fs::remove_dir_all(root)?;
         Ok(())

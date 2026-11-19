@@ -59,6 +59,14 @@ impl FrameDiff {
         canvas.copy_gray(canvas.bounds(), &mut self.prev, self.width as usize);
     }
 
+    /// Synchronizes the baseline for a rectangle that will be sent to the
+    /// screen unconditionally, so tile comparison skips its pixels.
+    pub fn commit_rect(&mut self, canvas: &Canvas, rect: Rect) {
+        if let Some(r) = rect.intersect(&canvas.bounds()) {
+            canvas.copy_gray(r, &mut self.prev, self.width as usize);
+        }
+    }
+
     /// Compares `canvas` with the last committed frame.
     pub fn changed(&mut self, canvas: &Canvas) -> Tiles {
         let cur = canvas.gray_data();
@@ -157,7 +165,26 @@ pub fn plan(tiles: &Tiles, bounds: Rect, hints: &[Update], default: RefreshMode,
         // Skip what a forced refresh of at least the same strength covers anyway.
         .filter(|u| !forced.iter().any(|f| f.mode >= u.mode && contains(&f.rect, &u.rect)))
         .collect();
-    updates.extend(forced.iter().filter_map(|f| f.rect.intersect(&bounds).map(|rect| Update { rect, mode: f.mode })));
+    // Clip forced refreshes and drop any covered by a changed update or another
+    // forced refresh of at least the same strength (e.g. a Fast→Ui cleanup
+    // inside a changed area or inside a forced Full rect).
+    let clipped_forced: Vec<Update> =
+        forced.iter().filter_map(|f| f.rect.intersect(&bounds).map(|rect| Update { rect, mode: f.mode })).collect();
+    for (i, &u) in clipped_forced.iter().enumerate() {
+        let covered_by_changed = updates.iter().any(|other| other.mode >= u.mode && contains(&other.rect, &u.rect));
+        let covered_by_forced = clipped_forced.iter().enumerate().any(|(j, other)| {
+            j != i
+                && other.mode >= u.mode
+                && contains(&other.rect, &u.rect)
+                && (other.mode > u.mode || other.rect != u.rect || j < i)
+        });
+        if !covered_by_changed && !covered_by_forced {
+            updates.push(u);
+        }
+    }
+    // Send non-flashing updates before flashing ones so Display::present never
+    // blocks on a flash it just started in the same frame.
+    updates.sort_by_key(|u| u.mode == RefreshMode::Full);
     updates
 }
 
@@ -338,5 +365,44 @@ mod tests {
         canvas.fill_rect(Rect::new(0, 16, 16, 32), 0);
         let updates = plan(&diff.changed(&canvas), bounds(), &[], Ui, &[]);
         assert_eq!(updates, vec![Update { rect: Rect::new(0, 0, 64, 48), mode: Ui }]);
+    }
+
+    #[test]
+    fn forced_refreshes_drop_covered_weaker_forced_and_order_full_last() {
+        let (canvas, mut diff) = setup();
+        let grid = Rect::new(10, 20, 120, 60);
+        let inside_debt = Update { rect: Rect::new(20, 30, 20, 20), mode: Ui };
+        let outside_debt = Update { rect: Rect::new(10, 82, 30, 10), mode: Ui };
+        let forced = [Update { rect: grid, mode: Full }, inside_debt, outside_debt];
+        let updates = plan(&diff.changed(&canvas), bounds(), &[], Ui, &forced);
+        assert_eq!(updates, vec![outside_debt, Update { rect: grid, mode: Full }]);
+    }
+
+    #[test]
+    fn forced_ui_covered_by_changed_ui_is_not_duplicated() {
+        let (mut canvas, mut diff) = setup();
+        canvas.fill_rect(Rect::new(0, 0, 64, 32), 0);
+        let forced = [Update { rect: Rect::new(0, 0, 32, 32), mode: Ui }];
+        let updates = plan(&diff.changed(&canvas), bounds(), &[], Ui, &forced);
+        assert_eq!(updates, vec![Update { rect: Rect::new(0, 0, 64, 32), mode: Ui }]);
+    }
+
+    #[test]
+    fn commit_rect_skips_unaligned_forced_full_edges() {
+        let (mut canvas, mut diff) = setup();
+        let grid = Rect::new(10, 20, 120, 50);
+        canvas.fill_rect(grid, 0);
+        // A separate change outside the forced rect (e.g. pager).
+        canvas.fill_rect(Rect::new(10, 84, 20, 6), 0);
+        diff.commit_rect(&canvas, grid);
+        let tiles = diff.changed(&canvas);
+        let forced = [Update { rect: grid, mode: Full }];
+        let updates = plan(&tiles, bounds(), &[], Ui, &forced);
+        diff.commit(&canvas, &tiles);
+        assert_eq!(
+            updates,
+            vec![Update { rect: Rect::new(0, 80, 32, 16), mode: Ui }, Update { rect: grid, mode: Full }]
+        );
+        assert!(!diff.changed(&canvas).any());
     }
 }
