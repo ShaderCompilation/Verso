@@ -23,6 +23,29 @@ def upload(path, data):
     remote('cat > ' + Q(path), data)
 
 
+def copy_dictionary_cache(source, state):
+    """Seed an isolated state with prepared dictionary indexes. A fresh state
+    otherwise builds every index in the background after the book opens (seconds
+    of CPU on the dictionary thread), which only happens once on a real device."""
+    assert re.fullmatch(r'/mnt/us/verso/[a-z0-9-]+-check/[A-Za-z0-9._-]+', source), source
+    remote(f'test -d {Q(source)}/dictionary-cache && cp -r {Q(source)}/dictionary-cache {Q(state)}/')
+
+
+def app_pid(executable, seconds=30):
+    """The app's PID. `pidof verso` can also list the background pre-layout
+    child (same executable, a verso parent) or the wrapper shell during exec."""
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        found = remote('for p in $(pidof verso); do '
+                       'pp=$(cut -d" " -f4 /proc/$p/stat 2>/dev/null); '
+                       f'test "$(readlink /proc/$pp/exe)" = {Q(executable)} && continue; '
+                       f'test "$(readlink /proc/$p/exe)" = {Q(executable)} && echo $p; done; true').split()
+        if len(found) == 1:
+            return found[0]
+        time.sleep(.1)
+    raise RuntimeError('No unique Verso app PID for ' + executable)
+
+
 def patch_launcher(app_dir, prefix, repo=None):
     """Build an isolated copy of Verso's launcher, failing loudly if markers move."""
     root = Path(repo) if repo is not None else Path(__file__).resolve().parents[2]
@@ -105,6 +128,8 @@ def main():
                         help='Allow updates after subsequent touches; require 24 taps, frames and saved-page advances')
     parser.add_argument('--annotation-count', type=int, choices=[0, 100, 1000])
     parser.add_argument('--annotation-fixture', type=Path, help='Local original reader.epub for synthetic records')
+    parser.add_argument('--dictionary-cache', metavar='STATE',
+                        help='Copy STATE/dictionary-cache (e.g. a dictionary.py cold state) into the run state')
     args = parser.parse_args()
     APP = '/mnt/us/verso/' + args.experiment + '-check'
     assert 0 < args.turn_delay_us <= 1000000
@@ -131,6 +156,8 @@ def main():
     state = APP + '/' + run + '.state'
     trace = APP + '/' + run + '.trace'
     remote(f'mkdir -p {state}; chmod 755 {APP}/bin/probe {APP}/bin/{args.variant}/verso')
+    if args.dictionary_cache:
+        copy_dictionary_cache(args.dictionary_cache, state)
     typography = {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0, 'justify': True}
     settings = {'typography': typography, 'library_folders': [APP + '/books'], 'library_sort': 'title',
                 'orientation': args.orientation, 'page_flash': args.page_flash}
@@ -157,9 +184,7 @@ def main():
     try:
         remote(f'chmod 755 {APP}/verso; : > {APP}/verso.log; '
                f'setsid sh {APP}/launcher.sh </dev/null >/dev/null 2>&1 &')
-        wait_for('pidof verso >/dev/null')
-        pid = remote('pidof verso')
-        assert remote(f'readlink /proc/{pid}/exe') == f'{APP}/bin/{args.variant}/verso'
+        pid = app_pid(f'{APP}/bin/{args.variant}/verso')
         wait_for(f'grep -q "first frame on screen" {APP}/verso.log')
         samples, hashes = {}, {}
         def sample(label):
@@ -209,6 +234,7 @@ def main():
         # Keep private logs on-device. Export numeric frame/gesture data only.
         frames = remote(f'grep -E "frame: drawn|Down\\(|Tap\\(|presented [0-9]+ update" {APP}/verso.log')
         results = {'variant': args.variant, 'run': run, 'frames': frames,
+                   'dictionary_cache_seeded': bool(args.dictionary_cache),
                    'binary_sha256': binary_sha256, 'identity_check_timing': 'before_launch',
                    'book_sha256': book_sha256,
                    'orientation': args.orientation, 'page_flash': args.page_flash,

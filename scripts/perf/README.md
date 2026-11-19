@@ -86,6 +86,16 @@ message is emitted after presentation returns. Likewise, the legacy
 including a full-refresh wait when applicable: it is not first SEND_UPDATE.
 The current report labels that value `first_present_return_ms`.
 
+Since 2026-11-20, a fresh isolated state builds every dictionary index in the
+background after the first page (the reader's one-time preparation), which costs
+seconds of CPU on `verso-dictionary` during the timed turns. For steady-state CPU
+pass `--dictionary-cache STATE` (to `redraw.py` or `highlights_load.py`) with a
+`dictionary.py cold` state; the run copies only its `dictionary-cache`. Scripts
+find the app with `redraw.app_pid` rather than `pidof verso`: the background
+pre-layout child runs the same executable. Keep benchmark binaries and fixtures
+under `/mnt/us/verso/*-check`, not `/tmp`: the Kindle's `/tmp` is a 64 MiB tmpfs
+shared with `/var`, and filling it slows the device and skews timings.
+
 Keep executable identity reads **before launch**. The current pass measured
 31,968 → 21,976 KiB RSS after running `sha256sum` on the live executable,
 with unchanged private dirty memory and page pixels. That observer effect can
