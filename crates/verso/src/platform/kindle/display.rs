@@ -10,6 +10,7 @@ use fbink_sys as fb;
 
 use crate::geom::Rect;
 use crate::gfx::Canvas;
+use crate::platform::flash::FlashFence;
 use crate::platform::{Orientation, RefreshMode, Update};
 
 pub struct Display {
@@ -30,6 +31,8 @@ pub struct Display {
     pub touch_swap_axes: bool,
     pub touch_mirror_x: bool,
     pub touch_mirror_y: bool,
+    /// Tracks an unawaited flashing refresh so the next write or handoff waits for it.
+    flash_fence: FlashFence,
 }
 
 impl Display {
@@ -104,22 +107,27 @@ impl Display {
                 touch_swap_axes: st.touch_swap_axes,
                 touch_mirror_x: st.touch_mirror_x,
                 touch_mirror_y: st.touch_mirror_y,
+                flash_fence: FlashFence::default(),
             })
         }
     }
 
     pub fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
         let screen = Rect::new(0, 0, self.width as i32, self.height as i32);
-        // SAFETY: the mapping is valid and at least `fb_len` bytes for as long
-        // as the FBInk session is open (checked in `open`), and only we use it.
-        let pixels = unsafe { std::slice::from_raw_parts_mut(self.fb, self.fb_len) };
-
         let (cw, ch) = self.orientation.screen_size(self.width, self.height);
         if (canvas.width(), canvas.height()) != (cw, ch) {
             bail!("canvas is {}x{}, expected {cw}x{ch}", canvas.width(), canvas.height());
         }
-        let mut flashed = false;
+        let canvas_bounds = canvas.bounds();
         for u in updates {
+            if u.rect.intersect(&canvas_bounds).is_none() {
+                continue;
+            }
+            // Let any in-flight flash finish before writing new pixels over it.
+            self.wait_for_pending_flash();
+            // SAFETY: the mapping is valid and at least `fb_len` bytes for as long
+            // as the FBInk session is open (checked in `open`), and only we use it.
+            let pixels = unsafe { std::slice::from_raw_parts_mut(self.fb, self.fb_len) };
             let r = match self.orientation {
                 Orientation::Portrait => {
                     let Some(r) = u.rect.intersect(&screen) else { continue };
@@ -145,31 +153,50 @@ impl Display {
             };
             self.cfg.wfm_mode = wfm;
             self.cfg.is_flashing = flash;
-            flashed |= flash;
             // SAFETY: FFI call with a valid fd and config.
             let rc = unsafe { fb::fbink_refresh(self.fd, r.y as u32, r.x as u32, r.w as u32, r.h as u32, &self.cfg) };
             if rc < 0 {
                 log::warn!("refresh of {r:?} ({:?}) failed: {rc}", u.mode);
+            } else if flash {
+                // SAFETY: reads FBInk's marker for the refresh just sent.
+                let marker = unsafe { fb::fbink_get_last_marker() };
+                self.flash_fence.mark_flash(marker);
             }
-        }
-        // Let a flash finish before anything else is drawn over it.
-        if flashed {
-            self.wait_for_complete();
         }
         Ok(())
     }
 
-    pub fn wait_for_complete(&mut self) {
-        // SAFETY: FFI call; marker 0 means "the last refresh we sent".
-        let rc = unsafe { fb::fbink_wait_for_complete(self.fd, 0) };
+    fn wait_for_marker(&self, marker: u32) {
+        // SAFETY: FFI call with a valid fd; marker 0 means "the last refresh we sent".
+        let rc = unsafe { fb::fbink_wait_for_complete(self.fd, marker) };
         if rc < 0 {
-            log::debug!("wait for complete returned {rc}");
+            log::debug!("wait for complete (marker {marker}) returned {rc}");
+        }
+    }
+
+    fn wait_for_pending_flash(&mut self) {
+        if let Some(marker) = self.flash_fence.take_before_write() {
+            self.wait_for_marker(marker);
+        }
+    }
+
+    pub fn wait_for_complete(&mut self) {
+        // SAFETY: reads FBInk's last sent refresh marker.
+        let last = unsafe { fb::fbink_get_last_marker() };
+        let (pending, tail) = self.flash_fence.take_for_barrier(last);
+        if let Some(marker) = pending {
+            self.wait_for_marker(marker);
+        }
+        if let Some(marker) = tail {
+            self.wait_for_marker(marker);
         }
     }
 }
 
 impl Drop for Display {
     fn drop(&mut self) {
+        // Don't hand the display back to the launcher mid-flash on an error exit.
+        self.wait_for_pending_flash();
         // SAFETY: closes the session opened in `open`; the mapping isn't used after this.
         unsafe { fb::fbink_close(self.fd) };
     }

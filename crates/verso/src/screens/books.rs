@@ -2109,6 +2109,16 @@ impl Screen for Books {
         self.apply_pending(cx);
         Action::None
     }
+    fn begin_batch(&mut self) {
+        if let Some(reader) = &mut self.reader {
+            reader.begin_batch();
+        }
+    }
+    fn finish_batch(&mut self, cx: &mut EventCx) {
+        if let Some(reader) = &mut self.reader {
+            reader.finish_batch(cx);
+        }
+    }
     fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
         if let Some(reader) = &mut self.reader {
             return reader.on_text_input(input, cx);

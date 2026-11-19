@@ -11,6 +11,9 @@ use crate::gfx::Canvas;
 pub mod awake;
 #[cfg(feature = "desktop")]
 mod desktop;
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+mod flash;
 #[cfg(feature = "desktop")]
 mod headless;
 #[cfg(feature = "kindle")]

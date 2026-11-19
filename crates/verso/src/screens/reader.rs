@@ -52,6 +52,10 @@ pub struct Reader {
     laying_out: bool,
     anchor: Position,
     turn_pending: bool,
+    /// True while draining a batch of already-queued input events.
+    batching: bool,
+    /// A page turn queued during the current event batch, committed on `finish_batch`.
+    pending_turn: bool,
     save_pending: bool,
     persistence: Writer,
     save_error: Option<String>,
@@ -150,6 +154,8 @@ impl Reader {
             laying_out: true,
             anchor,
             turn_pending: false,
+            batching: false,
+            pending_turn: false,
             save_pending: false,
             save_error: None,
             settings_save_pending: false,
@@ -291,7 +297,7 @@ impl Reader {
                         || page.annotation_revision == self.annotations.revision) =>
             {
                 self.cache.insert(page.clone(), self.target);
-                if page.number == self.target {
+                if page.number == self.target && !self.pending_turn {
                     self.annotations.paint_pending = false;
                     self.display(page, cx);
                 }
@@ -303,6 +309,7 @@ impl Reader {
                 if number == self.target {
                     self.target = self.shown.as_ref().map_or(0, |p| p.number);
                     self.turn_pending = false;
+                    self.pending_turn = false;
                     self.error = Some(message.clone());
                     cx.toast(message, None);
                 }
@@ -316,6 +323,7 @@ impl Reader {
                 self.jump = 0;
                 self.jump_destination = None;
                 self.turn_pending = false;
+                self.pending_turn = false;
                 self.target = self.shown.as_ref().map_or(0, |p| p.number);
                 cx.toast(message, None);
             }
@@ -433,6 +441,27 @@ impl Reader {
         self.target = page;
         self.turn_pending = true;
         self.bars.stepping = true;
+        if self.batching {
+            // Wait until the queued input batch finishes so rapid taps skip
+            // intermediate pages rather than drawing or requesting them.
+            self.pending_turn = true;
+            return;
+        }
+        self.commit_turn(cx);
+    }
+    fn commit_turn(&mut self, cx: &mut EventCx) {
+        if !std::mem::take(&mut self.pending_turn) && self.batching {
+            return;
+        }
+        if self.laying_out || self.layout_at.is_some() || self.pages == 0 {
+            return;
+        }
+        let page = self.target;
+        if self.shown.as_ref().is_some_and(|p| p.number == page) {
+            self.turn_pending = false;
+            self.bars.stepping = false;
+            return;
+        }
         if let Some(p) = self.cache.get(page) {
             self.display(p, cx);
         } else if self.cache.request(page) {
@@ -441,6 +470,7 @@ impl Reader {
     }
     /// `page` is the position's page in the current layout, when known.
     fn jump_position(&mut self, page: Option<usize>, position: Position, cx: &mut EventCx) -> bool {
+        self.pending_turn = false;
         if self.laying_out || self.layout_at.is_some() {
             // Page numbers will change. Keep only the stable text destination;
             // the latest choice wins after the new layout's first page arrives.
@@ -733,6 +763,7 @@ impl Reader {
         let _ = self.flush_text_settings();
     }
     fn changed(&mut self) {
+        self.pending_turn = false;
         if self.jump != 0 {
             self.pending_position = self.jump_destination.take();
             self.jump = 0;
@@ -879,6 +910,7 @@ impl Reader {
             return Action::None;
         }
         if matches!(self.overlay, Overlay::None)
+            && !self.pending_turn
             && self.selection.selected.is_none()
             && let Gesture::Tap(p) = g
         {
@@ -911,10 +943,16 @@ impl Reader {
             if owned {
                 cx.redraw(); // pressed feedback
                 if let Some(event) = event {
+                    if self.pending_turn {
+                        self.commit_turn(cx);
+                    }
                     self.on_bar(event, cx);
                 }
                 return Action::None;
             }
+        }
+        if self.pending_turn && matches!(g, Gesture::LongPress(_)) {
+            self.commit_turn(cx);
         }
         if (matches!(self.overlay, Overlay::None)
             || matches!(self.overlay, Overlay::SelectionActions(_)) && self.selection.adjusting(g, cx.theme))
@@ -1091,6 +1129,9 @@ impl Reader {
                 let step = match g {
                     Gesture::Tap(p) => match reader::tap_zone(self.screen, p, self.settings.tap_zones) {
                         Zone::Menu => {
+                            if self.pending_turn {
+                                self.commit_turn(cx);
+                            }
                             self.menu(cx);
                             cx.redraw();
                             return Action::None;
@@ -1105,6 +1146,9 @@ impl Reader {
                             && (dir == Direction::Down && from.y < self.screen.y + self.screen.h / 10
                                 || dir == Direction::Up && from.y >= self.screen.bottom() - self.screen.h / 10) =>
                     {
+                        if self.pending_turn {
+                            self.commit_turn(cx);
+                        }
                         self.menu(cx);
                         cx.redraw();
                         return Action::None;
@@ -1222,6 +1266,15 @@ impl Screen for Reader {
         }
         action
     }
+    fn begin_batch(&mut self) {
+        self.batching = true;
+    }
+    fn finish_batch(&mut self, cx: &mut EventCx) {
+        self.batching = false;
+        if self.pending_turn {
+            self.commit_turn(cx);
+        }
+    }
     fn busy(&self) -> bool {
         self.annotations.resolving
             || self.annotations.paint_pending
@@ -1337,6 +1390,8 @@ impl Screen for Reader {
         self.save();
     }
     fn on_sleep(&mut self) {
+        self.batching = false;
+        self.pending_turn = false;
         self.extension = None;
         self.annotations.cancel_import();
         self.selection.sleep();
@@ -2609,5 +2664,98 @@ mod tests {
         drop(r);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn queued_turns_in_one_batch_skip_intermediate_pages() {
+        let (mut r, commands) = test_reader("batch-skip");
+        let theme = Theme::for_dpi(150);
+        r.pages = 20;
+        r.laying_out = false;
+        r.target = 5;
+        r.shown = Some(test_page(1, 5));
+        r.cache.insert(test_page(1, 5), 5);
+        r.cache.insert(test_page(1, 6), 5); // already prefetched
+        let forward = crate::geom::Point::new(500, 400);
+        let back = crate::geom::Point::new(50, 400);
+
+        // Three rapid forward taps queued together skip cached page 6 and uncached page 7.
+        test_cx(&theme, |cx| {
+            r.begin_batch();
+            for _ in 0..3 {
+                r.on_gesture(Gesture::Tap(forward), cx);
+            }
+            assert_eq!(r.target, 8);
+            assert_eq!(r.shown.as_ref().unwrap().number, 5);
+            assert!(!*cx.needs_redraw);
+            assert!(cx.forced.is_empty());
+            assert!(commands.try_iter().next().is_none());
+            r.finish_batch(cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 5, "stale cached page 6 must not be shown");
+            assert!(cx.forced.is_empty());
+            let requested: Vec<_> = commands
+                .try_iter()
+                .filter_map(|c| match c {
+                    Command::Page { number, .. } => Some(number),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(requested, vec![8], "only the final target page should be requested");
+            r.receive(Reply::Page(test_page(1, 8)), cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 8);
+            assert_eq!(cx.forced.len(), 1);
+            // Drain neighbour prefetches queued by display(8).
+            let _ = commands.try_iter().count();
+        });
+
+        // Forward then back in the same batch cancels out with no redraw or request.
+        r.cache.insert(test_page(1, 9), 8);
+        test_cx(&theme, |cx| {
+            r.begin_batch();
+            r.on_gesture(Gesture::Tap(forward), cx);
+            r.on_gesture(Gesture::Tap(back), cx);
+            r.finish_batch(cx);
+            assert_eq!(r.target, 8);
+            assert_eq!(r.shown.as_ref().unwrap().number, 8);
+            assert!(!*cx.needs_redraw);
+            assert!(cx.forced.is_empty());
+            assert!(commands.try_iter().next().is_none());
+        });
+
+        // A single cached tap in a batch still displays immediately on finish_batch.
+        test_cx(&theme, |cx| {
+            r.begin_batch();
+            r.on_gesture(Gesture::Tap(forward), cx);
+            r.finish_batch(cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 9);
+            assert_eq!(cx.forced.len(), 1);
+        });
+
+        // A background page reply arriving mid-batch doesn't display before later taps run.
+        test_cx(&theme, |cx| {
+            r.begin_batch();
+            r.on_gesture(Gesture::Tap(forward), cx); // target -> 10
+            r.receive(Reply::Page(test_page(1, 10)), cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 9);
+            r.on_gesture(Gesture::Tap(forward), cx); // target -> 11
+            r.finish_batch(cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 9);
+            assert_eq!(r.target, 11);
+        });
+
+        // A turn followed by opening the menu in the same batch commits the turn first.
+        r.shown = Some(test_page(1, 9));
+        r.target = 9;
+        r.cache.insert(test_page(1, 10), 9);
+        test_cx(&theme, |cx| {
+            r.begin_batch();
+            r.on_gesture(Gesture::Tap(forward), cx);
+            r.on_gesture(Gesture::Tap(crate::geom::Point::new(300, 400)), cx);
+            r.finish_batch(cx);
+            assert_eq!(r.shown.as_ref().unwrap().number, 10);
+            assert!(matches!(r.overlay, Overlay::Menu(_)));
+        });
+
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 }

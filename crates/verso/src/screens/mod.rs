@@ -57,6 +57,11 @@ pub trait Screen {
     /// Stack actions, toasts and explicit refreshes invalidate automatically.
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action;
 
+    /// Called before draining a batch of already-queued events.
+    fn begin_batch(&mut self) {}
+    /// Called after draining a batch of already-queued events, before drawing.
+    fn finish_batch(&mut self, _cx: &mut EventCx) {}
+
     /// True if a focused field or its text-entry overlay consumed the input.
     fn on_text_input(&mut self, _input: &TextInput, _cx: &mut EventCx) -> bool {
         false

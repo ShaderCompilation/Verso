@@ -272,7 +272,8 @@ fn run() -> Result<i32> {
         let deadline = [gestures.next_deadline(), app.deadline()].into_iter().flatten().min();
         let mut timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         // Handle everything that's already waiting before drawing, so a fast
-        // drag draws once per batch instead of once per touch report.
+        // drag or burst of taps draws once per batch instead of once per report.
+        app.begin_batch();
         for _ in 0..MAX_BATCH {
             match platform.next_event(timeout)? {
                 None => break,
@@ -298,6 +299,7 @@ fn run() -> Result<i32> {
                 }
                 Some(Event::Sleep) => {
                     log::info!("sleep");
+                    app.finish_batch();
                     gestures.reset();
                     app.on_sleep();
                     let cover = app.draw_sleep_cover(store.settings().sleep_screen);
@@ -350,6 +352,7 @@ fn run() -> Result<i32> {
             log::debug!("{g:?}");
             app.on_gesture(g);
         }
+        app.finish_batch();
         app.on_tick(now);
     }
 

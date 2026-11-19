@@ -141,6 +141,8 @@ impl Platform for Kindle {
         self.sleeping = true;
         self.queue.clear();
         if !cover && !self.native_sleep {
+            // Let any in-flight flash finish before Amazon's UI draws its sleep screen.
+            self.display.wait_for_complete();
             self.touch.grab(false)?;
             launcher_handoff(true)?;
             self.native_sleep = true;

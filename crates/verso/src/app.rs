@@ -257,6 +257,24 @@ impl App {
         updates
     }
 
+    pub fn begin_batch(&mut self) {
+        if !self.asleep
+            && let Some(screen) = self.stack.last_mut()
+        {
+            screen.begin_batch();
+        }
+    }
+
+    pub fn finish_batch(&mut self) {
+        if self.asleep {
+            return;
+        }
+        self.with_screen(|screen, cx| {
+            screen.finish_batch(cx);
+            Action::None
+        });
+    }
+
     pub fn on_gesture(&mut self, g: Gesture) {
         if self.asleep {
             return;
