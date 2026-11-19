@@ -16,6 +16,107 @@ use super::{
 
 /// Upper limit for crengine's on-disk document cache.
 const CACHE_MAX_BYTES: c_int = 64 << 20;
+/// The font list's file in crengine's cache folder, which crengine leaves
+/// alone (it only removes `.cr3` files it doesn't list).
+const FONT_LIST: &str = "fonts.list";
+/// Bump when crengine's font registration (`RegisterFont`, `inspectFTFace`)
+/// records something new about a face: older lists are then ignored.
+const FONT_LIST_VERSION: u32 = 1;
+
+/// The faces crengine registered from each font file, written on one start
+/// and read on the next, so fonts register without opening every file: the
+/// 93 on the Kindle took 0.4–1.3 s to open (docs/reader.md#font-list).
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct FontList {
+    version: u32,
+    files: Vec<FontFile>,
+}
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct FontFile {
+    path: std::path::PathBuf,
+    len: u64,
+    modified_ns: u64,
+    /// `verso_cre_describe_font`'s text; empty when the file has no usable face.
+    faces: String,
+}
+
+/// Registers every .ttf/.otf file in `dirs`, from `list` where it still
+/// describes the file (same size and time) and by opening the file where it
+/// doesn't. Every font is always registered: registering fewer would change
+/// crengine's font hash, which is part of each cached book's key, and those
+/// books would lay out again. Returns the fonts registered and how many of
+/// them came from the list.
+fn register_fonts(dirs: &[std::path::PathBuf], list: Option<&Path>) -> Result<(usize, usize)> {
+    let old = list
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice::<FontList>(&bytes).ok())
+        .filter(|l| l.version == FONT_LIST_VERSION)
+        .unwrap_or_default();
+    let known: std::collections::HashMap<_, _> = old.files.iter().map(|f| (f.path.as_path(), f)).collect();
+    let mut new = FontList { version: FONT_LIST_VERSION, files: Vec::new() };
+    let (mut fonts, mut listed) = (0, 0);
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ext != "ttf" && ext != "otf" {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let modified_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as u64);
+            let file = cstr(&path)?;
+            if let Some(entry) =
+                known.get(path.as_path()).filter(|f| f.len == meta.len() && f.modified_ns == modified_ns)
+                && let Ok(faces) = CString::new(entry.faces.as_str())
+            {
+                let count = unsafe { sys::verso_cre_register_font_faces(file.as_ptr(), faces.as_ptr()) };
+                if count >= 0 {
+                    #[cfg(debug_assertions)]
+                    {
+                        let again =
+                            read_string(|buf, len| unsafe { sys::verso_cre_describe_font(file.as_ptr(), buf, len) });
+                        if again.as_deref().ok() != Some(entry.faces.as_str()) {
+                            log::warn!("font list entry for {} reads back differently: {again:?}", path.display());
+                        }
+                    }
+                    fonts += usize::from(count > 0);
+                    listed += usize::from(count > 0);
+                    new.files.push((*entry).clone());
+                    continue;
+                }
+                log::warn!("font list entry for {} is unreadable; opening the file", path.display());
+            }
+            let registered = unsafe { sys::verso_cre_register_font(file.as_ptr()) } == 0;
+            fonts += usize::from(registered);
+            let faces = read_string(|buf, len| unsafe { sys::verso_cre_describe_font(file.as_ptr(), buf, len) })
+                .unwrap_or_default();
+            // A registered font crengine can't describe is opened every time.
+            if registered != faces.is_empty() {
+                new.files.push(FontFile { path, len: meta.len(), modified_ns, faces });
+            }
+        }
+    }
+    if let Some(list) = list
+        && new != old
+    {
+        let write = || -> Result<()> {
+            let temp = list.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temp, serde_json::to_vec(&new)?)?;
+            std::fs::rename(&temp, list).inspect_err(|_| {
+                let _ = std::fs::remove_file(&temp);
+            })?;
+            Ok(())
+        };
+        if let Err(e) = write() {
+            log::warn!("couldn't save the font list: {e:#}");
+        }
+    }
+    Ok((fonts, listed))
+}
 
 /// crengine's global state (fonts, hyphenation, cache). Create one per process.
 pub struct CreEngine {
@@ -38,24 +139,25 @@ impl CreEngine {
         if unsafe { sys::verso_cre_init(hyph.as_ptr(), cache_ptr, CACHE_MAX_BYTES) } != 0 {
             bail!("crengine failed to start");
         }
-        let mut fonts = 0;
-        for dir in &paths.font_dirs {
-            let Ok(entries) = std::fs::read_dir(dir) else { continue };
-            for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-                if (ext == "ttf" || ext == "otf") && unsafe { sys::verso_cre_register_font(cstr(&path)?.as_ptr()) } == 0
-                {
-                    fonts += 1;
-                }
-            }
-        }
+        let fonts_started = Instant::now();
+        let list = paths.cache.as_ref().map(|dir| dir.join(FONT_LIST));
+        let (fonts, listed) = register_fonts(&paths.font_dirs, list.as_deref())?;
         if fonts == 0 {
             bail!("no fonts found in {:?}", paths.font_dirs);
         }
-        log::info!("crengine ready: {fonts} fonts registered in {:?}", started.elapsed());
+        log::info!(
+            "crengine ready: {fonts} fonts registered ({listed} from the font list) in {:?}, total {:?}, font hash {:08x}",
+            fonts_started.elapsed(),
+            started.elapsed(),
+            unsafe { sys::verso_cre_font_list_hash() }
+        );
         Ok(Self { paths, dpi })
     }
 
+    /// The hash of every registered font, part of each cached layout's key.
+    pub fn font_hash(&self) -> u32 {
+        unsafe { sys::verso_cre_font_list_hash() }
+    }
     /// Reads crengine's cache index again: the pre-layout process changed it.
     pub fn reload_cache(&self) -> Result<()> {
         if self.paths.cache.is_some() {

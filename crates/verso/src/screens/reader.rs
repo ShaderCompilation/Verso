@@ -65,6 +65,9 @@ pub struct Reader {
     selection: SelectionState,
     dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
     dictionary_language: String,
+    /// When to open the dictionaries' indexes in the background: a moment
+    /// after the first page is on screen, once per open book.
+    dictionary_prepare_at: Option<Instant>,
     search: Session,
     search_bar: Option<SearchBar>,
     search_redraw: Option<Instant>,
@@ -104,6 +107,9 @@ struct BarState {
 }
 /// Highlight requests share the selection reply; this bit keeps their IDs apart.
 const HIGHLIGHT_ID: u64 = 1 << 63;
+/// How long after a book's first page the dictionaries' indexes open in the
+/// background: past the first page's neighbours and the chapter offsets.
+const DICTIONARY_PREPARE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 enum Overlay {
     None,
     Menu(Box<ReaderMenu>),
@@ -164,6 +170,7 @@ impl Reader {
             selection: SelectionState::default(),
             dictionary: None,
             dictionary_language: String::new(),
+            dictionary_prepare_at: None,
             search: Session::default(),
             search_bar: None,
             search_redraw: None,
@@ -330,17 +337,20 @@ impl Reader {
             _ => {}
         }
     }
-    pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
-        let service = self.dictionary.get_or_insert_with(|| {
+    fn dictionary_service(&mut self) -> &Rc<crate::dictionary::worker::Worker> {
+        self.dictionary.get_or_insert_with(|| {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
-        });
+        })
+    }
+    pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
+        self.dictionary_prepare_at = None;
+        let service = self.dictionary_service().clone();
         let word = self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)));
         let selection = crate::dictionary::sets::Selection {
             book_set: self.store.book(&self.id).dictionary_set,
             language: self.dictionary_language.clone(),
         };
-        self.overlay =
-            Overlay::Lookup(Box::new(Lookup::new(query, service.clone(), cx.theme, self.screen, word, selection)));
+        self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service, cx.theme, self.screen, word, selection)));
         cx.redraw();
     }
     fn selection_released(&mut self, cx: &mut EventCx) {
@@ -1297,7 +1307,7 @@ impl Screen for Reader {
             Overlay::Layout(view) => view.deadline(),
             _ => None,
         };
-        [self.layout_at, step].into_iter().flatten().min()
+        [self.layout_at, step, self.dictionary_prepare_at].into_iter().flatten().min()
     }
     fn has_idle_work(&self) -> bool {
         matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.paginating())
@@ -1315,6 +1325,10 @@ impl Screen for Reader {
             && view.on_tick(cx.now)
         {
             cx.redraw();
+        }
+        if self.dictionary_prepare_at.is_some_and(|t| cx.now >= t) {
+            self.dictionary_prepare_at = None;
+            self.dictionary_service().prepare();
         }
         if self.layout_at.is_some_and(|t| cx.now >= t) {
             self.layout_at = None;
@@ -1386,6 +1400,7 @@ impl Screen for Reader {
             && let Some(started) = self.opened_at.take()
         {
             log::info!("startup stage: book first page requested elapsed_us={}", started.elapsed().as_micros());
+            self.dictionary_prepare_at = Some(Instant::now() + DICTIONARY_PREPARE_DELAY);
         }
         self.save();
     }

@@ -110,6 +110,7 @@ enum Command {
     Edit { request: Request, edit: Edit },
     Retry { request: Request, set: String, dictionary: String },
     Open { request: Request, dictionary: String },
+    Prepare(u64),
     Release,
     Flush(mpsc::Sender<Result<(), String>>),
     Stop,
@@ -135,6 +136,8 @@ pub struct Service {
     /// Cancels every running command, including another client's, at shutdown.
     stopped: Arc<AtomicBool>,
     folders: Arc<AtomicU64>,
+    /// Commands sent other than Prepare, which a running Prepare yields to.
+    sent: Arc<AtomicU64>,
 }
 /// A screen's client, not a separate thread. Its replies and cancellation are
 /// private; a Settings catalog can never replace a reader lookup.
@@ -483,6 +486,36 @@ impl Inner {
         );
         publish(request, reply, current);
     }
+    /// Opens (building if needed) the index of every dictionary that some
+    /// set searches, and the word-form packs. Failures are left for the
+    /// next lookup to find and report.
+    fn prepare(&mut self, current: &impl Fn() -> bool) {
+        let started = std::time::Instant::now();
+        let searched =
+            |id: &str| self.preferences.sets.iter().any(|s| s.dictionaries.iter().any(|p| p.id == id && !p.disabled));
+        let ids: Vec<_> = self
+            .catalog
+            .dictionaries
+            .iter()
+            .filter(|d| d.error.is_none() && !self.probes.contains_key(&d.id) && searched(&d.id))
+            .map(|d| d.id.clone())
+            .collect();
+        let mut opened = 0;
+        for id in ids {
+            if !current() {
+                return;
+            }
+            match self.open_probe(&id, current, &|| {}) {
+                Ok(_) => opened += 1,
+                Err(e) => log::debug!("dictionary prepare: {id}: {e:#}"),
+            }
+        }
+        if !current() {
+            return;
+        }
+        self.word_forms.status();
+        log::info!("dictionary prepare: {opened} indexes opened in {:?}", started.elapsed());
+    }
     #[cfg(test)]
     fn lookup(&mut self, query: &str, current: &impl Fn() -> bool) -> (Option<String>, State) {
         let mailbox = Arc::new(Mailbox {
@@ -611,6 +644,8 @@ impl Service {
         let stopped = Arc::new(AtomicBool::new(false));
         let stopping = stopped.clone();
         let folders = store.dictionary_folder_revision.clone();
+        let sent = Arc::new(AtomicU64::new(0));
+        let sent_seen = sent.clone();
         // Do not retain Store's service registry from its own thread.
         let store = store.dictionary_context();
         std::thread::Builder::new()
@@ -670,6 +705,14 @@ impl Service {
                                 reply.matches = session.matches;
                                 publish(&request, reply, &current);
                             }
+                        }
+                        // Any command sent after it moves the send count on and stops it.
+                        Command::Prepare(ticket) => {
+                            let current = || alive() && sent_seen.load(Ordering::Relaxed) == ticket;
+                            if (!inner.fresh || folders_changed(&inner)) && !inner.discover(&current) {
+                                continue;
+                            }
+                            inner.prepare(&current);
                         }
                         Command::Release => {
                             // A queued request from another client reopens what it needs.
@@ -776,7 +819,13 @@ impl Service {
                 }
             })
             .expect("spawn dictionary worker");
-        Self { tx, revision, stopped, folders }
+        Self { tx, revision, stopped, folders, sent }
+    }
+    fn send(&self, command: Command) {
+        if !matches!(command, Command::Prepare(_)) {
+            self.sent.fetch_add(1, Ordering::Relaxed);
+        }
+        let _ = self.tx.send(command);
     }
 }
 fn publish(request: &Request, reply: Reply, current: &dyn Fn() -> bool) {
@@ -823,7 +872,7 @@ impl Worker {
         let request = self.request();
         *self.mailbox.session.lock().unwrap() = None;
         let id = request.id;
-        let _ = self.service.tx.send(Command::Lookup { request, query, selection, rescan });
+        self.service.send(Command::Lookup { request, query, selection, rescan });
         id
     }
     pub fn catalog(&self, rescan: bool) -> u64 {
@@ -835,21 +884,21 @@ impl Worker {
         }
         let request = self.request();
         let id = request.id;
-        let _ = self.service.tx.send(Command::Catalog { request, set: set.into(), rescan });
+        self.service.send(Command::Catalog { request, set: set.into(), rescan });
         id
     }
     pub fn edit(&self, edit: Edit) -> u64 {
         self.service.revision.fetch_add(1, Ordering::Relaxed);
         let request = self.request();
         let id = request.id;
-        let _ = self.service.tx.send(Command::Edit { request, edit });
+        self.service.send(Command::Edit { request, edit });
         id
     }
     pub fn retry(&self, set: &str, dictionary: &str) -> u64 {
         self.service.revision.fetch_add(1, Ordering::Relaxed);
         let request = self.request();
         let id = request.id;
-        let _ = self.service.tx.send(Command::Retry { request, set: set.into(), dictionary: dictionary.into() });
+        self.service.send(Command::Retry { request, set: set.into(), dictionary: dictionary.into() });
         id
     }
     pub fn revision(&self) -> u64 {
@@ -862,7 +911,14 @@ impl Worker {
             mailbox: self.mailbox.clone(),
             revision: self.service.revision.load(Ordering::Relaxed),
         };
-        let _ = self.service.tx.send(Command::Open { request, dictionary: dictionary.into() });
+        self.service.send(Command::Open { request, dictionary: dictionary.into() });
+    }
+    /// Opens the indexes a lookup will search, in the background, so the
+    /// first lookup in a book is as quick as the ones after it. Any request
+    /// from any client stops it.
+    pub fn prepare(&self) {
+        let ticket = self.service.sent.load(Ordering::Relaxed);
+        let _ = self.service.tx.send(Command::Prepare(ticket));
     }
     pub fn receive(&self) -> Option<Reply> {
         self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
@@ -889,12 +945,12 @@ impl Worker {
         self.mailbox.latest.fetch_add(1, Ordering::Relaxed);
         *self.mailbox.result.lock().unwrap() = None;
         *self.mailbox.session.lock().unwrap() = None;
-        let _ = self.service.tx.send(Command::Release);
+        self.service.send(Command::Release);
     }
     pub fn flush(&self) -> anyhow::Result<()> {
         self.cancel();
         let (tx, rx) = mpsc::channel();
-        self.service.tx.send(Command::Flush(tx))?;
+        self.service.send(Command::Flush(tx));
         rx.recv()?.map_err(|e| anyhow::anyhow!("Couldn't save dictionary preferences: {e}"))
     }
 }

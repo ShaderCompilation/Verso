@@ -343,6 +343,28 @@ fn lookups_match_across_yo_and_stress_marks_and_exact_spelling_comes_first() -> 
 }
 
 #[test]
+fn large_dictionaries_get_more_buckets_and_still_find_every_word() -> Result<()> {
+    let f = Fixture::new();
+    let words: Vec<_> = (0..40_000).map(|i| (format!("word{i}"), format!("Meaning {i}."))).collect();
+    let pairs: Vec<_> = words.iter().map(|(w, m)| (w.as_str(), m.as_str())).collect();
+    f.install_words(false, false, &pairs)?;
+    let mut backend = f.backend()?;
+    let (cache, _) = f.cache_files()?.pop().unwrap();
+    // 40,001 entries: 32,768 buckets of 8 bytes after the 64-byte signature.
+    let header = 64 + 32_768 * 8;
+    assert!(fs::metadata(&cache)?.len() > header);
+    for i in [0, 1, 777, 20_000, 39_999] {
+        assert!(contents(&backend.lookup(&format!("word{i}"))?).contains(&format!("Meaning {i}.")), "{i}");
+    }
+    assert!(backend.lookup("word40000")?.is_empty());
+    // A cache cut off inside its bucket table is rebuilt, not trusted.
+    drop(backend);
+    fs::OpenOptions::new().write(true).open(&cache)?.set_len(header - 8)?;
+    assert!(contents(&f.backend()?.lookup("word5")?).contains("Meaning 5."));
+    Ok(())
+}
+
+#[test]
 fn caches_from_before_the_key_fold_rebuild_once() -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let f = Fixture::new();

@@ -475,6 +475,40 @@ fn open_indexes_outlive_the_lookup_and_definitions_open_only_to_show_one() {
 }
 
 #[test]
+fn prepare_opens_the_searched_indexes_and_stops_when_asked() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    install(&f.join("dictionaries/b.ifo"), "B", "other");
+    install(&f.join("dictionaries/c.ifo"), "C", "third");
+    let mut inner = inner(&f);
+    inner.edit_preferences(Edit::Disabled { set: DEFAULT.into(), dictionary: "c.ifo".into(), disabled: true }).unwrap();
+    // Cancelled before the first index: nothing opens.
+    inner.prepare(&|| false);
+    assert!(inner.probes.is_empty());
+    inner.prepare(&|| true);
+    let mut open: Vec<_> = inner.probes.keys().cloned().collect();
+    open.sort();
+    assert_eq!(open, ["a.ifo", "b.ifo"], "only dictionaries some set searches");
+    assert!(inner.definitions.is_none(), "definitions open only to show an entry");
+    // The lookup reuses them: A's index file is gone from disk.
+    for e in fs::read_dir(f.store.dictionary_cache()).unwrap() {
+        fs::remove_file(e.unwrap().path()).unwrap();
+    }
+    assert_eq!(inner.lookup("thunder", &|| true).0.as_deref(), Some("a.ifo"));
+}
+
+#[test]
+fn a_request_from_any_client_stops_a_running_prepare() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    let ticket = f.worker.service.sent.load(Ordering::Relaxed);
+    f.worker.prepare();
+    // A lookup sent after it moves the send count on, and still completes.
+    assert!(matches!(f.lookup("thunder").state, Some(State::Definition { .. })));
+    assert!(f.worker.service.sent.load(Ordering::Relaxed) > ticket);
+}
+
+#[test]
 fn a_failed_read_closes_the_index_so_the_next_lookup_rebuilds_it() {
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
