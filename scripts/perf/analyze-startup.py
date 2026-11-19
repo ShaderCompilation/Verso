@@ -30,18 +30,34 @@ def summarize(run, name):
     collections = ''
     if marks:
         mark = float(marks[0][0])
-        update = next(s for s in sends if s[2] == first[2] and float(s[0]) >= mark)
-        collections = round((float(update[0]) - mark) * 1000, 4)
+        update = next((s for s in sends if s[2] == first[2] and float(s[0]) >= mark), None)
+        # A tap that drew nothing (missed) leaves the cell empty.
+        collections = round((float(update[0]) - mark) * 1000, 4) if update else ''
     # The background pre-layout process logs its own engine start ("prelayout]").
-    fonts = re.search(r'crengine ready: \d+ fonts registered in ([\d.]+)(ns|µs|ms|s)',
+    fonts = re.search(r'crengine ready: \d+ fonts registered(?: \(\d+ from the font list\))? in ([\d.]+)(ns|µs|ms|s)',
                       '\n'.join(line for line in logs.splitlines() if 'prelayout]' not in line))
     font_ms = float(fonts[1]) * {'ns': 1e-6, 'µs': .001, 'ms': 1, 's': 1000}[fonts[2]] if fonts else ''
+    listed = re.search(r'\((\d+) from the font list\)', logs)
+    # immediate-open: when the tap came after the first frame, and tap → the reader's first page.
+    tap_after_ms = open_ms = ''
+    opens = [s for s in trace if s[1] == 'MARK' and s[3] == 'open']
+    if opens:
+        tap = float(opens[0][0])
+        tap_after_ms = round((tap - float(first[0])) * 1000, 4)
+        # The first full-screen request: the pressed card is a smaller update.
+        page = next((s for s in sends if s[2] == first[2] and float(s[0]) >= tap
+                     and int(s[-2]) >= 1000 and int(s[-1]) >= 800), None)
+        open_ms = round((float(page[0]) - tap) * 1000, 4) if page else ''
+    layout = re.search(r'opened book: parse (\d+) ms, layout (\d+) ms', logs)
     row = dict(run=name, variant=run['variant'], binary_sha256=run.get('binary_sha256', ''),
                fixture=run['fixture'], mode=run['mode'],
                startup_request_ms=round((float(first[0]) - start) * 1000, 4),
                startup_completion_ms=round((float(wait[4]) - start) * 1000, 4),
                background_complete_ms=stage('background complete'),
                first_collections_request_ms=collections, font_init_ms=font_ms,
+               fonts_from_list=listed[1] if listed else '', tap_after_first_frame_ms=tap_after_ms,
+               open_request_ms=open_ms, open_parse_ms=layout[1] if layout else '',
+               open_layout_ms=layout[2] if layout else '',
                collections_build_ms=stage('collections'), state_reads_ms=stage('cached states'),
                view_ms=stage('view'), clean_exit=True)
     for label in ['first_frame', 'background_complete', 'first_collections', 'reader']:

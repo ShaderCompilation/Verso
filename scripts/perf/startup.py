@@ -117,6 +117,9 @@ def main():
     parser.add_argument('--installed', action='store_true', help='Reuse the variant executable already installed by an earlier run')
     parser.add_argument('--collections-tap', default='950,200',
                         help='Collections tab position (baseline 950,200; three-tab Home 636,230)')
+    parser.add_argument('--tap-after', type=float, metavar='SECONDS',
+                        help='immediate-open: tap this long after the first frame, timed on the device '
+                             '(the default taps after the first-frame memory sample, 1.6-2.6 s after start)')
     parser.add_argument('--summary', choices=['copied', 'missing', 'seeded'], default='copied',
                         help='Home summary: as copied, removed (migration), or the saved real-library seed')
     args = parser.parse_args()
@@ -188,16 +191,25 @@ def main():
                     result['samples'][label] = dict(stat=records.splitlines()[0], status=records, io=records,
                                                    memory=memory(pid))
 
-                sample('first_frame')
                 probe = f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe tap {pid}'
-                if mode == 'immediate-open':
+                if mode == 'immediate-open' and args.tap_after is not None:
+                    # One shell on the device, so SSH round trips don't delay the tap.
+                    remote(f'while ! grep -q "first frame on screen" {APP}/verso.log; do usleep 10000; done; '
+                           f'usleep {int(args.tap_after * 1e6)}; {probe} 1 1 prime; {probe} 400 400 open')
+                    wait(f'grep -q "book first page requested" {APP}/verso.log')
+                    sample('reader')
+                    result['tap_after_s'] = args.tap_after
+                elif mode == 'immediate-open':
+                    sample('first_frame')
                     # Prime both axes outside the UI, then tap the resume card.
                     remote(f'{probe} 1 1 prime; {probe} 400 400 open')
                     wait(f'grep -q "book first page requested" {APP}/verso.log')
                     sample('reader')
                 elif mode == 'lifecycle':
+                    sample('first_frame')
                     result['lifecycle'] = lifecycle(probe, state, pid)
                 else:
+                    sample('first_frame')
                     wait(f'grep -q "startup stage: background complete" {APP}/verso.log')
                     sample('background_complete')
                     remote(f'{probe} 1 1 prime; {probe} {args.collections_tap.replace(",", " ")} first_collections')
@@ -207,7 +219,10 @@ def main():
                 lines = remote(f'cat {APP}/verso.log').splitlines()
                 result['timings'] = [line for line in lines if any(key in line for key in [
                     'startup stage:', 'first frame on screen', 'library covers:', 'library scan:',
-                    'library identities complete', 'crengine ready:'])]
+                    'library identities complete', 'crengine ready:', 'library warm:'])]
+                # Book opens without the path: parse/layout times show layout cache misses.
+                result['timings'] += [re.sub(r'opened /.*?: parse', 'opened book: parse', line)
+                                      for line in lines if 'opened /' in line]
                 result['trace'] = remote(f'cat {trace}')
                 if fixture == 'real' and mode == 'startup' and args.summary == 'missing':
                     remote(f'grep -q {Q('"complete":true')} {state}/home.json && cp {state}/home.json {APP}/seed-home.json')
