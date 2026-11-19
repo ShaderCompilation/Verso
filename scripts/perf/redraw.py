@@ -23,6 +23,17 @@ def upload(path, data):
     remote('cat > ' + Q(path), data)
 
 
+def patch_launcher(app_dir, prefix, repo=None):
+    """Build an isolated copy of Verso's launcher, failing loudly if markers move."""
+    root = Path(repo) if repo is not None else Path(__file__).resolve().parents[2]
+    text = (root / 'dist/kindle/verso/verso.sh').read_text()
+    app_marker = 'APP_DIR="${ROOT}/verso"'
+    tmp_marker = '${TMP}/verso-launcher'
+    assert app_marker in text, f'Missing {app_marker} in verso.sh'
+    assert tmp_marker in text, f'Missing {tmp_marker} in verso.sh'
+    return text.replace(app_marker, f'APP_DIR="{app_dir}"').replace(tmp_marker, prefix)
+
+
 def wait_for(command, seconds=30):
     until = time.monotonic() + seconds
     while time.monotonic() < until:
@@ -88,6 +99,8 @@ def main():
                         help='Sample settled idle CPU outside the timed turns (0 skips)')
     parser.add_argument('--page-layout', type=json.loads,
                         help='JSON for settings.page_layout (reader bars and margins); default is the old footer')
+    parser.add_argument('--reading-speed', type=float,
+                        help='Seed reading-speed.json (chars/sec, 10 samples) so time-left bar items render')
     parser.add_argument('--queued-input', action='store_true',
                         help='Allow updates after subsequent touches; require 24 taps, frames and saved-page advances')
     parser.add_argument('--annotation-count', type=int, choices=[0, 100, 1000])
@@ -112,21 +125,24 @@ def main():
     binary_sha256 = remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0]
     assert binary_sha256 == hashlib.sha256(args.binary.read_bytes()).hexdigest()
     book_sha256 = remote(f'sha256sum {APP}/books/book.epub').split()[0]
-    launcher = Path('dist/kindle/verso/verso.sh').read_text()
-    launcher = launcher.replace('APP_DIR="/mnt/us/verso"', f'APP_DIR="{APP}"')
-    launcher = launcher.replace('/tmp/verso-launcher', '/tmp/verso-redraw-launcher')
+    launcher = patch_launcher(APP, '/tmp/verso-redraw-launcher')
     upload(APP + '/launcher.sh', launcher.encode())
     run = args.variant + '-' + str(time.time_ns())
     state = APP + '/' + run + '.state'
     trace = APP + '/' + run + '.trace'
     remote(f'mkdir -p {state}; chmod 755 {APP}/bin/probe {APP}/bin/{args.variant}/verso')
-    settings = {'typography': {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0,
-                              'margins': 0, 'justify': True}, 'footer': True,
-                'library_folders': [APP + '/books'], 'library_sort': 'title',
+    typography = {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0, 'justify': True}
+    settings = {'typography': typography, 'library_folders': [APP + '/books'], 'library_sort': 'title',
                 'orientation': args.orientation, 'page_flash': args.page_flash}
     if args.page_layout is not None:
         settings['page_layout'] = args.page_layout
+    else:
+        typography['margins'] = 0
+        settings['footer'] = True
     upload(state + '/settings.json', json.dumps(settings).encode())
+    if args.reading_speed is not None:
+        upload(state + '/reading-speed.json',
+               json.dumps({'chars_per_sec': args.reading_speed, 'samples': 10}).encode())
     if args.annotation_count is not None:
         assert args.experiment == 'annotations' and args.annotation_fixture
         from annotation_fixture import fixture_tar
@@ -188,16 +204,18 @@ def main():
                f'VERSO_BENCH_TRACE={trace} {APP}/bin/probe mark turns_end; '
                f'cat /proc/{pid}/stat > {APP}/{run}.end.stat; '
                f'for t in /proc/{pid}/task/*; do cat "$t/stat"; done > {APP}/{run}.end.tasks; '
-               f'head -c 2157312 /dev/fb0 | sha256sum > {APP}/{run}.page.hash')
+               f'head -c 2157312 /dev/fb0 | sha256sum > {APP}/{run}.page.hash; '
+               f'head -c 1928352 /dev/fb0 | tail -c 1699392 | sha256sum > {APP}/{run}.body.hash')
         # Keep private logs on-device. Export numeric frame/gesture data only.
         frames = remote(f'grep -E "frame: drawn|Down\\(|Tap\\(|presented [0-9]+ update" {APP}/verso.log')
         results = {'variant': args.variant, 'run': run, 'frames': frames,
                    'binary_sha256': binary_sha256, 'identity_check_timing': 'before_launch',
                    'book_sha256': book_sha256,
                    'orientation': args.orientation, 'page_flash': args.page_flash,
-                   'font_size_pt': args.font_size_pt,
+                   'font_size_pt': args.font_size_pt, 'page_layout': args.page_layout,
                    'queued_input': args.queued_input, 'initial_position': initial_position,
                    'render_log': remote(f'grep "rendered in" {APP}/verso.log || true'),
+                   'bars_log': remote(f'grep "bars drawn in" {APP}/verso.log || true'),
                    'startup_log': remote(f'grep -E "startup stage:|book .*parse|book .*layout" {APP}/{run}.setup.log || true'),
                    'annotation_count': args.annotation_count,
                    'annotation_setup': remote(f'grep -E "annotation resolution:|book first page" {APP}/{run}.setup.log || true'),
@@ -205,7 +223,8 @@ def main():
                    'persistence': remote(f'grep -E "position write:|after_present:" {APP}/verso.log || true'),
                    'setup_frames': remote(f'grep "frame: drawn" {APP}/{run}.setup.log'),
                    'trace': remote(f'cat {trace}'),
-                   'page_hash': remote(f'cat {APP}/{run}.page.hash').split()[0]}
+                   'page_hash': remote(f'cat {APP}/{run}.page.hash').split()[0],
+                   'body_hash': remote(f'cat {APP}/{run}.body.hash').split()[0]}
         setup_log = remote(f'cat {APP}/{run}.setup.log')
         results['open_stats'] = [dict(parse_ms=int(p), layout_ms=int(l), pages=int(n)) for p, l, n in
                                  re.findall(r': parse (\d+) ms, layout (\d+) ms, (\d+) pages', setup_log)]

@@ -85,8 +85,9 @@ def summarize(path):
         return round(sorted(values)[math.ceil(.95 * len(values)) - 1], 4) if values else 0
     present = [duration(*m) for m in re.findall(r'presented \d+ update\(s\) in ([\d.]+)(ms|µs|ns|s)', r['frames'])]
     rendered = [duration(*m) for m in re.findall(r'rendered in ([\d.]+)(ms|µs|ns|s)', r.get('render_log', ''))]
+    bars = [int(v) / 1000 for v in re.findall(r'bars drawn in (\d+) us', r.get('bars_log', ''))]
     flash_ms = [(float(w[4]) - float(w[0])) * 1000 for w in waits]
-    for name, values in [('present', present), ('render', rendered), ('flash_wait', flash_ms)]:
+    for name, values in [('present', present), ('render', rendered), ('flash_wait', flash_ms), ('bars', bars)]:
         result[name + '_count'] = len(values)
         result[name + '_median_ms'] = round(statistics.median(values), 4) if values else 0
         result[name + '_p95_ms'] = percentile(values)
@@ -156,10 +157,16 @@ def main():
     for path, run in zip(args.inputs, runs):
         raw = json.loads(path.read_text())
         key = (raw.get('book_sha256'), run['orientation'], run['page_flash'],
-               run['turn_delay_us'], run['font_size_pt'], raw.get('annotation_count')) if args.workloads else 'comparison'
+               run['turn_delay_us'], run['font_size_pt'], raw.get('annotation_count'),
+               json.dumps(raw.get('page_layout'), sort_keys=True)) if args.workloads else 'comparison'
         groups.setdefault(key, []).append(run)
-    for group in groups.values():
-        assert len({r['page_hash'] for r in group}) == 1, 'Different final pages within workload'
+    for key, group in groups.items():
+        dynamic_bar = args.workloads and any(k in (key[-1] or '') for k in ('clock_', 'battery'))
+        if dynamic_bar:
+            body_hashes = {json.loads(p.read_text()).get('body_hash') for p, r in zip(args.inputs, runs) if r in group}
+            assert len(body_hashes) == 1 and None not in body_hashes, 'Different final page bodies within dynamic-bar workload'
+        else:
+            assert len({r['page_hash'] for r in group}) == 1, 'Different final pages within workload'
         # Matched waveforms establish identical full-flash cadence as well as pages.
         patterns = [[(e['waveform'], e['mode']) for e in events if e['run'] == r['run']] for r in group]
         assert all(p == patterns[0] for p in patterns), 'Different waveforms within workload'

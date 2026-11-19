@@ -13,7 +13,7 @@ import re
 import shlex
 import subprocess
 import time
-from redraw import memory
+from redraw import memory, patch_launcher
 
 APP = '/mnt/us/verso/startup-check'
 Q = shlex.quote
@@ -141,8 +141,7 @@ def main():
     remote(f'chmod 755 {APP}/bin/{Q(args.variant)}/verso {APP}/bin/probe')
     binary_sha256 = remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0]
     assert binary_sha256 == hashlib.sha256(args.binary.read_bytes()).hexdigest(), 'Installed variant differs from binary'
-    launcher = (repo / 'dist/kindle/verso/verso.sh').read_text().replace('APP_DIR="/mnt/us/verso"', f'APP_DIR="{APP}"')
-    launcher = launcher.replace('/tmp/verso-launcher', '/tmp/verso-startup-launcher')
+    launcher = patch_launcher(APP, '/tmp/verso-startup-launcher', repo)
     upload(APP + '/launcher.sh', launcher.encode())
     results = json.loads(args.output.read_text()) if args.output.exists() else []
     combos = [('real', 'startup'), ('large', 'startup'), ('real', 'immediate-open'), ('real', 'lifecycle')]
