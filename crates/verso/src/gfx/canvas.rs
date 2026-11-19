@@ -322,9 +322,14 @@ impl Canvas {
         assert!(stride >= self.height as usize && dst.len() >= (cw - 1 - x0) * stride + y1, "panel too small");
         // Turn a band of 64 columns (one cache line of each canvas row) at a
         // time in an ordinary buffer, in 4×4 blocks of 32-bit words, then copy
-        // each finished panel row in one go. On the Kindle a full page takes
-        // ~15–19 ms this way; byte-by-byte turning took ~30 ms.
+        // each finished panel row in one go. Walking down a band crosses a
+        // 4 KiB page every two or three rows, which the hardware prefetcher
+        // doesn't follow, so the rows a few blocks ahead are requested
+        // explicitly: on the Kindle a full page takes ~5 ms this way and
+        // ~13 ms without (the arithmetic is not the cost: NEON 8×16 blocks
+        // measured no faster). Byte-by-byte turning took ~30 ms.
         const BAND: usize = 64;
+        const AHEAD: usize = 8;
         let h = y1 - y0;
         let mut band = vec![0u8; BAND * h];
         for bx in (x0..x1).step_by(BAND) {
@@ -337,6 +342,12 @@ impl Canvas {
             assert!(y1 <= self.height as usize && bx + whole <= cw && whole * h <= band.len());
             let (src, out) = (self.gray.as_ptr(), band.as_mut_ptr());
             while y + 4 <= y1 {
+                for k in y + AHEAD..y + AHEAD + 4 {
+                    // A row's 64 bytes may straddle two cache lines.
+                    let row = src.wrapping_add(k * cw + bx);
+                    prefetch(row);
+                    prefetch(row.wrapping_add(BAND - 1));
+                }
                 let at = y * cw + bx;
                 for i in (0..whole).step_by(4) {
                     // SAFETY: in bounds as asserted above; unaligned 32-bit
@@ -366,6 +377,20 @@ impl Canvas {
         }
         Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w))
     }
+}
+
+/// Asks the CPU to start loading the cache line holding `p`. Only a hint:
+/// any address is fine, including one past the end of a buffer.
+#[inline(always)]
+fn prefetch(p: *const u8) {
+    // SAFETY: PLD reads nothing architecturally and never faults, whatever
+    // the address.
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        std::arch::asm!("pld [{p}]", p = in(reg) p, options(nostack, preserves_flags, readonly))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    let _ = p;
 }
 
 /// Transposes a 4×4 block of bytes, one row per word (byte `j` of row `i`
@@ -614,14 +639,27 @@ mod tests {
         let mut c = Canvas::new(w as u32, h as u32);
         let pixels: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
         c.blit_gray(c.bounds(), &pixels, w);
-        let rect = Rect::new(5, 3, 160, 60);
-        let mut out = vec![9u8; h * w];
-        c.copy_gray_rotated(rect, &mut out, h);
-        for y in 0..h {
-            for x in 0..w {
-                let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
-                let want = if inside { pixels[y * w + x] } else { 9 };
-                assert_eq!(out[(w - 1 - x) * h + y], want, "canvas ({x}, {y})");
+        // The whole canvas, then rectangles with every block and band
+        // remainder, down to a single pixel in the corner.
+        let rects = [
+            c.bounds(),
+            Rect::new(5, 3, 160, 60),
+            Rect::new(0, 0, 64, 4),
+            Rect::new(1, 2, 65, 9),
+            Rect::new(17, 7, 129, 23),
+            Rect::new(3, 0, 15, 67),
+            Rect::new(100, 40, 7, 3),
+            Rect::new(170, 66, 1, 1),
+        ];
+        for rect in rects {
+            let mut out = vec![9u8; h * w];
+            c.copy_gray_rotated(rect, &mut out, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
+                    let want = if inside { pixels[y * w + x] } else { 9 };
+                    assert_eq!(out[(w - 1 - x) * h + y], want, "{rect:?}: canvas ({x}, {y})");
+                }
             }
         }
     }
