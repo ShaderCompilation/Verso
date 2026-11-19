@@ -4132,8 +4132,8 @@ mod tests {
             let screen = Rect::new(0, 0, w, h);
             let mut sheet = NameSheet::new(&t, screen, NameOperation::Create("/books".into()));
             for _ in 0..3 {
-                // The language key is at the left of the last row.
-                let p = Point::new(t.margin + t.target / 2, screen.bottom() - t.target / 3);
+                // The globe key is second from the left on the bottom row (1.5..2.5 of 10 units).
+                let p = Point::new(screen.w / 5, screen.bottom() - t.target / 2);
                 sheet.keyboard.on_gesture(&Gesture::Down(p), &t);
                 sheet.keyboard.on_gesture(&Gesture::Tap(p), &t);
                 assert!(

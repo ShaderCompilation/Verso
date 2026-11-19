@@ -14,8 +14,7 @@ pub const INK2: u8 = 0x55;
 pub const INK3: u8 = 0x99;
 /// Dividers, slider tracks.
 pub const LINE: u8 = 0xbb;
-/// Subtle fills (rarely).
-#[allow(dead_code)] // no widget uses it yet
+/// Subtle fills (e.g. keyboard function keys).
 pub const FILL: u8 = 0xee;
 /// Background.
 pub const PAPER: u8 = 0xff;

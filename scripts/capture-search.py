@@ -57,8 +57,8 @@ def capture(name, steps=(), folder=None, page=0, small=False):
 
 state = capture("entry", search)
 capture("english", [*search, "--text", "JOURNEY"])
-capture("russian-keyboard", [*search, "--tap", "221,1630", "--text", "ЛЕГЕНДЫ"])
-capture("danish-keyboard", [*search, "--tap", "172,1630", "--tap", "172,1630", "--text", "ÆØÅ"])
+capture("russian-keyboard", [*search, "--tap", "263,1635", "--text", "ЛЕГЕНДЫ"])
+capture("danish-keyboard", [*search, "--tap", "263,1635", "--tap", "263,1635", "--text", "ÆØÅ"])
 capture("no-matches", [*search, "--text", "no-such-book", *hide])
 capture("filename", [*search, "--text", "Fixture 29", *hide])
 capture("shortcut-letters", [*search, "--text", "qspv"])
@@ -66,7 +66,7 @@ capture("scoped", [*search, "--text", "journey", *hide, "--tap", "920,350"], roo
 capture("result-page2", [*search, "--text", "journey", *hide, "--swipe", "1100,800,200,800"])
 capture("book-menu", [*search, "--text", "ЛЕГЕНДЫ", *hide, "--long-press", "190,700"])
 capture("restored-folder", [*search, "--text", "journey", *hide, "--tap", "758,77"], root / "Fiction/Nested", 1)
-capture("small-keyboard", ["--tap", "316,43", "--text", "Легенды", "--tap", "97,762"], small=True)
+capture("small-keyboard", ["--tap", "316,43", "--text", "Легенды", "--tap", "125,766"], small=True)
 
 # Cached-only fixture: intentionally offline paths, no source EPUB access needed.
 index = json.loads((state / "library.json").read_text())
