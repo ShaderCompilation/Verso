@@ -13,7 +13,7 @@ sha2 = "0.10"
 flate2 = "1.1"
 tar = { version = "0.4.46", default-features = false }
 anyhow = { version = "1.0.104", optional = true }
-zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
 
 [features]
 # The packaging side: reading staged components, writing archives, the
