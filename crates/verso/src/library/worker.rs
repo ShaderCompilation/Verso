@@ -1,6 +1,7 @@
 //! One coalescing library worker. Progress/errors and index content are published
 //! separately: status is small and always delivered, while an index is cloned,
 //! published and saved only after its content actually changed.
+use super::collections::Collections;
 use super::home::Summary;
 use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
@@ -8,6 +9,7 @@ use crate::store::{Store, book_id};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -35,6 +37,12 @@ pub struct Snapshot {
     pub index: LibraryIndex,
     pub partial: bool,
     pub revision: u64,
+    /// The Collections hierarchy of `index`, built here instead of on the UI
+    /// thread, with the folder list it was built for.
+    pub collections: Option<(Vec<PathBuf>, Arc<Collections>)>,
+    /// The index as saved before this launch, unchanged. The first pass
+    /// publishes it so browsing needn't read `library.json` on the UI thread.
+    pub cached: bool,
 }
 #[derive(Default)]
 struct Shared {
@@ -164,6 +172,11 @@ struct Background {
     attempted: HashSet<String>,
     startup: Instant,
     revision: u64,
+    /// Whether any index went to the UI yet.
+    published: bool,
+    /// The last hierarchy built, keyed by a hash of what it depends on, so
+    /// cover and metadata changes reuse it.
+    collections: Option<(u64, Arc<Collections>)>,
 }
 impl Background {
     fn run(mut self) {
@@ -252,17 +265,24 @@ impl Background {
         self.set_status(true, true, &errors);
         let mut checkpoint_index = None;
         let result = {
-            let (channel, store) = (&self.channel, &self.store);
+            let (channel, store, roots, built) = (&self.channel, &self.store, &self.roots, &mut self.collections);
             // Checkpoints happen only when the scan found new files to read.
-            scan_roots(&self.roots, &self.index, retry, &|| channel.yield_point(), |checkpoint| {
+            scan_roots(roots, &self.index, retry, &|| channel.yield_point(), |checkpoint| {
                 if let Err(e) = store.save_library(checkpoint) {
                     push_error(&mut errors, format!("Couldn't save library: {e}"));
                 }
-                channel.content(Snapshot { index: checkpoint.clone(), partial: true, revision: self.revision });
+                channel.content(Snapshot {
+                    index: checkpoint.clone(),
+                    partial: true,
+                    revision: self.revision,
+                    collections: Some((roots.clone(), hierarchy(built, checkpoint, roots))),
+                    cached: false,
+                });
                 checkpoint_index = Some(checkpoint.clone());
             })
         };
         let checkpointed = checkpoint_index.is_some();
+        self.published |= checkpointed;
         let Some(scan) = result else {
             // A folder edit or shutdown cancelled the scan after it showed new
             // books. Keep that index, which is already saved and published, so
@@ -482,9 +502,23 @@ impl Background {
         self.unpublished = true;
         self.home_stale = true;
     }
+    /// Sends a changed index to the UI. The first call sends it even when
+    /// unchanged (`cached`), with its hierarchy, so the first visit to
+    /// Collections or All books does no index work on the UI thread.
     fn publish(&mut self) {
-        if std::mem::take(&mut self.unpublished) {
-            self.channel.content(Snapshot { index: self.index.clone(), partial: false, revision: self.revision });
+        let changed = std::mem::take(&mut self.unpublished);
+        if changed || !self.published {
+            let started = Instant::now();
+            let collections = hierarchy(&mut self.collections, &self.index, &self.roots);
+            self.channel.content(Snapshot {
+                index: self.index.clone(),
+                partial: false,
+                revision: self.revision,
+                collections: Some((self.roots.clone(), collections)),
+                cached: !changed && !self.published,
+            });
+            self.published = true;
+            log::debug!("library published: {} books in {:?}", self.index.books.len(), started.elapsed());
         }
     }
     fn save(&mut self, errors: &mut Vec<String>, what: &str) {
@@ -536,6 +570,26 @@ impl Background {
     }
 }
 
+/// `index`'s Collections hierarchy under `roots`, reusing `cache` when no
+/// book path, availability, empty folder or root changed.
+fn hierarchy(cache: &mut Option<(u64, Arc<Collections>)>, index: &LibraryIndex, roots: &[PathBuf]) -> Arc<Collections> {
+    let mut hasher = DefaultHasher::new();
+    roots.hash(&mut hasher);
+    for book in &index.books {
+        (book.available, &book.path).hash(&mut hasher);
+    }
+    index.empty_folders.hash(&mut hasher);
+    let key = hasher.finish();
+    if let Some((cached, collections)) = cache
+        && *cached == key
+    {
+        return collections.clone();
+    }
+    let collections = Arc::new(Collections::from_index(index, roots));
+    *cache = Some((key, collections.clone()));
+    collections
+}
+
 pub struct Worker {
     shared: Arc<(Mutex<Shared>, Condvar)>,
     join: Option<JoinHandle<()>>,
@@ -563,6 +617,8 @@ impl Worker {
                     attempted: HashSet::new(),
                     startup,
                     revision: 0,
+                    published: false,
+                    collections: None,
                 }
                 .run()
             })
@@ -1179,12 +1235,12 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        // Returns the last changed index (if any) and the final status.
+        // Returns the last published snapshot (if any) and the final status.
         let finished = |worker: &Worker| {
             let (mut content, mut status) = (None, None);
             wait(|| {
                 if let Some(snapshot) = worker.take() {
-                    content = Some(snapshot.index);
+                    content = Some(snapshot);
                 }
                 if let Some(next) = worker.take_status() {
                     let done = !next.working;
@@ -1195,12 +1251,12 @@ mod tests {
             });
             // Content published just before the final status is already queued.
             if let Some(snapshot) = worker.take() {
-                content = Some(snapshot.index);
+                content = Some(snapshot);
             }
             (content, status.unwrap())
         };
         let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
-        let index = finished(&worker).0.expect("a new library publishes its index");
+        let index = finished(&worker).0.expect("a new library publishes its index").index;
         let book = index.books[0].clone();
         let Cover::Ready(key) = book.cover.clone() else { panic!("fixture cover missing") };
         assert!(covers::load_small(&store, &key).is_ok_and(|s| s.width() == covers::SMALL_WIDTH));
@@ -1232,8 +1288,10 @@ mod tests {
         assert!(covers::load_small(&store, &key).is_ok_and(|s| s.width() == covers::SMALL_WIDTH));
         drop(worker);
         // A corrupt, current cache file is reused by the unchanged pass without
-        // decoding. The pass publishes no index and writes no library file, but
-        // still delivers completion and errors (here an unreadable extra folder).
+        // decoding. The pass writes no library file and hands over the saved
+        // index only marked unchanged, with its hierarchy, so browsing needn't
+        // read it again. It still delivers completion and errors (here an
+        // unreadable extra folder).
         std::fs::write(store.cover_path(&key), b"corrupt")?;
         std::fs::write(store.small_cover_path(&key), b"corrupt")?;
         let library_file = root.join("state/library.json");
@@ -1243,7 +1301,11 @@ mod tests {
         let roots = vec![books.clone(), root.join("missing")];
         let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
         let (content, status) = finished(&worker);
-        assert!(content.is_none(), "an unchanged pass publishes no index");
+        let content = content.expect("the first pass hands over the saved index");
+        assert!(content.cached && !content.partial && content.index == store.library());
+        let (built_for, tree) = content.collections.expect("with its hierarchy");
+        assert_eq!(built_for, roots);
+        assert_eq!(tree.folders[&books].count, 1);
         assert!(worker.take_home().is_none(), "a complete summary is not rebuilt");
         assert_eq!(std::fs::metadata(&home_file)?.modified()?, home_written, "nor rewritten");
         assert!(!status.scanning && status.errors.iter().any(|e| e.contains("missing")));
@@ -1267,7 +1329,7 @@ mod tests {
         file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))?;
         drop(file);
         let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
-        let changed = finished(&worker).0.expect("a changed book publishes the index");
+        let changed = finished(&worker).0.expect("a changed book publishes the index").index;
         let Cover::Ready(new_key) = changed.books[0].cover.clone() else { panic!("changed cover missing") };
         assert_ne!(new_key, key);
         assert!(covers::load(&store.cover_path(&new_key)).is_ok());
@@ -1280,23 +1342,23 @@ mod tests {
             books.join("added.epub"),
         )?;
         let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
-        let added = finished(&worker).0.expect("an added book publishes the index");
+        let added = finished(&worker).0.expect("an added book publishes the index").index;
         assert_eq!(added.books.iter().filter(|b| b.available).count(), 2);
         assert_eq!(store.library(), added);
         drop(worker);
         std::fs::remove_file(books.join("added.epub"))?;
         let worker = Worker::new(store.clone(), roots, Waker::new(|| {}));
-        let removed = finished(&worker).0.expect("a removed book publishes the index");
+        let removed = finished(&worker).0.expect("a removed book publishes the index").index;
         assert_eq!(removed.books.iter().filter(|b| b.available).count(), 1);
         // A new folder list applies without restarting the worker. Books in a
         // removed folder stay indexed as unavailable and return when re-added.
         let other = root.join("other");
         std::fs::create_dir_all(&other)?;
         worker.set_roots(vec![other.clone()]);
-        let moved = finished(&worker).0.expect("a changed folder list publishes the index");
+        let moved = finished(&worker).0.expect("a changed folder list publishes the index").index;
         assert!(moved.books.iter().all(|b| !b.available) && !moved.books.is_empty());
         worker.set_roots(vec![books.clone()]);
-        let back = finished(&worker).0.expect("re-adding the folder publishes the index");
+        let back = finished(&worker).0.expect("re-adding the folder publishes the index").index;
         assert_eq!(back.books.iter().filter(|b| b.available).count(), 1);
         assert_eq!(store.book(&book.id).position, reading.position, "reading state survives");
         drop(worker);

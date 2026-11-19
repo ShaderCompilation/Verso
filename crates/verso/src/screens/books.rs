@@ -170,7 +170,8 @@ pub struct Books {
     pending_home: Option<Summary>,
     pending_home_revision: u64,
     books: Vec<Book>,
-    collections: Collections,
+    /// Shared with the library worker, which builds it (see `use_collections`).
+    collections: Arc<Collections>,
     /// Preview picks for folder tiles shown so far.
     previews: Previews,
     /// What folder tiles show; changes when Settings closes.
@@ -310,7 +311,7 @@ impl Books {
             pending_home: None,
             pending_home_revision: 0,
             books: Vec::new(),
-            collections: Collections::default(),
+            collections: Arc::default(),
             previews: Previews::default(),
             folder_preview: settings.folder_preview,
             folders: Vec::new(),
@@ -386,23 +387,28 @@ impl Books {
         if self.browsing_ready {
             return;
         }
+        // Usually the worker's first pass has published the index with its
+        // hierarchy by now; reading and building them here is the fallback.
         let snapshot = self.pending.take();
         let complete = snapshot.as_ref().is_none_or(|s| !s.partial);
-        let (mut index, revision) = snapshot.map_or_else(|| (self.store.library(), 0), |s| (s.index, s.revision));
+        let (mut index, revision, built) =
+            snapshot.map_or_else(|| (self.store.library(), 0, None), |s| (s.index, s.revision, s.collections));
         // Before browsing, only Home deletions can be queued. Their removals
         // are idempotent, so replaying them over the saved index is safe even
         // when the worker already saved them.
+        let mut replayed = false;
         for (r, change) in &self.changes {
             if *r > revision {
                 change.apply(&mut index);
+                replayed = true;
             }
         }
         self.index = index;
         self.index_revision = revision;
         let started = std::time::Instant::now();
-        self.rebuild_collections();
+        let prebuilt = self.use_collections(built, replayed);
         log::info!(
-            "startup stage: collections books={} elapsed_us={}",
+            "startup stage: collections books={} elapsed_us={} prebuilt={prebuilt}",
             self.index.books.len(),
             started.elapsed().as_micros()
         );
@@ -432,7 +438,8 @@ impl Books {
                     && if let Some(search) = &self.search {
                         search.cache.matches(b, &search.folded, &search.scope)
                     } else {
-                        !in_collections || folder.is_some_and(|f| f.books.contains(&collections::normalize(&b.path)))
+                        !in_collections
+                            || folder.is_some_and(|f| f.books.contains(collections::normalize_cow(&b.path).as_ref()))
                     }
             })
             .cloned()
@@ -620,8 +627,24 @@ impl Books {
     /// Every new index or folder list goes through here, so preview picks,
     /// which hold index positions, never outlive their index.
     fn rebuild_collections(&mut self) {
-        self.collections = Collections::from_index(&self.index, &self.roots);
+        self.collections = Arc::new(Collections::from_index(&self.index, &self.roots));
         self.previews.index_changed();
+    }
+    /// Takes a hierarchy the worker built for the index just applied, unless
+    /// the folder list changed since or edits were replayed over that index.
+    /// Returns whether it could.
+    fn use_collections(&mut self, built: Option<(Vec<PathBuf>, Arc<Collections>)>, replayed: bool) -> bool {
+        match built {
+            Some((roots, collections)) if roots == self.roots && !replayed => {
+                self.collections = collections;
+                self.previews.index_changed();
+                true
+            }
+            _ => {
+                self.rebuild_collections();
+                false
+            }
+        }
     }
     /// Folders inside a folder share its parent, already shown in the path
     /// row, so their tiles give that line to the preview. Only configured
@@ -793,6 +816,15 @@ impl Books {
             cx.redraw();
         }
     }
+    /// A published index waits for touches and overlays in `pending`. The
+    /// saved index, unchanged, is only of use before browsing has read one.
+    fn receive(&mut self, snapshot: Snapshot, cx: &mut EventCx) {
+        if snapshot.cached && self.browsing_ready {
+            return;
+        }
+        self.pending = Some(snapshot);
+        self.apply_pending(cx);
+    }
     fn apply_pending(&mut self, cx: &mut EventCx) {
         if self.touching
             || self.menu.is_some()
@@ -828,9 +860,11 @@ impl Books {
             return;
         }
         if let Some(mut snapshot) = self.pending.take() {
+            let mut replayed = false;
             for (revision, change) in &self.changes {
                 if *revision > snapshot.revision {
                     change.apply(&mut snapshot.index);
+                    replayed = true;
                 }
             }
             let started = std::time::Instant::now();
@@ -838,7 +872,7 @@ impl Books {
             self.index = snapshot.index;
             self.index_revision = snapshot.revision;
             self.prune_changes();
-            self.rebuild_collections();
+            self.use_collections(snapshot.collections.take(), replayed);
             if let Some(search) = &mut self.search {
                 search.cache.sync(&self.index);
             }
@@ -2184,10 +2218,8 @@ impl Screen for Books {
             }
             self.errors = status.errors;
         }
-        // Only changed content arrives here; it waits for touches and overlays.
         if let Some(snapshot) = self.library.take() {
-            self.pending = Some(snapshot);
-            self.apply_pending(cx);
+            self.receive(snapshot, cx);
         }
         for reply in self.worker.drain() {
             match reply {
@@ -2767,7 +2799,7 @@ mod tests {
             let mut survivor = book(2);
             survivor.path = blocked;
             books.index.books.push(survivor);
-            books.collections = Collections::from_index(&books.index, &books.roots);
+            books.collections = Arc::new(Collections::from_index(&books.index, &books.roots));
             store.save_book("2", &BookState { progress: 1700, ..Default::default() }).unwrap();
             books.refresh(&t);
             books.start_selection(Target::Book("2".into()), cx);
@@ -2833,6 +2865,48 @@ mod tests {
             assert!(!books.search.as_ref().unwrap().current.enabled);
             books.toggle_search(cx);
             assert!(books.is_home());
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn browsing_takes_the_worker_hierarchy_unless_folders_or_edits_changed() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("prebuilt")?;
+        let index = store.library();
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        // An empty marker: taken as it is, while a tree built here has folders.
+        let tree = Arc::new(Collections::default());
+        let snapshot = |roots: Vec<PathBuf>, cached: bool| Snapshot {
+            index: index.clone(),
+            collections: Some((roots, tree.clone())),
+            cached,
+            ..Default::default()
+        };
+        books.pending = Some(snapshot(books.roots.clone(), true));
+        books.prepare_browsing();
+        assert!(Arc::ptr_eq(&books.collections, &tree) && books.index == index);
+        books.home_active = false;
+        with_cx(&t, screen, |cx| {
+            // Browsing has an index now; the unchanged copy is dropped.
+            books.receive(snapshot(books.roots.clone(), true), cx);
+            assert!(books.pending.is_none());
+            // A tree built for another folder list is rebuilt for this one.
+            books.receive(snapshot(vec!["/elsewhere".into()], false), cx);
+            assert!(!Arc::ptr_eq(&books.collections, &tree) && !books.collections.folders.is_empty());
+            books.receive(snapshot(books.roots.clone(), false), cx);
+            assert!(Arc::ptr_eq(&books.collections, &tree));
+            // So is one under edits made since its index was published.
+            let removed = index.books[0].path.clone();
+            books.changes.push((1, PathChange::Remove(removed.clone())));
+            books.receive(snapshot(books.roots.clone(), false), cx);
+            assert!(!Arc::ptr_eq(&books.collections, &tree));
+            assert!(!books.index.books.iter().any(|b| b.path == removed));
+            let folder = removed.parent().unwrap();
+            assert!(books.collections.folders.get(folder).is_none_or(|f| !f.books.contains(&removed)));
         });
         drop(books);
         std::fs::remove_dir_all(root)?;

@@ -132,6 +132,9 @@ pub enum Command {
         jump: u64,
     },
     Close,
+    /// Loads fonts and hyphenation, once the first frame is on screen. A
+    /// command sent before it, such as opening a book at once, loads them first.
+    Start,
     Shutdown,
 }
 pub enum Reply {
@@ -197,6 +200,13 @@ impl Worker {
                     let _ = results.send(r);
                     thread_waker.wake();
                 };
+                // Registering the fonts takes 0.5–0.8 s on the Kindle; waiting
+                // for the first frame keeps it from competing with drawing it.
+                let first = match commands.recv() {
+                    Ok(Command::Start) => None,
+                    Ok(Command::Shutdown) | Err(_) => return,
+                    Ok(command) => Some(command),
+                };
                 let engine = CreEngine::new(paths, dpi);
                 let engine = match engine {
                     Ok(e) => e,
@@ -209,7 +219,7 @@ impl Worker {
                 let mut doc: Option<CreDocument> = None;
                 let mut generation = 0;
                 let mut dimensions = (0, 0);
-                let mut pending = None;
+                let mut pending = first;
                 let mut resolution: Option<Resolution> = None;
                 let mut annotations: Vec<Annotation> = vec![];
                 let mut annotation_revision = 0;
@@ -409,7 +419,7 @@ impl Worker {
                                 doc = None;
                                 return Ok(());
                             }
-                            Command::Shutdown => return Ok(()),
+                            Command::Start | Command::Shutdown => return Ok(()),
                         }
                         if let Some(d) = &mut doc {
                             let pages = d.page_count();
@@ -474,6 +484,10 @@ impl Worker {
     }
     pub fn waker(&self) -> Waker {
         self.waker.clone()
+    }
+    /// Lets the book thread load fonts; see [`Command::Start`].
+    pub fn start(&self) {
+        self.send(Command::Start);
     }
     pub fn send(&self, c: Command) {
         if self.tx.send(c).is_err() {

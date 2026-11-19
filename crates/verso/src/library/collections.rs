@@ -2,7 +2,8 @@
 //! book identities and all reading/cover state remain in the library.
 use super::{LibraryIndex, Sort};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,52 +77,42 @@ impl Navigation {
 pub struct Folder {
     pub parent: Option<PathBuf>,
     pub children: BTreeSet<PathBuf>,
-    pub books: BTreeSet<PathBuf>,
+    pub books: HashSet<PathBuf>,
     /// Positions of the same direct books in the index this was built from.
     pub indices: Vec<usize>,
     pub count: usize,
 }
 
+/// Built off the UI thread by the library worker (see `worker::Snapshot`),
+/// and shared with the screen without copying.
 #[derive(Default)]
 pub struct Collections {
-    pub folders: BTreeMap<PathBuf, Folder>,
+    pub folders: HashMap<PathBuf, Folder>,
     pub roots: BTreeSet<PathBuf>,
 }
 impl Collections {
     pub fn from_index(index: &LibraryIndex, roots: &[PathBuf]) -> Self {
         let roots = distinct_roots(roots);
         let mut result = Self::default();
-        let mut seen = BTreeSet::new();
         for (i, book) in index.books.iter().enumerate().filter(|(_, b)| b.available) {
-            let path = normalize(&book.path);
-            let Some(root) = roots.iter().find(|r| path.starts_with(r)) else { continue };
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            let Some(mut folder) = path.parent() else { continue };
+            let path = normalize_cow(&book.path);
+            let Some(root) = roots.iter().find(|r| beneath(&path, r)) else { continue };
+            let Some(folder) = path.parent() else { continue };
             // A misconfigured root may name the EPUB itself, rather than a
             // directory. Never walk above the selected root in cached data.
-            if !folder.starts_with(root) {
+            if !beneath(folder, root) {
                 continue;
             }
-            let node = result.folders.entry(folder.to_owned()).or_default();
-            node.books.insert(path.clone());
-            node.indices.push(i);
-            loop {
-                let node = result.folders.entry(folder.to_owned()).or_default();
+            result.link(folder, root);
+            let node = result.folders.get_mut(folder).expect("linked above");
+            // A path listed twice counts once.
+            if node.books.insert(path.into_owned()) {
+                node.indices.push(i);
                 node.count += 1;
-                if folder == root {
-                    result.roots.insert(root.clone());
-                    break;
-                }
-                let parent = folder.parent().expect("folder is beneath its absolute root");
-                node.parent = Some(parent.to_owned());
-                result.folders.entry(parent.to_owned()).or_default().children.insert(folder.to_owned());
-                folder = parent;
             }
         }
         for path in &index.empty_folders {
-            let path = normalize(path);
+            let path = normalize_cow(path);
             let Some(root) = roots.iter().find(|r| path.starts_with(r)) else { continue };
             if path.strip_prefix(root).unwrap().components().any(|part| {
                 let name = part.as_os_str().to_string_lossy();
@@ -129,20 +120,46 @@ impl Collections {
             }) {
                 continue;
             }
-            let mut folder = path.as_path();
-            loop {
-                let node = result.folders.entry(folder.to_owned()).or_default();
-                if folder == root {
-                    result.roots.insert(root.clone());
-                    break;
-                }
-                let parent = folder.parent().expect("folder beneath root");
-                node.parent = Some(parent.to_owned());
-                result.folders.entry(parent.to_owned()).or_default().children.insert(folder.to_owned());
-                folder = parent;
+            result.link(&path, root);
+        }
+        // Each folder counts the books beneath it: add every folder's total to
+        // its parent's, deepest folders first.
+        let mut order: Vec<(usize, PathBuf)> =
+            result.folders.keys().map(|p| (p.components().count(), p.clone())).collect();
+        order.sort_unstable_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+        for (_, path) in order {
+            let node = &result.folders[&path];
+            if let Some(parent) = node.parent.clone() {
+                let count = node.count;
+                result.folders.get_mut(&parent).expect("parents are linked").count += count;
             }
         }
         result
+    }
+
+    /// Adds `folder` and any missing ancestors up to `root`. A folder already
+    /// present is linked all the way up, so the walk stops at the first one.
+    fn link(&mut self, folder: &Path, root: &Path) {
+        let mut child: Option<PathBuf> = None;
+        let mut folder = folder;
+        loop {
+            if let Some(node) = self.folders.get_mut(folder) {
+                node.children.extend(child);
+                return;
+            }
+            let mut node = Folder::default();
+            node.children.extend(child.take());
+            if folder == root {
+                self.folders.insert(folder.to_owned(), node);
+                self.roots.insert(root.to_owned());
+                return;
+            }
+            let parent = folder.parent().expect("folder is beneath its absolute root");
+            node.parent = Some(parent.to_owned());
+            self.folders.insert(folder.to_owned(), node);
+            child = Some(folder.to_owned());
+            folder = parent;
+        }
     }
 
     pub fn children(&self, folder: Option<&Path>) -> Vec<PathBuf> {
@@ -161,12 +178,36 @@ impl Collections {
     }
 }
 
+/// `Path::starts_with` for normalized paths, comparing bytes instead of
+/// parsing components.
+fn beneath(path: &Path, root: &Path) -> bool {
+    let (path, root) = (path.as_os_str().as_encoded_bytes(), root.as_os_str().as_encoded_bytes());
+    path.starts_with(root) && (path.len() == root.len() || root.ends_with(b"/") || path[root.len()] == b'/')
+}
+
 pub fn name(path: &Path) -> String {
     path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
 }
 
 /// Lexical normalization needs no stat/read_dir and works for offline roots.
 pub fn normalize(path: &Path) -> PathBuf {
+    normalize_cow(path).into_owned()
+}
+
+/// [`normalize`], borrowing a path that is already normal (as indexed paths are).
+pub fn normalize_cow(path: &Path) -> Cow<'_, Path> {
+    // Normal: no `.` or `..` parts, no doubled or trailing separator.
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let normal = bytes == b"/"
+        || bytes.split(|&b| b == b'/').enumerate().all(|(i, part)| match part {
+            b"" => i == 0,
+            b"." | b".." => false,
+            _ => true,
+        });
+    if normal { Cow::Borrowed(path) } else { Cow::Owned(rebuild(path)) }
+}
+
+fn rebuild(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -238,6 +279,43 @@ mod tests {
         let moved = Collections::from_index(&index, &roots);
         assert_eq!(moved.folders[Path::new("/b")].count, 2);
         assert!(!moved.folders.contains_key(Path::new("/a/Fiction")));
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+    #[test]
+    fn borrowed_paths_are_exactly_what_normalizing_would_build() {
+        for p in [
+            "",
+            "/",
+            "/a/b.epub",
+            "a/b",
+            "/a//b",
+            "/a/b/",
+            "/a/./b",
+            "./a",
+            "/a/../b",
+            "..",
+            "/a/.hidden/b.epub",
+            "/a/b..c",
+        ] {
+            let path = Path::new(p);
+            let built = rebuild(path);
+            let cow = normalize_cow(path);
+            assert_eq!(cow.as_os_str(), built.as_os_str(), "{p}");
+            assert_eq!(matches!(cow, Cow::Borrowed(_)), built.as_os_str() == path.as_os_str(), "{p}");
+        }
+        for (path, root) in
+            [("/a/b", "/a"), ("/a", "/a"), ("/ab", "/a"), ("/a/b", "/"), ("/", "/"), ("/a", "/a/b"), ("a/b", "a")]
+        {
+            assert_eq!(
+                beneath(Path::new(path), Path::new(root)),
+                Path::new(path).starts_with(root),
+                "{path} in {root}"
+            );
+        }
     }
 }
 

@@ -222,6 +222,8 @@ fn run() -> Result<i32> {
                     started.elapsed()
                 );
                 first_frame = false;
+                // Fonts load now rather than alongside the first frame.
+                worker.start();
                 // An SSH server left running (or started by KOReader) gets its
                 // name back. After the first frame, so startup isn't delayed.
                 let settings = store.settings();
