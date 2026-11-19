@@ -40,9 +40,12 @@ use moving::{Carry, ClashSheet, PasteEnd};
 use selection::Selection;
 use thumbnails::{CoverSpec, Fit, Thumbnails};
 
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+
 struct SearchSession {
     field: TextField,
     folded: String,
+    debounce_at: Option<std::time::Instant>,
     scope: Scope,
     collection: Option<PathBuf>,
     page: usize,
@@ -933,6 +936,7 @@ impl Books {
             self.search = Some(SearchSession {
                 field,
                 folded: String::new(),
+                debounce_at: None,
                 scope: Scope::All,
                 collection,
                 page: 0,
@@ -949,18 +953,38 @@ impl Books {
         }
     }
 
+    fn apply_search(&mut self, cx: &mut EventCx) {
+        let Some(search) = &mut self.search else { return };
+        search.debounce_at = None;
+        let folded = search::fold(search.field.value().trim());
+        if folded == search.folded {
+            return;
+        }
+        self.selection = None;
+        let started = std::time::Instant::now();
+        search.folded = folded;
+        self.pager.page = 0;
+        self.refresh(cx.theme);
+        cx.redraw();
+        log::debug!("search query: {} matches prepared in {:?}", self.books.len(), started.elapsed());
+    }
+
     fn edit_search(&mut self, input: &TextInput, cx: &mut EventCx) {
         let Some(search) = &mut self.search else { return };
         if matches!(input, TextInput::Submit | TextInput::Dismiss) {
             search.keyboard.visible = false;
             search.field.focused = false;
+            self.apply_search(cx);
         } else if search.field.edit(input) {
             self.selection = None;
-            let started = std::time::Instant::now();
-            search.folded = search::fold(search.field.value().trim());
-            self.pager.page = 0;
-            self.refresh(cx.theme);
-            log::debug!("search query: {} matches prepared in {:?}", self.books.len(), started.elapsed());
+            if matches!(input, TextInput::Clear) {
+                self.apply_search(cx);
+            } else if search::fold(search.field.value().trim()) == search.folded {
+                search.debounce_at = None;
+            } else {
+                // Coalesce rapid keystrokes so sorting and grid redraws wait for a brief pause.
+                search.debounce_at = Some(cx.now + SEARCH_DEBOUNCE);
+            }
         }
     }
 
@@ -1958,6 +1982,8 @@ impl Screen for Books {
                 if let Some(scope) = scope {
                     self.selection = None;
                     search.scope = scope;
+                    search.debounce_at = None;
+                    search.folded = search::fold(search.field.value().trim());
                     self.pager.page = 0;
                     self.refresh(cx.theme);
                     self.apply_pending(cx);
@@ -2148,9 +2174,12 @@ impl Screen for Books {
         self.apply_pending(cx);
         true
     }
-    /// Scripted screenshots also wait for a running update check.
+    /// Scripted screenshots also wait for a running update check or search debounce.
     fn busy(&self) -> bool {
-        self.reader.as_ref().map_or(self.working || self.updates.checking(), Screen::busy)
+        self.reader.as_ref().map_or(
+            self.working || self.updates.checking() || self.search.as_ref().is_some_and(|s| s.debounce_at.is_some()),
+            Screen::busy,
+        )
     }
     fn has_pending_work(&self) -> bool {
         self.reader.is_none() && self.confirm.as_ref().is_some_and(|c| c.working)
@@ -2166,7 +2195,10 @@ impl Screen for Books {
         if self.navigation_error.is_some() {
             return Some(std::time::Instant::now());
         }
-        self.reader.as_ref().and_then(Screen::deadline)
+        if let Some(reader) = &self.reader {
+            return reader.deadline();
+        }
+        self.search.as_ref().and_then(|s| s.debounce_at)
     }
     fn has_idle_work(&self) -> bool {
         self.reader.as_ref().is_some_and(Screen::has_idle_work)
@@ -2178,7 +2210,13 @@ impl Screen for Books {
         if let Some(error) = self.navigation_error.take() {
             cx.toast(error, None);
         }
-        self.reader.as_mut().map_or(Action::None, |r| r.on_tick(cx))
+        if let Some(reader) = &mut self.reader {
+            return reader.on_tick(cx);
+        }
+        if self.search.as_ref().and_then(|s| s.debounce_at).is_some_and(|at| cx.now >= at) {
+            self.apply_search(cx);
+        }
+        Action::None
     }
     fn on_background(&mut self, cx: &mut EventCx) {
         if let Some(e) = self.navigation_writer.errors().last() {
@@ -3284,6 +3322,8 @@ mod tests {
             books.navigate(Some("/books/Fiction".into()), cx);
             books.toggle_search(cx);
             books.edit_search(&TextInput::Insert("Needle".into()), cx);
+            cx.now = books.deadline().expect("typing arms search debounce");
+            books.on_tick(cx);
             assert!(books.books.is_empty());
             let mut index = books.index.clone();
             index.books[0].metadata.title = "NEEDLE".into();
@@ -3323,6 +3363,99 @@ mod tests {
             books.toggle_search(cx);
             assert!(books.navigation.folder.is_none());
             assert_eq!(books.navigation.tab, Tab::Collections);
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_typing_debounces_and_flushes_on_clear_submit_or_dismiss() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("search-debounce")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        books.working = false;
+        with_cx(&t, screen, |cx| {
+            books.toggle_search(cx);
+            assert_eq!(books.books.len(), 22);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+
+            // Rapid typing updates the field immediately but defers matching/sorting.
+            let t0 = cx.now;
+            books.edit_search(&TextInput::Insert("N".into()), cx);
+            let d1 = books.deadline().expect("first keystroke arms debounce");
+            assert_eq!(d1, t0 + SEARCH_DEBOUNCE);
+            assert!(books.busy());
+            assert_eq!(books.search.as_ref().unwrap().field.value(), "N");
+            assert_eq!(books.books.len(), 22, "results wait for the debounce");
+
+            cx.now = t0 + std::time::Duration::from_millis(50);
+            books.edit_search(&TextInput::Insert("eedle".into()), cx);
+            let d2 = books.deadline().expect("subsequent keystroke extends debounce");
+            assert_eq!(d2, cx.now + SEARCH_DEBOUNCE);
+            assert_eq!(books.books.len(), 22);
+
+            // Ticking just before the deadline does not apply yet.
+            cx.now = d2 - std::time::Duration::from_millis(1);
+            books.on_tick(cx);
+            assert!(books.busy());
+            assert_eq!(books.books.len(), 22);
+
+            // Ticking at the deadline applies the folded query once.
+            cx.now = d2;
+            books.on_tick(cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+            assert!(books.books.is_empty());
+
+            // Trailing whitespace does not change the folded query, so no debounce is armed.
+            books.edit_search(&TextInput::Insert(" ".into()), cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+
+            // Clear applies immediately without waiting for a debounce tick.
+            books.edit_search(&TextInput::Clear, cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+            assert_eq!(books.books.len(), 22);
+
+            // Typing then backspacing back to the committed query cancels the pending debounce.
+            books.edit_search(&TextInput::Insert("x".into()), cx);
+            assert!(books.deadline().is_some());
+            books.edit_search(&TextInput::Backspace, cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+
+            // Submit flushes a pending debounced edit immediately.
+            books.edit_search(&TextInput::Insert("Needle".into()), cx);
+            assert!(books.deadline().is_some());
+            books.edit_search(&TextInput::Submit, cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+            assert!(!books.search.as_ref().unwrap().keyboard.visible);
+            assert!(books.books.is_empty());
+
+            // Dismiss also flushes a pending debounced edit immediately.
+            books.search.as_mut().unwrap().keyboard.visible = true;
+            books.search.as_mut().unwrap().field.focused = true;
+            books.edit_search(&TextInput::Clear, cx);
+            books.edit_search(&TextInput::Insert("Missing".into()), cx);
+            assert!(books.deadline().is_some());
+            books.edit_search(&TextInput::Dismiss, cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
+            assert!(books.books.is_empty());
+
+            // Closing search drops any pending debounce.
+            books.search.as_mut().unwrap().keyboard.visible = true;
+            books.search.as_mut().unwrap().field.focused = true;
+            books.edit_search(&TextInput::Insert("!".into()), cx);
+            assert!(books.deadline().is_some());
+            books.toggle_search(cx);
+            assert!(books.deadline().is_none());
+            assert!(!books.busy());
         });
         drop(books);
         std::fs::remove_dir_all(root)?;
