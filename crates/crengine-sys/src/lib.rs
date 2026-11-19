@@ -53,6 +53,9 @@ unsafe extern "C" {
     pub fn verso_cre_init(hyph_dir: *const c_char, cache_dir: *const c_char, cache_max_bytes: c_int) -> c_int;
     pub fn verso_cre_cache_reload() -> c_int;
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;
+    pub fn verso_cre_describe_font(path: *const c_char, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_register_font_faces(path: *const c_char, description: *const c_char) -> c_int;
+    pub fn verso_cre_font_list_hash() -> std::os::raw::c_uint;
 
     pub fn verso_cre_new(width: c_int, height: c_int, dpi: c_int) -> *mut VersoCreDoc;
     pub fn verso_cre_set_shaping(doc: *mut VersoCreDoc, mode: c_int);

@@ -442,6 +442,26 @@ int verso_cre_register_font(const char *path) {
     GUARD(-1, { return fontMan->RegisterFont(lString8(path)) ? 0 : -1; })
 }
 
+int verso_cre_describe_font(const char *path, char *buf, int len) {
+    GUARD(-1, {
+        lString8 text = fontMan->DescribeFontFile(lString8(path));
+        if (buf && len > 0) {
+            int n = std::min(text.length(), len - 1);
+            memcpy(buf, text.c_str(), n);
+            buf[n] = 0;
+        }
+        return text.length();
+    })
+}
+
+int verso_cre_register_font_faces(const char *path, const char *description) {
+    GUARD(-1, { return fontMan->RegisterFontFaces(lString8(path), lString8(description)); })
+}
+
+unsigned int verso_cre_font_list_hash(void) {
+    GUARD(0, { return fontMan->GetFontListHash(-1); })
+}
+
 VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
     GUARD(nullptr, {
         LVDocView *v = new LVDocView(-1, true);

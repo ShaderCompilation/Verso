@@ -163,6 +163,19 @@ fn run() -> Result<i32> {
         println!("{}", library::previews::benchmark(&store, &store.library(), &store.library_folders()));
         return Ok(0);
     }
+    if std::env::var("VERSO_FONT_BENCH").as_deref() == Ok("1") {
+        // Starts the book engine the way the book thread does: with the font
+        // list from the last start, or writing it when there is none.
+        let started = Instant::now();
+        let engine = document::CreEngine::new(document::Paths::for_device(), 300)?;
+        println!(
+            "fonts: {} faces, engine ready in {:?}, font hash {:08x}",
+            engine.fonts().len(),
+            started.elapsed(),
+            engine.font_hash()
+        );
+        return Ok(0);
+    }
     if std::env::var("VERSO_COVER_BENCH").as_deref() == Ok("1") {
         let store = store::Store::new();
         println!("{}", library::covers::benchmark(&store, &store.library()));

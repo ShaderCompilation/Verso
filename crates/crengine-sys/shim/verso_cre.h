@@ -49,6 +49,15 @@ int verso_cre_cache_reload(void);
 
 /* Makes a font file available to all documents. Returns 0 on success. */
 int verso_cre_register_font(const char *path);
+/* The faces registered from font file `path`, as text for
+   verso_cre_register_font_faces (copied into buf like the other getters).
+   Returns the text's length, or -1. */
+int verso_cre_describe_font(const char *path, char *buf, int len);
+/* Registers faces described by verso_cre_describe_font without opening the
+   file. Returns how many, or -1 for a malformed description. */
+int verso_cre_register_font_faces(const char *path, const char *description);
+/* Hash of every registered font; part of each cached layout's key. */
+unsigned int verso_cre_font_list_hash(void);
 
 /* A document view of `width` x `height` pixels. NULL on failure. */
 VersoCreDoc *verso_cre_new(int width, int height, int dpi);

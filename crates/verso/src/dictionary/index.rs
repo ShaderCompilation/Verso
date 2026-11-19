@@ -1,4 +1,4 @@
-//! Disk hash index of Unicode-folded keys. Constant-size build buffers, no
+//! Disk hash index of Unicode-folded keys. Bounded build buffers, no
 //! resident word list, and a single open index. The source ordinal map lets
 //! synonyms point to the original entry even when offsets are 64 bit.
 use super::{Info, basename, companion, sibling};
@@ -8,17 +8,33 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
 };
 const MAX_WORD_BYTES: usize = 4096;
-const BUCKETS: usize = 4096;
+/// Bucket counts are powers of two between these: about two words a
+/// bucket, so a lookup reads two or three records instead of a chain of
+/// hundreds spread over the file (docs/dictionary.md#implementation-decisions).
+const MIN_BUCKETS: usize = 4096;
+const MAX_BUCKETS: usize = 1 << 18;
 const SIGNATURE: u64 = 64;
-const HEADER: u64 = SIGNATURE + BUCKETS as u64 * 8;
+/// Fixed part of a record: next, offset, size and the two lengths.
+const RECORD: usize = 24;
 /// Part of the cache fingerprint: bump it whenever `fold` (in verso-wordforms)
 /// changes, so every cached index rebuilds once with the new keys.
 const KEY_VERSION: &[u8] = b"key-v2";
 static BUILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 type Entry = (String, u64, u32);
+/// The bucket count for a dictionary's headwords and synonyms. Derived from
+/// the `.ifo` counts, which the cache fingerprint covers, so building and
+/// opening always agree.
+fn bucket_count(info: &Info) -> usize {
+    let entries = info.count as usize + info.syn_count as usize;
+    (entries / 2).next_power_of_two().clamp(MIN_BUCKETS, MAX_BUCKETS)
+}
+fn header_len(buckets: usize) -> u64 {
+    SIGNATURE + buckets as u64 * 8
+}
 struct Record {
     next: u64,
     offset: u64,
@@ -26,13 +42,20 @@ struct Record {
     key: String,
     word: String,
 }
-pub struct Index(File);
+/// An open index cache. The file never changes once built (a rebuild writes
+/// a new file and renames it), so its length is read once.
+pub struct Index {
+    file: File,
+    len: u64,
+    buckets: usize,
+}
 /// The dictionary key for a headword or query, shared with the word-form
 /// packs: case folded and normalized, and blind to Russian ё/е and stress
 /// marks, so `ещё` finds `еще` and `молоко́` finds `молоко`.
 pub use verso_wordforms::fold;
-fn hash(text: &str) -> usize {
-    text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) as usize % BUCKETS
+fn hash(text: &str, buckets: usize) -> usize {
+    (text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) % buckets as u64)
+        as usize
 }
 fn read_word(r: &mut impl BufRead) -> Result<Option<String>> {
     let mut data = Vec::with_capacity(256);
@@ -59,6 +82,11 @@ fn folded_key(word: &str) -> Result<String> {
 pub fn query_fits(query: &str) -> bool {
     query.len() <= MAX_WORD_BYTES && fold(query.trim()).len() <= MAX_WORD_BYTES
 }
+fn read_u64_at(file: &File, at: u64) -> Result<u64> {
+    let mut b = [0; 8];
+    file.read_exact_at(&mut b, at)?;
+    Ok(u64::from_le_bytes(b))
+}
 fn read_u64(r: &mut impl Read) -> Result<u64> {
     let mut b = [0; 8];
     r.read_exact(&mut b)?;
@@ -79,7 +107,7 @@ impl Builder {
     fn append(&mut self, key: &str, display: &str, offset: u64, size: u32) -> Result<u64> {
         let file = &mut self.output;
         let heads = &mut self.heads;
-        let bucket = hash(key);
+        let bucket = hash(key, heads.len());
         let at = self.cursor;
         file.write_all(&heads[bucket].to_le_bytes())?;
         file.write_all(&offset.to_le_bytes())?;
@@ -93,22 +121,23 @@ impl Builder {
         Ok(at)
     }
 }
-fn record(file: &mut File, at: u64) -> Result<Record> {
-    ensure!(at >= HEADER && at < file.metadata()?.len(), "Invalid cached index pointer");
-    file.seek(SeekFrom::Start(at))?;
-    let next = read_u64(file)?;
-    let offset = read_u64(file)?;
-    let mut sizes = [0; 8];
-    file.read_exact(&mut sizes)?;
-    let size = u32::from_le_bytes(sizes[..4].try_into()?);
-    let klen = u16::from_le_bytes(sizes[4..6].try_into()?) as usize;
-    let wlen = u16::from_le_bytes(sizes[6..].try_into()?) as usize;
+/// The record at `at`, in two reads: its fixed part, then both words. On the
+/// Kindle every read of user storage goes through FUSE, so this matters
+/// more than it looks.
+fn record(file: &File, len: u64, header: u64, at: u64) -> Result<Record> {
+    ensure!(at >= header && at < len, "Invalid cached index pointer");
+    let mut fixed = [0; RECORD];
+    file.read_exact_at(&mut fixed, at)?;
+    let next = u64::from_le_bytes(fixed[..8].try_into()?);
+    let offset = u64::from_le_bytes(fixed[8..16].try_into()?);
+    let size = u32::from_le_bytes(fixed[16..20].try_into()?);
+    let klen = u16::from_le_bytes(fixed[20..22].try_into()?) as usize;
+    let wlen = u16::from_le_bytes(fixed[22..].try_into()?) as usize;
     ensure!(klen <= MAX_WORD_BYTES && wlen <= MAX_WORD_BYTES, "Invalid cached index word");
-    let mut key = vec![0; klen];
-    let mut word = vec![0; wlen];
-    file.read_exact(&mut key)?;
-    file.read_exact(&mut word)?;
-    Ok(Record { next, offset, size, key: String::from_utf8(key)?, word: String::from_utf8(word)? })
+    let mut words = vec![0; klen + wlen];
+    file.read_exact_at(&mut words, at + RECORD as u64)?;
+    let word = String::from_utf8(words.split_off(klen))?;
+    Ok(Record { next, offset, size, key: String::from_utf8(words)?, word })
 }
 fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
     let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
@@ -116,7 +145,7 @@ fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
     let (dict, _) = companion(&base, "dict", "dict.dz")?;
     let syn = sibling(&base, "syn");
     let mut signature = Sha256::new();
-    signature.update(b"verso-stardict-index-v1");
+    signature.update(b"verso-stardict-index-v2");
     signature.update(KEY_VERSION);
     // `path` is the metadata actually read (`.ifo` or `.ifo.gz`), so
     // switching or replacing either variant changes the signature.
@@ -139,7 +168,7 @@ fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
 /// for whether a cache is valid. A cache that can't be opened is rebuilt.
 fn cached(dest: &Path, fingerprint: &str) -> Result<Option<File>> {
     let Ok(mut file) = File::open(dest) else { return Ok(None) };
-    if file.metadata()?.len() < HEADER {
+    if file.metadata()?.len() < SIGNATURE {
         return Ok(None);
     }
     let mut signature = [0; SIGNATURE as usize];
@@ -163,8 +192,14 @@ impl Index {
     ) -> Result<Self> {
         fs::create_dir_all(cache)?;
         let (dest, fingerprint) = cache_location(path, cache)?;
+        let buckets = bucket_count(info);
+        let header = header_len(buckets);
         if let Some(file) = cached(&dest, &fingerprint)? {
-            return Ok(Self(file));
+            let len = file.metadata()?.len();
+            // A cut-off file with the right signature is rebuilt.
+            if len >= header {
+                return Ok(Self { file, len, buckets });
+            }
         }
         let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
         let (idx, compressed) = companion(&base, "idx", "idx.gz")?;
@@ -181,8 +216,8 @@ impl Index {
         let result = (|| {
             let mut out = BufWriter::with_capacity(65536, File::create(&temp)?);
             out.write_all(fingerprint.as_bytes())?;
-            out.write_all(&vec![0; HEADER as usize - SIGNATURE as usize])?;
-            let mut builder = Builder { output: out, heads: vec![0u64; BUCKETS], cursor: HEADER };
+            out.write_all(&vec![0; (header - SIGNATURE) as usize])?;
+            let mut builder = Builder { output: out, heads: vec![0u64; buckets], cursor: header };
             let mut refs = BufWriter::new(File::create(&refs_path)?);
             let source = File::open(&idx)?;
             let input: Box<dyn Read> = if compressed { Box::new(GzDecoder::new(source)) } else { Box::new(source) };
@@ -230,7 +265,8 @@ impl Index {
             drop(refs);
             if syn.exists() {
                 let mut refs = File::open(&refs_path)?;
-                let mut originals = File::open(&temp)?;
+                let originals = File::open(&temp)?;
+                let originals_len = originals.metadata()?.len();
                 let mut input = BufReader::new(File::open(&syn)?);
                 let mut count = 0u32;
                 let mut bytes = 0u64;
@@ -251,7 +287,7 @@ impl Index {
                     // The target's record comes from the partly built cache.
                     refs.seek(SeekFrom::Start(target as u64 * 8))?;
                     let at = read_u64(&mut refs)?;
-                    let original = record(&mut originals, at)?;
+                    let original = record(&originals, originals_len, header, at)?;
                     builder.append(&key, &original.word, original.offset, original.size)?;
                     bytes += word.len() as u64 + 5;
                     count += 1;
@@ -271,7 +307,9 @@ impl Index {
             out.flush()?;
             out.get_ref().sync_all()?;
             fs::rename(&temp, &dest)?;
-            Ok(Self(File::open(&dest)?))
+            let file = File::open(&dest)?;
+            let len = file.metadata()?.len();
+            Ok(Self { file, len, buckets })
         })();
         let _ = fs::remove_file(&temp);
         let _ = fs::remove_file(&refs_path);
@@ -287,11 +325,11 @@ impl Index {
         ensure!(query.len() <= MAX_WORD_BYTES, "Query is too long");
         let key = fold(query.trim());
         ensure!(key.len() <= MAX_WORD_BYTES, "Folded query is too long (limit 4096 bytes)");
-        self.0.seek(SeekFrom::Start(SIGNATURE + hash(&key) as u64 * 8))?;
-        let mut at = read_u64(&mut self.0)?;
+        let header = header_len(self.buckets);
+        let mut at = read_u64_at(&self.file, SIGNATURE + hash(&key, self.buckets) as u64 * 8)?;
         let mut entries = Vec::new();
         while at != 0 {
-            let entry = record(&mut self.0, at)?;
+            let entry = record(&self.file, self.len, header, at)?;
             ensure!(entry.next == 0 || entry.next < at, "Cyclic cached index");
             at = entry.next;
             if entry.key == key {
@@ -308,5 +346,24 @@ impl Index {
         entries.reverse();
         entries.sort_by_key(|(word, _, _)| word != query.trim());
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(count: u32, syn_count: u32) -> Info {
+        Info { name: String::new(), count, syn_count, index_size: 0, wide: false, types: String::new() }
+    }
+
+    #[test]
+    fn bucket_counts_keep_about_two_words_a_bucket_within_bounds() {
+        assert_eq!(bucket_count(&info(0, 0)), MIN_BUCKETS);
+        assert_eq!(bucket_count(&info(8_000, 0)), MIN_BUCKETS);
+        assert_eq!(bucket_count(&info(100_000, 20_000)), 65_536);
+        assert_eq!(bucket_count(&info(600_000, 0)), MAX_BUCKETS);
+        assert_eq!(bucket_count(&info(u32::MAX, u32::MAX)), MAX_BUCKETS);
+        assert_eq!(header_len(MIN_BUCKETS), 64 + 4096 * 8, "the old fixed table size");
     }
 }

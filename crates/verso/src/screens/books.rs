@@ -45,6 +45,8 @@ const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(18
 /// Untouched this long with the library settled, books likely to be opened
 /// next are laid out in the background (docs/prelayout.md).
 const PRELAYOUT_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Idle time on Home before the library's first page is prepared.
+const WARM_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// Below this charge, unless charging, nothing is laid out in the background.
 const PRELAYOUT_MIN_BATTERY: u8 = 20;
 
@@ -254,6 +256,9 @@ pub struct Books {
     prelayout_due: bool,
     /// The last touch, for the idle delay.
     last_input: std::time::Instant,
+    /// Home should decode the library's first page in the background at the
+    /// next idle moment: set on start and on coming back from a book.
+    warm_due: bool,
 }
 impl Books {
     pub fn new(t: &Theme, screen: Rect, worker: Rc<Worker>) -> Self {
@@ -383,6 +388,7 @@ impl Books {
             offer: None,
             prelayout_due: true,
             last_input: std::time::Instant::now(),
+            warm_due: true,
         };
         s.pager.page = s.navigation.page();
         s.refresh(t);
@@ -694,6 +700,10 @@ impl Books {
             return Vec::new();
         }
         let page = self.grid.page;
+        self.page_covers(t, [Some(page + 1), page.checked_sub(1)].into_iter().flatten())
+    }
+    /// The covers drawn on `pages` of the browsing grid, in that order.
+    fn page_covers(&self, t: &Theme, pages: impl IntoIterator<Item = usize>) -> Vec<CoverSpec> {
         let shared_names = self.shared_names();
         let mut specs = Vec::new();
         let mut add = |book: &Book, rect: Rect, fit: Fit| {
@@ -701,7 +711,7 @@ impl Books {
                 specs.push(CoverSpec { book_id: book.id.clone(), key: key.clone(), w: rect.w, h: rect.h, fit });
             }
         };
-        for p in [Some(page + 1), page.checked_sub(1)].into_iter().flatten() {
+        for p in pages {
             for (i, cell) in self.grid.cells_for_page(p) {
                 if let Some(path) = self.folders.get(i) {
                     let parent_line = shared_names.contains(&collections::name(path));
@@ -859,17 +869,18 @@ impl Books {
         self.pending = Some(snapshot);
         self.apply_pending(cx);
     }
-    fn apply_pending(&mut self, cx: &mut EventCx) {
-        if self.touching
-            || self.menu.is_some()
+    /// A menu, sheet or dialog is open over the screen.
+    fn overlay_open(&self) -> bool {
+        self.menu.is_some()
             || self.details.is_some()
             || self.confirm.is_some()
             || self.clash.is_some()
             || self.name_sheet.is_some()
             || self.jump.is_some()
             || self.offer.is_some()
-            || self.reader.is_some()
-        {
+    }
+    fn apply_pending(&mut self, cx: &mut EventCx) {
+        if self.touching || self.overlay_open() || self.reader.is_some() {
             return;
         }
         self.apply_update_status(cx);
@@ -1107,6 +1118,52 @@ impl Books {
             && !self.working)
             .then(|| self.last_input + PRELAYOUT_IDLE)
     }
+    fn select_saved_sort(&mut self) {
+        self.sort.selected = match self.navigation.sort(self.store.settings().library_sort) {
+            Sort::Recent => 0,
+            Sort::Title => 1,
+            Sort::Author => 2,
+        };
+    }
+    /// When Home should prepare the library's first page: once the worker's
+    /// index is in (preparing never reads it here), the scan is done and
+    /// nothing was touched for a moment.
+    fn warm_at(&self) -> Option<std::time::Instant> {
+        (self.warm_due
+            && self.is_home()
+            && self.reader.is_none()
+            && self.selection.is_none()
+            && !self.overlay_open()
+            && !self.touching
+            && !self.scanning
+            && (self.browsing_ready || self.pending.is_some()))
+        .then(|| self.last_input + WARM_IDLE)
+    }
+    /// Lays out the remembered library tab, folder and page without showing
+    /// them, and has the prefetcher decode that page's covers, so the first
+    /// visit draws from memory like a page turn. Home stays as it was; the
+    /// covers go with the rest of the cache when a book opens.
+    fn warm_library(&mut self, t: &Theme) -> usize {
+        self.warm_due = false;
+        let started = std::time::Instant::now();
+        self.home_active = false;
+        self.select_saved_sort();
+        self.pager.page = self.navigation.page();
+        self.refresh(t);
+        let covers = self.page_covers(t, [self.grid.page]);
+        self.home_active = true;
+        self.refresh(t);
+        log::info!(
+            "library warm: {:?} page {} with {} covers prepared in {:?}",
+            self.navigation.tab,
+            self.navigation.page(),
+            covers.len(),
+            started.elapsed()
+        );
+        let count = covers.len();
+        self.thumbnails.prefetch(covers);
+        count
+    }
     fn start_prelayout(&mut self, cx: &EventCx) {
         self.prelayout_due = false;
         if cx.battery.is_some_and(|b| b.percent < PRELAYOUT_MIN_BATTERY && !b.charging) {
@@ -1119,6 +1176,7 @@ impl Books {
     fn returned(&mut self, cx: &mut EventCx) {
         self.library.pause(false);
         self.prelayout_due = true;
+        self.warm_due = true;
         self.last_input = cx.now;
         self.reload_home();
         if self.pending_home.as_ref().is_none_or(|summary| !summary.complete) {
@@ -2073,11 +2131,7 @@ impl Screen for Books {
                 if !self.home_active {
                     self.navigation.tab = if selected == 1 { Tab::Collections } else { Tab::AllBooks };
                     self.top.title = "Library".into();
-                    self.sort.selected = match self.navigation.sort(self.store.settings().library_sort) {
-                        Sort::Recent => 0,
-                        Sort::Title => 1,
-                        Sort::Author => 2,
-                    };
+                    self.select_saved_sort();
                 }
                 self.pager.page = self.navigation.page();
                 self.refresh(cx.theme);
@@ -2270,7 +2324,10 @@ impl Screen for Books {
         if let Some(reader) = &self.reader {
             return reader.deadline();
         }
-        [self.search.as_ref().and_then(|s| s.debounce_at), self.prelayout_at()].into_iter().flatten().min()
+        [self.search.as_ref().and_then(|s| s.debounce_at), self.prelayout_at(), self.warm_at()]
+            .into_iter()
+            .flatten()
+            .min()
     }
     fn has_idle_work(&self) -> bool {
         self.reader.as_ref().is_some_and(Screen::has_idle_work)
@@ -2287,6 +2344,9 @@ impl Screen for Books {
         }
         if self.search.as_ref().and_then(|s| s.debounce_at).is_some_and(|at| cx.now >= at) {
             self.apply_search(cx);
+        }
+        if self.warm_at().is_some_and(|at| cx.now >= at) {
+            self.warm_library(cx.theme);
         }
         if self.prelayout_at().is_some_and(|at| cx.now >= at) {
             self.start_prelayout(cx);
@@ -4052,6 +4112,58 @@ mod tests {
         Ok((store, root))
     }
     #[test]
+    fn home_prepares_the_remembered_library_page_and_stays_as_it_was() -> anyhow::Result<()> {
+        let (store, root) = preview_fixture("warm")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        store.save_navigation(&Navigation { tab: Tab::AllBooks, ..Default::default() })?;
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.thumbnails = Thumbnails::prefetching(store.clone());
+        assert!(books.is_home());
+        books.refresh(&t);
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        let mut draw = |books: &mut Books| {
+            let mut hints = Vec::new();
+            canvas.fill(255);
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+            canvas.gray_data().to_vec()
+        };
+        // Not before the worker's index is in, the scan is done and Home was
+        // left alone for a moment.
+        assert!(books.warm_at().is_none());
+        books.pending = Some(Snapshot { index: store.library(), ..Default::default() });
+        books.scanning = true;
+        assert!(books.warm_at().is_none());
+        books.scanning = false;
+        let home = draw(&mut books);
+        assert!(books.warm_at().is_some_and(|at| at >= books.last_input + WARM_IDLE));
+        let covers = books.warm_library(&t);
+        assert!(covers > 0);
+        assert!(books.warm_at().is_none(), "once per visit to Home");
+        assert!(books.is_home() && books.books.len() <= 4);
+        let after = draw(&mut books);
+        let changed: Vec<_> = (0..home.len()).filter(|&i| home[i] != after[i]).collect();
+        let rows = changed.first().zip(changed.last()).map(|(a, b)| (a / 1272, b / 1272));
+        assert!(changed.is_empty(), "Home looks the same; rows {rows:?} changed");
+        books.thumbnails.wait_prefetch();
+        assert_eq!(books.thumbnails.images.len(), covers, "the first page of All books");
+        // The first visit draws from memory: with the files gone, nothing fails.
+        let covers = store.cover_path("0").parent().unwrap().to_owned();
+        std::fs::rename(&covers, root.join("covers-away"))?;
+        let tab = books.tabs.rect();
+        with_cx(&t, screen, |cx| tap(&mut books, Point::new(tab.x + tab.w * 5 / 6, tab.center().y), cx));
+        assert_eq!(books.navigation.tab, Tab::AllBooks);
+        draw(&mut books);
+        assert!(books.thumbnails.failed.is_empty());
+        // Back from a book, Home prepares it again.
+        books.warm_due = false;
+        with_cx(&t, screen, |cx| books.returned(cx));
+        assert!(books.warm_due);
+        Ok(())
+    }
+    #[test]
     fn folder_previews_decode_one_page_per_mode_and_icon_decodes_nothing() -> anyhow::Result<()> {
         let (store, root) = preview_fixture("modes")?;
         let t = Theme::for_dpi(300);
@@ -4479,6 +4591,14 @@ mod tests {
         books.refresh(&t);
         assert!(books.notice.is_some() && books.update_dot, "the notice is there from the first frame");
         let layout = (books.continue_rect, books.notice_rect);
+        // The library worker reports its first scan whenever it ends, which
+        // redraws the status line; let it finish so only the check changes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while books.scanning || books.working {
+            assert!(std::time::Instant::now() < deadline, "the library scan never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            with_cx(&t, screen, |cx| books.on_background(cx));
+        }
         with_cx(&t, screen, |cx| {
             let finger = Point::new(screen.w / 2, screen.h / 2);
             books.on_gesture(Gesture::Down(finger), cx);
