@@ -96,15 +96,71 @@ impl Canvas {
     /// Strokes the outline *inside* `rect`, so it never spills outside it.
     pub fn stroke_rounded_rect(&mut self, rect: Rect, radius: f32, width: f32, gray: u8) {
         let half = width / 2.0;
-        let inner = tiny_skia::Rect::from_xywh(
+        let Some(inner) = tiny_skia::Rect::from_xywh(
             rect.x as f32 + half,
             rect.y as f32 + half,
             rect.w as f32 - width,
             rect.h as f32 - width,
-        );
-        if let Some(path) = inner.and_then(|r| rounded_path(r, (radius - half).max(0.0))) {
-            self.draw_path(&path, Some(&Stroke { width, ..Stroke::default() }), gray, None);
+        ) else {
+            return;
+        };
+        let rad = (radius - half).max(0.0).min(inner.width() / 2.0).min(inner.height() / 2.0);
+        let integer_width = width >= 1.0 && width.fract() == 0.0 && width <= i32::MAX as f32;
+        // A 1 px stroke goes through tiny-skia's hairline rasterizer, whose
+        // corner pixels are only partly covered, so only thicker square
+        // outlines are plain strips.
+        if integer_width && width > 1.0 && rad == 0.0 {
+            let w = width as i32;
+            if rect.w > w && rect.h > w {
+                let mid_h = (rect.h - 2 * w).max(0);
+                self.fill_rect(Rect::new(rect.x, rect.y, rect.w, w), gray);
+                self.fill_rect(Rect::new(rect.x, rect.bottom() - w, rect.w, w), gray);
+                if mid_h > 0 {
+                    self.fill_rect(Rect::new(rect.x, rect.y + w, w, mid_h), gray);
+                    self.fill_rect(Rect::new(rect.right() - w, rect.y + w, w, mid_h), gray);
+                }
+                return;
+            }
         }
+        let Some(path) = rounded_path(inner, rad) else { return };
+        let stroke = Stroke { width, ..Stroke::default() };
+        if !integer_width || rad == 0.0 {
+            self.draw_path(&path, Some(&stroke), gray, None);
+            return;
+        }
+        // Integer-width rounded outlines have exact pixel-aligned straight
+        // sides between the two corner bands. Stroke the path once, fill the
+        // straight vertical sides directly, and only rasterize the top and
+        // bottom corner bands through tiny-skia (with a 1 px margin matching
+        // draw_path so conservative bounds never clip an arc).
+        let bounds = Rect::new(rect.x - 1, rect.y - 1, rect.w + 2, rect.h + 2);
+        let Some(area) = bounds.intersect(&self.bounds()) else { return };
+        let w = width as i32;
+        let top_end = ((inner.top() + rad + half + 2.0).ceil() as i32).clamp(area.y, area.bottom());
+        let bottom_start = ((inner.bottom() - rad - half - 2.0).floor() as i32).clamp(area.y, area.bottom());
+        if top_end >= bottom_start {
+            self.draw_path(&path, Some(&stroke), gray, None);
+            return;
+        }
+        let paint = paint(gray);
+        let mid_h = bottom_start - top_end;
+        self.fill_rect(Rect::new(rect.x, top_end, w, mid_h), gray);
+        self.fill_rect(Rect::new(rect.right() - w, top_end, w, mid_h), gray);
+        // tiny-skia routes width <= 1.0 through its hairline rasterizer, so
+        // only pre-stroke thick paths (width > 1.0) to match pixel-for-pixel.
+        let stroked = (width > 1.0).then(|| path.stroke(&stroke, 1.0)).flatten();
+        let (band_path, band_stroke) = match &stroked {
+            Some(stroked) => (stroked, None),
+            None => (&path, Some(&stroke)),
+        };
+        self.rasterize_path(Rect::new(area.x, area.y, area.w, top_end - area.y), band_path, band_stroke, &paint);
+        self.rasterize_path(
+            Rect::new(area.x, bottom_start, area.w, area.bottom() - bottom_start),
+            band_path,
+            band_stroke,
+            &paint,
+        );
+        self.trim_shape_rgba();
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, gray: u8) {
@@ -141,7 +197,6 @@ impl Canvas {
         let y = (b.top() - outset).floor() as i32;
         let bounds = Rect::new(x, y, (b.right() + outset).ceil() as i32 - x, (b.bottom() + outset).ceil() as i32 - y);
         let Some(area) = bounds.intersect(&self.bounds()) else { return };
-        let band_width = area.w as usize;
         // Never split a curve across surfaces: clipping the middle of a curve
         // changes tiny-skia's subdivision and can change edge coverage. Rounded
         // fills have two curved caps and a straight middle. Circles and strokes
@@ -167,36 +222,48 @@ impl Canvas {
                 area.bottom()
             }
             .min(area.bottom());
-            let height = (end - top) as usize;
-            let size = band_width * height * 4;
-            if size > self.shape_rgba.capacity() {
-                self.shape_rgba.reserve_exact(size - self.shape_rgba.len());
-            }
-            self.shape_rgba.resize(size, 0);
-            let pixels = &mut self.shape_rgba[..band_width * height * 4];
-            for (row, dst) in pixels.chunks_exact_mut(band_width * 4).enumerate() {
-                let offset = (top as usize + row) * self.width as usize + area.x as usize;
-                for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&self.gray[offset..offset + band_width]) {
-                    *px = [g, g, g, 255];
-                }
-            }
-            let mut surface = PixmapMut::from_bytes(pixels, band_width as u32, height as u32).unwrap();
-            let transform = Transform::from_translate(-area.x as f32, -top as f32);
-            if let Some(stroke) = stroke {
-                surface.stroke_path(path, &paint, stroke, transform, None);
-            } else {
-                surface.fill_path(path, &paint, FillRule::Winding, transform, None);
-            }
-            for (row, src) in pixels.chunks_exact(band_width * 4).enumerate() {
-                let offset = (top as usize + row) * self.width as usize + area.x as usize;
-                for (out, px) in self.gray[offset..offset + band_width].iter_mut().zip(src.as_chunks::<4>().0) {
-                    *out = px[0];
-                }
-            }
+            self.rasterize_path(Rect::new(area.x, top, area.w, end - top), path, stroke, &paint);
             top = end;
         }
-        // Large outline surfaces are temporary. Retain only a small scratch
-        // allocation between shapes/frames, including during cached page turns.
+        self.trim_shape_rgba();
+    }
+
+    fn rasterize_path(&mut self, area: Rect, path: &Path, stroke: Option<&Stroke>, paint: &Paint<'_>) {
+        if area.w <= 0 || area.h <= 0 {
+            return;
+        }
+        let band_width = area.w as usize;
+        let height = area.h as usize;
+        let size = band_width * height * 4;
+        if size > self.shape_rgba.capacity() {
+            self.shape_rgba.reserve_exact(size - self.shape_rgba.len());
+        }
+        self.shape_rgba.resize(size, 0);
+        let pixels = &mut self.shape_rgba[..size];
+        for (row, dst) in pixels.chunks_exact_mut(band_width * 4).enumerate() {
+            let offset = (area.y as usize + row) * self.width as usize + area.x as usize;
+            for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&self.gray[offset..offset + band_width]) {
+                *px = [g, g, g, 255];
+            }
+        }
+        let mut surface = PixmapMut::from_bytes(pixels, band_width as u32, height as u32).unwrap();
+        let transform = Transform::from_translate(-area.x as f32, -area.y as f32);
+        if let Some(stroke) = stroke {
+            surface.stroke_path(path, paint, stroke, transform, None);
+        } else {
+            surface.fill_path(path, paint, FillRule::Winding, transform, None);
+        }
+        for (row, src) in pixels.chunks_exact(band_width * 4).enumerate() {
+            let offset = (area.y as usize + row) * self.width as usize + area.x as usize;
+            for (out, px) in self.gray[offset..offset + band_width].iter_mut().zip(src.as_chunks::<4>().0) {
+                *out = px[0];
+            }
+        }
+    }
+
+    /// Large outline surfaces are temporary. Retain only a small scratch
+    /// allocation between shapes/frames, including during cached page turns.
+    fn trim_shape_rgba(&mut self) {
         if self.shape_rgba.capacity() > self.width as usize * SHAPE_ROWS * 4 {
             self.shape_rgba = Vec::new();
         }
@@ -417,6 +484,81 @@ mod tests {
         assert!(screen.shape_rgba.capacity() <= 1272 * SHAPE_ROWS * 4);
         canvas.set_gray(&page);
         assert_eq!(canvas.gray_data(), page, "restoring a page removes all shapes");
+    }
+
+    #[test]
+    fn stroke_rounded_rect_matches_full_tiny_skia_pixel_for_pixel() {
+        let cases: &[(u32, u32, Rect, f32, f32, u8)] = &[
+            // Square corners (Stack covers, Latest frame)
+            (400, 500, Rect::new(20, 30, 210, 315), 0.0, 1.0, 0),
+            (400, 500, Rect::new(20, 30, 210, 315), 0.0, 3.0, 0),
+            (400, 500, Rect::new(20, 30, 210, 315), 0.0, 4.0, 51),
+            (400, 500, Rect::new(20, 30, 210, 315), 1.5, 4.0, 0), // radius <= width/2 -> square inner path
+            (400, 500, Rect::new(-15, -10, 120, 140), 0.0, 3.0, 17), // clipped top-left
+            (400, 500, Rect::new(340, 440, 120, 140), 0.0, 4.0, 85), // clipped bottom-right
+            (400, 500, Rect::new(10, 10, 5, 20), 0.0, 3.0, 0),    // 2*width > rect.w (solid fill)
+            (400, 500, Rect::new(10, 10, 20, 5), 0.0, 3.0, 0),    // 2*width > rect.h (solid fill)
+            (400, 500, Rect::new(10, 10, 3, 20), 0.0, 3.0, 0),    // rect.w == width (empty inner)
+            // Rounded corners (All books covers, buttons, sheets, menus)
+            (400, 500, Rect::new(25, 40, 257, 365), 18.0, 4.0, 0),
+            (400, 500, Rect::new(25, 40, 257, 365), 18.0, 8.0, 34),
+            (400, 500, Rect::new(13, 17, 350, 106), 18.0, 4.0, 0), // wide button
+            (400, 500, Rect::new(13, 17, 350, 53), 26.5, 4.0, 0),  // wide pill (badge/toggle)
+            (400, 500, Rect::new(13, 17, 53, 350), 26.5, 4.0, 0),  // tall pill
+            (400, 500, Rect::new(13, 17, 40, 40), 20.0, 4.0, 0),   // circle-sized rounded square
+            (400, 500, Rect::new(5, 3, 360, 280), 17.3, 3.0, 119), // fractional radius
+            (400, 500, Rect::new(5, 3, 360, 280), 35.0, 1.0, 0),   // sheet radius, 1px stroke
+            (400, 500, Rect::new(5, 3, 360, 280), 35.0, 9.0, 68),  // thick stroke
+            (400, 500, Rect::new(-11, -9, 150, 180), 18.0, 4.0, 0), // clipped top-left
+            (400, 500, Rect::new(325, 410, 150, 180), 18.0, 4.0, 0), // clipped bottom-right
+            (400, 500, Rect::new(10, 10, 200, 30), 18.0, 12.0, 0), // thick stroke on thin rect
+            (400, 500, Rect::new(10, 10, 120, 120), 18.0, 0.75, 0), // fractional hairline width
+            (400, 500, Rect::new(10, 10, 120, 120), 18.0, 3.5, 0), // fractional width
+            (400, 500, Rect::new(500, 500, 100, 100), 18.0, 4.0, 0), // completely off-screen
+            // Full Kindle screen coordinates (tests large y/x translations)
+            (1272, 1696, Rect::new(59, 609, 257, 365), 18.0, 4.0, 0),
+            (1272, 1696, Rect::new(59, 1010, 257, 365), 18.0, 8.0, 0),
+            (1272, 1696, Rect::new(59, 200, 1154, 1300), 35.0, 4.0, 0),
+        ];
+        for (i, &(w, h, rect, radius, width, gray)) in cases.iter().enumerate() {
+            let page: Vec<u8> = (0..w as usize * h as usize).map(|k| ((k * 37 + i * 13) % 256) as u8).collect();
+            let mut canvas = Canvas::new(w, h);
+            canvas.set_gray(&page);
+            canvas.stroke_rounded_rect(rect, radius, width, gray);
+
+            // Reference: today's full-pixmap tiny-skia stroke_path.
+            let mut rgba = tiny_skia::Pixmap::new(w, h).unwrap();
+            for (px, &g) in rgba.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&page) {
+                *px = [g, g, g, 255];
+            }
+            let half = width / 2.0;
+            let inner = tiny_skia::Rect::from_xywh(
+                rect.x as f32 + half,
+                rect.y as f32 + half,
+                rect.w as f32 - width,
+                rect.h as f32 - width,
+            );
+            if let Some(path) = inner.and_then(|r| rounded_path(r, (radius - half).max(0.0))) {
+                rgba.stroke_path(
+                    &path,
+                    &paint(gray),
+                    &Stroke { width, ..Stroke::default() },
+                    Transform::identity(),
+                    None,
+                );
+            }
+            let expected: Vec<u8> = rgba.pixels().iter().map(|p| p.red()).collect();
+            let mismatches: Vec<_> = canvas
+                .gray
+                .iter()
+                .zip(&expected)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .take(5)
+                .map(|(idx, (a, b))| (idx % w as usize, idx / w as usize, *a, *b))
+                .collect();
+            assert!(mismatches.is_empty(), "case {i} ({rect:?}, r={radius}, w={width}): {mismatches:?}");
+        }
     }
 
     #[test]

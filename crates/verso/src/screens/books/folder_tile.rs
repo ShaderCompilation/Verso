@@ -59,7 +59,7 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
                     Rect::new(x2, y2, right, bottom),
                 ],
             };
-            let covers = slots.into_iter().enumerate().map(|(i, s)| (i, s, Fit::Preview)).collect();
+            let covers = slots.into_iter().enumerate().map(|(i, s)| (i, s, Fit::Cover)).collect();
             Layout { covers, front: area, tab: None, bounds: area }
         }
         FolderPreview::Stack => {
@@ -72,7 +72,7 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
             // Shorter stacks stay centred in the same box.
             let shift = (3 - n as i32) * d / 2;
             let at = |k: usize| Rect::new(x + shift + k as i32 * d, r.y + 2 * d - shift - k as i32 * d, w, h);
-            let covers = (0..n).rev().map(|k| (k, at(k), if k == 0 { Fit::Preview } else { Fit::Behind })).collect();
+            let covers = (0..n).rev().map(|k| (k, at(k), if k == 0 { Fit::Cover } else { Fit::Behind(d) })).collect();
             Layout { covers, front: at(0), tab: None, bounds }
         }
         FolderPreview::Latest => {
@@ -81,7 +81,7 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
             let h = w * 3 / 2;
             let cover = Rect::new(r.x + (r.w - w) / 2, r.y + tab_h, w, h);
             Layout {
-                covers: vec![(0, cover, Fit::Preview)],
+                covers: vec![(0, cover, Fit::Cover)],
                 front: cover,
                 tab: Some(Rect::new(cover.x, r.y, w * 2 / 5, tab_h)),
                 bounds: Rect::new(cover.x, r.y, w, h + tab_h),
@@ -105,8 +105,8 @@ pub(super) fn draw(
     let t = cx.theme;
     let layout = layout(mode, books.len(), r, t)?;
     for &(i, rect, fit) in &layout.covers {
-        if let Some(image) = load_cover(cache, store, books[i], rect.w, rect.h, fit) {
-            cx.canvas.blit_gray(rect, image.as_raw(), image.width() as usize);
+        if let Some(cover) = cache.load(store, books[i], rect.w, rect.h, fit) {
+            cover.blit(cx.canvas, rect);
             // A stack's covers need an edge where they overlap.
             if mode == FolderPreview::Stack {
                 cx.canvas.stroke_rounded_rect(rect, 0.0, t.hairline as f32, INK);
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(slots.iter().map(|s| s.w as i64 * s.h as i64).sum::<i64>(), l.bounds.w as i64 * l.bounds.h as i64);
         // Small thumbnails cover every quarter.
         assert!(slots.iter().all(|s| s.w as u32 <= covers::SMALL_WIDTH && s.h as u32 <= covers::SMALL_HEIGHT));
-        assert!(l.covers.iter().all(|c| c.2 == Fit::Preview));
+        assert!(l.covers.iter().all(|c| c.2 == Fit::Cover));
         // More books than slots draw only four.
         assert_eq!(layout(FolderPreview::Covers, 9, r, &t).unwrap(), l);
     }
@@ -210,7 +210,7 @@ mod tests {
         let q = |i: usize| full.covers[i].1;
         // One book: the whole grid.
         let one = layout(FolderPreview::Covers, 1, r, &t).unwrap();
-        assert_eq!(one.covers, [(0, area, Fit::Preview)]);
+        assert_eq!(one.covers, [(0, area, Fit::Cover)]);
         // Two: tall halves side by side.
         let two = layout(FolderPreview::Covers, 2, r, &t).unwrap();
         let halves: Vec<_> = two.covers.iter().map(|c| (c.0, c.1)).collect();
@@ -244,7 +244,7 @@ mod tests {
         // The front cover is larger than a small thumbnail and decodes the
         // full one; the hidden ones decode small files.
         assert!(front.w as u32 > covers::SMALL_WIDTH);
-        assert_eq!(l.covers.iter().map(|c| c.2).collect::<Vec<_>>(), [Fit::Behind, Fit::Behind, Fit::Preview]);
+        assert_eq!(l.covers.iter().map(|c| c.2).collect::<Vec<_>>(), [Fit::Behind(d), Fit::Behind(d), Fit::Cover]);
         // One or two books show only those, centred in the same box.
         let two = layout(FolderPreview::Stack, 2, r, &t).unwrap();
         assert_eq!(two.covers.len(), 2);

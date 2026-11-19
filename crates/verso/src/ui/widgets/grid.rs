@@ -50,10 +50,24 @@ impl Grid {
         Paging::new(self.count, self.cols * self.rows)
     }
 
+    /// The cells on `page`: (item index, rect).
+    pub fn cells_for_page(&self, page: usize) -> Vec<(usize, Rect)> {
+        let slots = self.rect.grid(self.cols, self.rows, self.gap_x, self.gap_y);
+        self.paging().range(page).zip(slots).collect()
+    }
+
     /// The cells on the current page: (item index, rect).
     pub fn cells(&self) -> Vec<(usize, Rect)> {
-        let slots = self.rect.grid(self.cols, self.rows, self.gap_x, self.gap_y);
-        self.paging().range(self.page).zip(slots).collect()
+        self.cells_for_page(self.page)
+    }
+
+    /// The uniform base cell size `(width, height)`, ignoring 1 px remainder
+    /// pixels distributed to the first columns/rows so every tile on a page
+    /// shares one exact cover size.
+    pub fn base_cell_size(&self) -> (i32, i32) {
+        let w = (self.rect.w - self.gap_x * (self.cols as i32 - 1)).max(0) / self.cols as i32;
+        let h = (self.rect.h - self.gap_y * (self.rows as i32 - 1)).max(0) / self.rows as i32;
+        (w, h)
     }
 
     fn cell_at(&self, p: Point) -> Option<usize> {

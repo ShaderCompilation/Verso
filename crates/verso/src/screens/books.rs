@@ -35,49 +35,11 @@ use verso_update::check::Offer;
 mod folder_tile;
 mod moving;
 mod selection;
+mod thumbnails;
 use moving::{Carry, ClashSheet, PasteEnd};
 use selection::Selection;
+use thumbnails::{CoverSpec, Fit, Thumbnails};
 
-/// How a decoded cover is fitted to its slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Fit {
-    /// Book covers: the Triangle filter, as before folder previews.
-    Book,
-    /// Folder preview covers: area averaging, about 4.5 ms cheaper per slot
-    /// on the Kindle (docs/folder-previews.md, Phase 1).
-    Preview,
-    /// A Stack's covers behind the front one, mostly hidden: always from the
-    /// small file, whatever the slot size.
-    Behind,
-}
-/// Cover key, slot size and fit.
-type ThumbnailKey = (String, i32, i32, Fit);
-/// Decoded covers for the visible view only. A cache file that fails to load is
-/// not retried on every redraw: the title cover is shown and the library worker
-/// is asked once to repair it. A repair reply allows one more load.
-#[derive(Default)]
-struct Thumbnails {
-    images: HashMap<ThumbnailKey, image::GrayImage>,
-    /// (book id, cover key) pairs that failed to load.
-    failed: HashSet<(String, String)>,
-    /// Book ids to send to the library worker after drawing.
-    requests: Vec<String>,
-}
-impl Thumbnails {
-    /// A page: up to 8 book covers and the Continue cover, with room for a
-    /// Home page beside them (18 before previews), plus up to 8 folder tiles
-    /// of 4 previews each.
-    const LIMIT: usize = 18 + 8 * library::previews::SLOTS;
-    fn retain(&mut self, keys: &HashSet<String>) {
-        self.images.retain(|(key, ..), _| keys.contains(key));
-    }
-    fn clear(&mut self) {
-        self.images.clear();
-    }
-    fn repaired(&mut self, ids: &[String]) {
-        self.failed.retain(|(id, _)| !ids.contains(id));
-    }
-}
 struct SearchSession {
     field: TextField,
     folded: String,
@@ -333,6 +295,7 @@ impl Books {
         // drawn at once (two small files).
         let updates = store.updates();
         let update_status = updates.status();
+        let thumbnails = Thumbnails::new(store.clone());
         let mut s = Self {
             screen,
             worker,
@@ -392,7 +355,7 @@ impl Books {
             scanning: true,
             working: true,
             errors: Vec::new(),
-            thumbnails: Thumbnails::default(),
+            thumbnails,
             reader: None,
             generation: 0,
             engine_error: None,
@@ -557,21 +520,6 @@ impl Books {
         }
         self.retain_selection();
         self.prioritize();
-        // Only the visible grid, its folder previews and the continue card
-        // retain decoded images.
-        let keys: HashSet<_> = self
-            .grid
-            .cells()
-            .iter()
-            .filter_map(|(i, _)| self.grid_book(*i))
-            .chain(self.continue_id.iter().filter_map(|id| self.book(id)))
-            .chain(self.visible_folders().flat_map(|folder| self.preview_books(folder)))
-            .filter_map(|b| match &b.cover {
-                Cover::Ready(key) => Some(key.clone()),
-                _ => None,
-            })
-            .collect();
-        self.thumbnails.retain(&keys);
         log::debug!("startup stage: view books={} elapsed_us={}", self.books.len(), started.elapsed().as_micros());
     }
     fn refresh_home(&mut self, t: &Theme) {
@@ -625,16 +573,6 @@ impl Books {
             Rect::new(t.margin, self.status.y - t.mm(2.0) - notice_h, width, notice_h)
         };
         self.prioritize();
-        let keys: HashSet<_> = self
-            .home
-            .books
-            .iter()
-            .filter_map(|e| match &e.book.cover {
-                Cover::Ready(key) => Some(key.clone()),
-                _ => None,
-            })
-            .collect();
-        self.thumbnails.retain(&keys);
     }
     /// Covers of visible books come first, then those of visible previews.
     fn prioritize(&mut self) {
@@ -654,10 +592,18 @@ impl Books {
     fn visible_folders(&self) -> impl Iterator<Item = &PathBuf> {
         self.grid.cells().into_iter().filter_map(|(i, _)| self.folders.get(i))
     }
-    /// Picks previews for the visible folder tiles only. The opened order is
-    /// read on first need, so views without folders read nothing.
+    /// Folders on the current page and the pages either side of it.
+    fn nearby_folders(&self) -> impl Iterator<Item = &PathBuf> {
+        let page = self.grid.page;
+        (page.saturating_sub(1)..=page + 1)
+            .flat_map(|p| self.grid.cells_for_page(p))
+            .filter_map(|(i, _)| self.folders.get(i))
+    }
+    /// Picks previews for the folder tiles on the current page and the pages
+    /// either side, which the prefetcher prepares. The opened order is read
+    /// on first need, so views without folders read nothing.
     fn pick_previews(&mut self) {
-        if self.folder_preview == FolderPreview::Icon || self.visible_folders().next().is_none() {
+        if self.folder_preview == FolderPreview::Icon || self.nearby_folders().next().is_none() {
             return;
         }
         if !self.previews.has_order() {
@@ -667,7 +613,7 @@ impl Books {
             log::debug!("opened order: {} books in {:?}", opened.books.len(), started.elapsed());
         }
         let started = std::time::Instant::now();
-        let folders: Vec<_> = self.visible_folders().cloned().collect();
+        let folders: Vec<_> = self.nearby_folders().cloned().collect();
         self.previews.update(&self.index, &self.collections, &folders);
         log::debug!("folder previews: {} folders in {:?}", folders.len(), started.elapsed());
     }
@@ -676,6 +622,64 @@ impl Books {
     fn rebuild_collections(&mut self) {
         self.collections = Collections::from_index(&self.index, &self.roots);
         self.previews.index_changed();
+    }
+    /// Folders inside a folder share its parent, already shown in the path
+    /// row, so their tiles give that line to the preview. Only configured
+    /// roots at the top level can share a name; those keep their parent.
+    fn shared_names(&self) -> HashSet<String> {
+        if self.navigation.folder.is_some() {
+            return HashSet::new();
+        }
+        let mut seen = HashSet::new();
+        self.folders.iter().map(|p| collections::name(p)).filter(|name| !seen.insert(name.clone())).collect()
+    }
+    /// A book's cover in grid cell `cell`. Every cell's cover has the size
+    /// of the narrowest cell's, so a page draws one tile thumbnail size.
+    fn cover_rect(&self, cell: Rect, t: &Theme) -> Rect {
+        let (w, h) = self.grid.base_cell_size();
+        let cover_h = (h - t.mm(10.0)).min(w * 3 / 2).max(1);
+        let cover_w = (cover_h * 2 / 3).max(1);
+        Rect::new(cell.x + (cell.w - cover_w) / 2, cell.y, cover_w, cover_h)
+    }
+    /// A folder tile's preview or icon area in `cell`, above its labels; the
+    /// same size in every cell, like covers.
+    fn folder_rect(&self, cell: Rect, parent_line: bool, t: &Theme) -> Rect {
+        let (w, h) = self.grid.base_cell_size();
+        let labels = t.mm(if parent_line { 10.0 } else { 5.0 });
+        Rect::new(cell.x, cell.y, w, (h - labels).min(w * 3 / 2))
+    }
+    /// The covers on the pages either side of the current one, next page
+    /// first, for the prefetcher to decode while this one is on screen.
+    fn neighbour_covers(&self, t: &Theme) -> Vec<CoverSpec> {
+        if self.is_home() {
+            return Vec::new();
+        }
+        let page = self.grid.page;
+        let shared_names = self.shared_names();
+        let mut specs = Vec::new();
+        let mut add = |book: &Book, rect: Rect, fit: Fit| {
+            if let Cover::Ready(key) = &book.cover {
+                specs.push(CoverSpec { book_id: book.id.clone(), key: key.clone(), w: rect.w, h: rect.h, fit });
+            }
+        };
+        for p in [Some(page + 1), page.checked_sub(1)].into_iter().flatten() {
+            for (i, cell) in self.grid.cells_for_page(p) {
+                if let Some(path) = self.folders.get(i) {
+                    let parent_line = shared_names.contains(&collections::name(path));
+                    let picks: Vec<&Book> = self.preview_books(path).collect();
+                    let r = self.folder_rect(cell, parent_line, t);
+                    for (k, rect, fit) in folder_tile::layout(self.folder_preview, picks.len(), r, t)
+                        .map(|l| l.covers)
+                        .unwrap_or_default()
+                    {
+                        add(picks[k], rect, fit);
+                    }
+                } else if let Some(book) = self.grid_book(i) {
+                    add(book, self.cover_rect(cell, t), Fit::Cover);
+                }
+            }
+        }
+        specs
     }
     fn grid_book(&self, i: usize) -> Option<&Book> {
         i.checked_sub(self.folders.len()).and_then(|i| self.books.get(i))
@@ -719,7 +723,6 @@ impl Books {
     fn go_to_page(&mut self, page: usize, cx: &mut EventCx) {
         self.pager.set(page, self.pager.pages);
         self.grid.page = self.pager.page;
-        self.thumbnails.clear();
         self.prioritize();
         self.save_navigation();
         cx.refresh(self.screen, RefreshMode::Full);
@@ -749,7 +752,6 @@ impl Books {
         self.navigation.set_page(self.pager.page);
         self.navigation.folder = folder;
         self.pager.page = self.navigation.page();
-        self.thumbnails.clear();
         self.refresh(cx.theme);
         self.save_navigation();
         cx.refresh(self.screen, RefreshMode::Full);
@@ -1428,62 +1430,9 @@ fn path_tail(text: &mut crate::gfx::TextRenderer, path: &str, style: crate::gfx:
     }
     format!("…{}", &path[chars[low]..])
 }
-/// The decoded cover of `book` sized `w` × `h`, loaded on first use. None
-/// without art, while pending, or when the cache file failed to load.
-fn load_cover<'a>(
-    cache: &'a mut Thumbnails,
-    store: &Store,
-    book: &Book,
-    w: i32,
-    h: i32,
-    fit: Fit,
-) -> Option<&'a image::GrayImage> {
-    let Cover::Ready(key) = &book.cover else { return None };
-    let cache_key = (key.clone(), w, h, fit);
-    let failure = (book.id.clone(), key.clone());
-    if !cache.images.contains_key(&cache_key) && !cache.failed.contains(&failure) {
-        // Slots no larger than the small thumbnail decode it instead; a
-        // broken small file is repaired like a full one.
-        let small = fit == Fit::Behind || (w <= covers::SMALL_WIDTH as i32 && h <= covers::SMALL_HEIGHT as i32);
-        let loaded = if small { covers::load_small(store, key) } else { covers::load(&store.cover_path(key)) };
-        match loaded {
-            Ok(image) => {
-                // Refresh retains only visible keys; this only guards the bound.
-                if cache.images.len() >= Thumbnails::LIMIT {
-                    cache.images.clear();
-                }
-                let (w, h) = (w.max(1) as u32, h.max(1) as u32);
-                let image = match fit {
-                    Fit::Book => image::imageops::resize(&image, w, h, image::imageops::FilterType::Triangle),
-                    Fit::Preview | Fit::Behind => fill(&image, w, h),
-                };
-                cache.images.insert(cache_key.clone(), image);
-            }
-            Err(e) => {
-                log::warn!("cover cache for {} failed to load: {e:#}", book.id);
-                cache.failed.insert(failure);
-                cache.requests.push(book.id.clone());
-            }
-        }
-    }
-    cache.images.get(&cache_key)
-}
-/// Scales a cover with area averaging until it covers a `w` × `h` slot and
-/// crops what's left over: centred across, kept from the top down, where
-/// titles usually sit. Cover-shaped slots lose at most a rounding pixel.
-fn fill(image: &image::GrayImage, w: u32, h: u32) -> image::GrayImage {
-    let (iw, ih) = (image.width().max(1) as u64, image.height().max(1) as u64);
-    let (w64, h64) = (w as u64, h as u64);
-    let (sw, sh) = if w64 * ih >= h64 * iw { (w64, (ih * w64).div_ceil(iw)) } else { ((iw * h64).div_ceil(ih), h64) };
-    let scaled = image::imageops::thumbnail(image, sw as u32, sh as u32);
-    if (sw, sh) == (w64, h64) {
-        return scaled;
-    }
-    image::imageops::crop_imm(&scaled, (sw as u32 - w) / 2, 0, w, h).to_image()
-}
 fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &mut Thumbnails) {
-    if let Some(image) = load_cover(cache, store, book, rect.w, rect.h, Fit::Book) {
-        cx.canvas.blit_gray(rect, image.as_raw(), image.width() as usize);
+    if let Some(cover) = cache.load(store, book, rect.w, rect.h, Fit::Cover) {
+        cover.blit(cx.canvas, rect);
         return;
     }
     let t = cx.theme;
@@ -1507,6 +1456,7 @@ impl Screen for Books {
             return;
         }
         let t = cx.theme;
+        self.thumbnails.home = self.is_home();
         let paste_enabled = self.paste_reason().is_none();
         if let Some(selection) = &mut self.selection {
             selection.paste.enabled = paste_enabled;
@@ -1618,22 +1568,14 @@ impl Screen for Books {
         if !self.is_home() {
             self.sort.draw(cx);
         }
-        // Folders inside a folder share its parent, already shown in the path
-        // row, so their tiles give that line to the preview. Only configured
-        // roots at the top level can share a name; those keep their parent.
-        let shared_names: HashSet<String> = if self.navigation.folder.is_none() {
-            let mut seen = HashSet::new();
-            self.folders.iter().map(|p| collections::name(p)).filter(|name| !seen.insert(name.clone())).collect()
-        } else {
-            HashSet::new()
-        };
+        let shared_names = self.shared_names();
         for (i, cell) in self.grid.cells() {
             if let Some(path) = self.folders.get(i) {
                 let folder = &self.collections.folders[path];
                 let name = collections::name(path);
                 let parent_line = shared_names.contains(&name);
-                let labels = t.mm(if parent_line { 10.0 } else { 5.0 });
-                let r = Rect::new(cell.x, cell.y, cell.w, (cell.h - labels).min(cell.w * 3 / 2));
+                let r = self.folder_rect(cell, parent_line, t);
+                // Fields, not preview_books, so the cache can be borrowed too.
                 let picks: Vec<&Book> = self
                     .previews
                     .get(path)
@@ -1688,10 +1630,7 @@ impl Screen for Books {
                 continue;
             }
             let book = &self.books[i - self.folders.len()];
-            let text_h = t.mm(10.0);
-            let cover_h = (cell.h - text_h).min(cell.w * 3 / 2).max(1);
-            let cover_w = (cover_h * 2 / 3).max(1);
-            let cover = Rect::new(cell.x + (cell.w - cover_w) / 2, cell.y, cover_w, cover_h);
+            let cover = self.cover_rect(cell, t);
             draw_cover(cx, book, cover, &self.store, &mut self.thumbnails);
             if self.grid.pressed() == Some(i) {
                 cx.canvas.stroke_rounded_rect(cover, t.radius, (2 * t.border) as f32, INK);
@@ -1795,6 +1734,12 @@ impl Screen for Books {
         if !self.thumbnails.requests.is_empty() {
             self.library.repair(std::mem::take(&mut self.thumbnails.requests));
         }
+        let sizes = self.thumbnails.take_new_sizes();
+        if !sizes.is_empty() {
+            self.library.drew_cover_sizes(sizes);
+        }
+        let neighbours = self.neighbour_covers(t);
+        self.thumbnails.prefetch(neighbours);
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         if matches!(g, Gesture::Down(_)) {
@@ -2008,7 +1953,6 @@ impl Screen for Books {
                     };
                 }
                 self.pager.page = self.navigation.page();
-                self.thumbnails.clear();
                 self.refresh(cx.theme);
                 self.save_navigation();
                 cx.refresh(self.screen, RefreshMode::Full);
@@ -3585,7 +3529,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn small_slots_use_small_thumbnails_and_fall_back_to_the_full_one() -> anyhow::Result<()> {
+    fn covers_use_tile_or_small_thumbnails_and_fall_back_to_the_full_one() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("small-covers")?;
         let mut book = store.library().books[0].clone();
         book.cover = Cover::Ready("k".into());
@@ -3605,13 +3549,18 @@ mod tests {
                 &store,
                 cache,
             );
-            cache.images.get(&("k".to_owned(), rect.w, rect.h, Fit::Book)).map(|image| image.get_pixel(50, 50)[0])
+            cache.images.get(&("k".to_owned(), rect.w, rect.h, Fit::Cover)).map(|e| e.cover.sample_pixel(50, 50))
         };
         // Until the worker backfills it, a small slot resizes the full thumbnail.
         assert_eq!(draw(small, &mut cache), Some(128));
         image::GrayImage::from_pixel(144, 216, image::Luma([40])).save(store.small_cover_path("k"))?;
         assert_eq!(draw(small, &mut cache), Some(40));
         assert_eq!(draw(large, &mut cache), Some(128), "larger slots keep the full thumbnail");
+        // Once the worker has made a thumbnail of the slot's size, it is used as it is.
+        assert_eq!(cache.take_new_sizes(), [(200, 300)], "only sizes above the small one get tiles");
+        image::GrayImage::from_pixel(200, 300, image::Luma([90])).save(store.tile_cover_path("k", 200, 300))?;
+        assert_eq!(draw(large, &mut cache), Some(90));
+        assert!(cache.take_new_sizes().is_empty(), "each size is sent to the worker once");
         // A broken small file shows the title cover and asks for one repair.
         std::fs::write(store.small_cover_path("k"), b"corrupt")?;
         assert_eq!(draw(small, &mut cache), None);
@@ -3664,7 +3613,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn decoded_covers_stay_on_visible_collection_pages() -> anyhow::Result<()> {
+    fn decoded_covers_keep_nearby_pages_within_their_budget() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("covers")?;
         let mut index = store.library();
         std::fs::create_dir_all(store.cover_path("0").parent().unwrap())?;
@@ -3675,25 +3624,36 @@ mod tests {
         store.save_library(&index)?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         books.navigation.tab = Tab::Collections;
         books.navigation.folder = Some("/books/Fiction/Nested".into());
         let mut canvas = crate::gfx::Canvas::new(1272, 1696);
         let mut text = crate::gfx::TextRenderer::new();
         let mut icons = crate::gfx::IconRenderer::default();
+        let mut seen = HashSet::new();
         for page in 0..3 {
             books.pager.page = page;
             books.refresh(&t);
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
-            let visible: std::collections::HashSet<_> =
-                books.grid.cells().iter().map(|(i, _)| books.grid_book(*i).unwrap().id.clone()).collect();
-            assert_eq!(books.thumbnails.images.len(), visible.len());
-            assert!(books.thumbnails.images.keys().all(|(key, ..)| visible.contains(key)));
+            seen.extend(books.grid.cells().iter().map(|(i, _)| books.grid_book(*i).unwrap().id.clone()));
+            let cached: HashSet<_> = books.thumbnails.images.keys().map(|(key, ..)| key.clone()).collect();
+            assert_eq!(cached, seen, "earlier pages stay decoded");
         }
-        books.navigation.folder = None;
-        books.folder_preview = FolderPreview::Icon;
-        books.refresh(&t);
-        assert!(books.thumbnails.images.is_empty(), "Icon folder pages retain no decoded covers");
+        assert!(books.thumbnails.bytes() <= Thumbnails::MAX_BYTES);
+        // Every cover on a page has one size, so one tile thumbnail serves it.
+        let sizes: HashSet<_> = books.thumbnails.images.keys().map(|(_, w, h, _)| (*w, *h)).collect();
+        assert_eq!(sizes.len(), 1);
+        // Going back a page decodes nothing, even with the files gone.
+        let covers = store.cover_path("0").parent().unwrap().to_owned();
+        let moved = root.join("covers-away");
+        std::fs::rename(&covers, &moved)?;
+        with_cx(&t, screen, |cx| books.go_to_page(1, cx));
+        books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+        assert!(books.thumbnails.failed.is_empty());
+        std::fs::rename(&moved, &covers)?;
+        // Clearing, as opening a book does, frees them all.
+        books.thumbnails.clear();
+        assert!(books.thumbnails.images.is_empty() && books.thumbnails.bytes() == 0);
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -3728,33 +3688,6 @@ mod tests {
         Ok((store, root))
     }
     #[test]
-    fn preview_fill_crops_the_overflow_keeping_the_top_and_centre() {
-        // A 2:3 cover: the top third white, the rest black, with a gray
-        // middle column.
-        let cover = image::GrayImage::from_fn(144, 216, |x, y| {
-            image::Luma([if (66..78).contains(&x) {
-                0x80
-            } else if y < 72 {
-                0xff
-            } else {
-                0x00
-            }])
-        });
-        // A wide slot crops the bottom and keeps the top whole.
-        let wide = fill(&cover, 120, 150);
-        assert_eq!(wide.dimensions(), (120, 150));
-        assert_eq!(wide.get_pixel(0, 0).0[0], 0xff);
-        assert_eq!(wide.get_pixel(0, 59).0[0], 0xff, "a third of the scaled height, 180, is white");
-        assert_eq!(wide.get_pixel(0, 149).0[0], 0x00);
-        // A tall slot crops both sides evenly.
-        let tall = fill(&cover, 60, 216);
-        assert_eq!(tall.dimensions(), (60, 216));
-        assert_eq!(tall.get_pixel(30, 100).0[0], 0x80, "the middle column stays in the middle");
-        assert_eq!(tall.get_pixel(0, 100).0[0], 0x00);
-        // A cover-shaped slot is scaled, not cropped.
-        assert_eq!(fill(&cover, 96, 144), image::imageops::thumbnail(&cover, 96, 144));
-    }
-    #[test]
     fn folder_previews_decode_one_page_per_mode_and_icon_decodes_nothing() -> anyhow::Result<()> {
         let (store, root) = preview_fixture("modes")?;
         let t = Theme::for_dpi(300);
@@ -3775,19 +3708,19 @@ mod tests {
             hints.iter().filter(|h| h.mode == RefreshMode::Ui).count()
         };
         // Pixel values tell the small file (50) from the full one (128).
-        let decoded = |books: &Books, fit: Fit| {
+        let decoded = |books: &Books, behind: bool| {
             books
                 .thumbnails
                 .images
                 .iter()
-                .filter(|((_, _, _, f), _)| *f == fit)
-                .map(|(_, i)| i.get_pixel(5, 5)[0])
+                .filter(|((_, _, _, f), _)| matches!(f, Fit::Behind(_)) == behind)
+                .map(|(_, e)| e.cover.sample_pixel(5, 5))
                 .collect::<Vec<_>>()
         };
         assert_eq!(draw(&mut books), 8, "each preview tile is a grayscale area");
         assert_eq!(books.thumbnails.images.len(), 32, "four previews for each of eight tiles");
-        assert!(books.thumbnails.images.len() <= Thumbnails::LIMIT);
-        assert!(decoded(&books, Fit::Preview).iter().all(|&v| v == 50), "mosaic slots decode small files");
+        assert!(books.thumbnails.bytes() <= Thumbnails::MAX_BYTES);
+        assert!(decoded(&books, false).iter().all(|&v| v == 50), "mosaic slots decode small files");
         // Drawing again decodes nothing new, even with the files gone.
         let covers = store.cover_path("0").parent().unwrap().to_owned();
         let moved = root.join("covers-away");
@@ -3799,7 +3732,7 @@ mod tests {
         // The ninth folder has no art: its tile is the icon, with no hint.
         with_cx(&t, screen, |cx| books.go_to_page(1, cx));
         assert_eq!(draw(&mut books), 0);
-        assert!(books.thumbnails.images.is_empty());
+        assert_eq!(books.thumbnails.images.len(), 32, "the previous page stays decoded");
         with_cx(&t, screen, |cx| books.go_to_page(0, cx));
         let set_mode = |books: &mut Books, mode| {
             let mut settings = store.settings();
@@ -3812,8 +3745,8 @@ mod tests {
         set_mode(&mut books, FolderPreview::Stack);
         assert_eq!(draw(&mut books), 8);
         assert_eq!(books.thumbnails.images.len(), 24);
-        assert_eq!(decoded(&books, Fit::Preview), [128; 8], "front covers decode the full file");
-        assert_eq!(decoded(&books, Fit::Behind), [50; 16], "covers behind decode small files");
+        assert_eq!(decoded(&books, false), [128; 8], "front covers decode the full file");
+        assert_eq!(decoded(&books, true), [50; 16], "covers behind decode small files");
         set_mode(&mut books, FolderPreview::Latest);
         assert_eq!(draw(&mut books), 8);
         assert_eq!(books.thumbnails.images.len(), 8);
@@ -3866,6 +3799,7 @@ mod tests {
         };
         draw(&mut books);
         assert_eq!(books.thumbnails.images.len(), 2, "only Home's visible covers are decoded");
+        assert!(books.thumbnails.take_new_sizes().is_empty(), "Home's covers get no tile thumbnails");
         assert!(books.thumbnails.failed.contains(&("1".into(), "1".into())));
         assert!(books.thumbnails.requests.is_empty(), "the repair request is sent after drawing");
         books.thumbnails.failed.insert(("2".into(), "missing".into()));

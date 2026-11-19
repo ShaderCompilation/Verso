@@ -321,6 +321,14 @@ impl Store {
     pub fn small_cover_path(&self, key: &str) -> PathBuf {
         self.root.join("covers").join(format!("{key}-s.png"))
     }
+    /// A thumbnail at a tile size the library draws covers at.
+    pub fn tile_cover_path(&self, key: &str, width: u32, height: u32) -> PathBuf {
+        self.root.join("covers").join(format!("{key}-{width}x{height}.png"))
+    }
+    /// The tile sizes `tile_cover_path` files are kept for.
+    pub fn tile_sizes_path(&self) -> PathBuf {
+        self.root.join("covers").join("sizes.json")
+    }
     pub fn annotation_dir(&self) -> PathBuf {
         self.root.join("annotations")
     }

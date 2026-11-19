@@ -57,6 +57,8 @@ struct Shared {
     revision: u64,
     /// A new folder list from Settings, used from the next pass.
     roots: Option<Vec<PathBuf>>,
+    /// Cover sizes the library screen drew since the worker last looked.
+    drawn_sizes: Vec<(u32, u32)>,
 }
 const REPAIR_LIMIT: usize = 32;
 /// A page of book covers plus a page of folder previews (8 tiles × 4) and
@@ -146,6 +148,8 @@ struct Background {
     channel: Channel,
     store: Store,
     roots: Vec<PathBuf>,
+    /// The sizes tile thumbnails are kept at, most recently drawn first.
+    tile_sizes: Vec<(u32, u32)>,
     index: LibraryIndex,
     /// Content changes not yet delivered to the UI / written to `library.json`.
     unpublished: bool,
@@ -168,13 +172,15 @@ impl Background {
         {
             self.rebuild_home();
         }
+        self.tile_sizes = covers::tile_sizes(&self.store);
         loop {
-            let (retry, scan, home, repairs) = {
+            let (retry, scan, home, repairs, tiles) = {
                 let mut state = self.channel.lock();
                 while !state.stop
                     && !state.requested
                     && !state.home_requested
                     && state.changes.is_empty()
+                    && state.drawn_sizes.is_empty()
                     && (state.paused || state.repairs.is_empty())
                 {
                     state = self.channel.wait(state);
@@ -186,7 +192,9 @@ impl Background {
                 if let Some(roots) = state.roots.take() {
                     self.roots = roots;
                 }
+                let drawn = std::mem::take(&mut state.drawn_sizes);
                 drop(state);
+                let tiles = self.use_tile_sizes(&drawn);
                 let changed = !changes.is_empty();
                 self.change_paths(&changes);
                 let mut state = self.channel.lock();
@@ -198,6 +206,7 @@ impl Background {
                     std::mem::take(&mut state.requested) || changed,
                     std::mem::take(&mut state.home_requested),
                     !state.paused && !state.repairs.is_empty(),
+                    tiles,
                 )
             };
             if home {
@@ -207,6 +216,18 @@ impl Background {
                 if !self.pass(retry) {
                     break;
                 }
+            } else if tiles {
+                // A new tile size: its thumbnails for every book, without a scan.
+                let mut errors = self.last_errors.clone();
+                self.set_status(false, true, &errors);
+                self.covers(&mut errors);
+                self.save(&mut errors, "covers");
+                if std::mem::take(&mut self.home_stale) {
+                    self.refresh_home_metadata();
+                }
+                self.publish();
+                self.set_status(false, false, &errors);
+                self.last_errors = errors;
             } else if repairs {
                 // Outside a pass, only an actual cover change is saved and published.
                 let mut errors = self.last_errors.clone();
@@ -265,55 +286,7 @@ impl Background {
         self.publish();
         self.set_status(false, true, &errors);
 
-        let covers_started = Instant::now();
-        let mut pending: BTreeSet<_> =
-            self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
-        let id_indices: HashMap<_, _> = self.index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
-        let mut since_publish = Instant::now();
-        let (mut confirmed, mut changed, mut unsaved) = (0, 0, 0);
-        let mut interrupted = false;
-        while !pending.is_empty() {
-            if self.channel.take_home_request() {
-                self.rebuild_home();
-            }
-            let (repaired, repair_changed) = self.repair_requested(&mut errors);
-            for i in repaired {
-                pending.remove(&i);
-            }
-            if repair_changed {
-                self.changed();
-                unsaved += 1;
-            }
-            let next = match self.next_cover(&pending, &id_indices) {
-                Next::Interrupted => {
-                    interrupted = true;
-                    break;
-                }
-                Next::Repairs => continue,
-                Next::Cover(i) => i,
-            };
-            pending.remove(&next);
-            match covers::generate(&self.index.books[next], &self.store) {
-                Ok(cover) if cover != self.index.books[next].cover => {
-                    self.index.books[next].cover = cover;
-                    self.changed();
-                    changed += 1;
-                    unsaved += 1;
-                }
-                Ok(_) => confirmed += 1,
-                Err(e) => push_error(&mut errors, format!("Couldn't cache cover: {e}")),
-            }
-            if unsaved >= SAVE_EVERY {
-                self.save(&mut errors, "covers");
-                unsaved = 0;
-            }
-            if self.unpublished && since_publish.elapsed() >= PUBLISH_INTERVAL {
-                self.publish();
-                since_publish = Instant::now();
-            }
-            self.set_status(false, true, &errors);
-        }
-        log::info!("library covers: {confirmed} confirmed, {changed} changed in {:?}", covers_started.elapsed());
+        let mut interrupted = self.covers(&mut errors);
 
         let identity_started = Instant::now();
         // Fingerprinting new additions is deferred until metadata and covers are
@@ -371,6 +344,87 @@ impl Background {
         true
     }
 
+    /// Moves the sizes the library drew covers at to the front of the kept
+    /// list, dropping the least recent beyond [`covers::TILE_SIZES`] with
+    /// their files. True when a size is new and its thumbnails are needed.
+    fn use_tile_sizes(&mut self, drawn: &[(u32, u32)]) -> bool {
+        let mut sizes = self.tile_sizes.clone();
+        let mut added = false;
+        for &size in drawn.iter().filter(|&&s| covers::tile_size(s)) {
+            match sizes.iter().position(|&s| s == size) {
+                Some(i) => {
+                    sizes.remove(i);
+                }
+                None => added = true,
+            }
+            sizes.insert(0, size);
+        }
+        if sizes == self.tile_sizes {
+            return false;
+        }
+        for &size in sizes.iter().skip(covers::TILE_SIZES) {
+            log::info!("cover size {}x{}: no longer kept", size.0, size.1);
+            covers::remove_tile_size(&self.store, size);
+        }
+        sizes.truncate(covers::TILE_SIZES);
+        if let Err(e) = covers::save_tile_sizes(&self.store, &sizes) {
+            log::warn!("saving cover sizes: {e:#}");
+        }
+        self.tile_sizes = sizes;
+        added
+    }
+
+    /// Makes missing thumbnails, visible books first. True when a scan
+    /// request, folder edit or shutdown interrupted it.
+    fn covers(&mut self, errors: &mut Vec<String>) -> bool {
+        let covers_started = Instant::now();
+        let mut pending: BTreeSet<_> =
+            self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
+        let id_indices: HashMap<_, _> = self.index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
+        let mut since_publish = Instant::now();
+        let (mut confirmed, mut changed, mut unsaved) = (0, 0, 0);
+        while !pending.is_empty() {
+            if self.channel.take_home_request() {
+                self.rebuild_home();
+            }
+            let (repaired, repair_changed) = self.repair_requested(errors);
+            for i in repaired {
+                pending.remove(&i);
+            }
+            if repair_changed {
+                self.changed();
+                unsaved += 1;
+            }
+            let next = match self.next_cover(&pending, &id_indices) {
+                Next::Interrupted => return true,
+                Next::Repairs => continue,
+                Next::Cover(i) => i,
+            };
+            pending.remove(&next);
+            match covers::generate(&self.index.books[next], &self.store, &self.tile_sizes) {
+                Ok(cover) if cover != self.index.books[next].cover => {
+                    self.index.books[next].cover = cover;
+                    self.changed();
+                    changed += 1;
+                    unsaved += 1;
+                }
+                Ok(_) => confirmed += 1,
+                Err(e) => push_error(errors, format!("Couldn't cache cover: {e}")),
+            }
+            if unsaved >= SAVE_EVERY {
+                self.save(errors, "covers");
+                unsaved = 0;
+            }
+            if self.unpublished && since_publish.elapsed() >= PUBLISH_INTERVAL {
+                self.publish();
+                since_publish = Instant::now();
+            }
+            self.set_status(false, true, errors);
+        }
+        log::info!("library covers: {confirmed} confirmed, {changed} changed in {:?}", covers_started.elapsed());
+        false
+    }
+
     fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>) -> Next {
         let mut state = self.channel.lock();
         while state.paused && !state.stop && !state.requested && state.changes.is_empty() {
@@ -404,7 +458,7 @@ impl Background {
                         Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
                         Cover::Pending => covers::key(book),
                     };
-                    covers::remove(&self.store, &key);
+                    covers::remove(&self.store, &key, &self.tile_sizes);
                 }
             }
             change.apply(&mut self.index);
@@ -472,7 +526,8 @@ impl Background {
         if ids.is_empty() {
             return (Vec::new(), false);
         }
-        let (repaired, changed) = repair_covers(&mut self.index, &ids, &self.store, &mut self.attempted, errors);
+        let (repaired, changed) =
+            repair_covers(&mut self.index, &ids, &self.store, &self.tile_sizes, &mut self.attempted, errors);
         if !repaired.is_empty() {
             self.channel.lock().repaired.extend(repaired.iter().map(|&i| self.index.books[i].id.clone()));
             self.channel.waker.wake();
@@ -498,6 +553,7 @@ impl Worker {
                     channel,
                     store,
                     roots,
+                    tile_sizes: Vec::new(),
                     index,
                     unpublished: false,
                     unsaved: false,
@@ -512,6 +568,14 @@ impl Worker {
             })
             .expect("start library thread");
         Self { shared, join: Some(join) }
+    }
+    /// Cover sizes the library drew, each once a session. The most recent
+    /// [`covers::TILE_SIZES`] get thumbnails of their own, so paging decodes
+    /// covers without resizing them.
+    pub fn drew_cover_sizes(&self, sizes: Vec<(u32, u32)>) {
+        let mut state = self.shared.0.lock().unwrap();
+        state.drawn_sizes.extend(sizes);
+        self.shared.1.notify_one();
     }
     pub fn rescan(&self) {
         let mut state = self.shared.0.lock().unwrap();
@@ -613,6 +677,7 @@ fn repair_covers(
     index: &mut LibraryIndex,
     ids: &[String],
     store: &Store,
+    tile_sizes: &[(u32, u32)],
     attempted: &mut HashSet<String>,
     errors: &mut Vec<String>,
 ) -> (Vec<usize>, bool) {
@@ -623,7 +688,7 @@ fn repair_covers(
         if !attempted.insert(covers::key(&index.books[i])) {
             continue;
         }
-        match covers::repair(&index.books[i], store) {
+        match covers::repair(&index.books[i], store, tile_sizes) {
             Ok(cover) if cover != index.books[i].cover => {
                 index.books[i].cover = cover;
                 changed = true;
@@ -1036,6 +1101,65 @@ mod tests {
         };
         assert!(scan_roots(&[root], &previous, false, &cancelled, |_| published.set(true)).is_none());
         assert!(!published.get(), "a cancelled retained-index rebuild must not publish a checkpoint");
+    }
+
+    #[test]
+    fn drawn_cover_sizes_get_tiles_for_every_book_and_the_oldest_size_goes() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-tile-sizes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let books = root.join("books");
+        std::fs::create_dir_all(&books)?;
+        for name in ["a", "b"] {
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub"),
+                books.join(format!("{name}.epub")),
+            )?;
+        }
+        let store = Store::at(root.join("data"));
+        let wait = |done: &dyn Fn() -> bool| {
+            let started = Instant::now();
+            while !done() {
+                assert!(started.elapsed() < Duration::from_secs(20), "timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let keys = || -> Vec<String> {
+            store
+                .library()
+                .books
+                .iter()
+                .filter_map(|b| match &b.cover {
+                    Cover::Ready(key) => Some(key.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let tiles =
+            |size: (u32, u32)| keys().iter().filter(|k| store.tile_cover_path(k, size.0, size.1).exists()).count();
+        let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
+        wait(&|| keys().len() == 2);
+        // Small and full sizes get no tiles of their own.
+        let sizes: Vec<_> = (0..covers::TILE_SIZES as u32).map(|i| (200 + i, 300 + i)).collect();
+        worker.drew_cover_sizes(vec![(100, 150), (covers::WIDTH, covers::HEIGHT), sizes[0]]);
+        wait(&|| tiles(sizes[0]) == 2);
+        assert_eq!(covers::tile_sizes(&store), [sizes[0]]);
+        worker.drew_cover_sizes(sizes[1..].to_vec());
+        wait(&|| sizes.iter().all(|&s| tiles(s) == 2));
+        // One more drops the least recently drawn size and its files.
+        worker.drew_cover_sizes(vec![(250, 375)]);
+        wait(&|| tiles((250, 375)) == 2 && tiles(sizes[0]) == 0);
+        let kept = covers::tile_sizes(&store);
+        assert_eq!((kept.len(), kept[0]), (covers::TILE_SIZES, (250, 375)));
+        assert!(!kept.contains(&sizes[0]));
+        drop(worker);
+        // A later session reads the kept sizes and backfills a missing tile.
+        let key = keys()[0].clone();
+        std::fs::remove_file(store.tile_cover_path(&key, 250, 375))?;
+        let worker = Worker::new(store.clone(), vec![books.clone()], Waker::new(|| {}));
+        wait(&|| store.tile_cover_path(&key, 250, 375).exists());
+        drop(worker);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
