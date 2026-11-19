@@ -45,8 +45,17 @@ pub struct Collection {
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-pub fn normalize(text: &str) -> String {
-    text.replace('\u{ad}', "").split_whitespace().collect::<Vec<_>>().join(" ")
+/// The text without soft hyphens, with each run of whitespace as one space and
+/// none at the ends.
+fn normalized(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.split_whitespace()
+        .filter(|w| w.chars().any(|c| c != '\u{ad}'))
+        .enumerate()
+        .flat_map(|(i, w)| (i > 0).then_some(' ').into_iter().chain(w.chars().filter(|&c| c != '\u{ad}')))
+}
+/// Whether a book's text still reads as a saved, non-empty quotation.
+pub fn same_quotation(text: &str, quotation: &str) -> bool {
+    normalized(quotation).next().is_some() && normalized(text).eq(normalized(quotation))
 }
 pub fn created_now() -> String {
     let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -309,8 +318,11 @@ mod tests {
     }
     #[test]
     fn quote_validation_only_folds_whitespace_and_soft_hyphens() {
-        assert_eq!(normalize("Hello\n  wo\u{ad}rld!"), "Hello world!");
-        assert_ne!(normalize("Hello!"), normalize("hello!"));
-        assert_ne!(normalize("Hello!"), normalize("Hello."));
+        assert!(!same_quotation("Hello!", "hello!"));
+        assert!(!same_quotation("Hello!", "Hello."));
+        assert_eq!(normalized(" \u{ad} a \u{ad}\u{ad} b\u{ad} ").collect::<String>(), "a b");
+        assert!(same_quotation("Hello\n  wo\u{ad}rld!", "Hello world!"));
+        assert!(!same_quotation("Hello world", "Hello world!"));
+        assert!(!same_quotation("", " \u{ad} "));
     }
 }

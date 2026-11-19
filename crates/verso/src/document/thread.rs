@@ -258,14 +258,17 @@ impl Worker {
                                         let i = task.next;
                                         task.next += 1;
                                         let a = &task.records[i];
-                                        let page =
-                                            d.validate_range(&a.range, &a.quotation).ok().flatten().and_then(|_| {
+                                        let page = d
+                                            .annotation_check(&a.range, &a.quotation)
+                                            .unwrap_or(false)
+                                            .then(|| {
                                                 if task.preview {
                                                     d.go_to_position(&a.range.start).ok().map(|_| d.current_page())
                                                 } else {
-                                                    d.annotation_add(i, &a.range).ok()
+                                                    d.annotation_keep(i).ok()
                                                 }
-                                            });
+                                            })
+                                            .flatten();
                                         task.found.push(Resolved { index: i, page });
                                     }
                                     if task.next == task.records.len() {

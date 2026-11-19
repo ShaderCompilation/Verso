@@ -286,7 +286,6 @@ impl Document for CreDocument {
             SelectionQuery::Extend { anchor, focus } => (1, *focus, Some(anchor)),
             SelectionQuery::Range(range) => (2, Point::default(), Some(range)),
             SelectionQuery::Geometry(range) => (3, Point::default(), Some(range)),
-            SelectionQuery::Quotation(range) => (4, Point::default(), Some(range)),
         };
         let start = range.map(|r| CString::new(r.start.0.as_str())).transpose()?;
         let end = range.map(|r| CString::new(r.end.0.as_str())).transpose()?;
@@ -523,11 +522,23 @@ impl CreDocument {
             sys::verso_cre_annotation_clear(self.raw);
         }
     }
-    pub fn annotation_add(&mut self, id: usize, range: &TextRange) -> Result<usize> {
+    /// Whether `range` is still valid text that reads as `quotation`. Never
+    /// searches for another location when the book or engine changed.
+    /// A true result can then be kept with [`Self::annotation_keep`].
+    pub fn annotation_check(&mut self, range: &TextRange, quotation: &str) -> Result<bool> {
         let a = CString::new(range.start.0.as_str())?;
         let b = CString::new(range.end.0.as_str())?;
-        let page = unsafe { sys::verso_cre_annotation_add(self.raw, id.try_into()?, a.as_ptr(), b.as_ptr()) };
-        anyhow::ensure!(page >= 0, "invalid annotation endpoints");
+        if unsafe { sys::verso_cre_annotation_check(self.raw, a.as_ptr(), b.as_ptr()) } < 0 {
+            return Ok(false);
+        }
+        let text = read_string(|buf, len| unsafe { sys::verso_cre_annotation_checked_text(self.raw, buf, len) })?;
+        Ok(crate::annotations::same_quotation(&text, quotation))
+    }
+    /// Adds the range the last successful [`Self::annotation_check`] accepted
+    /// as annotation `id`, returning its page.
+    pub fn annotation_keep(&mut self, id: usize) -> Result<usize> {
+        let page = unsafe { sys::verso_cre_annotation_keep(self.raw, id.try_into()?) };
+        anyhow::ensure!(page >= 0, "no checked annotation range");
         Ok(page as usize)
     }
     pub fn annotation_finish(&mut self, count: usize) -> Vec<usize> {

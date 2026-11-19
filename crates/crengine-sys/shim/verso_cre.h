@@ -14,7 +14,7 @@ typedef struct VersoCreDoc VersoCreDoc;
 typedef struct VersoCreRect { int left, top, right, bottom; } VersoCreRect;
 
 /* Resolve a word (0), extend geometry (1), extract a full range and clipped
- * geometry (2), geometry only (3), or quotation only (4).
+ * geometry (2), or geometry only (3).
  * Explicitly visits page, even after speculative rendering. Stores a snapshot
  * until the next call. Returns 1 for a selection, 0 for no text, -1 on error. */
 int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
@@ -118,7 +118,14 @@ int verso_cre_font_file(int index, char *buf, int len);
 
 
 int verso_cre_annotation_clear(VersoCreDoc *doc);
-int verso_cre_annotation_add(VersoCreDoc *doc, int id, const char *start, const char *end);
+// Checks a saved range: both ends must be valid text positions, start before
+// end. Returns the length of its UTF-8 text (soft hyphens removed), or -1.
+// Remembers the range and text for the two calls below.
+int verso_cre_annotation_check(VersoCreDoc *doc, const char *start, const char *end);
+// Copies the last checked text; returns its full length.
+int verso_cre_annotation_checked_text(VersoCreDoc *doc, char *buf, int len);
+// Adds the last checked range as annotation `id`; returns its page, or -1.
+int verso_cre_annotation_keep(VersoCreDoc *doc, int id);
 int verso_cre_annotation_finish(VersoCreDoc *doc);
 int verso_cre_annotation_order(VersoCreDoc *doc, int index);
 int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity);

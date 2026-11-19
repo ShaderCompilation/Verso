@@ -26,6 +26,9 @@ struct VersoCreDoc {
     struct Annotation { int id; ldomXPointerEx start, end; };
     std::vector<Annotation> annotations, pending_annotations;
     std::vector<ldomXPointerEx> annotation_max_end;
+    // The range the last annotation_check accepted, and its text.
+    ldomXPointerEx checked_start, checked_end;
+    lString8 checked_text;
     // Book search: a cursor that advances block by block, and the last batch.
     struct Hit { lString32 start, end, before, match, after; int page; };
     lString32 search_pattern;
@@ -290,7 +293,7 @@ int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
         doc->selection_rects.clear();
         doc->selection_start.clear(); doc->selection_end.clear(); doc->selection_text.clear();
         LVDocView *v = doc->view;
-        if (page < 0 || page >= v->getPageCount() || mode < 0 || mode > 4) return -1;
+        if (page < 0 || page >= v->getPageCount() || mode < 0 || mode > 3) return -1;
         v->goToPage(page, false, true, false);
         LVRef<ldomXRange> visible = v->getPageDocumentRange(page);
         if (visible.isNull()) return 0;
@@ -313,9 +316,8 @@ int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
         doc->selection_page = v->getBookmarkPage(range.getStart());
         doc->selection_start = range.getStart().toString();
         doc->selection_end = range.getEnd().toString();
-        if (mode == 0 || mode == 2 || mode == 4) doc->selection_text = removeSoftHyphens(range.getRangeText());
+        if (mode == 0 || mode == 2) doc->selection_text = removeSoftHyphens(range.getRangeText());
         doc->selection_visible = 0;
-        if (mode == 4) return 1;
         if (range.getStart().compare(visible->getStart()) >= 0 && range.getStart().compare(visible->getEnd()) < 0) doc->selection_visible |= 1;
         if (range.getEnd().compare(visible->getStart()) > 0 && range.getEnd().compare(visible->getEnd()) <= 0) doc->selection_visible |= 2;
         // Only paint geometry is clipped. Full endpoints/text always survive.
@@ -357,14 +359,39 @@ int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacit
 int verso_cre_annotation_clear(VersoCreDoc *doc) {
     GUARD(-1, { doc->pending_annotations.clear(); return 0; })
 }
-int verso_cre_annotation_add(VersoCreDoc *doc, int id, const char *start, const char *end) {
+int verso_cre_annotation_check(VersoCreDoc *doc, const char *start, const char *end) {
     GUARD(-1, {
-        auto *v = doc->view;
-        ldomXPointerEx a = v->getDocument()->createXPointer(Utf8ToUnicode(start));
-        ldomXPointerEx b = v->getDocument()->createXPointer(Utf8ToUnicode(end));
-        if (a.isNull() || b.isNull() || !a.isText() || !b.isText() || a.compare(b) >= 0) return -1;
-        doc->pending_annotations.push_back({id, a, b});
-        return v->getBookmarkPage(a);
+        doc->checked_start = doc->checked_end = ldomXPointerEx();
+        doc->checked_text.clear();
+        if (!start || !end) return -1;
+        auto *d = doc->view->getDocument();
+        ldomXPointerEx a = d->createXPointer(Utf8ToUnicode(start));
+        ldomXPointerEx b = d->createXPointer(Utf8ToUnicode(end));
+        if (a.isNull() || b.isNull() || !a.isText() || !b.isText()) return -1;
+        if (a.getOffset() < 0 || b.getOffset() < 0 || a.getOffset() > a.getNode()->getText().length() || b.getOffset() > b.getNode()->getText().length()) return -1;
+        if (a.compare(b) >= 0) return -1;
+        doc->checked_text = UnicodeToUtf8(removeSoftHyphens(ldomXRange(a, b).getRangeText()));
+        doc->checked_start = a;
+        doc->checked_end = b;
+        return doc->checked_text.length();
+    })
+}
+int verso_cre_annotation_checked_text(VersoCreDoc *doc, char *buf, int len) {
+    GUARD(-1, {
+        const lString8 &text = doc->checked_text;
+        if (buf && len > 0) {
+            int n = std::min(text.length(), len - 1);
+            memcpy(buf, text.c_str(), n);
+            buf[n] = 0;
+        }
+        return text.length();
+    })
+}
+int verso_cre_annotation_keep(VersoCreDoc *doc, int id) {
+    GUARD(-1, {
+        if (doc->checked_start.isNull()) return -1;
+        doc->pending_annotations.push_back({id, doc->checked_start, doc->checked_end});
+        return doc->view->getBookmarkPage(doc->checked_start);
     })
 }
 int verso_cre_annotation_finish(VersoCreDoc *doc) {

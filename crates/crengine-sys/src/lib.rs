@@ -29,12 +29,9 @@ unsafe extern "C" {
         end: *const c_char,
     ) -> c_int;
     pub fn verso_cre_annotation_clear(doc: *mut VersoCreDoc) -> c_int;
-    pub fn verso_cre_annotation_add(
-        doc: *mut VersoCreDoc,
-        id: c_int,
-        start: *const c_char,
-        end: *const c_char,
-    ) -> c_int;
+    pub fn verso_cre_annotation_check(doc: *mut VersoCreDoc, start: *const c_char, end: *const c_char) -> c_int;
+    pub fn verso_cre_annotation_checked_text(doc: *mut VersoCreDoc, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_annotation_keep(doc: *mut VersoCreDoc, id: c_int) -> c_int;
     pub fn verso_cre_annotation_finish(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_annotation_order(doc: *mut VersoCreDoc, index: c_int) -> c_int;
     pub fn verso_cre_annotation_page(doc: *mut VersoCreDoc, page: c_int, ids: *mut c_int, capacity: c_int) -> c_int;
