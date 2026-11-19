@@ -37,6 +37,10 @@ pub struct State {
     /// Versions the person chose to skip, or that were rolled back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Version>,
+    /// When the person chose "Later": the notice stays hidden until a check
+    /// that succeeds after this time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub postponed: Option<u64>,
 }
 
 /// An update this device can install.
@@ -172,10 +176,27 @@ impl State {
         self.skipped.contains(version)
     }
 
-    /// The update to tell the person about: the offer, unless it was skipped
-    /// or is no longer newer than `current` (it was installed since).
+    /// "Later": hides the notice until the next successful check.
+    pub fn postpone(&mut self, now: u64) {
+        self.postponed = Some(now);
+    }
+
+    /// "Later" was chosen after the last successful check.
+    pub fn is_postponed(&self) -> bool {
+        self.postponed.is_some_and(|later| self.checked.is_none_or(|checked| checked <= later))
+    }
+
+    /// An update newer than `current`, whether or not its notice is hidden
+    /// (Settings shows a dot until it is installed).
+    pub fn update(&self, current: &Version) -> Option<&Offer> {
+        self.available.as_ref().filter(|o| o.version > *current)
+    }
+
+    /// The update to tell the person about: the offer, unless it was
+    /// skipped, postponed until the next check, or is no longer newer than
+    /// `current` (it was installed since).
     pub fn notice(&self, current: &Version) -> Option<&Offer> {
-        self.available.as_ref().filter(|o| o.version > *current && !self.is_skipped(&o.version))
+        self.update(current).filter(|o| !self.is_skipped(&o.version) && !self.is_postponed())
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
@@ -356,6 +377,32 @@ mod tests {
         state.record_success(&manifest.version, Outcome::UpToDate, &v("0.3.1"), 2000);
         assert!(state.skipped.is_empty());
         assert!(state.notice(&v("0.3.1")).is_none());
+    }
+
+    #[test]
+    fn later_hides_the_notice_until_the_next_successful_check() {
+        let installed = v("0.2.0");
+        let manifest = release("0.3.0", &[("app", "2")]);
+        let mut state = State::default();
+        let check = |state: &mut State, now: u64| {
+            let outcome = evaluate(&manifest, None, &installed, state.newest_seen.as_ref()).unwrap();
+            state.record_success(&manifest.version, outcome, &installed, now);
+        };
+        check(&mut state, 1000);
+        state.postpone(1500);
+        assert!(state.notice(&installed).is_none());
+        assert_eq!(state.update(&installed).unwrap().version, v("0.3.0"), "the Settings dot stays");
+        // A failed check doesn't bring it back; a successful one does.
+        state.record_failure("x".into(), 2000);
+        assert!(state.notice(&installed).is_none());
+        check(&mut state, 3000);
+        assert_eq!(state.notice(&installed).unwrap().version, v("0.3.0"));
+        // Skipped stays hidden, Later or not; installed means no dot.
+        state.skip(&v("0.3.0"));
+        assert!(state.notice(&installed).is_none());
+        assert!(state.update(&v("0.3.0")).is_none());
+        let json = serde_json::to_vec(&state).unwrap();
+        assert_eq!(State::parse(&json).unwrap(), state);
     }
 
     #[test]

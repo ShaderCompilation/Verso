@@ -11,6 +11,7 @@ use crate::gfx::{HAlign, Icon};
 use crate::platform::{Waker, ssh, wifi};
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
+use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
@@ -20,6 +21,7 @@ use crate::ui::widgets::{
     Button, ButtonKind, IconButton, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, Toggle, TopBar,
 };
 use crate::update::{self, Updates};
+use verso_update::Version;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -112,8 +114,15 @@ pub struct SystemSettings {
     update_top: i32,
     /// Room for the check's note: two lines, three in a landscape column.
     update_note_h: i32,
+    /// "Check for updates", or "Update" while an update is available.
     check_button: Button,
     auto_check: Toggle,
+    /// The installed version and the previous one, while "Go back" can
+    /// restore it.
+    go_back: Option<(Version, Version)>,
+    go_back_button: Button,
+    offer: Option<OfferSheet>,
+    go_back_sheet: Option<GoBackSheet>,
     // Advanced: text shaping, then (below, or on the right in landscape)
     // the developer section.
     dev_top: i32,
@@ -212,6 +221,18 @@ impl SystemSettings {
         let updates = store.updates();
         let update_status = updates.status();
         check_button.enabled = !update_status.checking;
+        // "Go back to …": under the check button in portrait (the note
+        // beside it narrows), or a row of its own in the landscape column.
+        let go_back = updates.previous();
+        let label = go_back.as_ref().map_or_else(String::new, |(_, previous)| format!("Go back to {previous}"));
+        let mut go_back_button = Button::new(label, ButtonKind::Secondary);
+        let go_back_rect = if landscape {
+            let y = Self::auto_check_top(update_top, update_note_h, t) + t.mm(17.0);
+            Rect::new(u.x, y, u.w, t.button_h)
+        } else {
+            Rect { y: check_button.rect().bottom() + t.mm(2.0), ..check_button.rect() }
+        };
+        go_back_button.place(go_back_rect, t);
         // Advanced: text shaping on the left, the developer section below
         // it or on the right.
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
@@ -270,11 +291,16 @@ impl SystemSettings {
             update_note_h,
             check_button,
             auto_check,
+            go_back,
+            go_back_button,
+            offer: None,
+            go_back_sheet: None,
             dev_top,
             shaping,
             shaping_note_h,
         };
         this.load_folders(t);
+        this.sync_check_button();
         this.sync_ssh_toggle();
         this.remember_hostname();
         this
@@ -645,7 +671,26 @@ impl SystemSettings {
 
     fn refresh_update_status(&mut self) {
         self.update_status = self.updates.status();
+        self.sync_check_button();
+    }
+
+    /// The download checks again anyway, so with an update available the
+    /// button opens the update sheet instead of checking.
+    fn sync_check_button(&mut self) {
         self.check_button.enabled = !self.update_status.checking;
+        let available = self.update_status.update().is_some();
+        self.check_button.label = if available { "Update" } else { "Check for updates" }.into();
+        self.check_button.kind = if available { ButtonKind::Primary } else { ButtonKind::Secondary };
+    }
+
+    /// Portrait with "Go back": the note leaves room for the button.
+    fn update_note_w(&self, t: &Theme) -> i32 {
+        let c = self.device_right;
+        if self.go_back.is_some() && self.device_left == self.device_right {
+            self.check_button.rect().x - t.mm(3.0) - c.x
+        } else {
+            c.w
+        }
     }
 
     fn draw_updates(&mut self, cx: &mut DrawCx) {
@@ -659,8 +704,11 @@ impl SystemSettings {
             (Some(at), Some(now)) => at.since(now),
             _ => "earlier".into(),
         });
-        let note_rect = Rect::new(c.x, self.version.bottom() + t.mm(1.0), c.w, self.update_note_h);
+        let note_rect = Rect::new(c.x, self.version.bottom() + t.mm(1.0), self.update_note_w(t), self.update_note_h);
         cx.paragraph(&note, t.small.gray(INK2), note_rect, HAlign::Left);
+        if self.go_back.is_some() {
+            self.go_back_button.draw(cx);
+        }
         let top = Self::auto_check_top(self.update_top, self.update_note_h, t);
         let label = Rect::new(c.x, top, c.w - t.mm(12.0), t.mm(8.0));
         cx.line("Check automatically", t.body, label, HAlign::Left);
@@ -678,8 +726,17 @@ impl SystemSettings {
 
     fn updates_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
         if self.check_button.on_gesture(g) {
-            self.updates.check_now(&self.waker);
-            self.refresh_update_status();
+            if let Some(offer) = self.update_status.update() {
+                self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
+            } else {
+                self.updates.check_now(&self.waker);
+                self.refresh_update_status();
+            }
+        }
+        if let Some((current, previous)) = &self.go_back
+            && self.go_back_button.on_gesture(g)
+        {
+            self.go_back_sheet = Some(GoBackSheet::new(cx.theme, self.screen, current, previous));
         }
         if let Some(on) = self.auto_check.on_gesture(g)
             && !self.save(cx, "update checks", |s| s.check_updates = on)
@@ -841,9 +898,41 @@ impl Screen for SystemSettings {
             Tab::Device => self.draw_device(cx),
             Tab::Advanced => self.draw_advanced(cx),
         }
+        if let Some(offer) = &self.offer {
+            offer.draw(cx);
+        }
+        if let Some(sheet) = &self.go_back_sheet {
+            sheet.draw(cx);
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
+        if let Some(sheet) = &mut self.go_back_sheet {
+            if sheet.on_gesture(&g) == Some(false) {
+                self.go_back_sheet = None;
+            }
+            return Action::None;
+        }
+        if let Some(offer) = &mut self.offer {
+            if let Some(event) = offer.on_gesture(&g) {
+                let offer = self.offer.take().unwrap();
+                offer.apply(&event, &self.updates);
+                self.refresh_update_status();
+                if event == OfferEvent::Update {
+                    let (updates, waker) = (self.updates.clone(), self.waker.clone());
+                    let version = offer.offer.version.clone();
+                    return Action::Push(Box::new(UpdateScreen::new(
+                        cx.theme,
+                        self.screen,
+                        updates,
+                        waker,
+                        version,
+                        cx,
+                    )));
+                }
+            }
+            return Action::None;
+        }
         if self.top.on_gesture(&g) {
             return Action::Pop;
         }
@@ -904,13 +993,19 @@ impl Screen for SystemSettings {
         self.ssh_read_on_wake = true;
     }
     fn has_pending_work(&self) -> bool {
-        self.wifi_pending.is_some() || self.ssh_pending.is_some()
+        self.wifi_pending.is_some()
+            || self.ssh_pending.is_some()
+            || self.go_back_sheet.as_ref().is_some_and(|s| s.exit().is_some())
     }
     /// Scripted screenshots wait for a running update check.
     fn busy(&self) -> bool {
         self.update_status.checking
     }
     fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
+        // "Going back…" is on screen: the launcher does the rest.
+        if let Some(exit) = self.go_back_sheet.as_ref().and_then(GoBackSheet::exit) {
+            return exit;
+        }
         if let Some(on) = self.wifi_pending.take() {
             // Stop SSH before losing the network. If stopping fails, leave
             // Wi-Fi alone so the server can still be reached and stopped.

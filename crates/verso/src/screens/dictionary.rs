@@ -854,6 +854,7 @@ mod tests {
                 toast: &mut None,
                 forced: &mut Vec::new(),
                 needs_redraw: &mut false,
+                battery: None,
             };
             let swipe = |dir| Gesture::Swipe { dir, from: screen.center(), to: screen.center() };
             lookup.on_gesture(&swipe(Direction::Left), &mut cx);
@@ -906,6 +907,7 @@ mod tests {
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
+            battery: None,
         };
         let wait = |lookup: &mut Lookup, cx: &mut EventCx| {
             let deadline = Instant::now() + Duration::from_secs(5);

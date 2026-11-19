@@ -42,9 +42,14 @@ const MAX_BATCH: usize = 64;
 
 fn main() {
     logging::init();
-    if let Err(e) = run() {
-        log::error!("{e:#}");
-        std::process::exit(1);
+    match run() {
+        Ok(0) => {}
+        // Everything is saved and dropped; the launcher takes it from here.
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            log::error!("{e:#}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -139,20 +144,21 @@ fn start_screen(
     })
 }
 
-fn run() -> Result<()> {
+/// Runs Verso; the exit code for the launcher (0, or one a screen asked for).
+fn run() -> Result<i32> {
     if std::env::var("VERSO_SEARCH_BENCH").as_deref() == Ok("1") {
         println!("{}", library::search::benchmark(&store::Store::new().library()));
-        return Ok(());
+        return Ok(0);
     }
     if std::env::var("VERSO_PREVIEW_BENCH").as_deref() == Ok("1") {
         let store = store::Store::new();
         println!("{}", library::previews::benchmark(&store, &store.library(), &store.library_folders()));
-        return Ok(());
+        return Ok(0);
     }
     if std::env::var("VERSO_COVER_BENCH").as_deref() == Ok("1") {
         let store = store::Store::new();
         println!("{}", library::covers::benchmark(&store, &store.library()));
-        return Ok(());
+        return Ok(0);
     }
     log::info!("Verso {} starting", env!("CARGO_PKG_VERSION"));
     let started = Instant::now();
@@ -180,6 +186,11 @@ fn run() -> Result<()> {
         start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone(), store.clone())?,
     );
     app.set_orientation(orientation);
+    // After a rollback, the restored version says why with its first frame.
+    if let Some(rollback) = store.updates().rollback() {
+        log::info!("showing the rollback note: {:?}", rollback.reason);
+        app.show_rollback(screens::update::RollbackSheet::new(&theme, bounds, store.updates(), &rollback));
+    }
     app.frontlight = platform.frontlight();
     app.set_battery(platform.battery());
     if let Some(connected) = platform.usb_connected() {
@@ -345,6 +356,7 @@ fn run() -> Result<()> {
         // Closed cleanly before the started delay ran out: it works.
         update::mark_started();
     }
-    log::info!("bye");
-    Ok(())
+    let code = app.exit_code();
+    log::info!("bye{}", if code == 0 { String::new() } else { format!(" (exit code {code} for the launcher)") });
+    Ok(code)
 }

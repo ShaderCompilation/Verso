@@ -16,6 +16,7 @@ use crate::library::{
 };
 use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
+use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{BookState, FolderPreview, Store, navigation::Writer as NavigationWriter};
 use crate::ui::gesture::Gesture;
@@ -28,6 +29,8 @@ use crate::ui::widgets::{
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use verso_update::check::Offer;
 
 mod folder_tile;
 mod moving;
@@ -261,6 +264,19 @@ pub struct Books {
     reader: Option<Reader>,
     generation: u64,
     engine_error: Option<String>,
+    // The update notice on Home and the dot on the Settings icon
+    // (docs/updates.md, Phase 5).
+    updates: Arc<crate::update::Updates>,
+    /// `Updates::revision` when the notice and dot were last taken.
+    update_revision: u64,
+    /// The update Home's notice offers.
+    notice: Option<Offer>,
+    /// An update is available, even if skipped or postponed.
+    update_dot: bool,
+    /// The notice's spot, kept free on Home whether or not there is one.
+    notice_rect: Rect,
+    notice_press: Press,
+    offer: Option<OfferSheet>,
 }
 impl Books {
     pub fn new(t: &Theme, screen: Rect, worker: Rc<Worker>) -> Self {
@@ -313,6 +329,10 @@ impl Books {
             },
         );
         let fonts = worker.fonts();
+        // Read with the first frame: a notice saved by an earlier check is
+        // drawn at once (two small files).
+        let updates = store.updates();
+        let update_status = updates.status();
         let mut s = Self {
             screen,
             worker,
@@ -376,6 +396,13 @@ impl Books {
             reader: None,
             generation: 0,
             engine_error: None,
+            notice: update_status.notice().cloned(),
+            update_dot: update_status.update().is_some(),
+            update_revision: update_status.revision,
+            updates,
+            notice_rect: Rect::default(),
+            notice_press: Press::default(),
+            offer: None,
         };
         s.pager.page = s.navigation.page();
         s.refresh(t);
@@ -559,10 +586,18 @@ impl Books {
         // Landscape is too short to stack the resume card above the recent
         // books, so they stand side by side.
         let side = self.continue_id.is_some() && self.screen.w > self.screen.h;
+        // The update notice's spot stays free whether or not there is one,
+        // so a check finishing never moves anything: above the status line,
+        // or (side by side) under the recent books.
+        let notice_h = t.target;
+        let grid_limit = self.status.y - notice_h - t.mm(if side { 4.0 } else { 2.0 });
         self.continue_rect = if side {
             Rect::new(t.margin, y, width / 2, (self.status.y - y - t.mm(8.0)).min(t.mm(45.0)))
         } else if self.continue_id.is_some() {
-            Rect::new(t.margin, y, width, t.mm(37.0))
+            // On short screens the card gives up some height so the recent
+            // covers keep about 30 mm next to the notice's spot.
+            let spare = grid_limit - y - t.mm(16.0) - t.mm(30.0);
+            Rect::new(t.margin, y, width, spare.clamp(t.mm(26.0), t.mm(37.0)))
         } else {
             Rect::default()
         };
@@ -577,16 +612,18 @@ impl Books {
         let cols = (self.header.w / t.mm(if side { 19.0 } else { 22.0 })).clamp(1, 4) as usize;
         self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
         self.grid = Grid::new(self.books.len(), cols, 1);
-        self.grid.place(
-            Rect::new(
-                self.header.x,
-                self.header.bottom() + t.mm(2.0),
-                self.header.w,
-                (self.status.y - self.header.bottom() - t.mm(4.0)).min(t.mm(45.0)).max(t.target),
-            ),
-            t.mm(3.5),
-            0,
+        let grid = Rect::new(
+            self.header.x,
+            self.header.bottom() + t.mm(2.0),
+            self.header.w,
+            (grid_limit - self.header.bottom() - t.mm(4.0)).min(t.mm(45.0)).max(t.target),
         );
+        self.grid.place(grid, t.mm(3.5), 0);
+        self.notice_rect = if side {
+            Rect::new(self.header.x, grid.bottom() + t.mm(3.0), self.header.w, notice_h)
+        } else {
+            Rect::new(t.margin, self.status.y - t.mm(2.0) - notice_h, width, notice_h)
+        };
         self.prioritize();
         let keys: HashSet<_> = self
             .home
@@ -762,10 +799,12 @@ impl Books {
             || self.clash.is_some()
             || self.name_sheet.is_some()
             || self.jump.is_some()
+            || self.offer.is_some()
             || self.reader.is_some()
         {
             return;
         }
+        self.apply_update_status(cx);
         if let Some(mut home) = self.pending_home.take()
             && {
                 for (revision, change) in &self.changes {
@@ -1198,6 +1237,23 @@ impl Books {
         }
     }
     /// Reload status changes from Store without accepting older cached paths.
+    /// A check finished, or Later or Skip was chosen: the notice and the
+    /// dot follow, in their reserved places, once no finger or overlay is
+    /// on Home (see `apply_pending`). Nothing else moves.
+    fn apply_update_status(&mut self, cx: &mut EventCx) {
+        if self.updates.revision() == self.update_revision {
+            return;
+        }
+        let status = self.updates.status();
+        self.update_revision = status.revision;
+        let notice = status.notice().cloned();
+        let dot = status.update().is_some();
+        if notice != self.notice || dot != self.update_dot {
+            self.notice = notice;
+            self.update_dot = dot;
+            cx.redraw();
+        }
+    }
     fn reload_home(&mut self) {
         self.pending_home = self.store.home_summary().map(|mut summary| {
             if self.browsing_ready {
@@ -1263,6 +1319,40 @@ impl Books {
 const LISTED_STATES: usize = 32;
 /// Caches the reading states of `books`. Returns the records read and whether
 /// the state directory was listed.
+/// "Verso 0.3.0 is available · Update ›": one line in its reserved spot.
+fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
+    let t = cx.theme;
+    let (text, accent) = if pressed {
+        cx.canvas.fill_rounded_rect(r, t.radius, INK);
+        cx.hint(r, RefreshMode::Fast);
+        (crate::ui::theme::PAPER, crate::ui::theme::PAPER)
+    } else {
+        cx.canvas.stroke_rounded_rect(r, t.radius, t.hairline as f32, LINE);
+        cx.hint(r, RefreshMode::Ui);
+        (INK2, INK)
+    };
+    let inner = r.inset_xy(t.mm(3.0), 0);
+    let action = "Update";
+    let action_w = cx.text.width(action, t.button).ceil() as i32;
+    let chevron = Rect::new(inner.right() - t.icon_small, inner.y, t.icon_small, inner.h);
+    let label = Rect::new(chevron.x - t.mm(1.0) - action_w, inner.y, action_w + 1, inner.h);
+    cx.line(action, t.button.gray(accent), label, HAlign::Left);
+    cx.icon(Icon::ChevronRight, chevron, t.icon_small, accent);
+    let message = Rect { w: label.x - t.mm(3.0) - inner.x, ..inner };
+    cx.line(&format!("Verso {} is available", offer.version), t.body.gray(text), message, HAlign::Left);
+}
+
+/// The dot on the Settings icon while an update is available.
+fn draw_dot(cx: &mut DrawCx, icon: Rect) {
+    let t = cx.theme;
+    let r = t.mm(0.9) as f32;
+    let c = icon.center();
+    let (x, y) = ((c.x + t.icon / 2) as f32 - r * 0.4, (c.y - t.icon / 2) as f32 + r * 0.4);
+    // A paper ring keeps it apart from the gear's outline.
+    cx.canvas.fill_circle(x, y, r + t.hairline as f32 * 2.0, crate::ui::theme::PAPER);
+    cx.canvas.fill_circle(x, y, r, INK);
+}
+
 fn load_states(store: &Store, states: &mut HashMap<String, BookState>, books: &[Book]) -> (usize, bool) {
     let mut missing: Vec<_> = books.iter().map(|b| b.id.as_str()).filter(|id| !states.contains_key(*id)).collect();
     missing.sort_unstable();
@@ -1427,6 +1517,9 @@ impl Screen for Books {
             self.exit.draw(cx);
             self.search_action.draw(cx);
             self.settings_action.draw(cx);
+            if self.update_dot {
+                draw_dot(cx, self.settings_action.rect());
+            }
         }
         if let Some(search) = &mut self.search {
             search.field.draw(cx);
@@ -1665,6 +1758,12 @@ impl Screen for Books {
         let battery_w = if cx.battery.is_some() { t.mm(32.0) } else { 0 };
         cx.line(message, t.caption.gray(INK2), Rect { w: self.status.w - battery_w, ..self.status }, HAlign::Left);
         cx.battery(self.status);
+        if self.is_home()
+            && self.selection.is_none()
+            && let Some(offer) = &self.notice
+        {
+            draw_notice(cx, offer, self.notice_rect, self.notice_press.is_down());
+        }
         if !self.is_home() {
             self.pager.draw(cx);
         }
@@ -1690,6 +1789,9 @@ impl Screen for Books {
         if let Some(sheet) = &mut self.name_sheet {
             sheet.draw(cx);
         }
+        if let Some(offer) = &self.offer {
+            offer.draw(cx);
+        }
         if !self.thumbnails.requests.is_empty() {
             self.library.repair(std::mem::take(&mut self.thumbnails.requests));
         }
@@ -1711,7 +1813,24 @@ impl Screen for Books {
         // Library controls own their press/capture state, including gestures
         // that return no action. Reader gestures invalidate independently.
         cx.redraw();
-        if let Some(sheet) = &mut self.name_sheet {
+        if let Some(offer) = &mut self.offer {
+            if let Some(event) = offer.on_gesture(&g) {
+                let offer = self.offer.take().unwrap();
+                offer.apply(&event, &self.updates);
+                if event == OfferEvent::Update {
+                    let (updates, waker) = (self.updates.clone(), self.worker.waker());
+                    let version = offer.offer.version.clone();
+                    return Action::Push(Box::new(UpdateScreen::new(
+                        cx.theme,
+                        self.screen,
+                        updates,
+                        waker,
+                        version,
+                        cx,
+                    )));
+                }
+            }
+        } else if let Some(sheet) = &mut self.name_sheet {
             match sheet.on_gesture(&g, cx.theme) {
                 Some(NameEvent::Cancel) => self.name_sheet = None,
                 Some(NameEvent::Submit) => self.submit_name(cx),
@@ -1833,6 +1952,14 @@ impl Screen for Books {
             if self.selection.is_none() && self.search_action.on_gesture(&g) {
                 self.toggle_search(cx);
                 self.apply_pending(cx);
+                return Action::None;
+            }
+            if self.is_home()
+                && self.selection.is_none()
+                && let Some(offer) = &self.notice
+                && let Some(PressEvent::Tap) = self.notice_press.on_gesture(&g, self.notice_rect)
+            {
+                self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
                 return Action::None;
             }
             if let Some(search) = &mut self.search {
@@ -2033,8 +2160,9 @@ impl Screen for Books {
         self.apply_pending(cx);
         true
     }
+    /// Scripted screenshots also wait for a running update check.
     fn busy(&self) -> bool {
-        self.reader.as_ref().map_or(self.working, Screen::busy)
+        self.reader.as_ref().map_or(self.working || self.updates.checking(), Screen::busy)
     }
     fn has_pending_work(&self) -> bool {
         self.reader.is_none() && self.confirm.as_ref().is_some_and(|c| c.working)
@@ -2420,6 +2548,7 @@ mod tests {
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
+            battery: None,
         });
     }
     pub(super) fn tap(books: &mut Books, p: Point, cx: &mut EventCx) {
@@ -3989,6 +4118,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut false,
+            battery: None,
         };
         books.on_gesture(Gesture::Down(point), &mut cx);
         books.pending =
@@ -4014,6 +4144,49 @@ mod tests {
         assert_eq!(books.grid.cells().len(), 1);
         drop(books);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_check_finishing_waits_for_the_finger_and_moves_nothing() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-update-notice-{}", std::process::id()));
+        let state = verso_update::check::State {
+            available: Some(Offer {
+                version: "99.0.0".parse()?,
+                released: "2026-12-01".into(),
+                notes: "Faster page turns.".into(),
+                components: vec!["app".into()],
+                download: 6_100_000,
+                unpacked: 7_000_000,
+            }),
+            ..Default::default()
+        };
+        let path = root.join("device").join(verso_update::check::STATE_PATH);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(&path, serde_json::to_vec(&state)?)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), Store::at(root.clone()));
+        books.refresh(&t);
+        assert!(books.notice.is_some() && books.update_dot, "the notice is there from the first frame");
+        let layout = (books.continue_rect, books.notice_rect);
+        with_cx(&t, screen, |cx| {
+            let finger = Point::new(screen.w / 2, screen.h / 2);
+            books.on_gesture(Gesture::Down(finger), cx);
+            // A check (here: Skip from elsewhere) changes the status while
+            // the finger is down: nothing on Home changes yet.
+            books.updates.skip(&"99.0.0".parse().unwrap());
+            *cx.needs_redraw = false;
+            books.on_background(cx);
+            assert!(books.notice.is_some(), "nothing changes under a finger");
+            assert!(!*cx.needs_redraw);
+            books.on_gesture(Gesture::Cancel(finger), cx);
+            books.on_background(cx);
+        });
+        assert!(books.notice.is_none(), "the notice goes once the finger lifts");
+        assert!(books.update_dot, "the Settings dot stays while an update exists");
+        assert_eq!((books.continue_rect, books.notice_rect), layout, "its spot stays reserved");
+        std::fs::remove_dir_all(root).ok();
         Ok(())
     }
 }

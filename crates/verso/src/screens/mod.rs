@@ -13,12 +13,13 @@ pub mod reader;
 pub mod reader_menu;
 pub mod system;
 pub mod text_sheet;
+pub mod update;
 
 use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{Frontlight, Orientation, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, Frontlight, Orientation, RefreshMode, TextInput, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -33,6 +34,10 @@ pub enum Action {
     Pop,
     /// Leave Verso.
     Exit,
+    /// Leave Verso at once with this exit code, for the launcher: install
+    /// the staged update or go back (`verso_update::launcher`). Saves like
+    /// any exit, and leaves a running SSH server running.
+    ExitWith(i32),
     /// Turn the screen. The app saves like on exit and rebuilds its screens
     /// at the new size, reopening Settings on top of the library.
     Orientation(Orientation),
@@ -117,6 +122,8 @@ pub struct EventCx<'a> {
     pub now: Instant,
     pub frontlight: &'a mut Option<Frontlight>,
     pub light_request: &'a mut Option<Frontlight>,
+    /// The last battery reading (None: no battery, or unknown).
+    pub battery: Option<Battery>,
     pub(crate) toast: &'a mut Option<Toast>,
     pub(crate) forced: &'a mut Vec<Update>,
     pub(crate) needs_redraw: &'a mut bool,

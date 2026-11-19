@@ -847,6 +847,7 @@ mod tests {
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,
+            battery: None,
         })
     }
     fn wait(s: &mut Dictionaries, t: &Theme) {

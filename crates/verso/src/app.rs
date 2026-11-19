@@ -7,6 +7,7 @@ use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
 use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode, TextInput, Update};
 use crate::screens::system::{ExitChoice, ExitPrompt};
+use crate::screens::update::RollbackSheet;
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::Gesture;
@@ -36,6 +37,10 @@ pub struct App {
     asleep: bool,
     exit: bool,
     exit_prompt: Option<ExitPrompt>,
+    /// The exit code a screen asked for (`Action::ExitWith`).
+    exit_code: Option<i32>,
+    /// Why the launcher went back to this version, shown once over any screen.
+    rollback: Option<RollbackSheet>,
     stop_ssh_on_exit: bool,
     pub frontlight: Option<Frontlight>,
     light_request: Option<Frontlight>,
@@ -68,6 +73,8 @@ impl App {
             asleep: false,
             exit: false,
             exit_prompt: None,
+            exit_code: None,
+            rollback: None,
             stop_ssh_on_exit: false,
             frontlight: None,
             light_request: None,
@@ -142,6 +149,18 @@ impl App {
         self.exit
     }
 
+    /// The process exit code: 0, or what a screen asked the launcher for.
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.unwrap_or(0)
+    }
+
+    /// Shows why the launcher went back to this version, over whatever
+    /// screen is open, until OK.
+    pub fn show_rollback(&mut self, sheet: RollbackSheet) {
+        self.rollback = Some(sheet);
+        self.needs_redraw = true;
+    }
+
     /// User-requested exits ask what to do with a running SSH server. System
     /// shutdown/recovery and headless capture completion bypass this prompt.
     pub fn request_exit(&mut self) {
@@ -190,6 +209,9 @@ impl App {
             cx.battery = self.battery;
             if let Some(screen) = self.stack.last_mut() {
                 screen.draw(&mut cx);
+            }
+            if let Some(sheet) = &self.rollback {
+                sheet.draw(&mut cx);
             }
             if let Some(prompt) = &mut self.usb_prompt {
                 prompt.draw(&mut cx);
@@ -274,6 +296,16 @@ impl App {
                 Action::Exit => self.request_exit(),
                 Action::Pop => self.needs_redraw = true,
                 _ => self.usb_prompt = Some(prompt),
+            }
+            return;
+        }
+        if let Some(sheet) = &mut self.rollback {
+            if g.ends_touch() || matches!(g, Gesture::Down(_)) {
+                self.needs_redraw = true;
+            }
+            if sheet.on_gesture(&g) {
+                self.rollback = None;
+                self.on_background();
             }
             return;
         }
@@ -507,6 +539,7 @@ impl App {
             now: Instant::now(),
             frontlight: &mut self.frontlight,
             light_request: &mut self.light_request,
+            battery: self.battery,
             toast: &mut self.toast,
             forced: &mut self.forced,
             needs_redraw: &mut self.needs_redraw,
@@ -528,6 +561,10 @@ impl App {
                 }
             }
             Action::Exit => self.request_exit(),
+            Action::ExitWith(code) => {
+                self.exit = true;
+                self.exit_code = Some(code);
+            }
             Action::Orientation(o) => self.orientation_request = Some(o),
         }
     }

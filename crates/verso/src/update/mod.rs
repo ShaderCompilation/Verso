@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use verso_update::check::{self, Outcome, Refusal, State};
-use verso_update::launcher::{self, Rollback};
+use verso_update::check::{self, Offer, Outcome, Refusal, State};
+use verso_update::launcher::{self, Previous, Reason, Rollback};
 use verso_update::stage::AWAKE_MARKER;
 use verso_update::{INSTALLED_PATH, Installed, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, Manifest, Version};
 
@@ -208,11 +208,9 @@ pub struct Status {
     /// saved: it's about this moment.
     pub problem: Option<CheckError>,
     /// The download asked for in this session: where it is, or how it
-    /// ended. None until one is started. (Shown by the Phase 5 screens.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// ended. None until one is started.
     pub download: Option<DownloadState>,
     /// Cancel was pressed and the download is stopping.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub cancelling: bool,
     /// Changes whenever anything above does.
     pub revision: u64,
@@ -228,6 +226,18 @@ pub enum DownloadState {
 }
 
 impl Status {
+    /// The update Home tells about: none once it was skipped, or "Later"
+    /// was chosen since the last check.
+    pub fn notice(&self) -> Option<&Offer> {
+        self.state.notice(&self.current)
+    }
+
+    /// An update newer than the installed version, even if skipped or
+    /// postponed: the dot on the Settings icon, and Settings' Update button.
+    pub fn update(&self) -> Option<&Offer> {
+        self.state.update(&self.current)
+    }
+
     /// The line under the version in Settings. `when` says when a Unix
     /// time was ("today at 14:02").
     pub fn note(&self, when: impl Fn(u64) -> String) -> String {
@@ -249,15 +259,18 @@ impl Status {
             return format!(
                 "Verso {} is available, a {} download.{skipped}{checked}",
                 offer.version,
-                megabytes(offer.download)
+                file_size(offer.download)
             );
         }
         if s.checked.is_some() { format!("Up to date.{checked}") } else { "Not checked yet.".into() }
     }
 }
 
-/// `6.1 MB`; never `0.0 MB`.
-pub fn megabytes(bytes: u64) -> String {
+/// `6.1 MB`, never `0.0 MB`; `2.4 GB` from a gigabyte.
+pub fn file_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        return format!("{:.1} GB", bytes as f64 / 1e9);
+    }
     format!("{:.1} MB", (bytes as f64 / 1e6).max(0.1))
 }
 
@@ -491,11 +504,33 @@ impl Updates {
         }
     }
 
+    /// A check is running (scripted screenshots wait for it).
+    pub fn checking(&self) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.running && !inner.downloading
+    }
+
+    /// "Later" on the update sheet: hides Home's notice until the next
+    /// successful check (the next day's, for automatic checks).
+    pub fn postpone(&self) {
+        let now = (self.device.clock)();
+        let mut inner = self.lock();
+        inner.state.postpone(now);
+        self.save(&inner.state);
+        inner.revision += 1;
+    }
+
+    /// "Skip this version": hides Home's notice until a newer version.
+    pub fn skip(&self, version: &Version) {
+        let mut inner = self.lock();
+        inner.state.skip(version);
+        self.save(&inner.state);
+        inner.revision += 1;
+    }
+
     /// "Update": downloads and stages release `version` in the background.
     /// `battery` is the platform's reading (None: unknown, allowed). False
     /// when a check or download is already running.
-    // The update sheet (Phase 5) calls this and `cancel_download`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn download(self: &Arc<Self>, version: &Version, battery: Option<Battery>, waker: &Waker) -> bool {
         {
             let mut inner = self.lock();
@@ -525,7 +560,6 @@ impl Updates {
 
     /// Cancel on the progress screen. The download stops at its next step,
     /// at most [`IDLE_TIMEOUT`] later while waiting on the network.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cancel_download(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.downloading {
@@ -675,6 +709,33 @@ impl Updates {
         }
     }
 
+    /// Why the launcher went back the last time, until the person has seen
+    /// it (`dismiss_rollback`). One small file read.
+    pub fn rollback(&self) -> Option<Rollback> {
+        Rollback::read(&self.paths.root)
+    }
+
+    /// OK on the rollback sheet: it isn't shown again.
+    pub fn dismiss_rollback(&self) {
+        let path = self.paths.root.join(launcher::ROLLBACK_PATH);
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::error!("removing {}: {e}", path.display());
+        }
+    }
+
+    /// The installed version and the one "Go back" would restore, while
+    /// the previous files are kept and the launcher can switch them back.
+    /// One small file read.
+    pub fn previous(&self) -> Option<(Version, Version)> {
+        if !can_install() {
+            return None;
+        }
+        let Previous { current, previous } = launcher::previous(&self.paths.root)?;
+        Some((current, previous?))
+    }
+
     /// At startup: if the launcher went back from a version (it didn't
     /// start, or the person asked), that version counts as skipped, so it
     /// isn't offered again. `rollback.json` stays for the message.
@@ -690,6 +751,51 @@ impl Updates {
         self.save(&inner.state);
         inner.revision += 1;
     }
+}
+
+/// Whether the launcher running Verso installs staged updates and goes
+/// back (exit codes 85 and 86). Not under an older launcher, the simulator
+/// or a hand start; `VERSO_LAUNCHER_PROTOCOL=1` pretends, for captures.
+pub fn can_install() -> bool {
+    launcher::protocol() >= 1
+}
+
+/// Why the launcher went back, in plain words for the rollback sheet.
+/// None when the person asked.
+pub fn rollback_reason(reason: &Reason) -> Option<String> {
+    Some(match reason {
+        Reason::Requested => return None,
+        Reason::Exit(code) => format!("It stopped with error {code} while starting."),
+        // An abort: a Rust panic, or a failed check in a library.
+        Reason::Signal(6) => "It stopped on an internal error while starting.".into(),
+        Reason::Signal(signal) => format!("It crashed while starting (signal {signal})."),
+        Reason::Hang => "It didn’t open within two minutes.".into(),
+        Reason::Interrupted => "It was interrupted twice while starting, for example by a restart.".into(),
+        Reason::Install => "Its files couldn’t be put in place.".into(),
+        Reason::Other(other) => format!("The launcher gave the reason “{other}”."),
+    })
+}
+
+/// The log lines worth showing from a failed start: from the panic message
+/// if there is one, else the last `max` lines, without their timestamps.
+pub fn rollback_details(log: &[String], max: usize) -> Vec<String> {
+    let start = log.iter().position(|l| l.contains("panicked at")).unwrap_or(log.len().saturating_sub(max));
+    log[start..]
+        .iter()
+        .take(max)
+        .map(|line| {
+            // "2026/11/19 03:48:50.6053 ERROR message" → "ERROR message".
+            let mut parts = line.splitn(3, ' ');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(date), Some(time), Some(rest))
+                    if date.len() == 10 && date.as_bytes()[4] == b'/' && time.contains(':') =>
+                {
+                    rest.to_owned()
+                }
+                _ => line.clone(),
+            }
+        })
+        .collect()
 }
 
 /// How long Verso runs after its first frame before it counts as started.

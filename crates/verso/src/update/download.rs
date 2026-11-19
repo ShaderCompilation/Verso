@@ -18,6 +18,12 @@ pub const MIN_BATTERY: u8 = 20;
 /// Free space kept on top of the archives and their unpacked files.
 pub const SPACE_MARGIN: u64 = 20_000_000;
 
+/// [`SPACE_MARGIN`], or `VERSO_UPDATE_MARGIN` bytes: raised to test "not
+/// enough space" without filling the storage.
+fn space_margin() -> u64 {
+    std::env::var("VERSO_UPDATE_MARGIN").ok().and_then(|m| m.trim().parse().ok()).unwrap_or(SPACE_MARGIN)
+}
+
 /// Where a download is, for the progress screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -60,16 +66,48 @@ pub enum DownloadError {
 }
 
 impl DownloadError {
+    /// The update screen's heading for this failure.
+    pub fn title(&self) -> &'static str {
+        use super::fetch::FetchError as F;
+        match self {
+            DownloadError::Check(CheckError::WifiOff) => "Wi-Fi is off",
+            DownloadError::Check(CheckError::NotConnected) => "Wi-Fi isn’t connected",
+            DownloadError::Check(CheckError::Fetch(F::Tls(_))) => "Couldn’t connect securely",
+            DownloadError::Check(CheckError::Fetch(_)) => "Couldn’t reach the update server",
+            DownloadError::Check(CheckError::Release(_)) | DownloadError::Damaged(_) => {
+                "The update failed verification"
+            }
+            DownloadError::Check(CheckError::Refused(_)) => "This update can’t be installed",
+            DownloadError::LowBattery(_) => "The battery is low",
+            DownloadError::NotEnoughSpace { .. } | DownloadError::DiskFull => "Not enough space",
+            DownloadError::UpToDate => "Already up to date",
+            DownloadError::ReleaseChanged(_) => "A newer version came out",
+            DownloadError::Network(_) => "The download stopped",
+            DownloadError::Storage(_) => "Couldn’t save the update",
+            DownloadError::Cancelled => "Update cancelled",
+        }
+    }
+
     /// For the update screen: what happened and, where it helps, what to do.
     pub fn plain(&self) -> String {
         match self {
+            DownloadError::Check(CheckError::WifiOff) => "Turn on Wi-Fi in Settings → Device, then try again.".into(),
+            DownloadError::Check(CheckError::NotConnected) => {
+                "Wi-Fi is on but hasn’t joined a network yet. Try again in a moment.".into()
+            }
+            DownloadError::Check(CheckError::Release(verso_update::Error::Manifest(_))) => {
+                "The release information was damaged, so nothing was downloaded. Try again later.".into()
+            }
+            DownloadError::Check(CheckError::Release(_)) => {
+                "The release isn’t signed by Verso, so nothing was downloaded.".into()
+            }
             DownloadError::Check(e) => e.plain(),
             DownloadError::LowBattery(percent) => {
                 format!("The battery is at {percent}%. Charge it to {MIN_BATTERY}% or plug in a charger to update.")
             }
             DownloadError::NotEnoughSpace { needed, free } => format!(
-                "Not enough space: the update needs {} more. Remove some books and try again.",
-                super::megabytes(needed.saturating_sub(*free))
+                "The update needs {} more space on the Kindle. Remove some books and try again.",
+                super::file_size(needed.saturating_sub(*free))
             ),
             DownloadError::DiskFull => {
                 "The Kindle’s storage filled up during the download. Remove some books and try again.".into()
@@ -164,7 +202,7 @@ fn stage(
         .collect();
     let total: u64 = components.iter().map(|c| c.archive.size).sum();
     let unpacked: u64 = components.iter().flat_map(|c| &c.files).map(|f| f.size).sum();
-    let needed = total - have.iter().sum::<u64>() + unpacked + SPACE_MARGIN;
+    let needed = total - have.iter().sum::<u64>() + unpacked + space_margin();
     let free = (job.free_space)(job.root).map_err(storage)?;
     if free < needed {
         return Err(DownloadError::NotEnoughSpace { needed, free });

@@ -303,8 +303,9 @@ fn sources_and_sizes() {
     assert!(!s.https_only());
     assert_eq!(s.signature_url(), "http://localhost:8000/latest.json.minisig");
     assert!(Source { url: DEFAULT_URL.into(), keys: vec![] }.https_only());
-    assert_eq!(megabytes(6_095_497), "6.1 MB");
-    assert_eq!(megabytes(94), "0.1 MB");
+    assert_eq!(file_size(6_095_497), "6.1 MB");
+    assert_eq!(file_size(94), "0.1 MB");
+    assert_eq!(file_size(2_400_000_000), "2.4 GB");
     assert_eq!(app_version().to_string(), env!("CARGO_PKG_VERSION"));
 }
 
@@ -491,4 +492,31 @@ fn keep_awake_left_by_a_crash_is_restored_at_start() {
     b.updates.restore_awake_after_crash();
     assert_eq!(b.awake_changes(), [false]);
     assert!(!marker.exists());
+}
+
+#[test]
+fn rollback_reasons_and_details_read_plainly() {
+    assert_eq!(rollback_reason(&Reason::Requested), None);
+    assert!(rollback_reason(&Reason::Signal(6)).unwrap().contains("internal error"));
+    assert!(rollback_reason(&Reason::Signal(11)).unwrap().contains("signal 11"));
+    assert!(rollback_reason(&Reason::Hang).unwrap().contains("two minutes"));
+    let log: Vec<String> = [
+        "2026/11/19 03:48:50.6053 INFO starting",
+        "2026/11/19 03:48:50.7001 INFO library ready",
+        "thread 'main' panicked at src/x.rs:1:1:",
+        "index out of bounds",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(rollback_details(&log, 8), ["thread 'main' panicked at src/x.rs:1:1:", "index out of bounds"]);
+    assert_eq!(rollback_details(&log[..2], 1), ["INFO library ready"]);
+}
+
+#[test]
+fn download_failures_have_a_heading_and_plain_words() {
+    let space = DownloadError::NotEnoughSpace { needed: 2_400_000_000, free: 0 };
+    assert_eq!(space.title(), "Not enough space");
+    assert!(space.plain().contains("2.4 GB"), "{}", space.plain());
+    assert_eq!(DownloadError::Check(CheckError::WifiOff).title(), "Wi-Fi is off");
+    assert!(DownloadError::Check(CheckError::WifiOff).plain().contains("Settings → Device"));
 }

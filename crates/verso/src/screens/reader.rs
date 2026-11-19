@@ -1424,6 +1424,7 @@ mod tests {
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,
+            battery: None,
         });
     }
 
@@ -1443,6 +1444,7 @@ mod tests {
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,
+            battery: None,
         });
     }
 
@@ -1967,6 +1969,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut redraw,
+            battery: None,
         };
         let catalog = |r: &Reader| {
             let worker = r.dictionary.as_ref().unwrap();
@@ -2171,6 +2174,7 @@ mod tests {
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
+            battery: None,
         };
         // Neighbour prefetches are covered elsewhere.
         let drain = || commands.try_iter().filter(|c| !matches!(c, Command::Page { .. })).collect::<Vec<_>>();
@@ -2375,6 +2379,7 @@ mod tests {
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
+            battery: None,
         };
         let page = |generation, number| {
             Reply::Page(Arc::new(Page {
@@ -2507,6 +2512,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut false,
+            battery: None,
         };
         r.receive(Reply::Error { generation: 1, message: "failed open".into() }, &mut cx);
         r.after_present();

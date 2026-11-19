@@ -325,7 +325,7 @@ fn not_enough_space_changes_nothing() {
     assert_eq!(err, DownloadError::NotEnoughSpace { needed, free: needed - 1 });
     assert!(server.paths().is_empty(), "nothing downloaded");
     assert!(!staged(root.path()).exists());
-    assert_eq!(err.plain(), "Not enough space: the update needs 0.1 MB more. Remove some books and try again.");
+    assert_eq!(err.plain(), "The update needs 0.1 MB more space on the Kindle. Remove some books and try again.");
     // A part already downloaded counts.
     let app = &rel.manifest.component("app").unwrap().archive;
     fs::write(root.path().join(DOWNLOAD_DIR).join(format!("{}.tar.gz", app.sha256)), &rel.archive("app")[..1000])
@@ -449,5 +449,8 @@ fn messages_are_plain() {
         DownloadError::Network(FetchError::Timeout).plain(),
         "The download was interrupted. Try again to continue it."
     );
-    assert_eq!(DownloadError::Check(CheckError::WifiOff).plain(), "Wi-Fi is off. Turn it on to check.");
+    assert_eq!(
+        DownloadError::Check(CheckError::WifiOff).plain(),
+        "Turn on Wi-Fi in Settings → Device, then try again."
+    );
 }

@@ -284,6 +284,7 @@ mod tests {
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
+            battery: None,
         };
         test(&mut state, &worker, &commands, &mut cx);
     }
