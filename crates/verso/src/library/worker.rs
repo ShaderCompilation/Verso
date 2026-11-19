@@ -1,11 +1,12 @@
 //! One coalescing library worker. Progress/errors and index content are published
 //! separately: status is small and always delivered, while an index is cloned,
 //! published and saved only after its content actually changed.
-use super::collections::Collections;
+use super::collections::{self, Collections, Navigation, Tab};
 use super::home::Summary;
-use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, epub};
+use super::previews;
+use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Sort, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
-use crate::store::{Store, book_id};
+use crate::store::{BookState, FolderPreview, Store, book_id};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -44,6 +45,61 @@ pub struct Snapshot {
     /// publishes it so browsing needn't read `library.json` on the UI thread.
     pub cached: bool,
 }
+/// Above this many uncached books, one directory listing replaces failed opens
+/// of books never read; below it, single reads are cheaper.
+pub(crate) const LISTED_STATES: usize = 32;
+
+/// Input for preparing the remembered browsing page off the UI thread.
+#[derive(Clone, Debug)]
+pub struct WarmRequest {
+    pub seq: u64,
+    pub navigation: Navigation,
+    pub sort: Sort,
+    pub per_page: usize,
+    pub folder_preview: FolderPreview,
+    /// True when the screen has not yet loaded all saved reading states.
+    pub need_states: bool,
+    /// Known `last_opened` times already cached on the UI thread, used when
+    /// sorting by `Sort::Recent` without re-reading states from disk.
+    pub known_opened: HashMap<String, u64>,
+    /// Already-loaded `opened.json` preview ranks, if any.
+    pub known_ranks: Option<Arc<HashMap<String, u32>>>,
+}
+
+/// One tile on the prepared browsing page: only what the UI needs to compute
+/// `CoverSpec`s for `verso-thumb`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WarmTile {
+    Folder {
+        parent_line: bool,
+        /// Preview picks (up to `folder_preview.slots()`), in pick order.
+        picks: Vec<(String, Cover)>,
+    },
+    Book {
+        id: String,
+        cover: Cover,
+    },
+}
+
+/// Result of preparing the remembered browsing page off the UI thread.
+pub struct WarmResult {
+    pub seq: u64,
+    pub tab: Tab,
+    pub page: usize,
+    pub total_items: usize,
+    pub tiles: Vec<WarmTile>,
+    /// Saved states read from disk. When `states_complete` is true, every
+    /// existing state record in `books/` was read and absent ids have default
+    /// state.
+    pub states: Option<HashMap<String, BookState>>,
+    pub states_complete: bool,
+    /// `opened.json` ranks when read off-thread for folder previews.
+    pub opened_ranks: Option<Arc<HashMap<String, u32>>>,
+    pub reads: usize,
+    pub listed: bool,
+    pub elapsed: Duration,
+}
+
 #[derive(Default)]
 struct Shared {
     stop: bool,
@@ -67,6 +123,9 @@ struct Shared {
     roots: Option<Vec<PathBuf>>,
     /// Cover sizes the library screen drew since the worker last looked.
     drawn_sizes: Vec<(u32, u32)>,
+    /// Pending Home warm-up request and its completed result.
+    warm_request: Option<WarmRequest>,
+    warm_result: Option<WarmResult>,
 }
 const REPAIR_LIMIT: usize = 32;
 /// A page of book covers plus a page of folder previews (8 tiles × 4) and
@@ -144,6 +203,18 @@ impl Channel {
     fn take_home_request(&self) -> bool {
         std::mem::take(&mut self.lock().home_requested)
     }
+    fn take_warm_request(&self) -> Option<WarmRequest> {
+        let mut state = self.lock();
+        if state.paused || state.stop || !state.changes.is_empty() {
+            return None;
+        }
+        state.warm_request.take()
+    }
+    fn warm(&self, result: WarmResult) {
+        if self.lock().warm_result.replace(result).is_none() {
+            self.waker.wake();
+        }
+    }
 }
 
 enum Next {
@@ -194,7 +265,7 @@ impl Background {
                     && !state.home_requested
                     && state.changes.is_empty()
                     && state.drawn_sizes.is_empty()
-                    && (state.paused || state.repairs.is_empty())
+                    && (state.paused || (state.repairs.is_empty() && state.warm_request.is_none()))
                 {
                     state = self.channel.wait(state);
                 }
@@ -251,6 +322,8 @@ impl Background {
                 }
                 self.set_status(false, false, &errors);
                 self.last_errors = errors;
+            } else if let Some(request) = self.channel.take_warm_request() {
+                self.warm(request);
             }
         }
         // File operations already happened on the UI thread. Persist their
@@ -305,6 +378,9 @@ impl Background {
         self.save(&mut errors, "library");
         self.publish();
         self.set_status(false, true, &errors);
+        if let Some(request) = self.channel.take_warm_request() {
+            self.warm(request);
+        }
 
         let mut interrupted = self.covers(&mut errors);
 
@@ -314,6 +390,9 @@ impl Background {
         // is persisted but not displayed, so it changes no UI publication.
         let mut fingerprinted = 0;
         for i in 0..self.index.books.len() {
+            if let Some(request) = self.channel.take_warm_request() {
+                self.warm(request);
+            }
             if interrupted || self.channel.interrupted() {
                 interrupted = true;
                 break;
@@ -406,6 +485,9 @@ impl Background {
         while !pending.is_empty() {
             if self.channel.take_home_request() {
                 self.rebuild_home();
+            }
+            if let Some(request) = self.channel.take_warm_request() {
+                self.warm(request);
             }
             let (repaired, repair_changed) = self.repair_requested(errors);
             for i in repaired {
@@ -554,6 +636,133 @@ impl Background {
         }
     }
 
+    /// Prepares the remembered browsing page off the UI thread: loads saved
+    /// reading states and `opened.json`, picks folder previews, and selects
+    /// only the single page's books without cloning the whole index.
+    fn warm(&mut self, request: WarmRequest) {
+        let started = Instant::now();
+        let cancelled = || {
+            let state = self.channel.lock();
+            state.paused || state.stop || !state.changes.is_empty()
+        };
+        if cancelled() {
+            return;
+        }
+        let collections = hierarchy(&mut self.collections, &self.index, &self.roots);
+        let mut navigation = request.navigation;
+        navigation.folder = collections.restore(navigation.folder.as_deref());
+        let in_collections = navigation.tab == Tab::Collections;
+        let folders = if in_collections { collections.children(navigation.folder.as_deref()) } else { Vec::new() };
+        let folder_node = navigation.folder.as_ref().and_then(|p| collections.folders.get(p));
+        let book_indices: Vec<usize> = if in_collections {
+            folder_node.map_or_else(Vec::new, |f| f.indices.clone())
+        } else {
+            self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect()
+        };
+
+        let (mut states, mut states_complete, mut reads, mut listed) = (None, false, 0, false);
+        if request.need_states && !book_indices.is_empty() {
+            let Some((loaded, complete, r, l)) =
+                load_warm_states(&self.store, &self.index.books, &book_indices, &cancelled)
+            else {
+                return;
+            };
+            states = Some(loaded);
+            states_complete = complete;
+            reads = r;
+            listed = l;
+        }
+
+        let total_items = folders.len() + book_indices.len();
+        let per_page = request.per_page.max(1);
+        let pages = total_items.div_ceil(per_page).max(1);
+        let page = navigation.page().min(pages - 1);
+        let start = page * per_page;
+        let end = (start + per_page).min(total_items);
+
+        let page_folders_end = end.min(folders.len());
+        let page_folders = if start < page_folders_end { &folders[start..page_folders_end] } else { &[] };
+        let mut opened_ranks = None;
+        let ranks_for_picks = if request.folder_preview != FolderPreview::Icon && !page_folders.is_empty() {
+            if let Some(known) = request.known_ranks {
+                Some(known)
+            } else {
+                if cancelled() {
+                    return;
+                }
+                let opened = self.store.opened().unwrap_or_default();
+                let ranks = Arc::new(opened.ranks());
+                opened_ranks = Some(ranks.clone());
+                Some(ranks)
+            }
+        } else {
+            None
+        };
+
+        let shared_names: HashSet<String> = if navigation.folder.is_none() && !page_folders.is_empty() {
+            let mut seen = HashSet::new();
+            folders.iter().map(|p| collections::name(p)).filter(|name| !seen.insert(name.clone())).collect()
+        } else {
+            HashSet::new()
+        };
+
+        let mut tiles = Vec::with_capacity(end.saturating_sub(start));
+        for path in page_folders {
+            let parent_line = shared_names.contains(&collections::name(path));
+            let picks = match &ranks_for_picks {
+                Some(ranks) => previews::pick(&self.index, &collections, path, ranks)
+                    .into_iter()
+                    .take(request.folder_preview.slots())
+                    .filter_map(|i| self.index.books.get(i))
+                    .map(|b| (b.id.clone(), b.cover.clone()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            tiles.push(WarmTile::Folder { parent_line, picks });
+        }
+
+        let b_start = start.saturating_sub(folders.len());
+        let b_end = end.saturating_sub(folders.len());
+        if b_start < b_end {
+            let selected = super::select_page_indices(
+                &self.index.books,
+                book_indices,
+                |id| {
+                    request
+                        .known_opened
+                        .get(id)
+                        .copied()
+                        .or_else(|| states.as_ref().and_then(|s| s.get(id)).map(|s| s.last_opened))
+                        .unwrap_or(0)
+                },
+                request.sort,
+                b_start,
+                b_end,
+            );
+            for i in selected {
+                let book = &self.index.books[i];
+                tiles.push(WarmTile::Book { id: book.id.clone(), cover: book.cover.clone() });
+            }
+        }
+
+        if cancelled() {
+            return;
+        }
+        self.channel.warm(WarmResult {
+            seq: request.seq,
+            tab: navigation.tab,
+            page,
+            total_items,
+            tiles,
+            states,
+            states_complete,
+            opened_ranks,
+            reads,
+            listed,
+            elapsed: started.elapsed(),
+        });
+    }
+
     /// Returns the books processed and whether any cover changed.
     fn repair_requested(&mut self, errors: &mut Vec<String>) -> (Vec<usize>, bool) {
         let ids = std::mem::take(&mut self.channel.lock().repairs);
@@ -568,6 +777,45 @@ impl Background {
         }
         (repaired, changed)
     }
+}
+
+/// Loads reading states off the UI thread. Above [`LISTED_STATES`] books, a
+/// single `books/` directory listing reads only existing records (so unread
+/// books never take map space) and returns `complete = true`. Stops early on
+/// `cancelled`.
+fn load_warm_states(
+    store: &Store,
+    books: &[Book],
+    indices: &[usize],
+    cancelled: &dyn Fn() -> bool,
+) -> Option<(HashMap<String, BookState>, bool, usize, bool)> {
+    let mut states = HashMap::new();
+    let mut reads = 0;
+    if indices.len() > LISTED_STATES
+        && let Some(saved) = store.book_state_ids()
+    {
+        for id in saved {
+            if cancelled() {
+                return None;
+            }
+            reads += 1;
+            states.insert(id.clone(), store.book(&id));
+        }
+        return Some((states, true, reads, true));
+    }
+    let mut seen = HashSet::new();
+    for &i in indices {
+        let id = &books[i].id;
+        if !seen.insert(id.as_str()) {
+            continue;
+        }
+        if cancelled() {
+            return None;
+        }
+        reads += 1;
+        states.insert(id.clone(), store.book(id));
+    }
+    Some((states, false, reads, false))
 }
 
 /// `index`'s Collections hierarchy under `roots`, reusing `cache` when no
@@ -661,11 +909,28 @@ impl Worker {
     pub fn take_opened_changed(&self) -> bool {
         std::mem::take(&mut self.shared.0.lock().unwrap().opened_changed)
     }
-    /// While paused (a book is opening or open), scan, cover and identity work
-    /// stops at its next check: between files, covers or 64 KiB fingerprint reads.
+    /// While paused (a book is opening or open), scan, cover, warm-up and
+    /// identity work stops at its next check: between files, covers or 64 KiB
+    /// fingerprint reads.
     pub fn pause(&self, paused: bool) {
-        self.shared.0.lock().unwrap().paused = paused;
+        let mut state = self.shared.0.lock().unwrap();
+        state.paused = paused;
+        if paused {
+            state.warm_request = None;
+        }
         self.shared.1.notify_one();
+    }
+    /// Prepares the remembered browsing page off the UI thread. Replaces any
+    /// earlier pending request or unconsumed result.
+    pub fn warm(&self, request: WarmRequest) {
+        let mut state = self.shared.0.lock().unwrap();
+        state.warm_request = Some(request);
+        state.warm_result = None;
+        self.shared.1.notify_one();
+    }
+    /// The finished Home warm-up, if any.
+    pub fn take_warm(&self) -> Option<WarmResult> {
+        self.shared.0.lock().unwrap().warm_result.take()
     }
     pub fn change_paths(&self, changes: Vec<PathChange>) -> Vec<(u64, PathChange)> {
         let mut state = self.shared.0.lock().unwrap();

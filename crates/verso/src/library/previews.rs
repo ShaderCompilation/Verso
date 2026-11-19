@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Older books fall back to title order in previews.
 pub const MAX_OPENED: usize = 1000;
@@ -145,16 +146,22 @@ pub fn pick(
 #[derive(Default)]
 pub struct Previews {
     /// None until the opened order is first needed.
-    ranks: Option<HashMap<String, u32>>,
+    ranks: Option<Arc<HashMap<String, u32>>>,
     picks: HashMap<PathBuf, Vec<usize>>,
 }
 impl Previews {
     pub fn has_order(&self) -> bool {
         self.ranks.is_some()
     }
-    pub fn set_order(&mut self, opened: &Opened) {
-        self.ranks = Some(opened.ranks());
+    pub fn ranks(&self) -> Option<Arc<HashMap<String, u32>>> {
+        self.ranks.clone()
+    }
+    pub fn set_ranks(&mut self, ranks: Arc<HashMap<String, u32>>) {
+        self.ranks = Some(ranks);
         self.picks.clear();
+    }
+    pub fn set_order(&mut self, opened: &Opened) {
+        self.set_ranks(Arc::new(opened.ranks()));
     }
     /// The order changed elsewhere; it is read again when next needed.
     pub fn forget_order(&mut self) {

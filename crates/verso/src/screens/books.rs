@@ -12,7 +12,7 @@ use crate::library::{
     home::Summary,
     previews::Previews,
     search::{self, Scope, SearchCache},
-    worker::{Snapshot, Worker as LibraryWorker},
+    worker::{LISTED_STATES, Snapshot, WarmRequest, WarmResult, WarmTile, Worker as LibraryWorker},
 };
 use crate::page_layout::PageLayout;
 use crate::platform::{RefreshMode, TextInput};
@@ -199,6 +199,11 @@ pub struct Books {
     path_rect: Rect,
     path_press: Press,
     states: HashMap<String, BookState>,
+    /// True once every saved record in `books/` has been loaded, so ids absent
+    /// from `states` are known to have default state without storing them.
+    states_loaded: bool,
+    /// Fallback sort from `settings.json`, cached so Home warm-up reads no files.
+    default_sort: Sort,
     fonts: Vec<FontFace>,
     top: TopBar,
     exit: IconButton,
@@ -256,9 +261,16 @@ pub struct Books {
     prelayout_due: bool,
     /// The last touch, for the idle delay.
     last_input: std::time::Instant,
-    /// Home should decode the library's first page in the background at the
+    /// Home should prepare the library's first page in the background at the
     /// next idle moment: set on start and on coming back from a book.
     warm_due: bool,
+    /// Bumped for each warm-up request and on actions that invalidate it.
+    warm_seq: u64,
+    /// Book ids whose reading state changed or was deleted since the last warm
+    /// request, so off-thread reads never overwrite newer writes.
+    warm_touched: HashSet<String>,
+    /// True when the opened order was invalidated since the last warm request.
+    opened_touched: bool,
 }
 impl Books {
     pub fn new(t: &Theme, screen: Rect, worker: Rc<Worker>) -> Self {
@@ -344,6 +356,8 @@ impl Books {
             path_rect: Rect::default(),
             path_press: Press::default(),
             states: HashMap::new(),
+            states_loaded: false,
+            default_sort: settings.library_sort,
             fonts,
             top,
             exit,
@@ -389,6 +403,9 @@ impl Books {
             prelayout_due: true,
             last_input: std::time::Instant::now(),
             warm_due: true,
+            warm_seq: 0,
+            warm_touched: HashSet::new(),
+            opened_touched: false,
         };
         s.pager.page = s.navigation.page();
         s.refresh(t);
@@ -469,7 +486,7 @@ impl Books {
         // Only shown books need a state: for their status and Recent order.
         // Folder-only views read none.
         let states_started = std::time::Instant::now();
-        let (reads, listed) = load_states(&self.store, &mut self.states, &self.books);
+        let (reads, listed) = load_states(&self.store, &mut self.states, &mut self.states_loaded, &self.books);
         log::debug!(
             "startup stage: cached states reads={reads} listed={listed} elapsed_us={}",
             states_started.elapsed().as_micros()
@@ -678,20 +695,35 @@ impl Books {
         let mut seen = HashSet::new();
         self.folders.iter().map(|p| collections::name(p)).filter(|name| !seen.insert(name.clone())).collect()
     }
+    /// Browsing grid layout (outside search) for `tab` and `count` items.
+    /// Shared by `refresh` and Home's off-thread warm-up so prefetched cover
+    /// sizes match the browsing grid pixel-for-pixel.
+    fn browsing_grid(&self, tab: Tab, count: usize, t: &Theme) -> Grid {
+        let mut y = t.top_bar + t.mm(2.0) + t.target + t.mm(3.0);
+        if tab == Tab::Collections {
+            y += t.mm(12.0) + t.mm(2.0);
+        }
+        let top = y + t.target + t.mm(1.5);
+        let bottom = self.pager.rect().y - t.mm(6.0);
+        let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
+        let rows = ((bottom - top) / t.mm(32.0)).clamp(1, 2) as usize;
+        let mut grid = Grid::new(count, cols, rows);
+        grid.place(
+            Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (bottom - top).max(t.target)),
+            t.mm(3.5),
+            t.mm(3.0),
+        );
+        grid
+    }
     /// A book's cover in grid cell `cell`. Every cell's cover has the size
     /// of the narrowest cell's, so a page draws one tile thumbnail size.
     fn cover_rect(&self, cell: Rect, t: &Theme) -> Rect {
-        let (w, h) = self.grid.base_cell_size();
-        let cover_h = (h - t.mm(10.0)).min(w * 3 / 2).max(1);
-        let cover_w = (cover_h * 2 / 3).max(1);
-        Rect::new(cell.x + (cell.w - cover_w) / 2, cell.y, cover_w, cover_h)
+        grid_cover_rect(&self.grid, cell, t)
     }
     /// A folder tile's preview or icon area in `cell`, above its labels; the
     /// same size in every cell, like covers.
     fn folder_rect(&self, cell: Rect, parent_line: bool, t: &Theme) -> Rect {
-        let (w, h) = self.grid.base_cell_size();
-        let labels = t.mm(if parent_line { 10.0 } else { 5.0 });
-        Rect::new(cell.x, cell.y, w, (h - labels).min(w * 3 / 2))
+        grid_folder_rect(&self.grid, cell, parent_line, t)
     }
     /// The covers on the pages either side of the current one, next page
     /// first, for the prefetcher to decode while this one is on screen.
@@ -831,10 +863,16 @@ impl Books {
         }
         self.settings_seen = saves;
         self.prelayout_due = true;
-        let mode = self.store.settings().folder_preview;
+        let settings = self.store.settings();
+        self.default_sort = settings.library_sort;
+        let mode = settings.folder_preview;
         if mode != self.folder_preview {
             log::info!("folder previews: {mode:?}");
             self.folder_preview = mode;
+            self.warm_seq = self.warm_seq.wrapping_add(1);
+            if self.is_home() {
+                self.warm_due = true;
+            }
             // Picks don't depend on the mode; each mode shows a prefix.
             self.thumbnails.clear();
             if !self.is_home() {
@@ -847,6 +885,10 @@ impl Books {
             log::info!("library folders changed: {roots:?}");
             self.end_selection(cx);
             self.roots = roots.clone();
+            self.warm_seq = self.warm_seq.wrapping_add(1);
+            if self.is_home() {
+                self.warm_due = true;
+            }
             self.library.set_roots(roots);
             self.scanning = true;
             self.working = true;
@@ -1066,6 +1108,8 @@ impl Books {
         let annotation_book = book.clone();
         self.store.select_home_book(&book);
         self.save_navigation();
+        self.warm_seq = self.warm_seq.wrapping_add(1);
+        self.warm_touched.insert(id.clone());
         self.library.pause(true);
         self.thumbnails.clear();
         let settings = self.store.settings();
@@ -1119,11 +1163,19 @@ impl Books {
             .then(|| self.last_input + PRELAYOUT_IDLE)
     }
     fn select_saved_sort(&mut self) {
-        self.sort.selected = match self.navigation.sort(self.store.settings().library_sort) {
+        self.sort.selected = match self.navigation.sort(self.default_sort) {
             Sort::Recent => 0,
             Sort::Title => 1,
             Sort::Author => 2,
         };
+    }
+    fn set_book_state(&mut self, id: String, state: BookState) {
+        self.warm_touched.insert(id.clone());
+        self.states.insert(id, state);
+    }
+    pub(super) fn remove_book_state(&mut self, id: &str) {
+        self.warm_touched.insert(id.to_owned());
+        self.states.remove(id);
     }
     /// When Home should prepare the library's first page: once the worker's
     /// index is in (preparing never reads it here), the scan is done and
@@ -1139,30 +1191,101 @@ impl Books {
             && (self.browsing_ready || self.pending.is_some()))
         .then(|| self.last_input + WARM_IDLE)
     }
-    /// Lays out the remembered library tab, folder and page without showing
-    /// them, and has the prefetcher decode that page's covers, so the first
-    /// visit draws from memory like a page turn. Home stays as it was; the
-    /// covers go with the rest of the cache when a book opens.
-    fn warm_library(&mut self, t: &Theme) -> usize {
+    /// Starts preparing the remembered browsing tab, folder and page off the
+    /// UI thread. The library worker reads states and `opened.json` and picks
+    /// the page's tiles; `apply_warm` absorbs them and hands covers to
+    /// `verso-thumb`.
+    fn warm_library(&mut self, t: &Theme) {
         self.warm_due = false;
+        self.warm_seq = self.warm_seq.wrapping_add(1);
+        self.warm_touched.clear();
+        self.opened_touched = false;
+        let sort = self.navigation.sort(self.default_sort);
+        let per_page = self.browsing_grid(self.navigation.tab, 0, t).paging().per_page;
+        let known_opened = if sort == Sort::Recent {
+            self.states.iter().filter(|(_, s)| s.last_opened > 0).map(|(k, s)| (k.clone(), s.last_opened)).collect()
+        } else {
+            HashMap::new()
+        };
+        self.library.warm(WarmRequest {
+            seq: self.warm_seq,
+            navigation: self.navigation.clone(),
+            sort,
+            per_page,
+            folder_preview: self.folder_preview,
+            need_states: !self.states_loaded,
+            known_opened,
+            known_ranks: self.previews.ranks(),
+        });
+    }
+    /// Absorbs the worker's off-thread warm-up result on the UI thread without
+    /// file I/O or full-library cloning/sorting, and queues that page's covers
+    /// on `verso-thumb` while still on Home.
+    fn apply_warm(&mut self, mut warm: WarmResult, t: &Theme) -> usize {
+        if warm.seq != self.warm_seq {
+            return 0;
+        }
         let started = std::time::Instant::now();
-        self.home_active = false;
-        self.select_saved_sort();
-        self.pager.page = self.navigation.page();
-        self.refresh(t);
-        let covers = self.page_covers(t, [self.grid.page]);
-        self.home_active = true;
-        self.refresh(t);
-        log::info!(
-            "library warm: {:?} page {} with {} covers prepared in {:?}",
-            self.navigation.tab,
-            self.navigation.page(),
-            covers.len(),
-            started.elapsed()
-        );
+        if let Some(loaded) = warm.states.take() {
+            for (id, state) in loaded {
+                if !self.warm_touched.contains(&id) && !self.states.contains_key(&id) {
+                    self.states.insert(id, state);
+                }
+            }
+            if warm.states_complete {
+                self.states_loaded = true;
+            }
+        }
+        if let Some(ranks) = warm.opened_ranks.take()
+            && !self.opened_touched
+            && !self.previews.has_order()
+        {
+            self.previews.set_ranks(ranks);
+        }
+        if !self.is_home() || self.reader.is_some() {
+            return 0;
+        }
+        let covers = self.warm_covers(&warm, t);
         let count = covers.len();
+        log::info!(
+            "library warm: {:?} page {} with {} covers prepared in {:?} (worker {:?}, reads={}, listed={})",
+            warm.tab,
+            warm.page,
+            count,
+            started.elapsed(),
+            warm.elapsed,
+            warm.reads,
+            warm.listed,
+        );
         self.thumbnails.prefetch(covers);
         count
+    }
+    /// Converts the worker's single-page `WarmTile`s into `CoverSpec`s using
+    /// the exact same grid and tile geometry as `page_covers`.
+    fn warm_covers(&self, warm: &WarmResult, t: &Theme) -> Vec<CoverSpec> {
+        let grid = self.browsing_grid(warm.tab, warm.total_items, t);
+        let mut specs = Vec::new();
+        let mut add = |id: &str, cover: &Cover, rect: Rect, fit: Fit| {
+            if let Cover::Ready(key) = cover {
+                specs.push(CoverSpec { book_id: id.to_owned(), key: key.clone(), w: rect.w, h: rect.h, fit });
+            }
+        };
+        for ((_, cell), tile) in grid.cells_for_page(warm.page).into_iter().zip(&warm.tiles) {
+            match tile {
+                WarmTile::Folder { parent_line, picks } => {
+                    let r = grid_folder_rect(&grid, cell, *parent_line, t);
+                    for (k, rect, fit) in folder_tile::layout(self.folder_preview, picks.len(), r, t)
+                        .map(|l| l.covers)
+                        .unwrap_or_default()
+                    {
+                        let (id, cover) = &picks[k];
+                        add(id, cover, rect, fit);
+                    }
+                }
+                WarmTile::Book { id, cover } => add(id, cover, grid_cover_rect(&grid, cell, t), Fit::Cover),
+            }
+        }
+        specs
     }
     fn start_prelayout(&mut self, cx: &EventCx) {
         self.prelayout_due = false;
@@ -1177,6 +1300,7 @@ impl Books {
         self.library.pause(false);
         self.prelayout_due = true;
         self.warm_due = true;
+        self.warm_seq = self.warm_seq.wrapping_add(1);
         self.last_input = cx.now;
         self.reload_home();
         if self.pending_home.as_ref().is_none_or(|summary| !summary.complete) {
@@ -1187,10 +1311,11 @@ impl Books {
         if let Some(r) = self.reader.take() {
             self.generation = r.generation();
             let id = r.book_id();
-            self.states.insert(id.to_owned(), self.store.book(id));
+            self.set_book_state(id.to_owned(), self.store.book(id));
             // The book now leads the opened order, unless it already did.
             if !self.previews.leads(id) {
                 self.previews.forget_order();
+                self.opened_touched = true;
             }
         }
         self.apply_pending(cx);
@@ -1233,7 +1358,7 @@ impl Books {
         }
         match self.store.save_book(id, &state) {
             Ok(()) => {
-                self.states.insert(id.to_owned(), state);
+                self.set_book_state(id.to_owned(), state);
                 self.reload_home();
                 self.library.refresh_home();
                 self.apply_pending(cx);
@@ -1324,6 +1449,7 @@ impl Books {
     /// Applies queued edits to this view. A Home delete before browsing leaves
     /// the index unloaded; `prepare_browsing` replays the edits when it loads.
     fn apply_changes(&mut self, changes: Vec<(u64, PathChange)>, cx: &mut EventCx) {
+        self.warm_seq = self.warm_seq.wrapping_add(1);
         for (_, change) in &changes {
             change.apply_home(&mut self.home);
             if self.browsing_ready {
@@ -1385,7 +1511,7 @@ impl Books {
                 }
                 let deletion = files::delete_folder(&path, &self.index, &self.store);
                 for (id, _) in &deletion.books {
-                    self.states.remove(id);
+                    self.remove_book_state(id);
                 }
                 match deletion.error {
                     None => {
@@ -1484,7 +1610,7 @@ impl Books {
         if let Some(parent) = book.path.parent().filter(|p| files::is_empty(p)) {
             changes.extend(self.library.add_empty_folder(parent.to_owned()));
         }
-        self.states.remove(&book.id);
+        self.remove_book_state(&book.id);
         self.home.books.retain(|e| e.book.id != book.id);
         self.apply_changes(changes, cx);
         cx.toast(
@@ -1496,11 +1622,19 @@ impl Books {
         );
     }
 }
-/// Above this many uncached books, one directory listing replaces the failed
-/// opens of books never read; below it, single reads are cheaper.
-const LISTED_STATES: usize = 32;
-/// Caches the reading states of `books`. Returns the records read and whether
-/// the state directory was listed.
+fn grid_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
+    let (w, h) = grid.base_cell_size();
+    let cover_h = (h - t.mm(10.0)).min(w * 3 / 2).max(1);
+    let cover_w = (cover_h * 2 / 3).max(1);
+    Rect::new(cell.x + (cell.w - cover_w) / 2, cell.y, cover_w, cover_h)
+}
+
+fn grid_folder_rect(grid: &Grid, cell: Rect, parent_line: bool, t: &Theme) -> Rect {
+    let (w, h) = grid.base_cell_size();
+    let labels = t.mm(if parent_line { 10.0 } else { 5.0 });
+    Rect::new(cell.x, cell.y, w, (h - labels).min(w * 3 / 2))
+}
+
 /// "Verso 0.3.0 is available · Update ›": one line in its reserved spot.
 fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
     let t = cx.theme;
@@ -1535,22 +1669,40 @@ fn draw_dot(cx: &mut DrawCx, icon: Rect) {
     cx.canvas.fill_circle(x, y, r, INK);
 }
 
-fn load_states(store: &Store, states: &mut HashMap<String, BookState>, books: &[Book]) -> (usize, bool) {
+/// Caches the reading states of `books`. Returns the records read and whether
+/// the state directory was listed. Once a listing succeeds (`states_loaded`),
+/// only saved records stay in `states` and absent ids are known to be default.
+fn load_states(
+    store: &Store,
+    states: &mut HashMap<String, BookState>,
+    states_loaded: &mut bool,
+    books: &[Book],
+) -> (usize, bool) {
+    if *states_loaded {
+        return (0, false);
+    }
     let mut missing: Vec<_> = books.iter().map(|b| b.id.as_str()).filter(|id| !states.contains_key(*id)).collect();
     missing.sort_unstable();
     missing.dedup();
-    let saved = if missing.len() > LISTED_STATES { store.book_state_ids() } else { None };
+    if missing.len() > LISTED_STATES
+        && let Some(saved) = store.book_state_ids()
+    {
+        let mut reads = 0;
+        for id in saved {
+            states.entry(id).or_insert_with_key(|id| {
+                reads += 1;
+                store.book(id)
+            });
+        }
+        *states_loaded = true;
+        return (reads, true);
+    }
     let mut reads = 0;
     for id in missing {
-        let state = if saved.as_ref().is_none_or(|saved| saved.contains(id)) {
-            reads += 1;
-            store.book(id)
-        } else {
-            BookState::default()
-        };
-        states.insert(id.to_owned(), state);
+        reads += 1;
+        states.insert(id.to_owned(), store.book(id));
     }
-    (reads, saved.is_some())
+    (reads, false)
 }
 fn status(state: &BookState) -> String {
     if state.finished {
@@ -2182,8 +2334,10 @@ impl Screen for Books {
                 self.working = true;
             }
             if !self.is_home() && self.sort.on_gesture(&g).is_some() {
+                let sort = self.selected_sort();
+                self.default_sort = sort;
                 let mut settings = self.store.settings();
-                settings.library_sort = self.selected_sort();
+                settings.library_sort = sort;
                 if let Err(e) = self.store.save_settings(&settings) {
                     cx.toast(format!("Couldn't save sort: {e}"), None);
                 }
@@ -2370,9 +2524,13 @@ impl Screen for Books {
         }
         if self.library.take_opened_changed() {
             self.previews.forget_order();
+            self.opened_touched = true;
             if self.browsing_ready && !self.is_home() && self.reader.is_none() {
                 self.prioritize();
             }
+        }
+        if let Some(warm) = self.library.take_warm() {
+            self.apply_warm(warm, cx.theme);
         }
         let repaired = self.library.take_repaired();
         if !repaired.is_empty() {
@@ -3375,14 +3533,20 @@ mod tests {
         // finds the last one without any cached state.
         assert!(books.sleep_cover(600, 800).is_some());
         // All books sorts by recency across the whole library. The 61 states
-        // come from one listing, and only the two saved records are read.
-        let (reads, listed) = load_states(&store, &mut HashMap::new(), &books.index.books);
-        assert_eq!((reads, listed), (2, true));
+        // come from one listing, and only the two saved records are read and
+        // kept in memory (absent ids are known to have default state).
+        let mut loaded = false;
+        let (reads, listed) = load_states(&store, &mut HashMap::new(), &mut loaded, &books.index.books);
+        assert_eq!((reads, listed, loaded), (2, true, true));
         books.navigation.tab = Tab::AllBooks;
         books.refresh(&t);
-        assert_eq!(books.states.len(), books.index.books.len());
+        assert!(books.states_loaded);
+        assert_eq!(books.states.len(), 2);
         assert_eq!(books.books.iter().take(2).map(|b| b.id.as_str()).collect::<Vec<_>>(), ["5", "40"]);
         assert_eq!(books.states["40"].progress, 2500);
+        // Once listed, later refreshes read nothing.
+        let (reads, listed) = load_states(&store, &mut books.states, &mut books.states_loaded, &books.index.books);
+        assert_eq!((reads, listed), (0, false));
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -4111,9 +4275,45 @@ mod tests {
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
     }
+    /// Like `preview_fixture`, using real [`covers::key`] cache files so the
+    /// live `LibraryWorker` confirms every cover instead of replacing them.
+    fn warm_fixture(label: &str, extra: usize) -> anyhow::Result<(Store, PathBuf)> {
+        let root = std::env::temp_dir().join(format!(
+            "verso-warm-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let store = Store::at(root.clone());
+        let mut settings = store.settings();
+        settings.library_folders = Some(vec!["/books".into()]);
+        store.save_settings(&settings)?;
+        std::fs::create_dir_all(store.cover_path("0").parent().unwrap())?;
+        let mut books: Vec<_> = (0..36 + extra)
+            .map(|i| {
+                let mut b = book(i);
+                b.path = if i < 36 {
+                    format!("/books/F{}/{i}.epub", i / 4).into()
+                } else {
+                    format!("/books/F0/extra-{i:02}.epub").into()
+                };
+                b.cover = Cover::Unavailable("no art".into());
+                b
+            })
+            .collect();
+        for (i, b) in books.iter_mut().enumerate() {
+            if !(32..36).contains(&i) {
+                let key = covers::key(b);
+                image::GrayImage::from_pixel(288, 432, image::Luma([128])).save(store.cover_path(&key))?;
+                image::GrayImage::from_pixel(144, 216, image::Luma([50])).save(store.small_cover_path(&key))?;
+                b.cover = Cover::Ready(key);
+            }
+        }
+        store.save_library(&LibraryIndex { books, ..Default::default() })?;
+        Ok((store, root))
+    }
     #[test]
     fn home_prepares_the_remembered_library_page_and_stays_as_it_was() -> anyhow::Result<()> {
-        let (store, root) = preview_fixture("warm")?;
+        let (store, root) = warm_fixture("home", 0)?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         store.save_navigation(&Navigation { tab: Tab::AllBooks, ..Default::default() })?;
@@ -4133,16 +4333,30 @@ mod tests {
         // Not before the worker's index is in, the scan is done and Home was
         // left alone for a moment.
         assert!(books.warm_at().is_none());
-        books.pending = Some(Snapshot { index: store.library(), ..Default::default() });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while books.scanning || books.pending.is_none() {
+            assert!(std::time::Instant::now() < deadline, "initial scan never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            with_cx(&t, screen, |cx| books.on_background(cx));
+        }
         books.scanning = true;
         assert!(books.warm_at().is_none());
         books.scanning = false;
         let home = draw(&mut books);
         assert!(books.warm_at().is_some_and(|at| at >= books.last_input + WARM_IDLE));
-        let covers = books.warm_library(&t);
+        books.warm_library(&t);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let warm = loop {
+            if let Some(warm) = books.library.take_warm() {
+                break warm;
+            }
+            assert!(std::time::Instant::now() < deadline, "off-thread warm-up never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let covers = books.apply_warm(warm, &t);
         assert!(covers > 0);
         assert!(books.warm_at().is_none(), "once per visit to Home");
-        assert!(books.is_home() && books.books.len() <= 4);
+        assert!(books.is_home() && !books.browsing_ready && books.books.len() <= 4);
         let after = draw(&mut books);
         let changed: Vec<_> = (0..home.len()).filter(|&i| home[i] != after[i]).collect();
         let rows = changed.first().zip(changed.last()).map(|(a, b)| (a / 1272, b / 1272));
@@ -4161,6 +4375,112 @@ mod tests {
         books.warm_due = false;
         with_cx(&t, screen, |cx| books.returned(cx));
         assert!(books.warm_due);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn off_thread_warm_matches_refresh_covers_and_protects_newer_states() -> anyhow::Result<()> {
+        // 36 + 40 books exercises the sparse listed-states path (> LISTED_STATES),
+        // with one saved record so we verify only saved records stay in memory.
+        let (store, root) = warm_fixture("match", 40)?;
+        store.save_book(
+            "0",
+            &BookState {
+                position: crate::document::Position("old".into()),
+                progress: 1200,
+                last_opened: 50,
+                ..Default::default()
+            },
+        )?;
+        let wait_warm = |books: &mut Books| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(warm) = books.library.take_warm() {
+                    return warm;
+                }
+                assert!(std::time::Instant::now() < deadline, "off-thread warm-up never finished");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167)] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            for (tab, folder, page, sort, preview) in [
+                (Tab::AllBooks, None, 0, Sort::Recent, FolderPreview::Stack),
+                (Tab::AllBooks, None, 2, Sort::Title, FolderPreview::Stack),
+                (Tab::Collections, Some(PathBuf::from("/books")), 0, Sort::Title, FolderPreview::Stack),
+                (Tab::Collections, Some(PathBuf::from("/books")), 0, Sort::Title, FolderPreview::Latest),
+                (Tab::Collections, Some(PathBuf::from("/books")), 0, Sort::Title, FolderPreview::Icon),
+                (Tab::Collections, Some(PathBuf::from("/books/F0")), 0, Sort::Recent, FolderPreview::Stack),
+            ] {
+                let mut nav = Navigation { tab, folder, ..Default::default() };
+                nav.set_page(page);
+                nav.set_sort(sort);
+                store.save_navigation(&nav)?;
+                let mut settings = store.settings();
+                settings.folder_preview = preview;
+                store.save_settings(&settings)?;
+                let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while books.scanning || books.pending.is_none() {
+                    assert!(std::time::Instant::now() < deadline, "initial scan never finished");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    with_cx(&t, screen, |cx| books.on_background(cx));
+                }
+                books.warm_library(&t);
+                let warm = wait_warm(&mut books);
+                let warm_specs = books.warm_covers(&warm, &t);
+                books.apply_warm(warm, &t);
+                if tab == Tab::AllBooks {
+                    assert!(books.states_loaded, "listed states marked complete");
+                    assert_eq!(books.states.len(), 1, "unread books take no map space");
+                }
+                if preview != FolderPreview::Icon || tab == Tab::AllBooks {
+                    assert!(!warm_specs.is_empty(), "{w}x{h} {tab:?} {sort:?} {preview:?}");
+                }
+                // Compare directly against full synchronous browsing layout.
+                books.home_active = false;
+                books.select_saved_sort();
+                books.pager.page = books.navigation.page();
+                books.refresh(&t);
+                let expected = books.page_covers(&t, [books.grid.page]);
+                assert_eq!(warm_specs, expected, "{w}x{h} {tab:?} {sort:?} {preview:?}");
+            }
+        }
+        // Newer UI writes and deletes must never be overwritten by an in-flight warm-up.
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        store.save_navigation(&Navigation { tab: Tab::AllBooks, ..Default::default() })?;
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.warm_library(&t);
+        let warm = wait_warm(&mut books);
+        // Simulate a newer state written on the UI thread (book 0) and a deletion (book 1).
+        books.set_book_state(
+            "0".into(),
+            BookState {
+                position: crate::document::Position("newer".into()),
+                progress: 8900,
+                last_opened: 999,
+                ..Default::default()
+            },
+        );
+        books.remove_book_state("1");
+        let mut warm_with_deleted = warm;
+        if let Some(states) = &mut warm_with_deleted.states {
+            states.insert("1".into(), BookState { progress: 500, ..Default::default() });
+        }
+        books.apply_warm(warm_with_deleted, &t);
+        assert_eq!(books.states["0"].progress, 8900, "newer UI state kept");
+        assert!(!books.states.contains_key("1"), "deleted book state not resurrected");
+        // Opening a book bumps warm_seq and cancels prefetching stale results.
+        books.warm_library(&t);
+        let stale = wait_warm(&mut books);
+        books.warm_seq = books.warm_seq.wrapping_add(1);
+        assert_eq!(books.apply_warm(stale, &t), 0);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]

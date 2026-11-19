@@ -247,11 +247,73 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
     }
 }
 
-pub fn sort_books(books: &mut [Book], states: &std::collections::HashMap<String, crate::store::BookState>, sort: Sort) {
-    let recent = |b: &Book| {
-        let opened = states.get(&b.id).map_or(0, |s| s.last_opened);
-        if opened > 0 { (opened, 0) } else { (b.stamp.modified_secs, b.stamp.modified_nanos) }
+fn recency(book: &Book, last_opened: u64) -> (u64, u32) {
+    if last_opened > 0 { (last_opened, 0) } else { (book.stamp.modified_secs, book.stamp.modified_nanos) }
+}
+
+fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering {
+    if a.is_ascii() && b.is_ascii() {
+        a.bytes().map(|c| c.to_ascii_lowercase()).cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
+}
+
+/// Same total order as [`sort_books`], comparing without cloning books or
+/// building unused keys.
+pub fn compare_books(a: &Book, a_opened: u64, b: &Book, b_opened: u64, sort: Sort) -> std::cmp::Ordering {
+    match sort {
+        Sort::Recent => recency(b, b_opened)
+            .cmp(&recency(a, a_opened))
+            .then_with(|| cmp_ci(&a.metadata.title, &b.metadata.title))
+            .then_with(|| a.path.cmp(&b.path)),
+        Sort::Title => cmp_ci(&a.metadata.title, &b.metadata.title)
+            .then_with(|| cmp_ci(&a.metadata.authors, &b.metadata.authors))
+            .then_with(|| a.path.cmp(&b.path)),
+        Sort::Author => a
+            .metadata
+            .authors
+            .trim()
+            .is_empty()
+            .cmp(&b.metadata.authors.trim().is_empty())
+            .then_with(|| cmp_ci(&a.metadata.authors, &b.metadata.authors))
+            .then_with(|| cmp_ci(&a.metadata.title, &b.metadata.title))
+            .then_with(|| a.path.cmp(&b.path)),
+    }
+}
+
+/// The slice `start..end` of `indices` once ordered by `sort`, without cloning
+/// books or sorting items outside the page.
+pub fn select_page_indices(
+    books: &[Book],
+    mut indices: Vec<usize>,
+    opened: impl Fn(&str) -> u64,
+    sort: Sort,
+    start: usize,
+    end: usize,
+) -> Vec<usize> {
+    if start >= indices.len() || start >= end {
+        return Vec::new();
+    }
+    let end = end.min(indices.len());
+    let cmp = |&a: &usize, &b: &usize| {
+        let (ba, bb) = (&books[a], &books[b]);
+        let (oa, ob) = if sort == Sort::Recent { (opened(&ba.id), opened(&bb.id)) } else { (0, 0) };
+        compare_books(ba, oa, bb, ob, sort)
     };
+    if end < indices.len() {
+        indices.select_nth_unstable_by(end - 1, cmp);
+        indices.truncate(end);
+    }
+    if start > 0 {
+        indices.select_nth_unstable_by(start, cmp);
+    }
+    indices[start..end].sort_by(cmp);
+    indices[start..end].to_vec()
+}
+
+pub fn sort_books(books: &mut [Book], states: &std::collections::HashMap<String, crate::store::BookState>, sort: Sort) {
+    let recent = |b: &Book| recency(b, states.get(&b.id).map_or(0, |s| s.last_opened));
     books.sort_by_cached_key(|b| {
         let author = b.metadata.authors.to_lowercase();
         let title = b.metadata.title.to_lowercase();
@@ -304,6 +366,43 @@ pub(crate) mod selection_tests {
         assert_eq!(books.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["2", "1", "0", "3"]);
         sort_books(&mut books, &states, Sort::Author);
         assert_eq!(books.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["2", "1", "0", "3"]);
+    }
+    #[test]
+    fn select_page_indices_matches_full_sort() {
+        let mut books: Vec<_> = (0..25).map(book).collect();
+        books[0].metadata.title = "beta".into();
+        books[1].metadata.title = "Alpha".into();
+        books[2].metadata.title = "alpha".into();
+        books[3].metadata.title = "Война и мир".into();
+        books[4].metadata.title = "война и мир".into();
+        books[1].metadata.authors = "Zed".into();
+        books[2].metadata.authors = "ann".into();
+        books[3].metadata.authors = "Толстой".into();
+        books[5].stamp = books[6].stamp.clone();
+        books[5].metadata.title = books[6].metadata.title.clone();
+        let states = HashMap::from([
+            ("0".into(), BookState { position: Position("a".into()), last_opened: 100, ..Default::default() }),
+            ("7".into(), BookState { position: Position("b".into()), last_opened: 100, ..Default::default() }),
+            ("12".into(), BookState { position: Position("c".into()), last_opened: 250, ..Default::default() }),
+        ]);
+        for sort in [Sort::Recent, Sort::Title, Sort::Author] {
+            let mut full = books.clone();
+            sort_books(&mut full, &states, sort);
+            let full_ids: Vec<&str> = full.iter().map(|b| b.id.as_str()).collect();
+            for (start, end) in [(0, 8), (8, 16), (16, 24), (24, 32), (3, 11), (0, 25), (30, 38)] {
+                let picked = select_page_indices(
+                    &books,
+                    (0..books.len()).collect(),
+                    |id| states.get(id).map_or(0, |s| s.last_opened),
+                    sort,
+                    start,
+                    end,
+                );
+                let picked_ids: Vec<&str> = picked.iter().map(|&i| books[i].id.as_str()).collect();
+                let expected = &full_ids[start.min(full_ids.len())..end.min(full_ids.len())];
+                assert_eq!(picked_ids, expected, "{sort:?} {start}..{end}");
+            }
+        }
     }
 }
 

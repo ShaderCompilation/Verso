@@ -246,7 +246,7 @@ impl Books {
         );
         self.selection = None;
         for id in &result.removed_books {
-            self.states.remove(id);
+            self.remove_book_state(id);
             self.home.books.retain(|e| &e.book.id != id);
         }
         if !result.changes.is_empty() {
