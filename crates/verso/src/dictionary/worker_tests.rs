@@ -447,6 +447,55 @@ fn single_dictionary_reuses_its_backend_for_exact_and_forms() {
 }
 
 #[test]
+fn open_indexes_outlive_the_lookup_and_definitions_open_only_to_show_one() {
+    let f = Fixture::new();
+    let a = f.join("dictionaries/a.ifo");
+    install(&a, "A", "other");
+    install(&f.join("dictionaries/b.ifo"), "B", "thunder");
+    let mut inner = inner(&f);
+    assert_eq!(inner.lookup("thunder", &|| true).0.as_deref(), Some("b.ifo"));
+    assert_eq!(inner.probes.len(), 2);
+    assert_eq!(inner.definitions.as_ref().map(|(id, _)| id.as_str()), Some("b.ifo"));
+    // Closing the sheet releases the definitions file but keeps the indexes.
+    inner.definitions = None;
+    // A's files are gone: reopening its index or definitions would fail.
+    let base = basename(&a).unwrap();
+    for file in [a.clone(), sibling(&base, "idx"), sibling(&base, "dict")] {
+        fs::remove_file(file).unwrap();
+    }
+    let (selected, state) = inner.lookup("thunders", &|| true);
+    assert_eq!(selected.as_deref(), Some("b.ifo"));
+    assert!(matches!(state, State::Definition { base_forms: Some(_), .. }));
+    assert!(inner.catalog.dictionaries.iter().all(|d| d.error.is_none()));
+    // Discovery drops every open file; A is no longer listed.
+    assert!(inner.discover(&|| true));
+    assert!(inner.probes.is_empty() && inner.definitions.is_none());
+    assert_eq!(inner.lookup("thunder", &|| true).0.as_deref(), Some("b.ifo"));
+    assert_eq!(inner.probes.len(), 1);
+}
+
+#[test]
+fn a_failed_read_closes_the_index_so_the_next_lookup_rebuilds_it() {
+    let f = Fixture::new();
+    install(&f.join("dictionaries/a.ifo"), "A", "thunder");
+    let mut inner = inner(&f);
+    assert!(matches!(inner.lookup("thunder", &|| true).1, State::Definition { .. }));
+    // Damage the open cache file in place: the kept handle now fails.
+    let cache = fs::read_dir(f.store.dictionary_cache())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "index"))
+        .unwrap();
+    fs::OpenOptions::new().write(true).open(&cache).unwrap().set_len(70).unwrap();
+    assert_eq!(inner.lookup("thunder", &|| true).1, State::NoResult);
+    assert!(inner.catalog.dictionaries[0].error.is_some());
+    assert!(inner.probes.is_empty(), "a failed index is closed");
+    // Reopening finds the damaged cache invalid and rebuilds it.
+    assert!(matches!(inner.lookup("thunder", &|| true).1, State::Definition { .. }));
+    assert!(inner.catalog.dictionaries[0].error.is_none());
+}
+
+#[test]
 fn cancellation_at_any_point_marks_no_errors() {
     use std::cell::Cell;
     let f = Fixture::new();
@@ -487,7 +536,8 @@ fn inner(f: &Fixture) -> Inner {
         catalog: Catalog::default(),
         warnings: Vec::new(),
         fresh: false,
-        backend: None,
+        probes: Default::default(),
+        definitions: None,
         save_error: None,
         failed_queries: Default::default(),
         word_forms: WordForms::new(f.store.wordforms_dir()),

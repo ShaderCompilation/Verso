@@ -157,7 +157,7 @@ impl Index {
         path: &Path,
         cache: &Path,
         info: &Info,
-        data_len: u64,
+        data_len: impl FnOnce() -> Result<u64>,
         current: &impl Fn() -> bool,
         preparing: &impl Fn(),
     ) -> Result<Self> {
@@ -169,6 +169,8 @@ impl Index {
         let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
         let (idx, compressed) = companion(&base, "idx", "idx.gz")?;
         let syn = sibling(&base, "syn");
+        // Only a build reads the definitions file, to bound each record.
+        let data_len = data_len()?;
         preparing();
         let started = std::time::Instant::now();
         log::debug!("dictionary index build started: {}", path.display());

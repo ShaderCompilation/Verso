@@ -1,10 +1,11 @@
 //! One service per Store family, with independent cancellable client mailboxes.
 //! Discovery is lazy; edits and durable writes share the lookup command queue.
 use super::{
-    Backend, Catalog, Dictionary, Entry, Hits, Source, SourceStatus, discover_catalog,
+    Catalog, Dictionary, Entry, Hits, Source, SourceStatus, discover_catalog,
     forms::{self, WordForms, WordFormsStatus},
     sets::{DEFAULT, Edit, Preferences, Selection, Set},
 };
+use super::{Probe, dictzip::Definitions};
 use crate::{
     platform::Waker,
     store::{Store, atomic_bytes, default_dictionary_folders},
@@ -173,7 +174,13 @@ struct Inner {
     catalog: Catalog,
     warnings: Vec<String>,
     fresh: bool,
-    backend: Option<(String, Backend)>,
+    /// Indexes opened since the last discovery, kept across lookups: a file
+    /// handle each, so a search no longer reopens and revalidates every
+    /// dictionary. Discovery, Retry and a failed read drop them.
+    probes: std::collections::HashMap<String, Probe>,
+    /// The one open definitions file, for the dictionary last shown; it keeps
+    /// up to eight decompressed blocks. Closing the lookup releases it.
+    definitions: Option<(String, Definitions)>,
     save_error: Option<String>,
     /// The query that failed in each dictionary, with its word-form languages.
     failed_queries: std::collections::HashMap<String, (String, Vec<String>)>,
@@ -207,7 +214,7 @@ fn retry_read(
     word_forms: &mut WordForms,
     current: &impl Fn() -> bool,
 ) -> anyhow::Result<()> {
-    let mut backend = Backend::open(&dictionary.path, cache, current)?;
+    let mut backend = super::Backend::open(&dictionary.path, cache, current)?;
     if let Some((query, languages)) = query
         && backend.lookup(query)?.is_empty()
         && let Some(forms) = word_forms.candidates(languages, query)
@@ -235,7 +242,8 @@ impl Inner {
     fn discover(&mut self, current: &impl Fn() -> bool) -> bool {
         // Files may have changed; reopen from the new catalog. Word-form
         // packs reopen too, which retries one that couldn't be read.
-        self.backend = None;
+        self.probes.clear();
+        self.definitions = None;
         self.word_forms.reset();
         self.fresh = false;
         // Read the counter first: a save during the read then forces another scan.
@@ -377,11 +385,11 @@ impl Inner {
                     return;
                 }
                 let preparing = || snapshot.borrow_mut().preparing = Some(id.clone());
-                let outcome = self.open_backend(&id, &progress, &preparing).and_then(|backend| {
-                    if !backend.displayable() {
+                let outcome = self.open_probe(&id, &progress, &preparing).and_then(|probe| {
+                    if !probe.displayable() {
                         return Ok(None);
                     }
-                    backend.find(query).map(Some)
+                    probe.find(query).map(Some)
                 });
                 let outcome = match outcome {
                     Ok(Some(hits)) if hits.records.is_empty() => {
@@ -396,12 +404,11 @@ impl Inner {
                             forms
                         });
                         match forms {
-                            // The backend is still open: this reuses it.
                             Some(forms) => {
                                 let checking = Instant::now();
                                 let hits = self
-                                    .open_backend(&id, &progress, &preparing)
-                                    .and_then(|backend| backend.find_forms(forms, &progress));
+                                    .open_probe(&id, &progress, &preparing)
+                                    .and_then(|probe| probe.find_forms(forms, &progress));
                                 log::debug!("dictionary base forms checked: {:?}", checking.elapsed());
                                 hits
                             }
@@ -490,29 +497,32 @@ impl Inner {
         let Some(reply) = mailbox.result.lock().unwrap().take() else { return (None, State::NoResult) };
         (reply.selected, reply.state.unwrap())
     }
-    fn open_backend(
+    fn path(&self, id: &str) -> anyhow::Result<std::path::PathBuf> {
+        let dictionary = self.catalog.dictionaries.iter().find(|d| d.id == id);
+        Ok(dictionary.ok_or_else(|| anyhow::anyhow!("Dictionary disappeared"))?.path.clone())
+    }
+    /// The dictionary's open index, opening (and if needed building) it once.
+    fn open_probe(
         &mut self,
         id: &str,
         current: &impl Fn() -> bool,
         preparing: &impl Fn(),
-    ) -> anyhow::Result<&mut Backend> {
-        if self.backend.as_ref().is_none_or(|(open, _)| open != id) {
-            self.backend = None;
-            let dictionary = self
-                .catalog
-                .dictionaries
-                .iter()
-                .find(|d| d.id == id)
-                .ok_or_else(|| anyhow::anyhow!("Dictionary disappeared"))?;
-            self.backend = Some((
-                id.into(),
-                Backend::open_progress(&dictionary.path, &self.store.dictionary_cache(), current, preparing)?,
-            ));
+    ) -> anyhow::Result<&mut Probe> {
+        if !self.probes.contains_key(id) {
+            let probe = Probe::open_progress(&self.path(id)?, &self.store.dictionary_cache(), current, preparing)?;
+            self.probes.insert(id.into(), probe);
         }
-        Ok(&mut self.backend.as_mut().unwrap().1)
+        Ok(self.probes.get_mut(id).unwrap())
     }
     fn render_match(&mut self, matched: &Match, query: &str, current: &impl Fn() -> bool) -> anyhow::Result<State> {
-        let entries = self.open_backend(&matched.dictionary, current, &|| {})?.render(matched.hits.records.clone())?;
+        let id = &matched.dictionary;
+        self.open_probe(id, current, &|| {})?;
+        if self.definitions.as_ref().is_none_or(|(open, _)| open != id) {
+            self.definitions = None;
+            self.definitions = Some((id.clone(), super::open_definitions(&self.path(id)?)?));
+        }
+        let definitions = &mut self.definitions.as_mut().unwrap().1;
+        let entries = self.probes[id].render(definitions, matched.hits.records.clone())?;
         Ok(State::Definition {
             entries,
             base_forms: matched.hits.forms.map(|count| BaseForms { query: query.into(), count }),
@@ -524,7 +534,15 @@ impl Inner {
             d.error = None;
         }
     }
+    /// Closes the dictionary's files, so its next use reopens and revalidates them.
+    fn close(&mut self, id: &str) {
+        self.probes.remove(id);
+        if self.definitions.as_ref().is_some_and(|(open, _)| open == id) {
+            self.definitions = None;
+        }
+    }
     fn read_error(&mut self, id: &str, query: &str, form_languages: &[String], error: anyhow::Error) {
+        self.close(id);
         self.failed_queries.insert(id.into(), (query.into(), form_languages.to_vec()));
         if let Some(d) = self.catalog.dictionaries.iter_mut().find(|d| d.id == id) {
             d.error = Some(format!("{error:#}"));
@@ -611,7 +629,8 @@ impl Service {
                     catalog: Catalog::default(),
                     warnings: Vec::new(),
                     fresh: false,
-                    backend: None,
+                    probes: Default::default(),
+                    definitions: None,
                     save_error: None,
                     failed_queries: Default::default(),
                     word_forms,
@@ -653,9 +672,10 @@ impl Service {
                             }
                         }
                         Command::Release => {
-                            // A queued request from another client owns its own backend work.
-                            // Releasing this cache is safe and bounds idle retained memory.
-                            inner.backend = None;
+                            // A queued request from another client reopens what it needs.
+                            // Open indexes stay: they are file handles, and the next
+                            // lookup would otherwise reopen every one.
+                            inner.definitions = None;
                         }
                         Command::Flush(done) => {
                             if inner.save_error.is_some() {
@@ -700,7 +720,7 @@ impl Service {
                             if (!inner.fresh || folders_changed(&inner)) && !inner.discover(&current) {
                                 continue;
                             }
-                            inner.backend = None;
+                            inner.close(&dictionary);
                             if let Some(d) = inner.catalog.dictionaries.iter_mut().find(|d| d.id == dictionary) {
                                 let result = retry_read(
                                     d,

@@ -160,33 +160,25 @@ pub struct Hits {
     pub forms: Option<usize>,
 }
 
-pub struct Backend {
+/// The definitions file of the dictionary whose `.ifo` or `.ifo.gz` is `path`.
+fn open_definitions(path: &Path) -> Result<Definitions> {
+    let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
+    let (data_path, compressed) = companion(&base, "dict", "dict.dz")?;
+    Definitions::open(&data_path, compressed)
+}
+
+/// What a search needs from one dictionary: its validated index cache and
+/// field types. It holds one file handle and no word list, and never opens
+/// the definitions file except to build a missing index.
+pub struct Probe {
     index: Index,
-    definitions: Definitions,
     types: String,
 }
-impl Backend {
-    pub fn open(path: &Path, cache: &Path, current: &impl Fn() -> bool) -> Result<Self> {
-        Self::open_progress(path, cache, current, &|| {})
-    }
+impl Probe {
     fn open_progress(path: &Path, cache: &Path, current: &impl Fn() -> bool, preparing: &impl Fn()) -> Result<Self> {
         let info = Info::read(path)?;
-        let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
-        let (data_path, compressed) = companion(&base, "dict", "dict.dz")?;
-        let definitions = Definitions::open(&data_path, compressed)?;
-        let index = Index::open(path, cache, &info, definitions.len, current, preparing)?;
-        Ok(Self { index, definitions, types: info.types })
-    }
-    pub fn lookup(&mut self, query: &str) -> Result<Vec<Entry>> {
-        let entries = self.index.find(query)?;
-        self.render(entries)
-    }
-    /// Returns the rendered entries and how many base forms they cover, at
-    /// most three. A base form is a candidate word, so case variants of one
-    /// headword (`hope`, `Hope`) count once.
-    fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(Vec<Entry>, usize)> {
-        let hits = self.find_forms(forms, current)?;
-        Ok((self.render(hits.records)?, hits.forms.unwrap_or(0)))
+        let index = Index::open(path, cache, &info, || Ok(open_definitions(path)?.len), current, preparing)?;
+        Ok(Self { index, types: info.types })
     }
     fn find(&mut self, query: &str) -> Result<Hits> {
         let mut records = self.index.find(query)?;
@@ -239,14 +231,15 @@ impl Backend {
         hits.forms += usize::from(hits.entries.len() > shown);
         Ok(hit)
     }
-    fn render(&mut self, entries: Vec<(String, u64, u32)>) -> Result<Vec<Entry>> {
+    /// Reads and formats `entries` from this dictionary's `definitions`.
+    fn render(&self, definitions: &mut Definitions, entries: Vec<(String, u64, u32)>) -> Result<Vec<Entry>> {
         const LIMIT: usize = 1024 * 1024;
         const NOTICE: &str = "[Further entries omitted]";
         let mut output = Vec::new();
         let mut bytes = 0;
         let mut omitted = false;
         for (word, offset, size) in entries {
-            let data = self.definitions.read(offset, size)?;
+            let data = definitions.read(offset, size)?;
             let mut blocks = text::definition(&data, &self.types)?;
             // Reserve room for a notice so the combined block text, including
             // that notice, never exceeds the cap. Clip on a character boundary.
@@ -277,6 +270,34 @@ impl Backend {
             output.last_mut().unwrap().blocks.push(Block::plain(NOTICE));
         }
         Ok(output)
+    }
+}
+
+/// A dictionary with both files open, for checks and tests that read
+/// definitions directly. The worker keeps `Probe`s and opens definitions
+/// only to show them.
+pub struct Backend {
+    probe: Probe,
+    definitions: Definitions,
+}
+impl Backend {
+    pub fn open(path: &Path, cache: &Path, current: &impl Fn() -> bool) -> Result<Self> {
+        let info = Info::read(path)?;
+        let definitions = open_definitions(path)?;
+        let len = definitions.len;
+        let index = Index::open(path, cache, &info, || Ok(len), current, &|| {})?;
+        Ok(Self { probe: Probe { index, types: info.types }, definitions })
+    }
+    pub fn lookup(&mut self, query: &str) -> Result<Vec<Entry>> {
+        let entries = self.probe.index.find(query)?;
+        self.probe.render(&mut self.definitions, entries)
+    }
+    /// Returns the rendered entries and how many base forms they cover, at
+    /// most three. A base form is a candidate word, so case variants of one
+    /// headword (`hope`, `Hope`) count once.
+    fn lookup_forms(&mut self, forms: &forms::Candidates, current: &impl Fn() -> bool) -> Result<(Vec<Entry>, usize)> {
+        let hits = self.probe.find_forms(forms, current)?;
+        Ok((self.probe.render(&mut self.definitions, hits.records)?, hits.forms.unwrap_or(0)))
     }
 }
 
