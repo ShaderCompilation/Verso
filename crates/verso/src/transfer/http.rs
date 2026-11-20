@@ -545,6 +545,7 @@ pub fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Content Too Large",
         421 => "Misdirected Request",
+        428 => "Precondition Required",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",

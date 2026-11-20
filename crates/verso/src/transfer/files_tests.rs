@@ -550,7 +550,9 @@ fn refuses_dot_dot_and_bad_names() {
 fn koreader_and_library_folders_ask_twice() {
     let env = Env::new();
     for path in ["koreader", "documents", "extensions/koreader"] {
-        let (status, body) = env.delete(path, false);
+        let (status, head, body) = env.req("DELETE", &format!("/api/files?path={path}"), b"");
+        assert!(head.starts_with("HTTP/1.1 428 Precondition Required"), "{head}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!((status, body["twice"].clone()), (428, json!(true)), "{path}");
         assert!(env.root.join(path).exists());
     }
@@ -600,4 +602,76 @@ fn writes_need_the_session_and_header() {
     );
     assert_eq!(env.raw(&no_header, b"").0, 403);
     assert!(env.root.join("documents/notes.txt").exists());
+}
+
+#[test]
+fn entries_say_who_needs_a_folder() {
+    let env = Env::new();
+    std::os::unix::fs::symlink(env.root.join("koreader"), env.root.join("documents/KOReader link")).unwrap();
+    let needs = |folder: &str, name: &str| env.entry(folder, name)["needs"].clone();
+    assert_eq!(needs("", "documents"), json!(["library", "documents"]));
+    assert_eq!(needs("", "koreader"), json!(["koreader"]));
+    assert_eq!(needs("extensions", "koreader"), json!(["koreader"]));
+    assert_eq!(needs("", "fonts"), json!([]));
+    assert_eq!(needs("documents", "Russian"), json!([]));
+    assert_eq!(needs("documents", "notes.txt"), json!([]));
+    // A link: renaming, moving or deleting it leaves KOReader alone.
+    let link = env.entry("documents", "KOReader link");
+    assert_eq!((link["needs"].clone(), link["twice"].clone()), (json!([]), json!(false)));
+    assert_eq!(env.delete("documents/KOReader link", false).0, 200);
+    assert!(env.root.join("koreader").is_dir());
+    // A folder holding the library folder.
+    let store = Store::at(env.root.join("verso/data"));
+    store.save_library_folders(vec![env.root.join("documents/Russian")]).unwrap();
+    assert_eq!(needs("", "documents"), json!(["library", "documents"]));
+    assert_eq!(needs("documents", "Russian"), json!(["library"]));
+}
+
+#[test]
+fn upload_checks_answer_before_any_body_is_sent() {
+    let env = Env::new();
+    let check = |path: &str, size: u64, overwrite: bool| {
+        let flag = if overwrite { "&overwrite=1" } else { "" };
+        env.json("GET", &format!("/api/files/check?path={}&size={size}{flag}", encode(path)), b"")
+    };
+    assert_eq!(check("documents/New.epub", 1000, false).0, 200);
+    let (status, body) = check("documents/notes.txt", 1000, false);
+    assert_eq!((status, body["exists"].clone()), (409, json!(true)));
+    assert_eq!(check("documents/notes.txt", 1000, true).0, 200);
+    let (status, body) = check("documents/Russian", 1000, true);
+    assert_eq!((status, body["exists"].clone()), (409, Value::Null), "a folder can't be replaced");
+    assert_eq!(check("verso/bin/tool", 1000, false).0, 403);
+    assert_eq!(check("VERSO", 1000, false).0, 403);
+    assert_eq!(check("documents/a:b.txt", 1000, false).0, 400);
+    assert_eq!(check("documents/Big.epub", 20 * 1024 * 1024 * 1024, false).0, 507);
+    assert_eq!(env.json("GET", "/api/files/check?path=documents/x.txt", b"").0, 400, "the size is required");
+    // A check writes nothing.
+    assert!(!env.root.join("documents/New.epub").exists());
+    env.no_part_files();
+}
+
+#[test]
+fn listings_remove_parts_left_by_unfinished_uploads() {
+    let env = Env::new();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let part = |path: &str, modified: Option<std::time::SystemTime>| {
+        let file = File::create(env.root.join(path)).unwrap();
+        if let Some(time) = modified {
+            file.set_modified(time).unwrap();
+        }
+    };
+    part("documents/.verso-upload.part", Some(old));
+    part("documents/.verso-upload.3.part", None);
+    part("verso/bin/.verso-upload.part", Some(old));
+    fs::write(env.root.join("documents/.verso-upload.txt"), "mine").unwrap();
+    let names = env.names("documents", true);
+    assert!(names.iter().all(|n| !n.ends_with(".part")), "{names:?}");
+    assert!(names.contains(&".verso-upload.txt".to_owned()));
+    // Only the stale one goes: the fresh one may be an upload still running.
+    assert!(!env.root.join("documents/.verso-upload.part").exists());
+    assert!(env.root.join("documents/.verso-upload.3.part").exists());
+    // Read-only folders are never changed.
+    env.names("verso/bin", true);
+    assert!(env.root.join("verso/bin/.verso-upload.part").exists());
+    assert!(env.root.join("documents/.verso-upload.txt").exists());
 }

@@ -1447,8 +1447,10 @@ function renderFiles() {
       meta.appendChild(a);
     }
     if (entry.writable) {
-      meta.appendChild(iconButton("icon-rename", "Rename " + entry.name, () => renameEntry(entry)));
-      meta.appendChild(iconButton("icon-move", "Move " + entry.name, () => moveEntry(entry)));
+      meta.appendChild(iconButton("icon-rename", "Rename " + entry.name,
+        () => warnBeforeChange(entry, "renamed").then((go) => go && renameEntry(entry))));
+      meta.appendChild(iconButton("icon-move", "Move " + entry.name,
+        () => warnBeforeChange(entry, "moved").then((go) => go && moveEntry(entry))));
       meta.appendChild(iconButton("icon-trash", "Delete " + entry.name, () => deleteEntry(entry).catch(() => {})));
     } else if (entry.readonly) {
       const lock = document.createElement("span");
@@ -1476,6 +1478,28 @@ async function postFiles(what, body) {
   }
   const data = await response.json().catch(() => ({}));
   return { ok: response.ok, data };
+}
+
+// Why a folder should stay where it is, from the entry's `needs`.
+function needsText(entry, done) {
+  const lines = [];
+  const needs = entry.needs || [];
+  if (needs.includes("koreader")) lines.push("KOReader needs this folder: once it's " + done + ", KOReader won't start.");
+  if (needs.includes("library")) {
+    lines.push("This is, or holds, one of Verso's library folders: once it's " + done +
+      ", Verso won't show its books until you add the new place in Settings → Library.");
+  }
+  if (needs.includes("documents")) {
+    lines.push("The Kindle keeps its books in “documents”: once it's " + done + ", the Kindle's Home won't find them.");
+  }
+  return lines.join(" ");
+}
+
+async function warnBeforeChange(entry, done) {
+  const text = needsText(entry, done);
+  if (!text) return true;
+  const verb = done === "renamed" ? "Rename" : "Move";
+  return ask(verb + " " + quoted(entry.name) + "?", text, verb, true);
 }
 
 function renameEntry(entry) {
@@ -1570,9 +1594,9 @@ async function deleteEntry(entry) {
   if (!(await ask("Delete " + quoted(entry.name) + "?", text, "Delete", true))) return;
   const params = new URLSearchParams({ path: entry.path });
   if (entry.twice) {
-    const second = entry.name.toLowerCase() === "koreader"
+    const second = (entry.needs || []).includes("koreader")
       ? "KOReader and all its settings, reading progress and highlights will be gone. This can't be undone."
-      : "This is a library folder: every book in it is deleted, with its reading progress. This can't be undone.";
+      : "This is, or holds, a library folder: every book in it is deleted, with its reading progress. This can't be undone.";
     if (!(await ask("Delete all of " + quoted(entry.name) + "?", second, "Delete everything", true))) return;
     params.set("confirm", "2");
   }
@@ -1617,6 +1641,36 @@ function sendFilesPut(url, file) {
   });
 }
 
+// Asks the Kindle whether an upload would be taken before sending it: an
+// answer that comes before a large body is read (409 for a name that's
+// taken, 507, a read-only folder) can reach the browser as a reset
+// connection instead.
+async function checkFilesUpload(path, file, overwrite) {
+  const params = new URLSearchParams({ path, size: String(file.size) });
+  if (overwrite) params.set("overwrite", "1");
+  const response = await call("/api/files/check?" + params.toString());
+  const data = await response.json().catch(() => ({}));
+  return { status: response.status, data };
+}
+
+// After a failed upload: is the Kindle still there? Not `call`, which
+// shows "gone" itself.
+async function kindleReachable() {
+  try {
+    await fetch("/api/status", { credentials: "same-origin", cache: "no-store", headers: { "X-Verso-Request": "1" } });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function stopFilesQueue(view) {
+  filesQueue = [];
+  activeFilesXhr = null;
+  updateFilesQueueUi();
+  show(view);
+}
+
 function queueFilesUpload(fileList) {
   for (const file of fileList) filesQueue.push({ file, folder: filesPath });
   updateFilesQueueUi();
@@ -1638,27 +1692,34 @@ async function runNextFilesUpload() {
     $("files-upload-bar").value = 0;
     activeFilesXhr = true;
     updateFilesQueueUi();
-    const params = new URLSearchParams({ path });
-    if (overwrite) params.set("overwrite", "1");
     let result;
     try {
-      result = await sendFilesPut("/api/files?" + params.toString(), item.file);
-    } catch (e) {
-      if (e && e.message === "aborted") {
-        addFilesNotice("Cancelled " + item.file.name + ".", false);
-        break;
-      }
-      filesQueue = [];
-      activeFilesXhr = null;
-      updateFilesQueueUi();
-      show("gone");
+      result = await checkFilesUpload(path, item.file, overwrite);
+    } catch (_) {
+      stopFilesQueue("gone");
       return;
     }
+    if (result.status === 200) {
+      const params = new URLSearchParams({ path });
+      if (overwrite) params.set("overwrite", "1");
+      try {
+        result = await sendFilesPut("/api/files?" + params.toString(), item.file);
+      } catch (e) {
+        if (e && e.message === "aborted") {
+          addFilesNotice("Cancelled " + item.file.name + ".", false);
+          break;
+        }
+        // Something changed after the check, or the connection dropped.
+        if (await kindleReachable()) {
+          addFilesNotice(item.file.name + ": the upload didn't finish. Try it again.", true);
+          break;
+        }
+        stopFilesQueue("gone");
+        return;
+      }
+    }
     if (result.status === 401) {
-      filesQueue = [];
-      activeFilesXhr = null;
-      updateFilesQueueUi();
-      show("signin");
+      stopFilesQueue("signin");
       return;
     }
     if (result.status === 409 && result.data.exists && !overwrite) {

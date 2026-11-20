@@ -10,14 +10,14 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 use super::Activity;
 use super::books::{ActivitySink, FREE_SPACE_RESERVE, UploadGuard, create_part, err, read_error, write_error};
 use super::device::FreeSpace;
-use super::http::{BUFFER, Body, Request, Response};
+use super::http::{BUFFER, Body, Request, Response, STALL};
 use crate::library::{collections, files as names};
 use crate::store::Store;
 
@@ -31,9 +31,18 @@ const SYSTEM: [&str; 7] = ["libkh", "mrpackages", "system", ".active_content_san
 /// files go in and out, but they can't be renamed, moved or deleted.
 const PINNED: [&[&str]; 2] = [&["verso", "data", "dictionaries"], &["verso", "data", "exports"]];
 
-/// Deleting these (or a library folder) asks twice in the page, and the
-/// server wants `confirm=2`.
-const ASK_TWICE: [&[&str]; 2] = [&["koreader"], &["extensions", "koreader"]];
+/// KOReader's folders: deleting one (or a library folder) asks twice in the
+/// page, and the server wants `confirm=2`.
+const KOREADER: [&[&str]; 2] = [&["koreader"], &["extensions", "koreader"]];
+
+/// The part file uploads write to: `.verso-upload.part`, or
+/// `.verso-upload.2.part` and so on while several go to one folder.
+const UPLOAD_PART: &str = ".verso-upload";
+
+/// A part file older than this was left by an upload that never finished
+/// (a crash or power loss). A running upload writes at least every `STALL`.
+const STALE_PART: Duration = Duration::from_secs(10 * 60);
+const _: () = assert!(STALE_PART.as_secs() > 4 * STALL.as_secs());
 
 /// Stop counting a folder's contents for the delete question after this many
 /// entries.
@@ -237,6 +246,11 @@ impl Files {
     fn existing(&self, raw: &str) -> Result<Target, Response> {
         let rel = parse_rel(raw)?;
         let canon_root = self.canon_root()?;
+        self.resolve(rel, &canon_root)
+    }
+
+    /// `existing` for parts already split, with the root resolved.
+    fn resolve(&self, rel: Vec<String>, canon_root: &Path) -> Result<Target, Response> {
         let path = rel.iter().fold(self.root.clone(), |p, c| p.join(c));
         let link = match fs::symlink_metadata(&path) {
             Ok(meta) => meta.file_type().is_symlink(),
@@ -248,7 +262,7 @@ impl Files {
         };
         // A broken link has nowhere to go: treated as missing.
         let canon = fs::canonicalize(&path).map_err(|_| err(404, "That no longer exists."))?;
-        let Ok(inside) = canon.strip_prefix(&canon_root) else {
+        let Ok(inside) = canon.strip_prefix(canon_root) else {
             return Err(err(403, "That is outside the Kindle's storage."));
         };
         let canon_rel: Vec<String> =
@@ -316,15 +330,36 @@ impl Files {
         }
     }
 
-    /// Deleting the whole of KOReader or a library folder asks twice.
-    fn ask_twice(&self, target: &Target) -> bool {
-        let rel = lower(&target.canon_rel);
-        ASK_TWICE.iter().any(|p| is(&rel, p))
-            || ASK_TWICE.iter().any(|p| is(&lower(&target.rel), p))
-            || self.library_roots().iter().any(|r| r.starts_with(&target.canon))
+    /// Who needs a folder where it is, for the warnings in the page:
+    /// `koreader` (KOReader's folders), `library` (a library folder, or one
+    /// holding one) and `documents` (the Kindle's own). Empty for files and
+    /// links: changing a link leaves what it points to alone.
+    fn needs(target: &Target, library_roots: &[PathBuf]) -> Vec<&'static str> {
+        let mut needs = Vec::new();
+        if !target.dir || target.link {
+            return needs;
+        }
+        let (rel, canon_rel) = (lower(&target.rel), lower(&target.canon_rel));
+        let at = |p: &[&str]| is(&rel, p) || is(&canon_rel, p);
+        if KOREADER.iter().any(|p| at(p)) {
+            needs.push("koreader");
+        }
+        if library_roots.iter().any(|r| r.starts_with(&target.canon)) {
+            needs.push("library");
+        }
+        if at(&["documents"]) {
+            needs.push("documents");
+        }
+        needs
     }
 
-    fn entry_json(&self, target: &Target) -> Value {
+    /// Deleting the whole of KOReader or a library folder asks twice.
+    fn ask_twice(needs: &[&str]) -> bool {
+        needs.iter().any(|n| matches!(*n, "koreader" | "library"))
+    }
+
+    fn entry_json(&self, target: &Target, library_roots: &[PathBuf]) -> Value {
+        let needs = Self::needs(target, library_roots);
         json!({
             "name": target.name(),
             "path": join(&target.rel),
@@ -334,13 +369,22 @@ impl Files {
             // Shown with a lock; a pinned folder is neither.
             "readonly": !target.class.writable(),
             "link": target.link,
-            "twice": target.dir && self.ask_twice(target),
+            "twice": Self::ask_twice(&needs),
+            "needs": needs,
         })
     }
 
-    /// `GET /api/files?path=…[&hidden=1]`
+    /// `GET /api/files?path=…[&hidden=1]`. The root and the library folders
+    /// are resolved once, and an entry that isn't a link takes its real path
+    /// from its folder's, so a large folder costs one `lstat` per entry.
     pub fn list(&self, request: &Request) -> Response {
-        let folder = match self.existing(&request.param("path").unwrap_or_default()) {
+        let canon_root = match self.canon_root() {
+            Ok(root) => root,
+            Err(response) => return response,
+        };
+        let folder = match parse_rel(&request.param("path").unwrap_or_default())
+            .and_then(|rel| self.resolve(rel, &canon_root))
+        {
             Ok(folder) => folder,
             Err(response) => return response,
         };
@@ -355,25 +399,40 @@ impl Files {
                 return err(500, "Couldn't read this folder.");
             }
         };
+        let library_roots = self.library_roots();
         let mut entries = Vec::new();
         for entry in read.flatten() {
             let Ok(name) = entry.file_name().into_string() else {
                 log::info!("web app: skipping a name that isn't UTF-8 in {}", folder.path.display());
                 continue;
             };
-            if name.starts_with('.') && !hidden {
+            if name.starts_with('.') && !hidden && !is_upload_part(&name) {
+                continue;
+            }
+            // Not followed: a link's own date, and everything else needs.
+            let Ok(meta) = entry.metadata() else { continue };
+            if is_upload_part(&name) {
+                if folder.class.writable() && meta.is_file() {
+                    remove_stale_part(&folder.canon.join(&name), &meta);
+                }
                 continue;
             }
             let mut rel = folder.rel.clone();
             rel.push(name);
-            // Hidden classes, broken links and links out of the storage are left out.
-            let Ok(child) = self.existing(&join(&rel)) else { continue };
-            let modified = fs::symlink_metadata(&child.path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            let mut value = self.entry_json(&child);
+            let child = if meta.file_type().is_symlink() {
+                // Hidden classes, broken links and links out of the storage are left out.
+                match self.resolve(rel, &canon_root) {
+                    Ok(child) => child,
+                    Err(_) => continue,
+                }
+            } else {
+                match self.plain_child(&folder, rel, &meta) {
+                    Some(child) => child,
+                    None => continue,
+                }
+            };
+            let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
+            let mut value = self.entry_json(&child, &library_roots);
             value["modified"] = json!(modified);
             entries.push((child.dir, child.name().to_lowercase(), value));
         }
@@ -389,20 +448,40 @@ impl Files {
                 "writable": folder.class.writable(),
                 "crumbs": crumbs,
                 "entries": entries.into_iter().map(|(_, _, v)| v).collect::<Vec<_>>(),
-                "shortcuts": self.shortcuts(),
+                "shortcuts": self.shortcuts(&canon_root, &library_roots),
             }),
         )
     }
 
+    /// An entry of `folder` that isn't a link, from its `lstat`: its real
+    /// path is the folder's plus its name, so it needs no lookup of its own.
+    /// None for a hidden class.
+    fn plain_child(&self, folder: &Target, rel: Vec<String>, meta: &fs::Metadata) -> Option<Target> {
+        let name = rel.last()?.clone();
+        let mut canon_rel = folder.canon_rel.clone();
+        canon_rel.push(name.clone());
+        let class = classify(&rel).stricter(classify(&canon_rel));
+        if !class.visible(self.developer) {
+            return None;
+        }
+        Some(Target {
+            path: folder.path.join(&name),
+            canon: folder.canon.join(&name),
+            rel,
+            canon_rel,
+            class,
+            link: false,
+            dir: meta.is_dir(),
+            len: meta.len(),
+        })
+    }
+
     /// Books · Fonts · Dictionaries · Exports · Everything, where they exist.
-    fn shortcuts(&self) -> Vec<Value> {
+    fn shortcuts(&self, canon_root: &Path, library_roots: &[PathBuf]) -> Vec<Value> {
         let mut out = Vec::new();
-        let canon_root = fs::canonicalize(&self.root).ok();
-        let books = canon_root.as_ref().and_then(|root| {
-            self.library_roots().into_iter().find_map(|r| {
-                let rel = r.strip_prefix(root).ok()?;
-                Some(rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>())
-            })
+        let books = library_roots.iter().find_map(|r| {
+            let rel = r.strip_prefix(canon_root).ok()?;
+            Some(rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>())
         });
         if let Some(books) = books {
             out.push(json!({ "label": "Books", "path": join(&books) }));
@@ -429,7 +508,11 @@ impl Files {
             return err(400, "Folders can't be downloaded.");
         }
         match File::open(&target.canon) {
-            Ok(file) => Response::file(file, target.len, target.name()),
+            // The length of the file that was opened, even if it was replaced since.
+            Ok(file) => {
+                let len = file.metadata().map_or(target.len, |m| m.len());
+                Response::file(file, len, target.name())
+            }
             Err(e) => {
                 log::warn!("web app: opening {} for download: {e}", target.path.display());
                 err(500, "Couldn't open the file.")
@@ -468,7 +551,7 @@ impl Files {
             files = 1;
             bytes = target.len;
         }
-        let mut value = self.entry_json(&target);
+        let mut value = self.entry_json(&target, &self.library_roots());
         value["files"] = json!(files);
         value["folders"] = json!(folders);
         value["bytes"] = json!(bytes);
@@ -476,52 +559,70 @@ impl Files {
         Response::json(200, &value)
     }
 
-    /// `PUT /api/files?path=…[&overwrite=1]`: `path` names the new file.
-    /// An existing file is replaced only with `overwrite=1` (`409` otherwise).
-    pub fn upload(&self, request: &Request, body: &mut Body<'_>) -> Response {
-        let rel = match parse_rel(&request.param("path").unwrap_or_default()) {
-            Ok(rel) => rel,
-            Err(response) => return response,
-        };
+    /// The checks an upload passes before any of its body is read: the
+    /// destination folder, the file name, what is there now and free space
+    /// for `size` bytes. Shared with `GET /api/files/check`, which the page
+    /// asks first: an answer sent before a large body is read can reach the
+    /// browser as a reset connection instead of the answer.
+    fn plan_upload(&self, raw: &str, size: u64, overwrite: bool) -> Result<(Target, String, PathBuf), Response> {
+        let rel = parse_rel(raw)?;
         let Some((name, parent)) = rel.split_last() else {
-            return err(400, "Missing file name.");
+            return Err(err(400, "Missing file name."));
         };
-        let name = match check_name(name) {
-            Ok(name) => name.to_owned(),
-            Err(response) => return response,
-        };
-        let folder = match self.writable_folder(&join(parent)) {
-            Ok(folder) => folder,
-            Err(response) => return response,
-        };
+        let name = check_name(name)?.to_owned();
+        let folder = self.writable_folder(&join(parent))?;
         if !Self::child_class(&folder, &name).writable() {
-            return err(403, "This folder is read-only.");
+            return Err(err(403, "This folder is read-only."));
         }
-        let overwrite = request.param("overwrite").as_deref() == Some("1");
         let target = folder.canon.join(&name);
         match fs::symlink_metadata(&target) {
-            Ok(meta) if meta.is_dir() => return err(409, "A folder with that name is already there."),
-            Ok(meta) if !meta.is_file() => return err(409, "Something with that name is already there."),
-            Ok(_) if !overwrite => return conflict("A file with that name is already there."),
+            Ok(meta) if meta.is_dir() => return Err(err(409, "A folder with that name is already there.")),
+            Ok(meta) if !meta.is_file() => return Err(err(409, "Something with that name is already there.")),
+            Ok(_) if !overwrite => return Err(conflict("A file with that name is already there.")),
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return write_error("Couldn't check the name", e),
+            Err(e) => return Err(write_error("Couldn't check the name", e)),
         }
         match (self.free_space)(&folder.canon) {
-            Ok(free) if free < request.content_length.saturating_add(FREE_SPACE_RESERVE) => {
-                return err(507, "Not enough free space on the Kindle (50 MB is kept in reserve).");
+            Ok(free) if free < size.saturating_add(FREE_SPACE_RESERVE) => {
+                return Err(err(507, "Not enough free space on the Kindle (50 MB is kept in reserve)."));
             }
             Ok(_) => {}
             Err(e) => {
                 log::warn!("web app: reading free space for {}: {e}", folder.canon.display());
-                return err(500, "Couldn't check free space on the Kindle.");
+                return Err(err(500, "Couldn't check free space on the Kindle."));
             }
         }
+        Ok((folder, name, target))
+    }
+
+    /// `GET /api/files/check?path=…&size=…[&overwrite=1]`: `200` if a `PUT`
+    /// with these would be taken, or the answer it would get.
+    pub fn check_upload(&self, request: &Request) -> Response {
+        let Some(size) = request.param("size").and_then(|s| s.parse::<u64>().ok()) else {
+            return err(400, "Missing size.");
+        };
+        let overwrite = request.param("overwrite").as_deref() == Some("1");
+        match self.plan_upload(&request.param("path").unwrap_or_default(), size, overwrite) {
+            Ok(_) => Response::json(200, &json!({ "ok": true })),
+            Err(response) => response,
+        }
+    }
+
+    /// `PUT /api/files?path=…[&overwrite=1]`: `path` names the new file.
+    /// An existing file is replaced only with `overwrite=1` (`409` otherwise).
+    pub fn upload(&self, request: &Request, body: &mut Body<'_>) -> Response {
+        let overwrite = request.param("overwrite").as_deref() == Some("1");
+        let raw = request.param("path").unwrap_or_default();
+        let (folder, name, target) = match self.plan_upload(&raw, request.content_length, overwrite) {
+            Ok(plan) => plan,
+            Err(response) => return response,
+        };
 
         let guard = UploadGuard::start(&*self.activity, name.clone());
         // A hidden part name: it never shows up in a listing, and a 255-byte
-        // name still fits.
-        let mut part = match create_part(&folder.canon, ".verso-upload") {
+        // name still fits. One left by a crash is removed by a later listing.
+        let mut part = match create_part(&folder.canon, UPLOAD_PART) {
             Ok(part) => part,
             Err(e) => return write_error("Couldn't start saving the file", e),
         };
@@ -560,7 +661,7 @@ impl Files {
         let mut rel = folder.rel.clone();
         rel.push(name);
         match self.existing(&join(&rel)) {
-            Ok(saved) => Response::json(201, &self.entry_json(&saved)),
+            Ok(saved) => Response::json(201, &self.entry_json(&saved, &self.library_roots())),
             Err(_) => Response::json(201, &json!({ "path": join(&rel) })),
         }
     }
@@ -643,7 +744,7 @@ impl Files {
             Err(response) => return response,
         };
         if name == source.name() {
-            return Response::json(200, &self.entry_json(&source));
+            return Response::json(200, &self.entry_json(&source, &self.library_roots()));
         }
         if !Self::child_class(&parent, &name).writable() {
             return err(403, "That name belongs to Verso or the Kindle.");
@@ -708,7 +809,7 @@ impl Files {
         let mut rel = folder.to_vec();
         rel.push(name.to_owned());
         match self.existing(&join(&rel)) {
-            Ok(moved) => Response::json(200, &self.entry_json(&moved)),
+            Ok(moved) => Response::json(200, &self.entry_json(&moved, &self.library_roots())),
             Err(_) => Response::json(200, &json!({ "path": join(&rel) })),
         }
     }
@@ -720,7 +821,9 @@ impl Files {
             Ok(target) => target,
             Err(response) => return response,
         };
-        if target.dir && !target.link && self.ask_twice(&target) && request.param("confirm").as_deref() != Some("2") {
+        if Self::ask_twice(&Self::needs(&target, &self.library_roots()))
+            && request.param("confirm").as_deref() != Some("2")
+        {
             return Response::json(428, &json!({ "error": "This folder needs a second confirmation.", "twice": true }));
         }
         let parent_rel = &target.rel[..target.rel.len() - 1];
@@ -752,6 +855,28 @@ impl Files {
 struct Affects {
     library: bool,
     dictionaries: bool,
+}
+
+/// An upload's part file: `.verso-upload.part` or `.verso-upload.<n>.part`.
+fn is_upload_part(name: &str) -> bool {
+    name.strip_prefix(UPLOAD_PART)
+        .and_then(|rest| rest.strip_suffix(".part"))
+        .is_some_and(|n| n.is_empty() || n.strip_prefix('.').is_some_and(|n| n.parse::<u32>().is_ok()))
+}
+
+/// Removes a part file that no upload has written to for `STALE_PART`: it was
+/// left by a crash or power loss, and it's hidden, so nobody would see it
+/// taking space.
+fn remove_stale_part(path: &Path, meta: &fs::Metadata) {
+    let age = meta.modified().ok().and_then(|t| SystemTime::now().duration_since(t).ok());
+    if age.is_none_or(|age| age < STALE_PART) {
+        return;
+    }
+    match fs::remove_file(path) {
+        Ok(()) => log::info!("web app: removed an unfinished upload, {}", path.display()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("web app: removing {}: {e}", path.display()),
+    }
 }
 
 /// A file of that name is there: the page offers to replace it.

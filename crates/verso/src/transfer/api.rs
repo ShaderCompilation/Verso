@@ -135,6 +135,7 @@ impl Api {
             (Method::Get, "/api/files") => self.files().map_or_else(not_found, |f| f.list(request)),
             (Method::Get, "/api/files/download") => self.files().map_or_else(not_found, |f| f.download(request)),
             (Method::Get, "/api/files/info") => self.files().map_or_else(not_found, |f| f.info(request)),
+            (Method::Get, "/api/files/check") => self.files().map_or_else(not_found, |f| f.check_upload(request)),
             (Method::Put, "/api/files") => self.files().map_or_else(not_found, |f| f.upload(request, body)),
             (Method::Delete, "/api/files") => self.files().map_or_else(not_found, |f| f.delete(request)),
             (Method::Post, "/api/files/mkdir") => self.files().map_or_else(not_found, |f| f.mkdir(body)),
