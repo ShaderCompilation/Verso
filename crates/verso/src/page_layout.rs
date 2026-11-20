@@ -19,6 +19,8 @@ pub struct PageLayout {
     pub top: Bar,
     pub bottom: Bar,
     pub progress: ProgressLine,
+    /// Ticks at chapter starts along the progress line.
+    pub chapter_marks: bool,
     pub margins: Margins,
 }
 impl Default for PageLayout {
@@ -28,6 +30,7 @@ impl Default for PageLayout {
             top: Bar { on: false, slots: [Some(BarItem::BookTitle), None, Some(BarItem::Clock24)] },
             bottom: Bar { on: true, slots: [Some(BarItem::ChapterPagesLeft), None, Some(BarItem::Percent)] },
             progress: ProgressLine::Off,
+            chapter_marks: true,
             margins: Margins::default(),
         }
     }
@@ -284,6 +287,9 @@ mod tests {
         assert_eq!(serde_json::from_str::<PageLayout>(&json).unwrap(), layout);
         let partial: PageLayout = serde_json::from_str(r#"{"margins":{"top":9}}"#).unwrap();
         assert_eq!(partial.margins, Margins { sides: 7, top: 9, bottom: 6 });
+        assert!(partial.chapter_marks, "marks are on unless saved off");
+        let off: PageLayout = serde_json::from_str(r#"{"chapter_marks":false}"#).unwrap();
+        assert!(!off.chapter_marks);
         assert!(partial.bottom.on);
     }
 }

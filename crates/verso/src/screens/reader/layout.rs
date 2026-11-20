@@ -15,7 +15,8 @@ use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{MenuEvent, PopupMenu, Segmented, SideLabel, Step, Stepper, Toggle, TopBar};
 use std::time::Instant;
 
-const LABELS: [&str; 6] = ["Top bar", "Bottom bar", "Progress line", "Side margins", "Top margin", "Bottom margin"];
+const LABELS: [&str; 7] =
+    ["Top bar", "Bottom bar", "Progress line", "Chapter marks", "Side margins", "Top margin", "Bottom margin"];
 const LINES: [ProgressLine; 3] = [ProgressLine::Off, ProgressLine::Top, ProgressLine::Bottom];
 /// Space between the sketch's top and bottom pieces.
 const SKETCH_GAP_MM: f32 = 4.0;
@@ -46,9 +47,10 @@ pub(super) struct LayoutView {
     half: i32,
     scale: f32,
     target: i32,
-    rows: [Rect; 6],
+    rows: [Rect; 7],
     label_w: i32,
     bars: [Toggle; 2],
+    marks: Toggle,
     progress: Segmented,
     margins: [Stepper; 3],
     press: Press,
@@ -66,13 +68,13 @@ impl LayoutView {
         // The sketch on top, the controls below: one column in portrait,
         // two columns of three in landscape.
         let columns = if screen.w > screen.h { 2 } else { 1 };
-        let per_column = 6 / columns;
+        let per_column = 7usize.div_ceil(columns);
         let controls_h = per_column as i32 * row_h;
         let inner_w = screen.w - 2 * t.margin;
         let controls = Rect::new(screen.x + t.margin, screen.bottom() - pad - controls_h, inner_w, controls_h);
         let area = Rect::new(controls.x, body.y + pad, inner_w, controls.y - pad - body.y - pad);
         let column_rects = controls.columns(columns, t.mm(8.0));
-        let rows: [Rect; 6] = std::array::from_fn(|i| {
+        let rows: [Rect; 7] = std::array::from_fn(|i| {
             let column = column_rects[i / per_column];
             Rect::new(column.x, column.y + (i % per_column) as i32 * row_h, column.w, row_h)
         });
@@ -94,7 +96,7 @@ impl LayoutView {
         let margins = std::array::from_fn(|k| {
             let label = |text: &str| SideLabel { text: text.into(), style: t.heading };
             let mut stepper = Stepper::new(label("−"), label("+"), "");
-            stepper.place(control(3 + k), t.mm(12.0));
+            stepper.place(control(4 + k), t.mm(12.0));
             stepper
         });
         let spacing = [1.0, 1.2, 1.4][typography.spacing.min(2)];
@@ -113,6 +115,7 @@ impl LayoutView {
             rows,
             label_w: rows[0].w - control_w - t.mm(2.0),
             bars,
+            marks: Toggle::new(layout.chapter_marks),
             progress,
             margins,
             press: Press::default(),
@@ -122,6 +125,7 @@ impl LayoutView {
         for (k, toggle) in view.bars.iter_mut().enumerate() {
             toggle.place(rows[k].right(), rows[k].center().y, t);
         }
+        view.marks.place(rows[3].right(), rows[3].center().y, t);
         view.sync();
         view
     }
@@ -139,6 +143,7 @@ impl LayoutView {
     fn sync(&mut self) {
         self.bars[0].on = self.layout.top.on;
         self.bars[1].on = self.layout.bottom.on;
+        self.marks.on = self.layout.chapter_marks;
         self.progress.selected = line_index(self.layout.progress);
         for k in 0..3 {
             let value = *self.margin(k);
@@ -267,6 +272,10 @@ impl LayoutView {
                 self.set_bar(k, on);
             }
         }
+        if let Some(on) = self.marks.on_gesture(g) {
+            self.layout.chapter_marks = on;
+            self.sync();
+        }
         if let Some(i) = self.progress.on_gesture(g) {
             self.set_line(LINES[i.min(2)]);
         }
@@ -304,6 +313,7 @@ impl LayoutView {
         }
         self.bars.iter().for_each(|toggle| toggle.draw(cx));
         self.progress.draw(cx);
+        self.marks.draw(cx);
         self.margins.iter().for_each(|stepper| stepper.draw(cx));
         if let Some(picker) = &self.picker {
             if let Some(&(_, _, rect)) = self.slot_rects(t.dpi).iter().find(|s| (s.0, s.1) == (picker.bar, picker.slot))
@@ -383,7 +393,7 @@ impl LayoutView {
             let bar = if k == 0 { &self.layout.top } else { &self.layout.bottom };
             cx.fill(rect, PAPER);
             if self.layout.progress == LINES[k + 1] {
-                bars::progress(cx, rect, k == 1, data, &style);
+                bars::progress(cx, rect, k == 1, self.layout.chapter_marks, data, &style);
             }
             let thirds = rect.columns(3, 0);
             let texts: [Option<(ItemText, u8)>; 3] = std::array::from_fn(|slot| {
@@ -449,9 +459,9 @@ mod tests {
             let screen = view.screen;
             let size = (screen.w, screen.h);
             assert!(view.sketch.y >= view.top_bar.rect().bottom(), "{size:?}");
-            assert!(view.rows[5].bottom() <= screen.bottom() && view.rows[0].y >= view.top_bar.rect().bottom());
+            assert!(view.rows[6].bottom() <= screen.bottom() && view.rows[0].y >= view.top_bar.rect().bottom());
             assert!(view.sketch.w >= t.mm(20.0), "{size:?}: the sketch is big enough to read ({:?})", view.sketch);
-            let controls = view.rows[0].union(&view.rows[5]);
+            let controls = view.rows[0].union(&view.rows[6]);
             assert!(view.sketch.intersect(&controls).is_none(), "{size:?}");
             // Slot taps are full targets and stay off the top bar and the controls.
             let mut layout = PageLayout::default();
@@ -555,6 +565,11 @@ mod tests {
         tap(&mut view, toggle, &t, &d);
         assert!(!view.layout.top.on);
         assert_eq!((view.layout.progress, view.progress.selected), (ProgressLine::Off, 0));
+        // The chapter marks toggle flips the layout.
+        assert!(view.layout.chapter_marks);
+        let marks = view.marks.rect().center();
+        tap(&mut view, marks, &t, &d);
+        assert!(!view.layout.chapter_marks && !view.marks.on);
         // The back arrow closes.
         let back = Point::new(t.margin + t.target / 2 - t.mm(2.0), view.top_bar.rect().center().y);
         assert!(matches!(tap(&mut view, back, &t, &d), Some(LayoutEvent::Close)));

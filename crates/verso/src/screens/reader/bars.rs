@@ -53,7 +53,7 @@ pub fn draw(cx: &mut DrawCx, layout: &PageLayout, geometry: &PageGeometry, data:
         slots(cx, &texts(bar, data, style.text.gray), rect, &style);
         if layout.progress == line {
             // The line sits on the bar's edge towards the text.
-            progress(cx, rect, line == ProgressLine::Bottom, data, &style);
+            progress(cx, rect, line == ProgressLine::Bottom, layout.chapter_marks, data, &style);
         }
     }
 }
@@ -124,15 +124,16 @@ fn battery_icon(cx: &mut DrawCx, square: Rect, battery: crate::platform::Battery
     }
 }
 
-/// The progress line along one edge of `rect`, with chapter ticks.
-pub(super) fn progress(cx: &mut DrawCx, rect: Rect, on_top_edge: bool, data: &BarData, style: &BarStyle) {
+/// The progress line along one edge of `rect`, with chapter ticks if `marks`.
+pub(super) fn progress(cx: &mut DrawCx, rect: Rect, on_top_edge: bool, marks: bool, data: &BarData, style: &BarStyle) {
     let (thickness, tick) = (style.line, style.tick);
     let y = if on_top_edge { rect.y } else { rect.bottom() - thickness };
     cx.fill(Rect::new(rect.x, y, rect.w, thickness), LINE);
     let filled = (rect.w as f32 * data.fraction()).round() as i32;
     cx.fill(Rect::new(rect.x, y, filled, thickness), INK2);
     let tick_y = if on_top_edge { rect.y } else { rect.bottom() - tick };
-    for start in data.chapter_starts() {
+    let starts = if marks { data.chapter_starts() } else { Vec::new() };
+    for start in starts {
         let x = rect.x + (rect.w as f32 * start).round() as i32;
         cx.fill(Rect::new(x - style.tick_w / 2, tick_y, style.tick_w, tick), INK2);
     }
@@ -195,6 +196,11 @@ mod tests {
         // A tick at the second chapter (page 10 of 20) reaches into the bar.
         let tick_y = (bottom.y + Theme::for_dpi(150).mm(TICK_MM) - 1) as usize;
         assert_eq!(pixels[tick_y * 600 + (bottom.x + bottom.w / 2) as usize], INK2);
+        // Without chapter marks the line is plain.
+        layout.chapter_marks = false;
+        let (plain, _) = render(&layout, "One");
+        assert_eq!(plain[tick_y * 600 + (bottom.x + bottom.w / 2) as usize], PAPER);
+        assert_eq!(plain[bottom.y as usize * 600 + (bottom.x + bottom.w / 8) as usize], INK2);
     }
 
     /// Draws only a battery item in the bottom bar's right slot at 300 dpi.
