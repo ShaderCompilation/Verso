@@ -9,7 +9,7 @@ use crate::document::{
     thread::{Command, Page, Reply, SelectionRequest, Worker},
 };
 use crate::geom::Rect;
-use crate::gfx::HAlign;
+use crate::gfx::{HAlign, Icon};
 use crate::page_layout::PageLayout;
 use crate::platform::RefreshMode;
 use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
@@ -26,6 +26,7 @@ use crate::store::{
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{PAPER, Theme};
 use crate::ui::widget::DrawCx;
+use crate::ui::widgets::Toast;
 use layout::{LayoutEvent, LayoutView};
 use search::{BarEvent, Origin, SearchBar, SearchEvent, SearchView, Session};
 use selection::SelectionState;
@@ -84,6 +85,14 @@ pub struct Reader {
     extension: Option<annotations::ExtendBar>,
     lookup_query: Option<String>,
     bars: BarState,
+    /// Where the reader was before the last jump (Contents, highlights,
+    /// chapter buttons, the progress slider), offered back until the next
+    /// page turn. Jumps made while it is offered keep the first place.
+    back: Option<Origin>,
+    /// Where the back pill was drawn last; empty when it wasn't.
+    back_rect: Rect,
+    /// The current touch started on the back pill.
+    back_touch: bool,
 }
 /// What the bars show beyond the page itself: chapter offsets, reading
 /// speed, and the clock and battery as of the last reader redraw.
@@ -185,6 +194,9 @@ impl Reader {
             extension: None,
             lookup_query: None,
             bars: BarState { opened: generation, live_due: true, ..BarState::default() },
+            back: None,
+            back_rect: Rect::default(),
+            back_touch: false,
         }
     }
     /// The book's saved reading speed and the average carried over from
@@ -446,6 +458,7 @@ impl Reader {
         if self.target == page {
             return;
         }
+        self.back = None;
         self.jump = 0;
         self.jump_destination = None;
         self.target = page;
@@ -508,6 +521,47 @@ impl Reader {
         }
         true
     }
+    /// The displayed page, as a place to come back to.
+    fn here(&self) -> Option<Origin> {
+        self.shown.as_ref().map(|p| Origin { position: p.position.clone(), page: p.number, generation: p.generation })
+    }
+    /// A jump that offers the way back to where the reader was.
+    fn jump_away(&mut self, page: Option<usize>, position: Position, cx: &mut EventCx) {
+        let origin = self.back.take().or_else(|| self.here());
+        self.jump_position(page, position, cx);
+        self.back = origin;
+    }
+    /// The back pill shows on the page a jump arrived at, over the bare page.
+    fn back_visible(&self) -> bool {
+        matches!(self.overlay, Overlay::None)
+            && !self.selection.extending
+            && self.selection.selected.is_none()
+            && self.search_bar.is_none()
+            && !self.laying_out
+            && self.layout_at.is_none()
+            && self.back.as_ref().is_some_and(|o| {
+                self.shown.as_ref().is_some_and(|p| p.generation != o.generation || p.number != o.page)
+            })
+    }
+    fn back_label(&self) -> String {
+        let Some(origin) = &self.back else { return String::new() };
+        if origin.generation != self.cache.generation {
+            // Page numbers changed with the layout; the place itself didn't.
+            return "Back to where you were".into();
+        }
+        let mut label = format!("Back to p. {}", origin.page + 1);
+        if let Some(i) = reader::chapter(&self.toc, origin.page) {
+            label.push_str(" · ");
+            label.push_str(&self.toc[i].title);
+        }
+        label
+    }
+    fn go_back(&mut self, cx: &mut EventCx) {
+        let Some(origin) = self.back.take() else { return };
+        let page = (origin.generation == self.cache.generation).then_some(origin.page);
+        self.jump_position(page, origin.position, cx);
+        cx.redraw();
+    }
     fn open_search(&mut self, prefill: Option<&str>, cx: &mut EventCx) {
         let generation = self.cache.generation;
         let query = prefill.map(|q| q.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
@@ -535,6 +589,8 @@ impl Reader {
             generation: shown.generation,
         });
         self.search.current = Some(index);
+        // The search bar's Return is the way back from hits.
+        self.back = None;
         self.overlay = Overlay::None;
         self.search_bar.get_or_insert_with(|| SearchBar::new(cx.theme, self.screen));
         self.highlight = None;
@@ -670,7 +726,7 @@ impl Reader {
                 if let Some(a) = self.annotations.collection.records.get(i) {
                     let p = a.range.start.clone();
                     self.overlay = Overlay::None;
-                    self.jump_position(None, p, cx);
+                    self.jump_away(None, p, cx);
                 }
             }
             Event::Remove(i) => {
@@ -919,6 +975,22 @@ impl Reader {
             }
             return Action::None;
         }
+        if let Gesture::Down(p) = g {
+            self.back_touch = self.back_visible() && self.back_rect.contains(p);
+        }
+        if self.back_touch {
+            // Touches on the back pill never turn pages or select text.
+            if g.ends_touch() {
+                self.back_touch = false;
+                if matches!(g, Gesture::Tap(_)) {
+                    if self.pending_turn {
+                        self.commit_turn(cx);
+                    }
+                    self.go_back(cx);
+                }
+            }
+            return Action::None;
+        }
         if matches!(self.overlay, Overlay::None)
             && !self.pending_turn
             && self.selection.selected.is_none()
@@ -1069,7 +1141,11 @@ impl Reader {
                 Some(MenuEvent::Search) => self.open_search(None, cx),
                 Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
                 Some(MenuEvent::Text) => self.text(cx.theme),
-                Some(MenuEvent::Page(page)) => self.go(page, cx),
+                Some(MenuEvent::Page(page)) => {
+                    let origin = self.back.take().or_else(|| self.here());
+                    self.go(page, cx);
+                    self.back = origin;
+                }
                 Some(MenuEvent::Chapter(delta)) => {
                     let chapter = if delta > 0 {
                         self.toc.iter().find(|c| c.level <= 2 && c.page > self.target)
@@ -1078,7 +1154,7 @@ impl Reader {
                     };
                     if let Some(c) = chapter {
                         let (page, position) = (c.page, c.position.clone());
-                        self.jump_position(Some(page), position, cx);
+                        self.jump_away(Some(page), position, cx);
                     }
                 }
                 Some(MenuEvent::Light(value)) => {
@@ -1131,7 +1207,7 @@ impl Reader {
                 Some(ContentsEvent::Close) => self.menu(cx),
                 Some(ContentsEvent::Position(position)) => {
                     self.overlay = Overlay::None;
-                    self.jump_position(None, position, cx);
+                    self.jump_away(None, position, cx);
                 }
                 None => {}
             },
@@ -1231,6 +1307,12 @@ impl Screen for Reader {
             && let Some(bar) = &mut self.search_bar
         {
             bar.draw(cx, &self.search);
+        }
+        self.back_rect = Rect::default();
+        if self.back_visible() {
+            // Over the bottom margin, where the search bar sits.
+            let pill = Toast { text: self.back_label(), icon: Some(Icon::ArrowLeft), until: Instant::now() };
+            self.back_rect = pill.draw_above(cx, self.screen.bottom() - t.mm(1.5));
         }
         match &mut self.overlay {
             Overlay::None => {}
@@ -1597,6 +1679,92 @@ mod tests {
         drop(other);
         std::fs::remove_dir_all(std::env::temp_dir().join(format!("verso-reading-speed-{}", std::process::id())))?;
         Ok(())
+    }
+
+    #[test]
+    fn jumps_offer_one_tap_back_until_the_next_page_turn() {
+        use crate::document::TocEntry;
+        use crate::geom::Point;
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("jump-back");
+        r.pages = 20;
+        r.laying_out = false;
+        let entry = |title: &str, page: usize| TocEntry {
+            title: title.into(),
+            level: 1,
+            page,
+            position: Position(format!("page-{page}")),
+        };
+        r.toc = vec![entry("One", 0), entry("Nine", 9)];
+        r.shown = Some(test_page(1, 3));
+        r.target = 3;
+        let (mut canvas, mut text, mut icons) = (Canvas::new(600, 800), TextRenderer::new(), IconRenderer::default());
+        let mut draw = |r: &mut Reader| {
+            let mut hints = vec![];
+            r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+            r.back_rect
+        };
+        // The book thread locates the latest jump and sends its page.
+        let arrive = |r: &mut Reader, page: usize| {
+            let jump = commands
+                .try_iter()
+                .filter_map(|c| match c {
+                    Command::Position { jump, .. } => Some(jump),
+                    _ => None,
+                })
+                .last()
+                .expect("a jump was sent");
+            test_cx(&theme, |cx| r.receive(Reply::Jumped { jump, page: test_page(1, page) }, cx));
+        };
+        let tap = |r: &mut Reader, p: Point| {
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(p), cx);
+                r.on_gesture(Gesture::Tap(p), cx);
+            })
+        };
+        assert!(draw(&mut r).is_empty(), "nothing extra while reading");
+
+        // A Contents jump: the pill names the page and chapter left behind.
+        test_cx(&theme, |cx| r.jump_away(None, Position("page-9".into()), cx));
+        assert!(!r.back_visible(), "not before the jump arrives");
+        arrive(&mut r, 9);
+        assert_eq!(r.back_label(), "Back to p. 4 · One");
+        let pill = draw(&mut r);
+        assert!(!pill.is_empty() && pill.bottom() <= 800);
+
+        // A second jump before reading on keeps the first place.
+        test_cx(&theme, |cx| r.jump_away(None, Position("page-12".into()), cx));
+        arrive(&mut r, 12);
+        assert_eq!(r.back.as_ref().map(|o| o.page), Some(3));
+        // Hidden under overlays.
+        test_cx(&theme, |cx| r.menu(cx));
+        assert!(draw(&mut r).is_empty());
+        r.overlay = Overlay::None;
+        let pill = draw(&mut r);
+
+        // Tapping it goes back, and the pill is gone.
+        tap(&mut r, pill.center());
+        assert!(r.back.is_none());
+        arrive(&mut r, 3);
+        assert_eq!(r.shown.as_ref().unwrap().number, 3);
+        assert!(draw(&mut r).is_empty());
+
+        // The next page turn after a jump drops the offer.
+        test_cx(&theme, |cx| r.jump_away(None, Position("page-9".into()), cx));
+        arrive(&mut r, 9);
+        assert!(!draw(&mut r).is_empty());
+        r.cache.insert(test_page(1, 10), 9);
+        tap(&mut r, Point::new(590, 400));
+        assert_eq!(r.shown.as_ref().unwrap().number, 10);
+        assert!(r.back.is_none());
+        assert!(draw(&mut r).is_empty());
+
+        // Search hits keep their own Return on the search bar.
+        test_cx(&theme, |cx| r.jump_away(None, Position("page-9".into()), cx));
+        arrive(&mut r, 9);
+        r.search_bar = Some(SearchBar::new(&theme, r.screen));
+        assert!(draw(&mut r).is_empty());
     }
 
     #[test]

@@ -21,20 +21,26 @@ impl Toast {
         Self { text: text.into(), icon, until: now + TOAST_TIME }
     }
 
-    /// Where the pill goes for this text.
-    pub fn rect(&self, text_w: i32, screen: Rect, theme: &Theme) -> Rect {
+    /// Where the pill goes for this text, its bottom edge at `bottom`.
+    pub fn rect(&self, text_w: i32, screen: Rect, bottom: i32, theme: &Theme) -> Rect {
         let icon_w = if self.icon.is_some() { theme.icon_small + theme.mm(2.0) } else { 0 };
         let w = (text_w + icon_w + theme.mm(12.0)).min(screen.w - 2 * theme.margin);
         let h = theme.mm(10.0);
-        Rect::new(screen.center().x - w / 2, screen.bottom() - theme.mm(22.0) - h, w, h)
+        Rect::new(screen.center().x - w / 2, bottom - h, w, h)
     }
 
     /// Draws the toast; returns where it is.
     pub fn draw(&self, cx: &mut DrawCx) -> Rect {
+        let bottom = cx.bounds().bottom() - cx.theme.mm(22.0);
+        self.draw_above(cx, bottom)
+    }
+
+    /// Draws the pill with its bottom edge at `bottom`; returns where it is.
+    pub fn draw_above(&self, cx: &mut DrawCx, bottom: i32) -> Rect {
         let t = cx.theme;
         let style = t.body.gray(PAPER);
         let text_w = cx.text.width(&self.text, style).ceil() as i32;
-        let r = self.rect(text_w, cx.bounds(), t);
+        let r = self.rect(text_w, cx.bounds(), bottom, t);
         cx.canvas.fill_rounded_rect(r, r.h as f32 / 2.0, INK);
         let mut inner = r.inset_xy(t.mm(6.0), 0);
         if let Some(icon) = self.icon {
