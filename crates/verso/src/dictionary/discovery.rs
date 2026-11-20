@@ -226,15 +226,17 @@ impl<F: Fn() -> bool> Scan<'_, F> {
                         companion(&base, "dict", "dict.dz")?;
                         Ok(i)
                     });
-                    let (name, error) = match info {
-                        Ok(i) => (i.name, None),
-                        Err(e) => {
-                            (base.file_name().unwrap_or_default().to_string_lossy().into(), Some(format!("{e:#}")))
-                        }
+                    let (name, word_count, error) = match info {
+                        Ok(i) => (i.name, Some(i.count), None),
+                        Err(e) => (
+                            base.file_name().unwrap_or_default().to_string_lossy().into(),
+                            None,
+                            Some(format!("{e:#}")),
+                        ),
                     };
                     let disabled = self.preferences.iter().any(|p| p.id == id && p.disabled);
                     let relative = relative.to_owned();
-                    self.found.push(Dictionary { id, name, path, relative, source, error, disabled });
+                    self.found.push(Dictionary { id, name, path, relative, source, word_count, error, disabled });
                 }
             }
         }

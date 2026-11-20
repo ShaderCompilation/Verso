@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::auth::{self, Auth, Login};
 use super::books::Books;
+use super::dictionaries::Dictionaries;
 use super::http::{Body, Method, Request, Response};
 use super::server::Handler;
 
@@ -26,8 +27,10 @@ pub struct Context {
     pub status: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
     /// Something the Kindle screen shows changed (a new code).
     pub changed: Box<dyn Fn() + Send + Sync>,
-    /// Books tab handlers; None only in minimal auth/routing unit tests.
+    /// Books & Highlights tab handlers; None only in minimal auth/routing unit tests.
     pub books: Option<Books>,
+    /// Dictionaries tab handlers; None only in minimal unit tests.
+    pub dictionaries: Option<Dictionaries>,
 }
 
 pub struct Api {
@@ -50,6 +53,13 @@ impl Api {
     pub fn code(&self) -> (String, u64) {
         let auth = self.auth();
         (auth.code().to_owned(), auth.revision())
+    }
+
+    /// Removes any uncommitted loose-file dictionary staging batches.
+    pub fn cleanup_batches(&self) {
+        if let Some(dicts) = &self.cx.dictionaries {
+            dicts.cleanup_batches();
+        }
     }
 
     fn host_ok(&self, request: &Request) -> bool {
@@ -98,12 +108,37 @@ impl Api {
                 let id = book_id_segment(p).unwrap();
                 self.books().map_or_else(not_found, |b| b.delete(id))
             }
+            (Method::Get, "/api/highlights.zip") => self.books().map_or_else(not_found, |b| b.highlights_zip()),
+            (Method::Get, p) if highlight_id_segment(p).is_some() => {
+                let id = highlight_id_segment(p).unwrap();
+                self.books().map_or_else(not_found, |b| b.highlights(id))
+            }
+            (Method::Get, "/api/dictionaries") => self.dictionaries().map_or_else(not_found, |d| d.list()),
+            (Method::Put, "/api/dictionaries") => {
+                self.dictionaries().map_or_else(not_found, |d| d.upload_archive(request, body))
+            }
+            (Method::Delete, "/api/dictionaries") => self.dictionaries().map_or_else(not_found, |d| d.delete(request)),
+            (Method::Post, "/api/dictionaries/batch") => {
+                self.dictionaries().map_or_else(not_found, |d| d.create_batch())
+            }
+            (Method::Put, p) if batch_id_segment(p).is_some() => {
+                let id = batch_id_segment(p).unwrap();
+                self.dictionaries().map_or_else(not_found, |d| d.upload_batch_file(id, request, body))
+            }
+            (Method::Post, p) if batch_commit_segment(p).is_some() => {
+                let id = batch_commit_segment(p).unwrap();
+                self.dictionaries().map_or_else(not_found, |d| d.commit_batch(id))
+            }
             _ => not_found(),
         }
     }
 
     fn books(&self) -> Option<&Books> {
         self.cx.books.as_ref()
+    }
+
+    fn dictionaries(&self) -> Option<&Dictionaries> {
+        self.cx.dictionaries.as_ref()
     }
 
     fn login(&self, body: &mut Body<'_>) -> Response {
@@ -151,6 +186,21 @@ fn not_found() -> Response {
 
 fn book_id_segment(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/api/books/")?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+}
+
+fn highlight_id_segment(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/highlights/")?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+}
+
+fn batch_id_segment(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/dictionaries/batch/")?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+}
+
+fn batch_commit_segment(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/dictionaries/batch/")?.strip_suffix("/commit")?;
     (!rest.is_empty() && !rest.contains('/')).then_some(rest)
 }
 
@@ -249,6 +299,7 @@ mod tests {
                     }
                 }),
                 books: None,
+                dictionaries: None,
             },
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api.clone(), Timeouts::default()).unwrap();

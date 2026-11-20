@@ -427,6 +427,11 @@ impl Screen for TransferScreen {
     fn on_quit(&mut self) -> anyhow::Result<()> {
         self.session.close();
         self.cover_pause = None;
+        if self.session.dictionaries_changed()
+            && let Some(service) = self.store.dictionary_service.get()
+        {
+            service.rescan();
+        }
         Ok(())
     }
 
@@ -443,6 +448,11 @@ impl Screen for TransferScreen {
     fn run_pending_work(&mut self, _cx: &mut EventCx) -> Action {
         self.session.close();
         self.cover_pause = None;
+        if self.session.dictionaries_changed()
+            && let Some(service) = self.store.dictionary_service.get()
+        {
+            service.rescan();
+        }
         Action::Pop
     }
 }

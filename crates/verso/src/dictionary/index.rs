@@ -164,6 +164,18 @@ fn cache_location(path: &Path, cache: &Path) -> Result<(PathBuf, String)> {
     let dest = cache.join(format!("{name}.index"));
     Ok((dest, fingerprint))
 }
+/// Removes the cached index file for the dictionary whose `.ifo` or `.ifo.gz`
+/// is `path`. A missing cache file is ignored.
+pub(crate) fn remove_cache(path: &Path, cache: &Path) {
+    let Some(base) = basename(path) else { return };
+    let name = format!("{:x}", Sha256::digest(sibling(&base, "ifo").as_os_str().as_encoded_bytes()));
+    let dest = cache.join(format!("{name}.index"));
+    if let Err(e) = fs::remove_file(&dest)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("removing dictionary cache {}: {e}", dest.display());
+    }
+}
 /// The cache file when it exists and carries this fingerprint; the one rule
 /// for whether a cache is valid. A cache that can't be opened is rebuilt.
 fn cached(dest: &Path, fingerprint: &str) -> Result<Option<File>> {

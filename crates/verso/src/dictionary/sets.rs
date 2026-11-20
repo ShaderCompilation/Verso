@@ -482,6 +482,7 @@ mod tests {
             path: id.into(),
             relative: id.into(),
             source: 0,
+            word_count: None,
             error: None,
             disabled: false,
         };

@@ -22,6 +22,9 @@ softbuffer = { version = "0.4.8", optional = true }
 tiny-skia = "0.12.0"
 winit = { version = "0.30.13", optional = true }
 zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
+tar = { version = "0.4.46", default-features = false }
+# Decode-only bzip2 for .tar.bz2 dictionaries (docs/web-app.md, Phase 3).
+bzip2-rs = "0.1.2"
 quick-xml = { version = "0.41", features = ["escape-html"] }
 flate2 = "1.1"
 qrcode = { version = "0.14", default-features = false }
@@ -46,4 +49,5 @@ tempfile = "3"
 verso-wordforms = { path = "../verso-wordforms", features = ["build"] }
 # Tests pack releases to download and stage.
 verso-update = { path = "../verso-update", features = ["release"] }
-tar = { version = "0.4.46", default-features = false }
+# Tests compress .tar.bz2 dictionary archives; the app only decodes them.
+bzip2 = "0.6.1"

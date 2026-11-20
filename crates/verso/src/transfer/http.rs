@@ -515,6 +515,11 @@ impl Response {
         Self { status: 200, headers: download_headers(download_name), body: ResponseBody::File { file, len } }
     }
 
+    /// Sends in-memory `bytes` as a safe attachment download.
+    pub fn download(bytes: impl Into<Vec<u8>>, download_name: &str) -> Self {
+        Self { status: 200, headers: download_headers(download_name), body: ResponseBody::Bytes(bytes.into()) }
+    }
+
     /// A short plain-text answer, used for errors.
     pub fn text(status: u16, text: &str) -> Self {
         Self::new(status).body("text/plain; charset=utf-8", text.as_bytes())

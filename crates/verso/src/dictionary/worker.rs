@@ -112,6 +112,8 @@ enum Command {
     Open { request: Request, dictionary: String },
     Prepare(u64),
     Release,
+    Close { id: String, done: mpsc::Sender<()> },
+    Rescan,
     Flush(mpsc::Sender<Result<(), String>>),
     Stop,
 }
@@ -720,6 +722,14 @@ impl Service {
                             // lookup would otherwise reopen every one.
                             inner.definitions = None;
                         }
+                        Command::Close { id, done } => {
+                            inner.close(&id);
+                            inner.fresh = false;
+                            let _ = done.send(());
+                        }
+                        Command::Rescan => {
+                            inner.discover(&alive);
+                        }
                         Command::Flush(done) => {
                             if inner.save_error.is_some() {
                                 inner.save();
@@ -826,6 +836,20 @@ impl Service {
             self.sent.fetch_add(1, Ordering::Relaxed);
         }
         let _ = self.tx.send(command);
+    }
+    /// Closes any open index or definitions file for `id` and waits until the
+    /// worker thread confirms they are dropped (before deleting on FUSE).
+    pub(crate) fn close_sync(&self, id: &str) {
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        self.send(Command::Close { id: id.into(), done: tx });
+        let _ = rx.recv();
+    }
+    /// Triggers a catalog rescan on the worker thread without tying it to a
+    /// short-lived client mailbox.
+    pub(crate) fn rescan(&self) {
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        self.send(Command::Rescan);
     }
 }
 fn publish(request: &Request, reply: Reply, current: &dyn Fn() -> bool) {

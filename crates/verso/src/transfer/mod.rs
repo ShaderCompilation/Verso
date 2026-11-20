@@ -14,11 +14,13 @@ mod api;
 mod auth;
 mod books;
 mod device;
+mod dictionaries;
 mod http;
 mod server;
 
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -29,6 +31,7 @@ use crate::store::Store;
 use api::{Api, Context};
 use auth::Auth;
 use books::{ActivitySink, Books};
+use dictionaries::Dictionaries;
 use server::{Server, Timeouts};
 
 pub use device::Device;
@@ -80,20 +83,10 @@ pub enum Failure {
 /// A line in the screen's activity list, newest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity {
-    Receiving {
-        name: String,
-    },
-    Received {
-        name: String,
-        folder: String,
-    },
-    Deleted {
-        name: String,
-    },
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // filled by the Dictionaries tab (Phase 3)
-    Dictionary {
-        name: String,
-    },
+    Receiving { name: String },
+    Received { name: String, folder: String },
+    Deleted { name: String },
+    Dictionary { name: String },
 }
 
 /// What the screen shows.
@@ -143,6 +136,9 @@ pub struct Session {
     developer: bool,
     /// The last code shown: a new start never shows the same one.
     last_code: String,
+    /// Set when any dictionary is installed or deleted during this session, so
+    /// Done triggers a catalog rescan.
+    dictionaries_changed: Arc<AtomicBool>,
 }
 
 struct Shared {
@@ -263,8 +259,18 @@ impl Session {
             wake: Condvar::new(),
             battery: Mutex::new(None),
         });
-        let mut session =
-            Self { device, store, library, shared, thread: None, waker, label, developer, last_code: String::new() };
+        let mut session = Self {
+            device,
+            store,
+            library,
+            shared,
+            thread: None,
+            waker,
+            label,
+            developer,
+            last_code: String::new(),
+            dictionaries_changed: Arc::new(AtomicBool::new(false)),
+        };
         session.spawn();
         session
     }
@@ -345,13 +351,21 @@ impl Session {
             }
         };
         let activity: Arc<dyn ActivitySink> = Arc::new(SessionActivity { shared: weak, waker: self.waker.clone() });
-        let books = Books::new(self.store.clone(), self.library.clone(), self.device.free_space.clone(), activity);
+        let books =
+            Books::new(self.store.clone(), self.library.clone(), self.device.free_space.clone(), activity.clone());
+        let dictionaries = Dictionaries::new(
+            self.store.clone(),
+            self.device.free_space.clone(),
+            activity,
+            self.dictionaries_changed.clone(),
+        );
         Context {
             port: self.device.listen.port(),
             names: Box::new(names),
             status: Box::new(status),
             changed: Box::new(changed),
             books: Some(books),
+            dictionaries: Some(dictionaries),
         }
     }
 
@@ -371,6 +385,11 @@ impl Session {
     /// True while a file upload is currently being received.
     pub fn receiving(&self) -> bool {
         self.shared.lock().receiving > 0
+    }
+
+    /// True if any dictionary was installed or deleted during this session.
+    pub fn dictionaries_changed(&self) -> bool {
+        self.dictionaries_changed.load(Ordering::SeqCst)
     }
 
     /// Changes whenever the snapshot may have.
@@ -437,8 +456,14 @@ impl Session {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let running = std::mem::take(&mut self.shared.lock().running);
+        let (running, api) = {
+            let mut state = self.shared.lock();
+            (std::mem::take(&mut state.running), state.api.clone())
+        };
         running.release(&self.device);
+        if let Some(api) = api {
+            api.cleanup_batches();
+        }
     }
 
     /// Adds a line to the activity list (newest first) and redraws.

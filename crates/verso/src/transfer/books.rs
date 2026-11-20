@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use super::Activity;
 use super::device::FreeSpace;
 use super::http::{BUFFER, Body, Request, Response};
 use super::server::PartFile;
-use crate::annotations::Manifest;
+use crate::annotations::{self, Collection, Manifest, export};
 use crate::library::collections::{self, Collections};
 use crate::library::{self, Book, Cover, LibraryIndex, PathChange, epub, files, search};
 use crate::store::{BookState, Store, book_id};
@@ -39,17 +39,17 @@ pub trait ActivitySink: Send + Sync {
 
 /// Keeps a `Receiving` row on the Kindle screen until the upload finishes,
 /// fails or is cancelled.
-struct UploadGuard<'a> {
+pub(super) struct UploadGuard<'a> {
     sink: &'a dyn ActivitySink,
     id: Option<u64>,
 }
 
 impl<'a> UploadGuard<'a> {
-    fn start(sink: &'a dyn ActivitySink, name: String) -> Self {
+    pub(super) fn start(sink: &'a dyn ActivitySink, name: String) -> Self {
         Self { sink, id: Some(sink.begin_receiving(name)) }
     }
 
-    fn finish(mut self, received: Activity) {
+    pub(super) fn finish(mut self, received: Activity) {
         if let Some(id) = self.id.take() {
             self.sink.finish_receiving(id, Some(received));
         }
@@ -104,8 +104,9 @@ impl Books {
                 continue;
             }
             let state = states.get(&book.id);
-            let ann_id = if book.annotation_id.is_empty() { &book.id } else { &book.annotation_id };
-            out.push(book_json(book, folder, &group, &filename, state, annotated.contains(ann_id)));
+            let ann_id = annotation_id_of(book);
+            let highlight_count = annotated.get(ann_id).copied().unwrap_or(0);
+            out.push(book_json(book, folder, &group, &filename, state, highlight_count));
         }
 
         let folder_list: Vec<Value> = folders
@@ -238,7 +239,7 @@ impl Books {
         let group = group_label(&dest_dir, &roots);
         let filename = book.path.file_name().unwrap_or_default().to_string_lossy();
         log::info!("web app: received {} → {} (id {})", name, book.path.display(), book.id);
-        Response::json(201, &book_json(&book, &dest_dir, &group, &filename, None, false))
+        Response::json(201, &book_json(&book, &dest_dir, &group, &filename, None, 0))
     }
 
     /// `POST /api/books/mkdir`
@@ -323,13 +324,111 @@ impl Books {
             .map(|e| format!("Deleted “{}”, but couldn't remove its KOReader data: {e:#}", book.metadata.title));
         Response::json(200, &json!({ "ok": true, "warning": warning }))
     }
+
+    /// `GET /api/highlights/<id>`: one book's highlights and notes as UTF-8
+    /// Markdown, in saved order (looked up by `annotation_id`).
+    pub fn highlights(&self, id: &str) -> Response {
+        let index = self.library.current();
+        let Some(book) = index.books.iter().find(|b| b.available && b.id == id) else {
+            return err(404, "Book not found.");
+        };
+        let ann_id = annotation_id_of(book);
+        let collection = match Collection::load(&self.store, ann_id) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("web app: reading highlights for {}: {e:#}", book.id);
+                return err(500, "Couldn't read this book's highlights.");
+            }
+        };
+        if collection.records.is_empty() {
+            return err(404, "This book has no highlights.");
+        }
+        let exp = export::Export {
+            title: book.metadata.title.clone(),
+            author: book.metadata.authors.clone(),
+            records: collection.records,
+        };
+        let md = export::markdown(&exp, &annotations::created_now());
+        let name = export::file_name(&exp.title, ann_id);
+        Response::download(md.into_bytes(), &name)
+    }
+
+    /// `GET /api/highlights.zip`: a zip of every library book's highlights as
+    /// Markdown, in saved order. Highlights of deleted books are omitted.
+    pub fn highlights_zip(&self) -> Response {
+        let index = self.library.current();
+        let mut books: Vec<&Book> = index.books.iter().filter(|b| b.available).collect();
+        books.sort_by(|a, b| library::compare_books(a, 0, b, 0, library::Sort::Title));
+
+        let exported = annotations::created_now();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut used_names = HashSet::new();
+        let mut count = 0usize;
+
+        for book in books {
+            let ann_id = annotation_id_of(book);
+            let collection = match Collection::load(&self.store, ann_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("web app: skipping unreadable highlights for {}: {e:#}", book.id);
+                    continue;
+                }
+            };
+            if collection.records.is_empty() {
+                continue;
+            }
+            let exp = export::Export {
+                title: book.metadata.title.clone(),
+                author: book.metadata.authors.clone(),
+                records: collection.records,
+            };
+            let md = export::markdown(&exp, &exported);
+            let mut entry_name = export::file_name(&exp.title, ann_id);
+            if !used_names.insert(entry_name.clone()) {
+                let stem = entry_name.strip_suffix(".md").unwrap_or(&entry_name).to_owned();
+                let mut n = 2u32;
+                loop {
+                    let candidate = format!("{stem} ({n}).md");
+                    if used_names.insert(candidate.clone()) {
+                        entry_name = candidate;
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+            if let Err(e) = writer
+                .start_file(&entry_name, options)
+                .and_then(|()| writer.write_all(md.as_bytes()).map_err(Into::into))
+            {
+                log::warn!("web app: writing highlights zip entry {entry_name}: {e}");
+                return err(500, "Couldn't build the highlights archive.");
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return err(404, "No highlights to download.");
+        }
+        let cursor = match writer.finish() {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("web app: finishing highlights zip: {e}");
+                return err(500, "Couldn't build the highlights archive.");
+            }
+        };
+        Response::download(cursor.into_inner(), "verso-highlights.zip")
+    }
 }
 
-fn err(status: u16, message: &str) -> Response {
+fn annotation_id_of(book: &Book) -> &str {
+    if book.annotation_id.is_empty() { &book.id } else { &book.annotation_id }
+}
+
+pub(super) fn err(status: u16, message: &str) -> Response {
     Response::json(status, &json!({ "error": message }))
 }
 
-fn read_error(e: io::Error) -> Response {
+pub(super) fn read_error(e: io::Error) -> Response {
     match e.kind() {
         io::ErrorKind::Interrupted => err(503, "Wi-Fi transfer is stopping."),
         io::ErrorKind::TimedOut => err(408, "The upload timed out."),
@@ -337,7 +436,7 @@ fn read_error(e: io::Error) -> Response {
     }
 }
 
-fn write_error(context: &str, e: io::Error) -> Response {
+pub(super) fn write_error(context: &str, e: io::Error) -> Response {
     if e.raw_os_error() == Some(libc::ENOSPC) {
         return err(507, "Not enough free space on the Kindle.");
     }
@@ -359,7 +458,7 @@ fn read_first_chunk(body: &mut Body<'_>, buf: &mut [u8]) -> io::Result<usize> {
     Ok(filled)
 }
 
-fn create_part(dir: &Path, name: &str) -> io::Result<PartFile> {
+pub(super) fn create_part(dir: &Path, name: &str) -> io::Result<PartFile> {
     let first = dir.join(format!("{name}.part"));
     match PartFile::create(first) {
         Ok(part) => return Ok(part),
@@ -586,9 +685,10 @@ fn load_book_states(store: &Store, index: &LibraryIndex) -> HashMap<String, Book
 }
 
 /// Returns the `annotation_id`s that currently have at least one saved
-/// highlight or note, from one listing of `data/annotations/`.
-fn annotated_book_ids(store: &Store) -> HashSet<String> {
-    let mut ids = HashSet::new();
+/// highlight or note, mapped to their saved record count, from one listing of
+/// `data/annotations/`.
+fn annotated_book_ids(store: &Store) -> HashMap<String, usize> {
+    let mut ids = HashMap::new();
     let Ok(entries) = std::fs::read_dir(store.annotation_dir()) else { return ids };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -599,7 +699,7 @@ fn annotated_book_ids(store: &Store) -> HashSet<String> {
             && manifest.version == 1
             && !manifest.records.is_empty()
         {
-            ids.insert(id.to_owned());
+            ids.insert(id.to_owned(), manifest.records.len());
         }
     }
     ids
@@ -617,7 +717,7 @@ fn book_json(
     group: &str,
     filename: &str,
     state: Option<&BookState>,
-    has_highlights: bool,
+    highlight_count: usize,
 ) -> Value {
     let finished = state.is_some_and(|s| s.finished);
     let progress = state.and_then(|s| {
@@ -634,7 +734,8 @@ fn book_json(
         "size": book.stamp.size,
         "progress": progress,
         "finished": finished,
-        "has_highlights": has_highlights,
+        "has_highlights": highlight_count > 0,
+        "highlight_count": highlight_count,
     })
 }
 
@@ -733,6 +834,7 @@ mod tests {
                     status: Box::new(|| json!({ "name": "verso.local" })),
                     changed: Box::new(|| {}),
                     books: Some(books),
+                    dictionaries: None,
                 },
             ));
             let server = Server::start("127.0.0.1:0".parse().unwrap(), api, Timeouts::default()).unwrap();
@@ -1200,6 +1302,72 @@ mod tests {
         assert_eq!(status, 200);
         assert!(env.worker.current().empty_folders.contains(&sub));
         assert_eq!(env.req("GET", &format!("/api/books/{id2}"), b"").0, 404);
+    }
+
+    #[test]
+    fn highlights_export_one_book_and_zip_in_saved_order() {
+        let env = Env::new();
+        let (_, b1) = env.upload(&env.library_dir, "Marked.epub", &epub_bytes("Война и мир", "Лев Толстой", &[]));
+        let (_, b2) = env.upload(&env.library_dir, "Plain.epub", &epub_bytes("Plain", "Nobody", &[]));
+        let (_, b3) = env.upload(&env.library_dir, "Gone.epub", &epub_bytes("Gone", "Somebody", &[]));
+        let id1 = b1["id"].as_str().unwrap().to_owned();
+        let id2 = b2["id"].as_str().unwrap().to_owned();
+        let id3 = b3["id"].as_str().unwrap().to_owned();
+        let annotation_id =
+            |id: &str| env.worker.current().books.iter().find(|b| b.id == id).unwrap().annotation_id.clone();
+        let add = |ann: &str, quotes: &[(&str, &str)]| {
+            let mut col = Collection::load(&env.store, ann).unwrap();
+            for (id, quote) in quotes {
+                col.add(Annotation {
+                    version: 1,
+                    id: (*id).into(),
+                    book: ann.into(),
+                    fingerprint: "fp".into(),
+                    range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+                    quotation: (*quote).into(),
+                    created: "2026-11-20".into(),
+                    chapter: "Глава 1".into(),
+                    note: (*id == "z").then(|| "a note".into()),
+                    provenance: None,
+                });
+            }
+            col.commit(&env.store, ann).unwrap();
+        };
+        // Saved order, not alphabetical: "z" was saved before "a".
+        let ann1 = annotation_id(&id1);
+        add(&ann1, &[("z", "Second in the text"), ("a", "First in the text")]);
+        let ann3 = annotation_id(&id3);
+        add(&ann3, &[("g", "From a deleted book")]);
+        assert_eq!(env.json("DELETE", &format!("/api/books/{id3}"), b"").0, 200);
+
+        let (_, list) = env.json("GET", "/api/books", b"");
+        let first = list["books"].as_array().unwrap().iter().find(|b| b["id"] == id1).unwrap().clone();
+        assert_eq!(first["highlight_count"], 2);
+
+        let (status, head, body) = env.req("GET", &format!("/api/highlights/{id1}"), b"");
+        assert_eq!(status, 200);
+        assert!(head.contains("Content-Type: application/octet-stream"));
+        assert!(head.contains("Content-Disposition: attachment;") && head.contains(".md"));
+        assert!(head.contains("Content-Security-Policy: sandbox"));
+        let md = String::from_utf8(body).unwrap();
+        assert!(md.starts_with("# Война и мир\n\nЛев Толстой\n\n*2 highlights · 1 note"), "{md}");
+        let (second, first_q) = (md.find("Second in the text").unwrap(), md.find("First in the text").unwrap());
+        assert!(second < first_q, "saved order is kept");
+        assert!(md.contains("**Note:** a note"));
+        assert_eq!(env.req("GET", &format!("/api/highlights/{id2}"), b"").0, 404, "no highlights");
+        assert_eq!(env.req("GET", &format!("/api/highlights/{id3}"), b"").0, 404, "deleted books aren't listed");
+
+        let (status, head, body) = env.req("GET", "/api/highlights.zip", b"");
+        assert_eq!(status, 200);
+        assert!(head.contains("verso-highlights.zip"));
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+        assert_eq!(zip.len(), 1, "only library books with highlights");
+        let mut entry = zip.by_index(0).unwrap();
+        assert_eq!(entry.name(), export::file_name("Война и мир", &ann1));
+        let mut zipped = String::new();
+        entry.read_to_string(&mut zipped).unwrap();
+        let strip = |s: &str| s.lines().filter(|l| !l.contains("exported from Verso")).collect::<Vec<_>>().join("\n");
+        assert_eq!(strip(&zipped), strip(&md));
     }
 
     #[test]

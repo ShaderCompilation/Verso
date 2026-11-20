@@ -18,6 +18,7 @@ pub use discovery::{Catalog, Source, SourceStatus, discover_catalog};
 pub(crate) use forms::write_pack;
 pub use forms::{WordFormsSource, WordFormsStatus};
 use index::Index;
+pub(crate) use index::remove_cache;
 pub use model::{Block, BlockKind, Entry, Span, Style};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,13 +41,15 @@ pub struct Dictionary {
     pub relative: PathBuf,
     /// Index into `Catalog::sources` of the source that listed it.
     pub source: usize,
+    /// Headword count from `.ifo` (`wordcount`), when readable.
+    pub word_count: Option<u32>,
     pub error: Option<String>,
     pub disabled: bool,
 }
 #[derive(Debug)]
-struct Info {
-    name: String,
-    count: u32,
+pub(crate) struct Info {
+    pub(crate) name: String,
+    pub(crate) count: u32,
     syn_count: u32,
     index_size: u64,
     wide: bool,
@@ -64,7 +67,7 @@ fn bounded_text(source: impl std::io::Read, limit: usize) -> Result<String> {
 }
 /// The basename shared by a dictionary's files: its `.ifo` or `.ifo.gz`
 /// metadata path without those suffixes. `None` for any other file.
-fn basename(path: &Path) -> Option<PathBuf> {
+pub(crate) fn basename(path: &Path) -> Option<PathBuf> {
     let plain = path.with_extension("");
     match path.extension()?.to_str()? {
         "ifo" => Some(plain),
@@ -74,18 +77,18 @@ fn basename(path: &Path) -> Option<PathBuf> {
 }
 /// A companion file: the basename plus `.{ext}`. Unlike `with_extension`, this
 /// keeps dots inside the basename and works for two-part suffixes.
-fn sibling(base: &Path, ext: &str) -> PathBuf {
+pub(crate) fn sibling(base: &Path, ext: &str) -> PathBuf {
     let mut path = base.as_os_str().to_owned();
     path.push(".");
     path.push(ext);
     path.into()
 }
-fn is_gzip(path: &Path) -> bool {
+pub(crate) fn is_gzip(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "gz")
 }
 impl Info {
     /// Reads `.ifo` or `.ifo.gz`; the decompressed text is bounded to 64 KiB.
-    fn read(path: &Path) -> Result<Self> {
+    pub(crate) fn read(path: &Path) -> Result<Self> {
         let base = basename(path).context("Not a StarDict .ifo or .ifo.gz file")?;
         let text = if is_gzip(path) {
             bounded_text(flate2::read::GzDecoder::new(fs::File::open(path)?), 65536)
@@ -122,7 +125,7 @@ impl Info {
         })
     }
 }
-fn companion(base: &Path, plain: &str, compressed: &str) -> Result<(PathBuf, bool)> {
+pub(crate) fn companion(base: &Path, plain: &str, compressed: &str) -> Result<(PathBuf, bool)> {
     let file = sibling(base, plain);
     if file.is_file() {
         return Ok((file, false));

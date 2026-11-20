@@ -136,6 +136,22 @@ details.group[open] summary::before { content: "▾"; }
 .icon-btn:hover { background: var(--wash); color: var(--ink); border-color: var(--line); }
 .icon-btn.del:hover { color: var(--danger); }
 .icon-btn svg { width: 1.05rem; height: 1.05rem; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.hl-head {
+  display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; justify-content: space-between;
+  margin-bottom: .75rem;
+}
+.hl-summary { color: var(--ink2); font-size: .92rem; }
+.card-list {
+  list-style: none; margin: 0; padding: 0;
+  border: 1px solid var(--line); border-radius: .55rem; background: #fff; overflow: hidden;
+}
+.card-list .book-row:first-child { border-top: 0; }
+.badge {
+  display: inline-block; padding: .12rem .45rem; border-radius: .3rem;
+  background: var(--wash); color: var(--ink2); font-size: .8rem;
+}
+.row-err { display: block; color: var(--danger); font-size: .85rem; margin-top: .2rem; }
+.drop-hint { margin: .55rem 0 0; color: var(--ink2); font-size: .88rem; }
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(29, 29, 27, .35);
   display: flex; align-items: center; justify-content: center; padding: 1rem; z-index: 10;
@@ -225,12 +241,46 @@ details.group[open] summary::before { content: "▾"; }
 
       <div id="books-list"></div>
       <div id="highlights-view" hidden>
-        <p class="empty">Downloading highlights comes next.</p>
+        <div id="hl-head" class="hl-head" hidden>
+          <span id="hl-summary" class="hl-summary"></span>
+          <a class="btn" id="hl-zip" href="/api/highlights.zip" download="verso-highlights.zip">Download all (.zip)</a>
+        </div>
+        <div id="hl-list"></div>
       </div>
     </section>
 
     <section role="tabpanel" id="dictionaries" aria-labelledby="tab-dictionaries" hidden>
-      <p class="empty">Installing dictionaries comes next.</p>
+      <div id="dict-drop" class="drop">
+        <div class="drop-main">
+          <span>Drop a StarDict archive or loose files here, or</span>
+          <button type="button" class="primary" id="dict-pick">Choose files</button>
+          <input type="file" id="dict-input" multiple hidden>
+        </div>
+        <p class="drop-hint">Accepts .zip, .tar.gz, .tar.bz2, or loose .ifo/.idx/.dict/.syn files.</p>
+      </div>
+
+      <div id="dict-upload-box" class="upload-box" hidden>
+        <div class="upload-head">
+          <div>
+            <span>Uploading </span>
+            <span id="dict-upload-name" class="upload-name"></span>
+            <span id="dict-upload-pct" class="upload-meta"></span>
+          </div>
+          <div>
+            <span id="dict-upload-queued" class="upload-meta"></span>
+            <button type="button" class="ghost" id="dict-upload-cancel">Cancel</button>
+          </div>
+        </div>
+        <progress id="dict-upload-bar" max="100" value="0"></progress>
+      </div>
+
+      <div id="dict-notices" class="notices" aria-live="polite"></div>
+
+      <div class="toolbar">
+        <span id="dict-count" class="hl-summary"></span>
+      </div>
+
+      <div id="dict-list"></div>
     </section>
     <section role="tabpanel" id="files" aria-labelledby="tab-files" hidden>
       <p class="empty">Browsing the Kindle's files comes next.</p>
@@ -324,7 +374,7 @@ async function signIn(code, retries = 2) {
     });
     if (response.ok) {
       $("code").value = "";
-      if (await loadStatus()) await loadBooks();
+      if (await loadStatus()) await Promise.all([loadBooks(), loadDictionaries()]);
       return;
     }
     if (response.status === 429 && retries > 0) {
@@ -347,14 +397,19 @@ $("form").addEventListener("submit", (event) => {
   signIn($("code").value.trim());
 });
 
+let activeTab = "books";
 for (const tab of document.querySelectorAll("[role=tab]")) {
   tab.addEventListener("click", () => select(tab.id.slice(4)));
 }
 function select(name) {
+  activeTab = name;
   for (const tab of document.querySelectorAll("[role=tab]")) {
     const on = tab.id === "tab-" + name;
     tab.setAttribute("aria-selected", on);
     $(tab.getAttribute("aria-controls")).hidden = !on;
+  }
+  if (!$("app").hidden && name === "dictionaries") {
+    loadDictionaries().catch(() => {});
   }
 }
 select("books");
@@ -369,8 +424,8 @@ let uploadQueue = [];
 let activeXhr = null;
 let pendingDelete = null;
 
-function addNotice(text, isError) {
-  const wrap = $("book-notices");
+function addNoticeTo(containerId, text, isError) {
+  const wrap = $(containerId);
   const el = document.createElement("div");
   el.className = isError ? "notice err" : "notice";
   const span = document.createElement("span");
@@ -385,6 +440,9 @@ function addNotice(text, isError) {
   wrap.prepend(el);
   while (wrap.children.length > 5) wrap.lastChild.remove();
 }
+function addNotice(text, isError) {
+  addNoticeTo("book-notices", text, isError);
+}
 
 async function loadBooks() {
   const response = await call("/api/books");
@@ -396,6 +454,7 @@ async function loadBooks() {
   libraryData = await response.json();
   renderFolders();
   renderBooks();
+  renderHighlights();
 }
 
 function renderFolders() {
@@ -532,7 +591,80 @@ function renderBooks() {
   }
 }
 
-$("book-search").addEventListener("input", renderBooks);
+function renderHighlights() {
+  const list = $("hl-list");
+  list.replaceChildren();
+  const all = libraryData.books.filter((b) => b.has_highlights);
+  const q = $("book-search").value.trim().toLowerCase();
+  const filtered = q
+    ? all.filter((b) =>
+        (b.title || "").toLowerCase().includes(q) ||
+        (b.author || "").toLowerCase().includes(q) ||
+        (b.filename || "").toLowerCase().includes(q) ||
+        (b.group || "").toLowerCase().includes(q)
+      )
+    : all;
+
+  $("hl-head").hidden = all.length === 0;
+  $("hl-summary").textContent = all.length === 1 ? "1 book with highlights" : all.length + " books with highlights";
+
+  if (filtered.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = q
+      ? "No highlighted books match \"" + $("book-search").value.trim() + "\"."
+      : "No highlights yet.";
+    list.appendChild(p);
+    return;
+  }
+
+  const ul = document.createElement("ul");
+  ul.className = "card-list";
+  for (const b of filtered) {
+    const li = document.createElement("li");
+    li.className = "book-row";
+
+    const info = document.createElement("div");
+    info.className = "book-info";
+    const title = document.createElement("span");
+    title.className = "book-title";
+    title.textContent = b.title || b.filename;
+    info.appendChild(title);
+    if (b.author) {
+      const author = document.createElement("span");
+      author.className = "book-author";
+      author.textContent = " — " + b.author;
+      info.appendChild(author);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "book-meta";
+    const n = b.highlight_count || 0;
+    if (n > 0) {
+      const cnt = document.createElement("span");
+      cnt.textContent = n === 1 ? "1 highlight" : n + " highlights";
+      meta.appendChild(cnt);
+    }
+
+    const dl = document.createElement("a");
+    dl.className = "icon-btn";
+    dl.href = "/api/highlights/" + encodeURIComponent(b.id);
+    dl.setAttribute("download", "");
+    dl.title = "Download Markdown highlights";
+    dl.setAttribute("aria-label", "Download highlights for " + (b.title || b.filename));
+    dl.appendChild(svgIcon("icon-download"));
+    meta.appendChild(dl);
+
+    li.append(info, meta);
+    ul.appendChild(li);
+  }
+  list.appendChild(ul);
+}
+
+$("book-search").addEventListener("input", () => {
+  renderBooks();
+  renderHighlights();
+});
 
 function setSubView(which) {
   const isBooks = which === "books";
@@ -692,11 +824,18 @@ drop.addEventListener("drop", (ev) => {
   if (ev.dataTransfer && ev.dataTransfer.files.length > 0) queueFiles(ev.dataTransfer.files);
 });
 
-// Delete confirmation dialog
+// Delete confirmation dialog (shared by Books and Dictionaries)
 function askDelete(book) {
-  pendingDelete = book;
+  pendingDelete = { kind: "book", item: book };
   $("confirm-title").textContent = "Delete \"" + (book.title || book.filename) + "\"?";
   $("confirm-text").textContent = "This removes the EPUB file and your reading progress from the Kindle.";
+  $("confirm-backdrop").hidden = false;
+  $("confirm-cancel").focus();
+}
+function askDeleteDict(dict) {
+  pendingDelete = { kind: "dict", item: dict };
+  $("confirm-title").textContent = "Delete \"" + dict.name + "\"?";
+  $("confirm-text").textContent = "This removes the dictionary and its index cache from Verso's folder.";
   $("confirm-backdrop").hidden = false;
   $("confirm-cancel").focus();
 }
@@ -712,11 +851,14 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !$("confirm-backdrop").hidden) closeConfirm();
 });
 $("confirm-ok").addEventListener("click", async () => {
-  const book = pendingDelete;
-  if (!book) return;
+  const pending = pendingDelete;
+  if (!pending) return;
   $("confirm-ok").disabled = true;
   try {
-    const response = await call("/api/books/" + encodeURIComponent(book.id), { method: "DELETE" });
+    const url = pending.kind === "book"
+      ? "/api/books/" + encodeURIComponent(pending.item.id)
+      : "/api/dictionaries?id=" + encodeURIComponent(pending.item.id);
+    const response = await call(url, { method: "DELETE" });
     if (response.status === 401) {
       closeConfirm();
       show("signin");
@@ -724,21 +866,308 @@ $("confirm-ok").addEventListener("click", async () => {
     }
     const data = await response.json();
     closeConfirm();
-    if (response.ok) {
-      if (data.warning) addNotice(data.warning, true);
-      else addNotice("Deleted \"" + (book.title || book.filename) + "\".", false);
-      await Promise.all([loadBooks(), loadStatus()]);
+    if (pending.kind === "book") {
+      if (response.ok) {
+        if (data.warning) addNotice(data.warning, true);
+        else addNotice("Deleted \"" + (pending.item.title || pending.item.filename) + "\".", false);
+        await Promise.all([loadBooks(), loadStatus()]);
+      } else {
+        addNotice(data.error || "Couldn't delete the book.", true);
+      }
     } else {
-      addNotice(data.error || "Couldn't delete the book.", true);
+      if (response.ok) {
+        addDictNotice("Deleted \"" + pending.item.name + "\".", false);
+        await Promise.all([loadDictionaries(), loadStatus()]);
+      } else {
+        addDictNotice(data.error || "Couldn't delete the dictionary.", true);
+      }
     }
   } finally {
     $("confirm-ok").disabled = false;
   }
 });
 
+// ---- Dictionaries tab ----
+
+let dictData = { dictionaries: [] };
+let dictQueue = [];
+let activeDictXhr = null;
+
+function addDictNotice(text, isError) {
+  addNoticeTo("dict-notices", text, isError);
+}
+
+async function loadDictionaries() {
+  const response = await call("/api/dictionaries");
+  if (response.status === 401) {
+    show("signin");
+    return;
+  }
+  if (!response.ok) return;
+  dictData = await response.json();
+  renderDictionaries();
+}
+
+function renderDictionaries() {
+  const list = $("dict-list");
+  list.replaceChildren();
+  const dicts = dictData.dictionaries || [];
+  $("dict-count").textContent = dicts.length === 0
+    ? ""
+    : (dicts.length === 1 ? "1 dictionary installed" : dicts.length + " dictionaries installed");
+
+  if (dicts.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No dictionaries installed yet.";
+    list.appendChild(p);
+    return;
+  }
+
+  const ul = document.createElement("ul");
+  ul.className = "card-list";
+  for (const d of dicts) {
+    const li = document.createElement("li");
+    li.className = "book-row";
+
+    const info = document.createElement("div");
+    info.className = "book-info";
+    const title = document.createElement("span");
+    title.className = "book-title";
+    title.textContent = d.name;
+    info.appendChild(title);
+    if (d.error) {
+      const errSpan = document.createElement("span");
+      errSpan.className = "row-err";
+      errSpan.textContent = d.error;
+      info.appendChild(errSpan);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "book-meta";
+    if (typeof d.word_count === "number") {
+      const words = document.createElement("span");
+      words.textContent = d.word_count.toLocaleString() + " words";
+      meta.appendChild(words);
+    }
+    const loc = document.createElement("span");
+    loc.className = "badge";
+    loc.textContent = d.location || "";
+    meta.appendChild(loc);
+
+    if (d.native) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "icon-btn del";
+      del.title = "Delete";
+      del.setAttribute("aria-label", "Delete " + d.name);
+      del.appendChild(svgIcon("icon-trash"));
+      del.addEventListener("click", () => askDeleteDict(d));
+      meta.appendChild(del);
+    }
+
+    li.append(info, meta);
+    ul.appendChild(li);
+  }
+  list.appendChild(ul);
+}
+
+const ARCHIVE_EXTS = [".zip", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2"];
+const UNSUPPORTED_ARCHIVES = [".tar.xz", ".txz", ".7z", ".rar"];
+const LOOSE_EXTS = [".ifo", ".ifo.gz", ".idx", ".idx.gz", ".dict", ".dict.dz", ".syn", ".syn.dz"];
+
+function hasExt(name, list) {
+  const lower = name.toLowerCase();
+  return list.some((ext) => lower.endsWith(ext));
+}
+
+function queueDictFiles(fileList) {
+  const loose = [];
+  for (const file of fileList) {
+    if (hasExt(file.name, ARCHIVE_EXTS)) {
+      dictQueue.push({ kind: "archive", file });
+    } else if (hasExt(file.name, LOOSE_EXTS)) {
+      loose.push(file);
+    } else if (hasExt(file.name, UNSUPPORTED_ARCHIVES)) {
+      addDictNotice(file.name + ": unsupported archive format. Unpack it first, or re-pack it as .zip, .tar.gz or .tar.bz2.", true);
+    } else {
+      addDictNotice(file.name + ": send a .zip, .tar.gz or .tar.bz2 archive, or loose StarDict files. Use the Files tab for other files.", true);
+    }
+  }
+  if (loose.length > 0) {
+    dictQueue.push({ kind: "batch", files: loose });
+  }
+  updateDictQueueUi();
+  if (!activeDictXhr) runNextDictUpload();
+}
+
+function updateDictQueueUi() {
+  if (!activeDictXhr && dictQueue.length === 0) {
+    $("dict-upload-box").hidden = true;
+    return;
+  }
+  $("dict-upload-box").hidden = false;
+  $("dict-upload-queued").textContent = dictQueue.length > 0 ? dictQueue.length + " more queued" : "";
+}
+
+function sendXhrPut(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    activeDictXhr = xhr;
+    xhr.open("PUT", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("X-Verso-Request", "1");
+    xhr.upload.onprogress = onProgress;
+    xhr.onload = () => {
+      activeDictXhr = null;
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
+      resolve({ status: xhr.status, data });
+    };
+    xhr.onerror = () => {
+      activeDictXhr = null;
+      reject(new Error("network"));
+    };
+    xhr.onabort = () => {
+      activeDictXhr = null;
+      reject(new Error("aborted"));
+    };
+    xhr.send(file);
+  });
+}
+
+async function runNextDictUpload() {
+  if (dictQueue.length === 0) {
+    activeDictXhr = null;
+    updateDictQueueUi();
+    return;
+  }
+  const job = dictQueue.shift();
+  try {
+    if (job.kind === "archive") {
+      $("dict-upload-name").textContent = job.file.name;
+      $("dict-upload-pct").textContent = " 0%";
+      $("dict-upload-bar").value = 0;
+      updateDictQueueUi();
+      const params = new URLSearchParams({ name: job.file.name });
+      const res = await sendXhrPut("/api/dictionaries?" + params.toString(), job.file, (ev) => {
+        if (ev.lengthComputable && ev.total > 0) {
+          const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+          $("dict-upload-bar").value = pct;
+          $("dict-upload-pct").textContent = pct >= 100 ? " unpacking…" : " " + pct + "%";
+        }
+      });
+      if (res.status === 401) {
+        dictQueue = [];
+        updateDictQueueUi();
+        show("signin");
+        return;
+      }
+      if (res.status >= 200 && res.status < 300) {
+        const names = (res.data.installed || []).map((d) => d.name).join(", ");
+        addDictNotice("Installed " + (names || job.file.name) + ".", false);
+        await Promise.all([loadDictionaries(), loadStatus()]).catch(() => {});
+      } else {
+        addDictNotice(job.file.name + ": " + (res.data.error || "Upload failed (" + res.status + ")."), true);
+      }
+    } else {
+      const batchResp = await call("/api/dictionaries/batch", { method: "POST" });
+      if (batchResp.status === 401) {
+        dictQueue = [];
+        updateDictQueueUi();
+        show("signin");
+        return;
+      }
+      const batchData = await batchResp.json();
+      if (!batchResp.ok || !batchData.id) {
+        addDictNotice(batchData.error || "Couldn't start dictionary upload.", true);
+        runNextDictUpload();
+        return;
+      }
+      const batchId = batchData.id;
+      let failed = false;
+      for (let i = 0; i < job.files.length; i++) {
+        const file = job.files[i];
+        $("dict-upload-name").textContent = file.name + " (" + (i + 1) + "/" + job.files.length + ")";
+        $("dict-upload-pct").textContent = " 0%";
+        $("dict-upload-bar").value = 0;
+        updateDictQueueUi();
+        const params = new URLSearchParams({ name: file.name });
+        const res = await sendXhrPut("/api/dictionaries/batch/" + encodeURIComponent(batchId) + "?" + params.toString(), file, (ev) => {
+          if (ev.lengthComputable && ev.total > 0) {
+            const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+            $("dict-upload-bar").value = pct;
+            $("dict-upload-pct").textContent = " " + pct + "%";
+          }
+        });
+        if (res.status === 401) {
+          dictQueue = [];
+          updateDictQueueUi();
+          show("signin");
+          return;
+        }
+        if (res.status < 200 || res.status >= 300) {
+          addDictNotice(file.name + ": " + (res.data.error || "Upload failed (" + res.status + ")."), true);
+          failed = true;
+          break;
+        }
+      }
+      if (!failed) {
+        const commitResp = await call("/api/dictionaries/batch/" + encodeURIComponent(batchId) + "/commit", { method: "POST" });
+        const commitData = await commitResp.json();
+        if (commitResp.ok) {
+          const names = (commitData.installed || []).map((d) => d.name).join(", ");
+          addDictNotice("Installed " + (names || "dictionary") + ".", false);
+          await Promise.all([loadDictionaries(), loadStatus()]).catch(() => {});
+        } else {
+          addDictNotice(commitData.error || "Dictionary files are incomplete.", true);
+        }
+      }
+    }
+  } catch (e) {
+    if (e && e.message === "aborted") {
+      addDictNotice("Cancelled dictionary upload.", false);
+    } else {
+      dictQueue = [];
+      updateDictQueueUi();
+      show("gone");
+      return;
+    }
+  }
+  runNextDictUpload();
+}
+
+$("dict-upload-cancel").addEventListener("click", () => {
+  if (activeDictXhr) activeDictXhr.abort();
+});
+
+$("dict-pick").addEventListener("click", () => $("dict-input").click());
+$("dict-input").addEventListener("change", () => {
+  if ($("dict-input").files.length > 0) {
+    queueDictFiles($("dict-input").files);
+    $("dict-input").value = "";
+  }
+});
+
+const dictDrop = $("dict-drop");
+dictDrop.addEventListener("dragover", (ev) => {
+  ev.preventDefault();
+  dictDrop.classList.add("over");
+});
+dictDrop.addEventListener("dragleave", () => dictDrop.classList.remove("over"));
+dictDrop.addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  dictDrop.classList.remove("over");
+  if (ev.dataTransfer && ev.dataTransfer.files.length > 0) queueDictFiles(ev.dataTransfer.files);
+});
+
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && !$("app").hidden) {
-    loadStatus().then((ok) => ok && loadBooks()).catch(() => {});
+    loadStatus().then((ok) => {
+      if (!ok) return;
+      loadBooks().catch(() => {});
+      if (activeTab === "dictionaries") loadDictionaries().catch(() => {});
+    }).catch(() => {});
   }
 });
 
@@ -749,7 +1178,7 @@ if (given) {
   history.replaceState(null, "", location.pathname + location.search);
   signIn(given).catch(() => {});
 } else {
-  loadStatus().then((ok) => ok && loadBooks()).catch(() => {});
+  loadStatus().then((ok) => ok && Promise.all([loadBooks(), loadDictionaries()])).catch(() => {});
 }
 </script>
 </body>
