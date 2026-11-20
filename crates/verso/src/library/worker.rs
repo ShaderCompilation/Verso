@@ -1031,7 +1031,16 @@ impl Worker {
     /// For tests that exercise the browsing UI, not background scanning.
     #[cfg(test)]
     pub fn stub() -> Self {
-        Self { shared: Arc::new((Mutex::new(Shared::default()), Condvar::new())), join: None }
+        Self {
+            inner: Arc::new(WorkerInner {
+                shared: Arc::new(SyncState {
+                    state: Mutex::new(Shared::default()),
+                    wake: Condvar::new(),
+                    applied: Condvar::new(),
+                }),
+                join: Mutex::new(None),
+            }),
+        }
     }
     /// Cover sizes the library drew, each once a session. The most recent
     /// [`covers::TILE_SIZES`] get thumbnails of their own, so paging decodes
