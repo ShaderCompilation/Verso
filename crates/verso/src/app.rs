@@ -240,13 +240,11 @@ impl App {
             vec![Update { rect: self.canvas.bounds(), mode }]
         } else {
             // Pixels covered by a forced Full refresh will be sent to the panel
-            // with the strongest mode anyway; commit them first so tile diffing
-            // skips them and doesn't emit a redundant Ui update along unaligned
-            // edges of the forced rect.
-            for u in forced.iter().filter(|u| u.mode == RefreshMode::Full) {
-                self.diff.commit_rect(&self.canvas, u.rect);
-            }
-            let tiles = self.diff.changed(&self.canvas);
+            // with the strongest mode anyway: tile diffing neither reads them
+            // (most of a grid-only library frame's diff time) nor emits a
+            // redundant Ui update along unaligned edges of the forced rect.
+            let full: Vec<Rect> = forced.iter().filter(|u| u.mode == RefreshMode::Full).map(|u| u.rect).collect();
+            let tiles = self.diff.changed_outside(&self.canvas, &full);
             let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
             updates
@@ -521,6 +519,15 @@ impl App {
         if self.battery != battery {
             self.battery = battery;
             self.needs_redraw = true;
+        }
+    }
+
+    /// Delivers an asynchronous startup frontlight reading without overwriting
+    /// a value already set by the user.
+    pub fn set_initial_frontlight(&mut self, light: Option<Frontlight>) {
+        if self.frontlight.is_none() && light.is_some() {
+            self.frontlight = light;
+            self.on_background();
         }
     }
 
@@ -1142,5 +1149,30 @@ mod tests {
         let updates = app.frame();
         assert_eq!(updates.len(), 1, "wake and layout completion share one full refresh");
         assert_eq!(updates[0].mode, RefreshMode::Full);
+    }
+
+    #[test]
+    fn initial_frontlight_notifies_screen_once_without_overwriting_user_choice() {
+        let backgrounds = Rc::new(Cell::new(0));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let screen = BookScreen {
+            touches: Rc::new(Cell::new(0)),
+            backgrounds: backgrounds.clone(),
+            saves: Rc::new(Cell::new(0)),
+            cover: false,
+        };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(screen));
+        assert_eq!(app.frontlight, None);
+        app.set_initial_frontlight(None);
+        assert_eq!(app.frontlight, None);
+        assert_eq!(backgrounds.get(), 0);
+        let hw = Frontlight { brightness: 9, warmth: Some(4) };
+        app.set_initial_frontlight(Some(hw));
+        assert_eq!(app.frontlight, Some(hw));
+        assert_eq!(backgrounds.get(), 1);
+        // A later delivery must never overwrite an existing value.
+        app.set_initial_frontlight(Some(Frontlight { brightness: 1, warmth: Some(0) }));
+        assert_eq!(app.frontlight, Some(hw));
+        assert_eq!(backgrounds.get(), 1);
     }
 }

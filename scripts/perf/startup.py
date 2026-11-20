@@ -13,7 +13,7 @@ import re
 import shlex
 import subprocess
 import time
-from redraw import memory, patch_launcher
+from redraw import app_pid, memory, patch_launcher
 
 APP = '/mnt/us/verso/startup-check'
 Q = shlex.quote
@@ -181,9 +181,7 @@ def main():
             try:
                 remote(f'chmod 755 {APP}/verso; : > {APP}/verso.log; '
                        f'setsid sh {APP}/launcher.sh </dev/null >/dev/null 2>&1 &')
-                wait('pidof verso >/dev/null')
-                pid = remote('pidof verso')
-                assert remote(f'readlink /proc/{pid}/exe') == f'{APP}/bin/{args.variant}/verso'
+                pid = app_pid(f'{APP}/bin/{args.variant}/verso')
                 wait(f'grep -q "first frame on screen" {APP}/verso.log')
 
                 def sample(label):

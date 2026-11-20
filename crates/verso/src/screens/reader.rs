@@ -1345,6 +1345,12 @@ impl Screen for Reader {
         Action::None
     }
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Overlay::Menu(menu) = &mut self.overlay
+            && let Some(light) = *cx.frontlight
+            && menu.set_frontlight_if_missing(cx.theme, self.screen, light)
+        {
+            cx.redraw();
+        }
         if let Overlay::Lookup(lookup) = &mut self.overlay {
             lookup.receive(cx);
         }
@@ -2770,6 +2776,68 @@ mod tests {
             assert_eq!(r.shown.as_ref().unwrap().number, 10);
             assert!(matches!(r.overlay, Overlay::Menu(_)));
         });
+
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn menu_hides_light_until_async_frontlight_arrives_then_shows_real_level() {
+        use crate::geom::Point;
+        use crate::platform::Frontlight;
+        let theme = Theme::for_dpi(150);
+        let (mut r, _) = test_reader("async-frontlight");
+        r.pages = 10;
+        r.laying_out = false;
+        let mut frontlight = None;
+        let mut light_request = None;
+        let mut needs_redraw = false;
+        let run = |frontlight: &mut Option<Frontlight>,
+                   light_request: &mut Option<Frontlight>,
+                   needs_redraw: &mut bool,
+                   f: &mut dyn FnMut(&mut EventCx)| {
+            let mut toast = None;
+            let mut forced = vec![];
+            f(&mut EventCx {
+                theme: &theme,
+                screen: Rect::new(0, 0, 600, 800),
+                now: Instant::now(),
+                frontlight,
+                light_request,
+                toast: &mut toast,
+                forced: &mut forced,
+                needs_redraw,
+                battery: None,
+            });
+        };
+        // Open the menu before hardware frontlight has arrived.
+        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
+            r.on_gesture(Gesture::Tap(Point::new(300, 400)), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::Menu(_)));
+        // Tapping where the brightness slider would be must not invent a value.
+        let panel_y = 800 - theme.mm(61.0);
+        let slider_pt = Point::new(300, panel_y + theme.mm(30.0));
+        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
+            r.on_gesture(Gesture::Down(slider_pt), cx);
+            r.on_gesture(Gesture::Tap(slider_pt), cx);
+        });
+        assert_eq!(light_request, None, "no default light written while reading is pending");
+        assert_eq!(frontlight, None);
+
+        // Hardware reading arrives asynchronously.
+        frontlight = Some(Frontlight { brightness: 14, warmth: Some(6) });
+        needs_redraw = false;
+        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
+            r.on_background(cx);
+        });
+        assert!(needs_redraw, "menu redraws once the real light level arrives");
+        // Now interacting with the slider updates the light request.
+        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
+            r.on_gesture(Gesture::Down(slider_pt), cx);
+            r.on_gesture(Gesture::Tap(slider_pt), cx);
+        });
+        assert!(light_request.is_some(), "light slider works once populated");
+        assert_eq!(light_request.unwrap().warmth, Some(6), "real warmth preserved");
 
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }

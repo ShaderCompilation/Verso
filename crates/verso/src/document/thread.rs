@@ -394,7 +394,9 @@ impl Worker {
                             }
                             Command::Open { generation: g, path, layout, typography, page, position, progress } => {
                                 generation = g;
-                                doc = None;
+                                if doc.take().is_some() {
+                                    release_freed_memory();
+                                }
                                 open_book = None;
                                 prelayout.before_open(&engine);
                                 dimensions = (layout.width, layout.height);
@@ -447,7 +449,9 @@ impl Worker {
                                 return Ok(());
                             }
                             Command::Close => {
-                                doc = None;
+                                if doc.take().is_some() {
+                                    release_freed_memory();
+                                }
                                 open_book = None;
                                 return Ok(());
                             }
@@ -636,6 +640,19 @@ fn render(
     };
     log::info!("page {} rendered in {:?}", page.number + 1, started.elapsed());
     Ok(Arc::new(page))
+}
+/// Gives the pages of a closed book back to the system. glibc keeps freed
+/// memory in whichever of its per-thread arenas allocated it, so a closed
+/// book's DOM, caches and page buffers would otherwise stay resident until
+/// that arena happens to be reused (measured: 4-9 MiB after a few reopens).
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let started = Instant::now();
+        // SAFETY: malloc_trim only returns free heap pages to the system.
+        unsafe { libc::malloc_trim(0) };
+        log::debug!("freed memory released in {:?}", started.elapsed());
+    }
 }
 #[cfg(test)]
 mod tests {

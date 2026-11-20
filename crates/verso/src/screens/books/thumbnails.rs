@@ -95,8 +95,7 @@ struct PrefetchShared {
     generation: u64,
     queue: VecDeque<CoverSpec>,
     ready: Vec<(ThumbnailKey, CachedCover)>,
-    #[cfg(test)]
-    active: bool,
+    in_flight: Option<ThumbnailKey>,
 }
 
 /// Low-overhead background decoder for neighbouring library pages.
@@ -124,31 +123,29 @@ impl Prefetcher {
                 .name("verso-thumb".into())
                 .spawn(move || {
                     loop {
-                        let (generation, spec) = {
+                        let (generation, spec, key) = {
                             let mut s = shared.0.lock().unwrap();
-                            #[cfg(test)]
-                            {
-                                s.active = false;
-                                shared.1.notify_all();
-                            }
                             while !s.stop && s.queue.is_empty() {
                                 s = shared.1.wait(s).unwrap();
                             }
                             if s.stop {
                                 break;
                             }
-                            #[cfg(test)]
-                            {
-                                s.active = true;
-                            }
-                            (s.generation, s.queue.pop_front().unwrap())
+                            let spec = s.queue.pop_front().unwrap();
+                            let key = (spec.key.clone(), spec.w, spec.h, spec.fit);
+                            s.in_flight = Some(key.clone());
+                            (s.generation, spec, key)
                         };
-                        if let Ok(cover) = decode_cover(&store, &spec.key, spec.w, spec.h, spec.fit) {
-                            let mut s = shared.0.lock().unwrap();
-                            if !s.stop && s.generation == generation {
-                                s.ready.push(((spec.key, spec.w, spec.h, spec.fit), cover));
-                            }
+                        let decoded = decode_cover(&store, &spec.key, spec.w, spec.h, spec.fit);
+                        let mut s = shared.0.lock().unwrap();
+                        s.in_flight = None;
+                        if let Ok(cover) = decoded
+                            && !s.stop
+                            && s.generation == generation
+                        {
+                            s.ready.push((key, cover));
                         }
+                        shared.1.notify_all();
                     }
                 })
                 .expect("start thumbnail prefetcher"),
@@ -173,6 +170,26 @@ impl Prefetcher {
         std::mem::take(&mut self.shared.0.lock().unwrap().ready)
     }
 
+    /// Waits briefly if the worker is already decoding `key` (avoiding a
+    /// duplicate decode on the UI thread), and drops `key` from the pending
+    /// queue so the worker moves straight to the next cover.
+    fn wait_or_claim(&self, key: &ThumbnailKey, max_wait: std::time::Duration) {
+        let mut s = self.shared.0.lock().unwrap();
+        let deadline = std::time::Instant::now() + max_wait;
+        while !s.stop && s.in_flight.as_ref() == Some(key) {
+            let rem = deadline.saturating_duration_since(std::time::Instant::now());
+            if rem.is_zero() {
+                break;
+            }
+            let (guard, timeout) = self.shared.1.wait_timeout(s, rem).unwrap();
+            s = guard;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+        s.queue.retain(|spec| !(spec.key == key.0 && spec.w == key.1 && spec.h == key.2 && spec.fit == key.3));
+    }
+
     fn cancel(&self) {
         let mut s = self.shared.0.lock().unwrap();
         s.generation = s.generation.wrapping_add(1);
@@ -183,7 +200,7 @@ impl Prefetcher {
     #[cfg(test)]
     fn wait_idle(&self) {
         let mut s = self.shared.0.lock().unwrap();
-        while !s.stop && (!s.queue.is_empty() || s.active) {
+        while !s.stop && (!s.queue.is_empty() || s.in_flight.is_some()) {
             s = self.shared.1.wait(s).unwrap();
         }
     }
@@ -226,7 +243,7 @@ pub(super) struct Thumbnails {
     new_sizes: Vec<(u32, u32)>,
     prefetcher: Option<Prefetcher>,
     /// What the prefetcher was last asked for.
-    prefetching: HashSet<ThumbnailKey>,
+    pub(super) prefetching: HashSet<ThumbnailKey>,
 }
 
 impl Thumbnails {
@@ -332,6 +349,12 @@ impl Thumbnails {
         }
         let cache_key = (key.clone(), w, h, fit);
         if !self.images.contains_key(&cache_key) {
+            self.absorb_prefetched();
+        }
+        if !self.images.contains_key(&cache_key)
+            && let Some(p) = &self.prefetcher
+        {
+            p.wait_or_claim(&cache_key, std::time::Duration::from_millis(50));
             self.absorb_prefetched();
         }
         if !self.images.contains_key(&cache_key) {
