@@ -835,6 +835,7 @@ mod tests {
                     changed: Box::new(|| {}),
                     books: Some(books),
                     dictionaries: None,
+                    files: None,
                 },
             ));
             let server = Server::start("127.0.0.1:0".parse().unwrap(), api, Timeouts::default()).unwrap();

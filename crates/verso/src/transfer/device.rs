@@ -41,6 +41,9 @@ pub struct Device {
     pub markers: PathBuf,
     /// Free space is reported for this folder.
     pub storage: PathBuf,
+    /// The Files tab's root: `/mnt/us` on the Kindle, a test folder in the
+    /// simulator (never `/`).
+    pub files_root: PathBuf,
     /// Reads available bytes on the filesystem containing the given folder.
     pub free_space: FreeSpace,
     pub network_wait: Duration,
@@ -85,6 +88,7 @@ fn kindle() -> Device {
         local_names: Vec::new(),
         markers: PathBuf::from("/tmp"),
         storage: PathBuf::from("/mnt/us"),
+        files_root: PathBuf::from("/mnt/us"),
         free_space: Arc::new(crate::update::download::free_space),
         network_wait: NETWORK_WAIT,
         idle: IDLE,
@@ -142,6 +146,7 @@ pub fn simulator(storage: PathBuf, options: &str) -> Device {
         local_names: vec!["127.0.0.1".into(), "localhost".into()],
         markers: std::env::temp_dir().join("verso-simulator"),
         storage,
+        files_root: super::files::simulator_root(),
         free_space: Arc::new(crate::update::download::free_space),
         network_wait: NETWORK_WAIT,
         idle: IDLE,
@@ -248,8 +253,9 @@ pub mod fake {
             }),
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             local_names: vec!["127.0.0.1".into()],
-            markers,
+            markers: markers.clone(),
             storage: std::env::temp_dir(),
+            files_root: markers.clone(),
             free_space: Arc::new(crate::update::download::free_space),
             network_wait: Duration::from_millis(300),
             idle: Duration::from_millis(400),

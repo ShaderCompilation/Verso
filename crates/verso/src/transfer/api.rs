@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use super::auth::{self, Auth, Login};
 use super::books::Books;
 use super::dictionaries::Dictionaries;
+use super::files::Files;
 use super::http::{Body, Method, Request, Response};
 use super::server::Handler;
 
@@ -31,6 +32,8 @@ pub struct Context {
     pub books: Option<Books>,
     /// Dictionaries tab handlers; None only in minimal unit tests.
     pub dictionaries: Option<Dictionaries>,
+    /// Files tab handlers; None only in minimal unit tests.
+    pub files: Option<Files>,
 }
 
 pub struct Api {
@@ -129,8 +132,20 @@ impl Api {
                 let id = batch_commit_segment(p).unwrap();
                 self.dictionaries().map_or_else(not_found, |d| d.commit_batch(id))
             }
+            (Method::Get, "/api/files") => self.files().map_or_else(not_found, |f| f.list(request)),
+            (Method::Get, "/api/files/download") => self.files().map_or_else(not_found, |f| f.download(request)),
+            (Method::Get, "/api/files/info") => self.files().map_or_else(not_found, |f| f.info(request)),
+            (Method::Put, "/api/files") => self.files().map_or_else(not_found, |f| f.upload(request, body)),
+            (Method::Delete, "/api/files") => self.files().map_or_else(not_found, |f| f.delete(request)),
+            (Method::Post, "/api/files/mkdir") => self.files().map_or_else(not_found, |f| f.mkdir(body)),
+            (Method::Post, "/api/files/rename") => self.files().map_or_else(not_found, |f| f.rename(body)),
+            (Method::Post, "/api/files/move") => self.files().map_or_else(not_found, |f| f.move_to(body)),
             _ => not_found(),
         }
+    }
+
+    fn files(&self) -> Option<&Files> {
+        self.cx.files.as_ref()
     }
 
     fn books(&self) -> Option<&Books> {
@@ -300,6 +315,7 @@ mod tests {
                 }),
                 books: None,
                 dictionaries: None,
+                files: None,
             },
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api.clone(), Timeouts::default()).unwrap();

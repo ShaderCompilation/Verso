@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::{Family, HAlign, Icon, TextStyle, Weight};
-use crate::library::worker::CoverPause;
+use crate::library::worker::{CoverPause, Worker as LibraryWorker};
 use crate::platform::Waker;
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::Store;
@@ -24,6 +24,8 @@ pub struct TransferScreen {
     session: Session,
     /// Pauses library cover work while this screen is open; released on Done/Drop.
     cover_pause: Option<CoverPause>,
+    /// Rescanned after Done when the Files tab changed a library folder.
+    library: LibraryWorker,
     snapshot: Snapshot,
     revision: u64,
     /// A phase forced for a simulator capture: nothing runs.
@@ -127,8 +129,14 @@ impl TransferScreen {
         let forced = device.forced.is_some();
         let library = store.library_worker(waker.clone());
         let cover_pause = Some(library.pause_covers());
-        let session =
-            Session::start(Arc::new(device), store.clone(), library, waker, settings.hostname, settings.developer);
+        let session = Session::start(
+            Arc::new(device),
+            store.clone(),
+            library.clone(),
+            waker,
+            settings.hostname,
+            settings.developer,
+        );
         let snapshot = session.snapshot();
         let revision = session.revision();
         let mut this = Self {
@@ -136,6 +144,7 @@ impl TransferScreen {
             top,
             session,
             cover_pause,
+            library,
             snapshot,
             revision,
             forced,
@@ -150,6 +159,23 @@ impl TransferScreen {
         };
         this.sync();
         this
+    }
+
+    /// Stops the session, resumes cover work, and rescans what the web app
+    /// changed: the library after Files tab changes in a library folder, the
+    /// dictionary catalog after dictionary changes.
+    fn finish(&mut self) {
+        self.session.close();
+        self.cover_pause = None;
+        if self.session.library_changed() {
+            log::info!("Wi-Fi transfer: library files changed, rescanning");
+            self.library.rescan();
+        }
+        if self.session.dictionaries_changed()
+            && let Some(service) = self.store.dictionary_service.get()
+        {
+            service.rescan();
+        }
     }
 
     fn begin_closing(&mut self) {
@@ -425,13 +451,7 @@ impl Screen for TransferScreen {
 
     /// Exiting (also to connect USB) stops the server and puts Wi-Fi back.
     fn on_quit(&mut self) -> anyhow::Result<()> {
-        self.session.close();
-        self.cover_pause = None;
-        if self.session.dictionaries_changed()
-            && let Some(service) = self.store.dictionary_service.get()
-        {
-            service.rescan();
-        }
+        self.finish();
         Ok(())
     }
 
@@ -446,13 +466,7 @@ impl Screen for TransferScreen {
 
     /// "Stopping…" is on screen: stop, then leave.
     fn run_pending_work(&mut self, _cx: &mut EventCx) -> Action {
-        self.session.close();
-        self.cover_pause = None;
-        if self.session.dictionaries_changed()
-            && let Some(service) = self.store.dictionary_service.get()
-        {
-            service.rescan();
-        }
+        self.finish();
         Action::Pop
     }
 }
@@ -575,5 +589,81 @@ mod tests {
         assert!(!part.exists(), "confirmed stop deletes the part file");
         assert!(!books_dir.join("Stalled.epub").exists());
         assert!(!screen.session.receiving());
+    }
+
+    #[test]
+    fn done_rescans_the_library_after_files_tab_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        // The fake device roots the Files tab in its marker folder.
+        let files_root = dir.path().join("markers");
+        let books_dir = files_root.join("documents");
+        std::fs::create_dir_all(&books_dir).unwrap();
+        let store = Store::at(dir.path().join("data"));
+        store.save_library_folders(vec![books_dir.clone()]).unwrap();
+        let net = Arc::new(Mutex::new(Net { wifi: true, address: Some(Ipv4Addr::LOCALHOST), ..Net::default() }));
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut dev = fake_device(&net, files_root.clone());
+        dev.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let theme = Theme::for_dpi(300);
+        let bounds = Rect::new(0, 0, 1272, 1696);
+        let mut screen = TransferScreen::with_device(&theme, bounds, store, dev, Waker::new(|| {}));
+        let started = Instant::now();
+        while screen.session.snapshot().phase != Phase::Ready {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Let the opening scan of the empty library finish.
+        let started = Instant::now();
+        while screen.library.take_status().is_none_or(|s| s.working) {
+            assert!(started.elapsed() < Duration::from_secs(10), "initial scan timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let send = |head: String, body: &[u8]| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let head = format!(
+                "{head}Host: 127.0.0.1:{port}\r\nX-Verso-Request: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+        let code = screen.session.snapshot().code;
+        let login = send("POST /api/login HTTP/1.1\r\n".into(), format!("{{\"code\":\"{code}\"}}").as_bytes());
+        let cookie = login.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap().split(';').next().unwrap();
+        let book = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub"))
+            .unwrap();
+        let put = send(format!("PUT /api/files?path=documents/New.epub HTTP/1.1\r\nCookie: {cookie}\r\n"), &book);
+        assert!(put.starts_with("HTTP/1.1 201"), "{put}");
+        assert!(screen.session.library_changed());
+        assert!(screen.library.current().books.is_empty(), "the Files tab doesn't touch the index itself");
+
+        screen.begin_closing();
+        let mut frontlight = None;
+        let mut light_request = None;
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut needs_redraw = false;
+        let mut cx = EventCx {
+            theme: &theme,
+            screen: bounds,
+            now: Instant::now(),
+            frontlight: &mut frontlight,
+            light_request: &mut light_request,
+            battery: None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut needs_redraw,
+        };
+        assert!(matches!(screen.run_pending_work(&mut cx), Action::Pop));
+        let started = Instant::now();
+        while !screen.library.current().books.iter().any(|b| b.path == books_dir.join("New.epub")) {
+            assert!(started.elapsed() < Duration::from_secs(10), "Done didn't rescan the library");
+            std::thread::sleep(Duration::from_millis(15));
+        }
     }
 }

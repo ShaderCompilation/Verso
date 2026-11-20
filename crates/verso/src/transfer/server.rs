@@ -291,7 +291,6 @@ impl PartFile {
     }
 
     /// Flushes the file to storage and renames it to `to`.
-    #[cfg_attr(not(test), allow(dead_code))] // used by overwrite uploads (Phase 4) and tests
     pub fn finish(mut self, to: &Path) -> io::Result<()> {
         self.sync_and_close()?;
         std::fs::rename(&self.path, to)?;

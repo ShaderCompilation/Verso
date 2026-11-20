@@ -6,15 +6,27 @@ use std::path::{Path, PathBuf};
 
 const WINDOWS_RESERVED: [char; 8] = ['\\', ':', '*', '?', '"', '<', '>', '|'];
 
+/// The longest name the Kindle's storage takes, in bytes.
+pub const MAX_NAME_BYTES: usize = 255;
+
+/// The character rules every name Verso creates follows, shared by the
+/// library's folder actions and Wi-Fi transfer's Files tab (which, unlike
+/// `validate_name`, must allow dotfiles and `.sdr` folders).
+pub fn check_name(name: &str) -> Result<()> {
+    ensure!(!name.contains('/'), "Names cannot contain /");
+    ensure!(!name.chars().any(char::is_control), "Names cannot contain control characters");
+    // Linux allows these, but a Windows computer reading the Kindle over USB
+    // can't show or copy a file whose name has them.
+    ensure!(!name.contains(WINDOWS_RESERVED), "Names cannot contain \\ : * ? \" < > |");
+    ensure!(name.len() <= MAX_NAME_BYTES, "Names can be at most {MAX_NAME_BYTES} bytes long");
+    Ok(())
+}
+
 pub fn validate_name(parent: &Path, name: &str) -> Result<PathBuf> {
     let name = name.trim();
     ensure!(!name.is_empty(), "Enter a folder name");
     ensure!(!name.starts_with('.'), "Names cannot begin with a dot");
-    ensure!(!name.contains('/'), "Names cannot contain /");
-    ensure!(!name.chars().any(char::is_control), "Names cannot contain control characters");
-    // Linux allows these, but a Windows computer reading the Kindle over USB
-    // can't show or copy a folder whose name has them.
-    ensure!(!name.contains(WINDOWS_RESERVED), "Names cannot contain \\ : * ? \" < > |");
+    check_name(name)?;
     ensure!(!name.ends_with(".sdr"), "Names ending in .sdr are reserved for reading data");
     let target = parent.join(name);
     match std::fs::symlink_metadata(&target) {

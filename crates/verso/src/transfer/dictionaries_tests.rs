@@ -74,6 +74,7 @@ impl Env {
                 changed: Box::new(|| {}),
                 books: None,
                 dictionaries: Some(dictionaries),
+                files: None,
             },
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api.clone(), Timeouts::default()).unwrap();

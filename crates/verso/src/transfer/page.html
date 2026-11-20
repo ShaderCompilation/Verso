@@ -163,6 +163,32 @@ details.group[open] summary::before { content: "▾"; }
 .modal h3 { margin: 0 0 .5rem; font: 600 1.1rem/1.3 Georgia, "Times New Roman", serif; }
 .modal p { margin: 0 0 1.15rem; color: var(--ink2); }
 .modal-actions { display: flex; gap: .5rem; justify-content: flex-end; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: .1rem; margin: 0 0 .85rem; font-size: .95rem; }
+.crumbs button { border: 0; background: none; padding: .2rem .35rem; color: var(--ink2); }
+.crumbs button:last-child { color: var(--ink); font-weight: 600; }
+.crumbs .sep { color: var(--line); }
+.shortcuts { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .85rem; }
+.shortcuts button { font-size: .9rem; padding: .35rem .7rem; }
+.shortcuts button[aria-pressed="true"] { border-color: var(--ink); font-weight: 600; }
+.readonly-note { display: flex; gap: .45rem; align-items: center; color: var(--ink2); font-size: .92rem; margin: 0 0 .5rem; }
+.readonly-note svg, .lock svg { width: 1rem; height: 1rem; stroke: currentColor; fill: none; stroke-width: 1.8; }
+.lock { display: inline-flex; color: var(--ink2); }
+.file-name { display: flex; gap: .5rem; align-items: center; min-width: 0; }
+.file-name svg { flex: none; width: 1.1rem; height: 1.1rem; stroke: var(--ink2); fill: none; stroke-width: 1.7; stroke-linejoin: round; }
+.file-name button { border: 0; background: none; padding: 0; text-align: left; font-weight: 500; word-break: break-word; }
+.file-name button:hover { text-decoration: underline; }
+.file-name span { word-break: break-word; }
+.switch { display: inline-flex; gap: .4rem; align-items: center; color: var(--ink2); font-size: .92rem; cursor: pointer; }
+.modal input[type="text"] { width: 100%; margin-bottom: .25rem; }
+.modal .error { margin: .25rem 0 .5rem; }
+.move-where { display: flex; flex-wrap: wrap; gap: .1rem; font-size: .9rem; margin-bottom: .4rem; }
+.move-where button { border: 0; background: none; padding: .15rem .3rem; color: var(--ink2); }
+.move-list { list-style: none; margin: 0 0 .5rem; padding: 0; max-height: 14rem; overflow-y: auto; border: 1px solid var(--line); border-radius: .45rem; }
+.move-list li { border-top: 1px solid var(--line); }
+.move-list li:first-child { border-top: 0; }
+.move-list button { width: 100%; justify-content: flex-start; border: 0; border-radius: 0; }
+.move-list svg { width: 1rem; height: 1rem; stroke: var(--ink2); fill: none; stroke-width: 1.7; }
+.move-list .none { padding: .5rem .75rem; color: var(--ink2); font-size: .9rem; }
 </style>
 </head>
 <body>
@@ -283,7 +309,46 @@ details.group[open] summary::before { content: "▾"; }
       <div id="dict-list"></div>
     </section>
     <section role="tabpanel" id="files" aria-labelledby="tab-files" hidden>
-      <p class="empty">Browsing the Kindle's files comes next.</p>
+      <div id="files-shortcuts" class="shortcuts"></div>
+      <div id="files-crumbs" class="crumbs"></div>
+      <p id="files-readonly" class="readonly-note" hidden></p>
+      <div id="files-drop" class="drop">
+        <div class="drop-main">
+          <span>Drop files here, or</span>
+          <button type="button" class="primary" id="files-pick">Choose files</button>
+          <input type="file" id="files-input" multiple hidden>
+          <button type="button" id="files-mkdir-toggle">+ New folder</button>
+        </div>
+        <form id="files-mkdir-form" class="mkdir-row" hidden>
+          <input type="text" id="files-mkdir-name" placeholder="Folder name" aria-label="New folder name" required>
+          <button type="submit" class="primary">Create</button>
+          <button type="button" id="files-mkdir-cancel">Cancel</button>
+        </form>
+      </div>
+
+      <div id="files-upload-box" class="upload-box" hidden>
+        <div class="upload-head">
+          <div>
+            <span>Uploading </span>
+            <span id="files-upload-name" class="upload-name"></span>
+            <span id="files-upload-pct" class="upload-meta"></span>
+          </div>
+          <div>
+            <span id="files-upload-queued" class="upload-meta"></span>
+            <button type="button" class="ghost" id="files-upload-cancel">Cancel</button>
+          </div>
+        </div>
+        <progress id="files-upload-bar" max="100" value="0"></progress>
+      </div>
+
+      <div id="files-notices" class="notices" aria-live="polite"></div>
+
+      <div class="toolbar">
+        <span id="files-count" class="hl-summary"></span>
+        <label class="switch"><input type="checkbox" id="files-hidden"> Show hidden files</label>
+      </div>
+
+      <div id="files-list"></div>
     </section>
   </main>
 </div>
@@ -299,6 +364,34 @@ details.group[open] summary::before { content: "▾"; }
   </div>
 </div>
 
+<div id="dialog-backdrop" class="modal-backdrop" hidden>
+  <form class="modal" id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <h3 id="dialog-title"></h3>
+    <p id="dialog-text"></p>
+    <div id="dialog-body"></div>
+    <p class="error" id="dialog-error" role="alert"></p>
+    <div class="modal-actions">
+      <button type="button" id="dialog-cancel">Cancel</button>
+      <button type="submit" class="primary" id="dialog-ok">OK</button>
+    </div>
+  </form>
+</div>
+
+<template id="icon-folder">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"/></svg>
+</template>
+<template id="icon-file">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+</template>
+<template id="icon-rename">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/></svg>
+</template>
+<template id="icon-move">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v11H3z"/><path d="M10 13h6"/><path d="M13 10l3 3-3 3"/></svg>
+</template>
+<template id="icon-lock">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="1.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+</template>
 <template id="icon-download">
   <svg viewBox="0 0 24 24" aria-hidden="true">
     <path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>
@@ -410,6 +503,9 @@ function select(name) {
   }
   if (!$("app").hidden && name === "dictionaries") {
     loadDictionaries().catch(() => {});
+  }
+  if (!$("app").hidden && name === "files") {
+    loadFiles().catch(() => {});
   }
 }
 select("books");
@@ -1161,12 +1257,482 @@ dictDrop.addEventListener("drop", (ev) => {
   if (ev.dataTransfer && ev.dataTransfer.files.length > 0) queueDictFiles(ev.dataTransfer.files);
 });
 
+// ---- Dialog (Files tab): a question, or a form with its own body ----
+
+let dialog = null;
+function openDialog(options) {
+  dialog = options;
+  $("dialog-title").textContent = options.title;
+  $("dialog-text").textContent = options.text || "";
+  $("dialog-text").hidden = !options.text;
+  $("dialog-body").replaceChildren(...(options.body ? [options.body] : []));
+  $("dialog-error").textContent = "";
+  $("dialog-ok").textContent = options.ok || "OK";
+  $("dialog-ok").className = options.danger ? "danger" : "primary";
+  $("dialog-ok").disabled = false;
+  $("dialog-backdrop").hidden = false;
+  (options.focus || $("dialog-cancel")).focus();
+}
+function closeDialog(result) {
+  const closing = dialog;
+  dialog = null;
+  $("dialog-backdrop").hidden = true;
+  if (closing && closing.onClose) closing.onClose(result);
+}
+function ask(title, text, ok, danger) {
+  return new Promise((resolve) => openDialog({ title, text, ok, danger, onClose: resolve }));
+}
+$("dialog").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const current = dialog;
+  if (!current) return;
+  $("dialog-ok").disabled = true;
+  try {
+    const error = current.onOk ? await current.onOk() : null;
+    if (dialog !== current) return;
+    if (error) {
+      $("dialog-error").textContent = error;
+      return;
+    }
+    closeDialog(true);
+  } finally {
+    if (dialog === current) $("dialog-ok").disabled = false;
+  }
+});
+$("dialog-cancel").addEventListener("click", () => closeDialog(false));
+$("dialog-backdrop").addEventListener("click", (ev) => {
+  if (ev.target === $("dialog-backdrop")) closeDialog(false);
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !$("dialog-backdrop").hidden) closeDialog(false);
+});
+
+// ---- Files tab ----
+
+let filesPath = "";
+let filesData = null;
+let filesQueue = [];
+let activeFilesXhr = null;
+
+function addFilesNotice(text, isError) {
+  addNoticeTo("files-notices", text, isError);
+}
+
+function quoted(name) {
+  return "“" + name + "”";
+}
+
+async function loadFiles(path = filesPath) {
+  const params = new URLSearchParams({ path });
+  if ($("files-hidden").checked) params.set("hidden", "1");
+  const response = await call("/api/files?" + params.toString());
+  if (response.status === 401) {
+    show("signin");
+    return;
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    addFilesNotice(data.error || "Couldn't open that folder.", true);
+    if (path !== "") await loadFiles("");
+    return;
+  }
+  filesPath = data.path;
+  filesData = data;
+  renderFiles();
+}
+
+function crumbButtons(container, crumbs, onClick) {
+  container.replaceChildren();
+  crumbs.forEach((crumb, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = "/";
+      container.appendChild(sep);
+    }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = crumb.name;
+    b.addEventListener("click", () => onClick(crumb.path));
+    container.appendChild(b);
+  });
+}
+
+function iconButton(icon, label, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = icon === "icon-trash" ? "icon-btn del" : "icon-btn";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.appendChild(svgIcon(icon));
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function renderFiles() {
+  const data = filesData;
+  const shortcuts = $("files-shortcuts");
+  shortcuts.replaceChildren();
+  for (const s of data.shortcuts || []) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = s.label;
+    b.setAttribute("aria-pressed", s.path === data.path);
+    b.addEventListener("click", () => loadFiles(s.path).catch(() => {}));
+    shortcuts.appendChild(b);
+  }
+  crumbButtons($("files-crumbs"), data.crumbs || [], (path) => loadFiles(path).catch(() => {}));
+  $("files-drop").hidden = !data.writable;
+  const note = $("files-readonly");
+  note.hidden = data.writable;
+  note.replaceChildren(svgIcon("icon-lock"), document.createTextNode("This folder is read-only."));
+
+  const entries = data.entries || [];
+  const folders = entries.filter((e) => e.dir).length;
+  const files = entries.length - folders;
+  const parts = [];
+  if (folders) parts.push(folders === 1 ? "1 folder" : folders + " folders");
+  if (files) parts.push(files === 1 ? "1 file" : files + " files");
+  $("files-count").textContent = parts.join(", ");
+
+  const list = $("files-list");
+  list.replaceChildren();
+  if (entries.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "This folder is empty.";
+    list.appendChild(p);
+    return;
+  }
+  const ul = document.createElement("ul");
+  ul.className = "card-list";
+  for (const entry of entries) {
+    const li = document.createElement("li");
+    li.className = "book-row";
+    const info = document.createElement("div");
+    info.className = "book-info file-name";
+    info.appendChild(svgIcon(entry.dir ? "icon-folder" : "icon-file"));
+    if (entry.dir) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = entry.name;
+      open.addEventListener("click", () => loadFiles(entry.path).catch(() => {}));
+      info.appendChild(open);
+    } else {
+      const name = document.createElement("span");
+      name.textContent = entry.name;
+      info.appendChild(name);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "book-meta";
+    if (typeof entry.size === "number") {
+      const sz = document.createElement("span");
+      sz.textContent = entry.size < 1000 ? entry.size + " B" : size(entry.size);
+      meta.appendChild(sz);
+    }
+    if (typeof entry.modified === "number") {
+      const date = document.createElement("span");
+      date.textContent = new Date(entry.modified * 1000).toLocaleDateString();
+      meta.appendChild(date);
+    }
+    if (!entry.dir) {
+      const a = document.createElement("a");
+      a.className = "icon-btn";
+      a.href = "/api/files/download?" + new URLSearchParams({ path: entry.path }).toString();
+      a.setAttribute("download", entry.name);
+      a.title = "Download";
+      a.setAttribute("aria-label", "Download " + entry.name);
+      a.appendChild(svgIcon("icon-download"));
+      meta.appendChild(a);
+    }
+    if (entry.writable) {
+      meta.appendChild(iconButton("icon-rename", "Rename " + entry.name, () => renameEntry(entry)));
+      meta.appendChild(iconButton("icon-move", "Move " + entry.name, () => moveEntry(entry)));
+      meta.appendChild(iconButton("icon-trash", "Delete " + entry.name, () => deleteEntry(entry).catch(() => {})));
+    } else if (entry.readonly) {
+      const lock = document.createElement("span");
+      lock.className = "lock";
+      lock.title = "Read-only";
+      lock.appendChild(svgIcon("icon-lock"));
+      meta.appendChild(lock);
+    }
+    li.append(info, meta);
+    ul.appendChild(li);
+  }
+  list.appendChild(ul);
+}
+
+async function postFiles(what, body) {
+  const response = await call("/api/files/" + what, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    closeDialog(false);
+    show("signin");
+    return null;
+  }
+  const data = await response.json().catch(() => ({}));
+  return { ok: response.ok, data };
+}
+
+function renameEntry(entry) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = entry.name;
+  input.setAttribute("aria-label", "New name");
+  openDialog({
+    title: "Rename " + quoted(entry.name),
+    body: input,
+    ok: "Rename",
+    focus: input,
+    onOk: async () => {
+      const name = input.value.trim();
+      if (!name) return "Enter a name.";
+      const result = await postFiles("rename", { path: entry.path, name });
+      if (!result) return null;
+      if (!result.ok) return result.data.error || "Couldn't rename it.";
+      await loadFiles();
+      return null;
+    },
+  });
+  const dot = entry.dir ? -1 : entry.name.lastIndexOf(".");
+  input.setSelectionRange(0, dot > 0 ? dot : entry.name.length);
+}
+
+function moveEntry(entry) {
+  const box = document.createElement("div");
+  const where = document.createElement("div");
+  where.className = "move-where";
+  const list = document.createElement("ul");
+  list.className = "move-list";
+  box.append(where, list);
+  const from = entry.path.split("/").slice(0, -1).join("/");
+  let destination = from;
+  async function browse(path) {
+    const response = await call("/api/files?" + new URLSearchParams({ path }).toString());
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || dialog === null) return;
+    destination = data.path;
+    crumbButtons(where, data.crumbs || [], (p) => browse(p).catch(() => {}));
+    list.replaceChildren();
+    const folders = (data.entries || []).filter((e) => e.dir && e.path !== entry.path);
+    for (const folder of folders) {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.appendChild(svgIcon("icon-folder"));
+      b.appendChild(document.createTextNode(folder.name));
+      b.addEventListener("click", () => browse(folder.path).catch(() => {}));
+      li.appendChild(b);
+      list.appendChild(li);
+    }
+    if (folders.length === 0) {
+      const li = document.createElement("li");
+      li.className = "none";
+      li.textContent = "No folders here.";
+      list.appendChild(li);
+    }
+    $("dialog-ok").disabled = !data.writable || destination === from;
+    $("dialog-error").textContent = data.writable ? "" : "This folder is read-only.";
+  }
+  openDialog({
+    title: "Move " + quoted(entry.name),
+    body: box,
+    ok: "Move here",
+    onOk: async () => {
+      const result = await postFiles("move", { path: entry.path, to: destination });
+      if (!result) return null;
+      if (!result.ok) return result.data.error || "Couldn't move it.";
+      await loadFiles();
+      return null;
+    },
+  });
+  browse(from).catch(() => {});
+}
+
+function describeContents(info) {
+  if (info.files === 0 && info.folders === 0) return "This folder is empty.";
+  const files = info.files === 1 ? "1 file" : info.files + " files";
+  const folders = info.folders === 1 ? "1 folder" : info.folders + " folders";
+  const amount = (info.more ? "more than " : "") + files + " and " + folders;
+  return "This folder holds " + amount + " (" + size(info.bytes) + "). Everything in it is deleted.";
+}
+
+async function deleteEntry(entry) {
+  let text = "This removes the file from the Kindle.";
+  if (entry.dir) {
+    const response = await call("/api/files/info?" + new URLSearchParams({ path: entry.path }).toString());
+    text = response.ok ? describeContents(await response.json()) : "This removes the folder and everything in it.";
+  }
+  if (!(await ask("Delete " + quoted(entry.name) + "?", text, "Delete", true))) return;
+  const params = new URLSearchParams({ path: entry.path });
+  if (entry.twice) {
+    const second = entry.name.toLowerCase() === "koreader"
+      ? "KOReader and all its settings, reading progress and highlights will be gone. This can't be undone."
+      : "This is a library folder: every book in it is deleted, with its reading progress. This can't be undone.";
+    if (!(await ask("Delete all of " + quoted(entry.name) + "?", second, "Delete everything", true))) return;
+    params.set("confirm", "2");
+  }
+  const response = await call("/api/files?" + params.toString(), { method: "DELETE" });
+  if (response.status === 401) {
+    show("signin");
+    return;
+  }
+  const data = await response.json().catch(() => ({}));
+  if (response.ok) addFilesNotice("Deleted " + quoted(entry.name) + ".", false);
+  else addFilesNotice(data.error || "Couldn't delete it.", true);
+  await Promise.all([loadFiles(), loadStatus()]);
+}
+
+function updateFilesQueueUi() {
+  $("files-upload-box").hidden = !activeFilesXhr && filesQueue.length === 0;
+  $("files-upload-queued").textContent = filesQueue.length > 0 ? filesQueue.length + " more queued" : "";
+}
+
+function sendFilesPut(url, file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    activeFilesXhr = xhr;
+    xhr.open("PUT", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("X-Verso-Request", "1");
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable && ev.total > 0) {
+        const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+        $("files-upload-bar").value = pct;
+        $("files-upload-pct").textContent = " " + pct + "%";
+      }
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
+      resolve({ status: xhr.status, data });
+    };
+    xhr.onerror = () => reject(new Error("network"));
+    xhr.onabort = () => reject(new Error("aborted"));
+    xhr.send(file);
+  });
+}
+
+function queueFilesUpload(fileList) {
+  for (const file of fileList) filesQueue.push({ file, folder: filesPath });
+  updateFilesQueueUi();
+  if (!activeFilesXhr) runNextFilesUpload();
+}
+
+async function runNextFilesUpload() {
+  const item = filesQueue.shift();
+  if (!item) {
+    activeFilesXhr = null;
+    updateFilesQueueUi();
+    return;
+  }
+  const path = (item.folder ? item.folder + "/" : "") + item.file.name;
+  let overwrite = false;
+  for (;;) {
+    $("files-upload-name").textContent = item.file.name;
+    $("files-upload-pct").textContent = " 0%";
+    $("files-upload-bar").value = 0;
+    activeFilesXhr = true;
+    updateFilesQueueUi();
+    const params = new URLSearchParams({ path });
+    if (overwrite) params.set("overwrite", "1");
+    let result;
+    try {
+      result = await sendFilesPut("/api/files?" + params.toString(), item.file);
+    } catch (e) {
+      if (e && e.message === "aborted") {
+        addFilesNotice("Cancelled " + item.file.name + ".", false);
+        break;
+      }
+      filesQueue = [];
+      activeFilesXhr = null;
+      updateFilesQueueUi();
+      show("gone");
+      return;
+    }
+    if (result.status === 401) {
+      filesQueue = [];
+      activeFilesXhr = null;
+      updateFilesQueueUi();
+      show("signin");
+      return;
+    }
+    if (result.status === 409 && result.data.exists && !overwrite) {
+      const replace = await ask("Replace " + quoted(item.file.name) + "?",
+        "A file with this name is already in this folder.", "Replace", true);
+      if (replace) {
+        overwrite = true;
+        continue;
+      }
+      addFilesNotice("Kept the file already there: " + item.file.name + ".", false);
+    } else if (result.status >= 200 && result.status < 300) {
+      addFilesNotice("Uploaded " + item.file.name + ".", false);
+    } else {
+      addFilesNotice(item.file.name + ": " + (result.data.error || "Upload failed (" + result.status + ")."), true);
+    }
+    break;
+  }
+  if (item.folder === filesPath) await loadFiles().catch(() => {});
+  loadStatus().catch(() => {});
+  runNextFilesUpload();
+}
+
+$("files-upload-cancel").addEventListener("click", () => {
+  if (activeFilesXhr && activeFilesXhr.abort) activeFilesXhr.abort();
+});
+$("files-pick").addEventListener("click", () => $("files-input").click());
+$("files-input").addEventListener("change", () => {
+  if ($("files-input").files.length > 0) {
+    queueFilesUpload($("files-input").files);
+    $("files-input").value = "";
+  }
+});
+const filesDrop = $("files-drop");
+filesDrop.addEventListener("dragover", (ev) => {
+  ev.preventDefault();
+  filesDrop.classList.add("over");
+});
+filesDrop.addEventListener("dragleave", () => filesDrop.classList.remove("over"));
+filesDrop.addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  filesDrop.classList.remove("over");
+  if (ev.dataTransfer && ev.dataTransfer.files.length > 0) queueFilesUpload(ev.dataTransfer.files);
+});
+$("files-hidden").addEventListener("change", () => loadFiles().catch(() => {}));
+$("files-mkdir-toggle").addEventListener("click", () => {
+  $("files-mkdir-form").hidden = false;
+  $("files-mkdir-name").focus();
+});
+$("files-mkdir-cancel").addEventListener("click", () => {
+  $("files-mkdir-form").hidden = true;
+  $("files-mkdir-name").value = "";
+});
+$("files-mkdir-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const name = $("files-mkdir-name").value.trim();
+  if (!name) return;
+  const result = await postFiles("mkdir", { path: filesPath, name });
+  if (!result) return;
+  if (!result.ok) {
+    addFilesNotice(result.data.error || "Couldn't create the folder.", true);
+    return;
+  }
+  $("files-mkdir-form").hidden = true;
+  $("files-mkdir-name").value = "";
+  await loadFiles();
+});
+
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && !$("app").hidden) {
     loadStatus().then((ok) => {
       if (!ok) return;
       loadBooks().catch(() => {});
       if (activeTab === "dictionaries") loadDictionaries().catch(() => {});
+      if (activeTab === "files") loadFiles().catch(() => {});
     }).catch(() => {});
   }
 });

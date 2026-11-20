@@ -15,6 +15,7 @@ mod auth;
 mod books;
 mod device;
 mod dictionaries;
+mod files;
 mod http;
 mod server;
 
@@ -32,6 +33,7 @@ use api::{Api, Context};
 use auth::Auth;
 use books::{ActivitySink, Books};
 use dictionaries::Dictionaries;
+use files::Files;
 use server::{Server, Timeouts};
 
 pub use device::Device;
@@ -139,6 +141,9 @@ pub struct Session {
     /// Set when any dictionary is installed or deleted during this session, so
     /// Done triggers a catalog rescan.
     dictionaries_changed: Arc<AtomicBool>,
+    /// Set when the Files tab changed something in a library folder, so Done
+    /// runs one incremental rescan.
+    library_changed: Arc<AtomicBool>,
 }
 
 struct Shared {
@@ -270,6 +275,7 @@ impl Session {
             developer,
             last_code: String::new(),
             dictionaries_changed: Arc::new(AtomicBool::new(false)),
+            library_changed: Arc::new(AtomicBool::new(false)),
         };
         session.spawn();
         session
@@ -356,7 +362,16 @@ impl Session {
         let dictionaries = Dictionaries::new(
             self.store.clone(),
             self.device.free_space.clone(),
+            activity.clone(),
+            self.dictionaries_changed.clone(),
+        );
+        let files = Files::new(
+            self.device.files_root.clone(),
+            self.store.clone(),
+            self.device.free_space.clone(),
             activity,
+            self.developer,
+            self.library_changed.clone(),
             self.dictionaries_changed.clone(),
         );
         Context {
@@ -366,6 +381,7 @@ impl Session {
             changed: Box::new(changed),
             books: Some(books),
             dictionaries: Some(dictionaries),
+            files: Some(files),
         }
     }
 
@@ -390,6 +406,11 @@ impl Session {
     /// True if any dictionary was installed or deleted during this session.
     pub fn dictionaries_changed(&self) -> bool {
         self.dictionaries_changed.load(Ordering::SeqCst)
+    }
+
+    /// True if the Files tab changed something in a library folder.
+    pub fn library_changed(&self) -> bool {
+        self.library_changed.load(Ordering::SeqCst)
     }
 
     /// Changes whenever the snapshot may have.
