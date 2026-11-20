@@ -13,6 +13,7 @@
 #include "lvdrawbuf.h"
 #include "hyphman.h"
 #include "textlang.h"
+#include "fb2def.h"
 
 struct VersoCreDoc {
     LVDocView *view;
@@ -36,6 +37,11 @@ struct VersoCreDoc {
     int search_page = 0, search_found = 0, search_status = 1;
     bool search_word_start = true;
     std::vector<Hit> search_hits;
+    // Internal links on the last page listed, and the last link resolved.
+    std::vector<VersoCreRect> link_rects;
+    std::vector<int> link_ids;
+    lString32 link_target, link_label;
+    lString8 link_note, link_rule;
 };
 
 // Literal matching that ignores case, Unicode encoding/compatibility forms,
@@ -183,6 +189,282 @@ static lString32 block_text_after(ldomXPointerEx p, int want) {
     lString32 out = text.substr(p.getOffset(), text.length() - p.getOffset());
     while (out.length() < want && p.nextVisibleText(true)) out.append(p.getNode()->getText());
     return out.length() > want ? out.substr(0, want) : out;
+}
+
+// ---- Links and footnotes ----
+
+// The longest note shown in a sheet; a longer target is a place to jump to.
+static const int NOTE_MAX_CHARS = 6000;
+
+static ldomNode *link_anchor(ldomNode *n) {
+    while (n && (!n->isElement() || n->getNodeId() != el_a)) n = n->getParentNode();
+    return n;
+}
+
+// The element an internal link points at. crengine rewrites EPUB links to
+// "#id" (ids prefixed per file) in its single DOM; other links have no target.
+static ldomNode *link_target(ldomNode *a) {
+    lString32 href = a->getAttributeValue(attr_href);
+    if (href.length() < 2 || href[0] != '#') return NULL;
+    ldomDocument *d = a->getDocument();
+    lString32 id = href.substr(1);
+    return d->getNodeById(d->getAttrValueIndex(id.c_str()));
+}
+
+static bool same(ldomNode *a, ldomNode *b) {
+    return a && b && a->getDataIndex() == b->getDataIndex();
+}
+
+static bool inline_node(ldomNode *n) {
+    if (!n->isElement()) return true;
+    lvdom_element_render_method m = n->getRendMethod();
+    return m == erm_inline || m == erm_invisible;
+}
+
+// The nearest block (paragraph, list item, section) holding n.
+static ldomNode *block_of(ldomNode *n) {
+    while (n && inline_node(n)) n = n->getParentNode();
+    return n;
+}
+
+static bool has_token(lString32 value, const char *const *words) {
+    value.lowercase();
+    int start = 0;
+    for (int i = 0; i <= value.length(); ++i) {
+        if (i < value.length() && value[i] != ' ' && value[i] != '\t' && value[i] != '\n') continue;
+        if (i > start) {
+            lString32 token = value.substr(start, i - start);
+            for (const char *const *w = words; *w; ++w)
+                if (token == Utf8ToUnicode(*w)) return true;
+        }
+        start = i + 1;
+    }
+    return false;
+}
+
+static const char *const NOTEREF_TYPES[] = {"noteref", "note", "doc-noteref", NULL};
+static const char *const NOTE_TYPES[] = {"footnote", "endnote", "rearnote", "note", "footnotes", "endnotes",
+    "rearnotes", "doc-footnote", "doc-endnote", "doc-endnotes", NULL};
+
+// EPUB3 epub:type / ARIA role on the link, FB2's <a type="note">.
+static bool marked_source(ldomNode *a) {
+    return has_token(a->getAttributeValue(attr_type), NOTEREF_TYPES)
+        || has_token(a->getAttributeValue(attr_role), NOTEREF_TYPES);
+}
+
+// The same markup on the target or a container of it, or FB2's notes body.
+static bool marked_target(ldomNode *t) {
+    for (ldomNode *n = t; n && !n->isRoot(); n = n->getParentNode()) {
+        if (!n->isElement()) continue;
+        if (has_token(n->getAttributeValue(attr_type), NOTE_TYPES)
+                || has_token(n->getAttributeValue(attr_role), NOTE_TYPES))
+            return true;
+        lUInt16 id = n->getNodeId();
+        if (id == el_body) {
+            lString32 name = n->getAttributeValue(attr_name);
+            name.lowercase();
+            return name == cs32("notes") || name == cs32("comments");
+        }
+        if (id == el_DocFragment) break;
+    }
+    return false;
+}
+
+static bool label_trim(lChar32 c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0xA0 || c == '[' || c == ']' || c == '('
+        || c == ')' || c == '{' || c == '}';
+}
+
+// Text without soft hyphens, surrounding spaces and brackets: "[12]" is "12".
+static lString32 bare(lString32 s) {
+    s = removeSoftHyphens(s);
+    int a = 0, b = s.length();
+    while (a < b && label_trim(s[a])) a++;
+    while (b > a && label_trim(s[b - 1])) b--;
+    return s.substr(a, b - a);
+}
+
+static ldomNode *first_text(ldomNode *n) {
+    if (!n->isElement()) return n;
+    for (int i = 0; i < n->getChildCount(); ++i)
+        if (ldomNode *t = first_text(n->getChildNode(i))) return t;
+    return NULL;
+}
+
+static int vertical(ldomNode *n) {
+    css_style_ref_t st = n->getStyle();
+    if (st.isNull() || st->vertical_align.type != css_val_unspecified) return 0;
+    if (st->vertical_align.value == css_va_super) return 1;
+    if (st->vertical_align.value == css_va_sub) return 2;
+    return 0;
+}
+
+// Set as a superscript: <sup>, or vertical-align: super from the book's CSS.
+static bool raised(ldomNode *n) {
+    for (; n && inline_node(n); n = n->getParentNode()) {
+        if (!n->isElement()) continue;
+        if (n->getNodeId() == el_sup || vertical(n) == 1) return true;
+    }
+    return false;
+}
+
+// What a footnote marker looks like: "12", "*", "†", or anything short raised.
+static bool note_label(const lString32 &label, bool superscript) {
+    if (label.empty() || label.length() > 6) return false;
+    if (superscript) return true;
+    bool digits = true, symbols = true;
+    for (int i = 0; i < label.length(); ++i) {
+        lChar32 c = label[i];
+        digits = digits && c >= '0' && c <= '9';
+        symbols = symbols && (c == '*' || c == '#' || c == 0x2020 || c == 0x2021 || c == 0xA7 || c == 0xB6
+            || c == 0x2016);
+    }
+    return digits || symbols;
+}
+
+// Whether link points at the marker a, or an inline container of it up to
+// its paragraph: a footnote's way back.
+static bool points_at(ldomNode *link, ldomNode *a) {
+    ldomNode *t = link_target(link);
+    if (!t) return false;
+    ldomNode *stop = block_of(a);
+    for (ldomNode *n = a; n; n = n->getParentNode()) {
+        if (same(n, t)) return true;
+        if (same(n, stop)) break;
+    }
+    return false;
+}
+
+static bool links_back(ldomNode *n, ldomNode *a) {
+    if (!n->isElement()) return false;
+    if (n->getNodeId() == el_a && points_at(n, a)) return true;
+    for (int i = 0; i < n->getChildCount(); ++i)
+        if (links_back(n->getChildNode(i), a)) return true;
+    return false;
+}
+
+static bool heading(ldomNode *n) {
+    lUInt16 id = n->getNodeId();
+    return (id >= el_h1 && id <= el_h6) || id == el_title;
+}
+
+// A heading other than the note's own number ("12" over note 12).
+static bool other_heading(ldomNode *n, const lString32 &label) {
+    if (!n->isElement()) return false;
+    if (heading(n)) return bare(n->getText()) != label;
+    for (int i = 0; i < n->getChildCount(); ++i)
+        if (other_heading(n->getChildNode(i), label)) return true;
+    return false;
+}
+
+static lString32 block_text(ldomNode *n) {
+    lString32 text = removeSoftHyphens(n->getText(' ', NOTE_MAX_CHARS + 1));
+    text.trim();
+    return text;
+}
+
+// The block a link target stands for: the paragraph, list item or section
+// holding it, the next block after an empty anchor block, or a whole file's
+// body for a link to a file.
+static ldomNode *note_block(ldomNode *t) {
+    if (t->isElement() && t->getNodeId() == el_DocFragment) {
+        for (int i = 0; i < t->getChildCount(); ++i) {
+            ldomNode *c = t->getChildNode(i);
+            if (c->isElement() && c->getNodeId() == el_body) return c;
+        }
+        return t;
+    }
+    ldomNode *b = block_of(t);
+    for (int tries = 0; b && tries < 2 && block_text(b).empty(); ++tries) {
+        ldomNode *parent = b->getParentNode();
+        if (!parent) break;
+        ldomNode *next = NULL;
+        for (int i = b->getNodeIndex() + 1; i < parent->getChildCount() && !next; ++i) {
+            ldomNode *c = parent->getChildNode(i);
+            if (c->isElement()) next = c;
+        }
+        if (!next) break;
+        b = next;
+    }
+    return b;
+}
+
+static void escape(const lString32 &text, lString8 &out) {
+    lString8 s = UnicodeToUtf8(removeSoftHyphens(text));
+    for (int i = 0; i < s.length(); ++i) {
+        char c = s[i];
+        if (c == '&') out << "&amp;";
+        else if (c == '<') out << "&lt;";
+        else if (c == '>') out << "&gt;";
+        else out.append(1, c);
+    }
+}
+
+// The note as simple HTML for Verso's text renderer: blocks, line breaks,
+// bold, italic, super/subscript (from the book's computed styles). Images,
+// hidden elements, the link back to the marker and a heading that only
+// repeats the marker are left out.
+static void write_note(ldomNode *n, ldomNode *a, const lString32 &label, lString8 &out, bool italic, bool bold) {
+    if (!n->isElement()) {
+        escape(n->getText(), out);
+        return;
+    }
+    lvdom_element_render_method m = n->getRendMethod();
+    if (m == erm_invisible) return;
+    lUInt16 id = n->getNodeId();
+    if (id == el_img || id == el_image) return;
+    if (id == el_br) {
+        out << "<br>";
+        return;
+    }
+    if (id == el_a && points_at(n, a)) return;
+    if (heading(n) && bare(n->getText()) == label) return;
+    css_style_ref_t st = n->getStyle();
+    bool it = !st.isNull() && st->font_style == css_fs_italic;
+    bool bo = !st.isNull() && st->font_weight >= 600 && st->font_weight < 1000;
+    int script = vertical(n);
+    if (id == el_sup) script = 1;
+    if (id == el_sub) script = 2;
+    const char *block = m == erm_inline ? NULL : heading(n) ? "h4" : id == el_blockquote ? "blockquote" : "div";
+    if (block) out << "<" << block << ">";
+    if (it && !italic) out << "<i>";
+    if (bo && !bold) out << "<b>";
+    if (script) out << (script == 1 ? "<sup>" : "<sub>");
+    for (int i = 0; i < n->getChildCount(); ++i) write_note(n->getChildNode(i), a, label, out, it, bo);
+    if (script) out << (script == 1 ? "</sup>" : "</sub>");
+    if (bo && !bold) out << "</b>";
+    if (it && !italic) out << "</i>";
+    if (block) out << "</" << block << ">";
+}
+
+// 1: show the target as a footnote; 2: jump to it. why names the rule.
+static int classify(ldomNode *a, ldomNode *t, ldomNode *note, const lString32 &label, const char *&why) {
+    if (!note) { why = "no block"; return 2; }
+    lString32 text = block_text(note);
+    if (text.empty()) { why = "empty"; return 2; }
+    if (text.length() > NOTE_MAX_CHARS) { why = "long"; return 2; }
+    if (marked_source(a) || marked_target(t)) { why = "marked"; return 1; }
+    if (heading(note) || other_heading(note, label)) { why = "heading"; return 2; }
+    // A link that is a whole paragraph is navigation: a contents entry.
+    ldomNode *source = block_of(a);
+    if (source && bare(source->getText()) == label) { why = "navigation"; return 2; }
+    // Notes follow their markers; a link back up is the way back.
+    if (ldomXPointerEx(t, 0).compare(ldomXPointerEx(a, 0)) < 0) { why = "backward"; return 2; }
+    ldomNode *first = first_text(a);
+    if (note_label(label, first && raised(first))) { why = "label"; return 1; }
+    if (links_back(note, a)) { why = "backlink"; return 1; }
+    why = "plain";
+    return 2;
+}
+
+// The links on the current page that point inside the book.
+static void current_links(LVDocView *v, std::vector<ldomNode *> &out) {
+    ldomXRangeList list;
+    v->getCurrentPageLinks(list);
+    for (int i = 0; i < list.length(); ++i) {
+        ldomNode *a = link_anchor(list[i]->getStart().getNode());
+        out.push_back(a && link_target(a) ? a : NULL);
+    }
 }
 
 extern "C" {
@@ -786,6 +1068,79 @@ int verso_cre_font_file(int index, char *buf, int len) {
         lString8 file; int face_index; int family; bool math; bool emojis;
         if (!fontMan->getFontFileNameAndFaceIndex(faces[index], false, false, file, face_index, family, math, emojis)) return -1;
         return copy_utf8(Utf8ToUnicode(file), buf, len);
+    })
+}
+int verso_cre_page_links(VersoCreDoc *doc, int page, VersoCreRect *rects, int *links, int capacity) {
+    GUARD(-1, {
+        LVDocView *v = doc->view;
+        if (!rects) {
+            doc->link_rects.clear();
+            doc->link_ids.clear();
+            if (page < 0 || page >= v->getPageCount()) return -1;
+            v->goToPage(page, false, true, false);
+            std::vector<ldomNode *> anchors;
+            current_links(v, anchors);
+            for (size_t i = 0; i < anchors.size(); ++i) {
+                if (!anchors[i]) continue;
+                LVArray<lvRect> segments;
+                ldomXRange(anchors[i], true).getSegmentRects(segments);
+                for (int s = 0; s < segments.length(); ++s) {
+                    lvPoint a = segments[s].topLeft();
+                    lvPoint b = segments[s].bottomRight();
+                    if (v->docToWindowPoint(a) && v->docToWindowPoint(b, true) && b.x > a.x && b.y > a.y) {
+                        VersoCreRect r;
+                        r.left = a.x; r.top = a.y; r.right = b.x; r.bottom = b.y;
+                        doc->link_rects.push_back(r);
+                        doc->link_ids.push_back((int)i);
+                    }
+                }
+            }
+        } else {
+            int n = std::min((int)doc->link_rects.size(), capacity);
+            std::copy_n(doc->link_rects.begin(), n, rects);
+            if (links) std::copy_n(doc->link_ids.begin(), n, links);
+        }
+        return (int)doc->link_rects.size();
+    })
+}
+
+int verso_cre_link(VersoCreDoc *doc, int page, int link) {
+    GUARD(-1, {
+        doc->link_target.clear(); doc->link_label.clear(); doc->link_note.clear(); doc->link_rule.clear();
+        LVDocView *v = doc->view;
+        if (page < 0 || page >= v->getPageCount()) return -1;
+        v->goToPage(page, false, true, false);
+        std::vector<ldomNode *> anchors;
+        current_links(v, anchors);
+        if (link < 0 || link >= (int)anchors.size()) return -1;
+        ldomNode *a = anchors[link];
+        if (!a) return 0;
+        ldomNode *t = link_target(a);
+        if (!t) return 0;
+        doc->link_target = ldomXPointer(t, 0).toString();
+        lString32 label = bare(a->getText());
+        doc->link_label = label;
+        ldomNode *note = note_block(t);
+        const char *why = "";
+        int kind = classify(a, t, note, label, why);
+        doc->link_rule = why;
+        if (kind == 1) write_note(note, a, label, doc->link_note, false, false);
+        return kind;
+    })
+}
+
+int verso_cre_link_text(VersoCreDoc *doc, int field, char *buf, int len) {
+    GUARD(-1, {
+        if (field == 0) return copy_utf8(doc->link_target, buf, len);
+        if (field == 2) return copy_utf8(doc->link_label, buf, len);
+        const lString8 &text = field == 1 ? doc->link_note : doc->link_rule;
+        if (field != 1 && field != 3) return -1;
+        if (buf && len > 0) {
+            int n = std::min(text.length(), len - 1);
+            memcpy(buf, text.c_str(), n);
+            buf[n] = 0;
+        }
+        return text.length();
     })
 }
 } // extern "C"

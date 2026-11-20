@@ -15,6 +15,13 @@ chapters, plus inline markup, case, Unicode canonical/compatibility forms,
 apostrophes, spaces, Cyrillic, a soft hyphen and regular-expression characters.
 Regenerate with `python3 scripts/gen-search-fixture.py`. Licensed with Verso.
 
+footnotes.epub is original text with one link of each kind the footnote rules
+handle: a bracketed marker to a note section in another file, a raised marker
+to an endnote list item, an `epub:type` noteref to an aside, a starred marker to
+a whole file, a phrase to a note that links back, a contents entry, a
+cross-reference to a chapter heading and a web link. Regenerate with
+`python3 scripts/gen-footnotes-fixture.py`. Licensed with Verso.
+
 dictionary-words.epub is an original test book of selectable single words and
 short passages for manual dictionary and base-form checks: exact entries,
 regular and irregular English inflections, possessives, function words,

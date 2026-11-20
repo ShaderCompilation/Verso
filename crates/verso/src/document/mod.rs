@@ -110,6 +110,22 @@ pub enum SelectionQuery {
     Geometry(TextRange),
 }
 
+/// Where a link in the book leads (see `CreDocument::link`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub target: Position,
+    /// Set when the target is a footnote to show in place rather than jump to.
+    pub note: Option<Note>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    /// The marker's text without brackets: "12", "*", or a linked phrase.
+    pub label: String,
+    /// The note as simple HTML: blocks, line breaks, bold, italic, scripts.
+    pub html: String,
+}
+
 /// One match from book search, with the text around it in the same block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchHit {
@@ -319,6 +335,7 @@ mod tests {
         drop(reopened);
         selection_checks(&engine, &layout);
         search_checks(&engine, &layout);
+        footnote_checks(&engine, &layout);
         missing_mimetype_checks(&engine, &layout, &book, pages);
     }
 
@@ -424,6 +441,45 @@ mod tests {
             hits.iter().map(|h| &h.range).collect::<Vec<_>>()
         );
         assert!(relaid.last().unwrap().page > hits.last().unwrap().page);
+    }
+
+    /// Footnote markers of the shapes real books use open as notes; contents
+    /// entries, cross-references and the ways back jump; web links aren't listed.
+    fn footnote_checks(engine: &CreEngine, layout: &Layout) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/footnotes.epub");
+        let mut doc = engine.open(&path, layout, None).unwrap();
+        let mut found = Vec::new();
+        let mut notes = std::collections::BTreeMap::new();
+        for page in 0..doc.page_count() {
+            let links = doc.page_links(page);
+            assert!(links.iter().all(|(_, r)| r.w > 0 && r.h > 0 && r.right() <= 600 && r.bottom() <= 800));
+            let mut ids: Vec<_> = links.iter().map(|(id, _)| *id).collect();
+            ids.dedup();
+            for id in ids {
+                let link = doc.link(page, id).unwrap().expect("listed links lead somewhere");
+                let label = link.note.as_ref().map(|n| n.label.clone());
+                found.push((page, label.is_some()));
+                if let Some(note) = link.note {
+                    notes.insert(note.label, note.html);
+                }
+                doc.go_to_position(&link.target).unwrap();
+            }
+        }
+        assert_eq!(found.iter().filter(|(_, note)| *note).count(), 5, "{notes:?}");
+        assert_eq!(found.iter().filter(|(_, note)| !*note).count(), 6, "contents, cross-reference, four ways back");
+        assert!(found.iter().filter(|(_, note)| *note).all(|(page, _)| *page == 0), "only the markers");
+        for (label, text) in [
+            ("1", "First note"),
+            ("2", "Second note"),
+            ("reference", "Third note"),
+            ("*", "Fourth note"),
+            ("linked phrase", "Fifth note"),
+        ] {
+            assert!(notes.get(label).is_some_and(|html| html.contains(text)), "{label}: {:?}", notes.get(label));
+        }
+        // Styles come from the book; the marker's number and way back don't repeat.
+        assert!(notes["2"].contains("<i>italic</i>") && notes["2"].contains("<b>bold</b>"), "{}", notes["2"]);
+        assert!(!notes["2"].contains(">2<") && !notes["1"].contains("back") && !notes["1"].contains("<h"));
     }
 
     fn selection_checks(engine: &CreEngine, layout: &Layout) {

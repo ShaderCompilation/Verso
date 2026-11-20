@@ -163,6 +163,7 @@ mod tests {
                 annotation_revision: 0,
                 annotations: vec![],
                 painted: vec![],
+                links: vec![],
             })
         };
         c.insert(page(1, 10), 10);

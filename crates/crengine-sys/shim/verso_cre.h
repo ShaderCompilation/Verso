@@ -25,6 +25,20 @@ int verso_cre_selection_text(VersoCreDoc *doc, int field, char *buf, int len);
 /* Returns total count, copies at most capacity screen rectangles. */
 int verso_cre_selection_rects(VersoCreDoc *doc, VersoCreRect *rects, int capacity);
 
+/* Links. List the internal links on page (0-based) for hit-testing taps:
+ * the rectangles of each link's text in window coordinates, and each
+ * rectangle's link number in links. Call with rects NULL first: it lists
+ * the page and returns the rectangle count; then call with buffers to copy
+ * at most capacity. Links out of the book are left out. -1 on error. */
+int verso_cre_page_links(VersoCreDoc *doc, int page, VersoCreRect *rects, int *links, int capacity);
+/* Resolves link number link of page: 1 a footnote (show it in place),
+ * 2 another place in the book (jump there), 0 no target, -1 on error.
+ * Stores a snapshot until the next call. */
+int verso_cre_link(VersoCreDoc *doc, int page, int link);
+/* Snapshot fields: 0=target position, 1=the note as simple HTML (footnotes
+ * only), 2=link text without brackets, 3=the rule that decided (for logs). */
+int verso_cre_link_text(VersoCreDoc *doc, int field, char *buf, int len);
+
 /* Book search. Start a literal, case-insensitive search from the beginning,
  * keeping matches that start a word when the query starts with a letter or
  * digit; each step searches whole blocks for about max_ms and keeps only that step's

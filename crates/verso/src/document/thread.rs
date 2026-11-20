@@ -1,7 +1,7 @@
 //! The only thread that touches crengine. Results carry a book/layout generation.
 use super::prelayout::{self, Job, Runner};
 use super::{
-    CreDocument, CreEngine, Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchStatus,
+    CreDocument, CreEngine, Document, FontFace, Layout, Link, Metadata, Paths, Position, SearchBatch, SearchStatus,
     Selection, SelectionQuery, TocEntry, Typography,
 };
 use crate::annotations::Annotation;
@@ -33,6 +33,9 @@ pub struct Page {
     pub annotation_revision: u64,
     pub annotations: Vec<(usize, Vec<Rect>)>,
     pub painted: Vec<Paint>,
+    /// Internal links on the page: (link number, rectangle) for each piece
+    /// of link text, for `Command::Link`.
+    pub links: Vec<(usize, Rect)>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +72,14 @@ pub struct SelectionRequest {
     pub page: usize,
     pub id: u64,
 }
+/// A tap on link `link` of a displayed page; IDs are never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkRequest {
+    pub generation: u64,
+    pub page: usize,
+    pub link: usize,
+    pub id: u64,
+}
 /// A search session on one book layout; IDs are never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchRequest {
@@ -100,6 +111,8 @@ pub enum Command {
         request: SelectionRequest,
         query: SelectionQuery,
     },
+    /// Where a tapped link leads; replies with `Reply::Link`.
+    Link(LinkRequest),
     /// Replaces any running search. Steps interleave with other commands.
     Search {
         request: SearchRequest,
@@ -160,6 +173,10 @@ pub enum Reply {
     Selection {
         request: SelectionRequest,
         result: Result<Option<Selection>, String>,
+    },
+    Link {
+        request: LinkRequest,
+        result: Result<Option<Link>, String>,
     },
     Fonts(Vec<FontFace>),
     Opened {
@@ -381,6 +398,15 @@ impl Worker {
                             }
                             Command::CancelSearch => {
                                 search = None;
+                                return Ok(());
+                            }
+                            Command::Link(request) => {
+                                if request.generation == generation
+                                    && let Some(d) = &mut doc
+                                {
+                                    let result = d.link(request.page, request.link).map_err(|e| format!("{e:#}"));
+                                    send(Reply::Link { request, result });
+                                }
                                 return Ok(());
                             }
                             Command::Select { request, query } => {
@@ -626,17 +652,19 @@ fn render(
         geometry.len(),
         geometry.iter().map(|(_, r)| r.len()).sum::<usize>()
     );
+    let position = d.position()?;
     let page = Page {
         generation,
         number: d.current_page(),
         pixels,
-        position: d.position()?,
+        position,
         progress: d.progress(),
         offset: d.text_offset(),
         images: d.has_images(),
         annotation_revision: revision,
         painted,
         annotations: geometry,
+        links: d.page_links(current),
     };
     log::info!("page {} rendered in {:?}", page.number + 1, started.elapsed());
     Ok(Arc::new(page))

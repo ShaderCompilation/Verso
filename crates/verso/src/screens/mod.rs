@@ -8,6 +8,7 @@ pub mod dictionaries;
 pub mod dictionary;
 pub mod dictionary_folders;
 pub mod folders;
+pub mod footnote;
 pub mod gallery;
 pub mod reader;
 pub mod reader_menu;

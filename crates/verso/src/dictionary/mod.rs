@@ -20,6 +20,14 @@ pub use forms::{WordFormsSource, WordFormsStatus};
 use index::Index;
 pub(crate) use index::remove_cache;
 pub use model::{Block, BlockKind, Entry, Span, Style};
+
+/// Simple HTML, such as a book's footnote, as text blocks, read with the
+/// same forgiving tag reader as dictionary definitions.
+pub fn html_blocks(source: &str) -> Vec<Block> {
+    let mut blocks = markup::parse_field(source, b'h', &mut false);
+    markup::normalize(&mut blocks);
+    blocks
+}
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,

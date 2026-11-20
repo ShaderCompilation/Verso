@@ -64,6 +64,16 @@ fn styled(block: &Block, t: &Theme) -> StyledBlock {
     })
 }
 
+/// Definition blocks for the text renderer: gaps, rules and styled text.
+pub(crate) fn styled_blocks<'a>(blocks: &'a [Block], t: &'a Theme) -> impl Iterator<Item = StyledBlock> + 'a {
+    let gap = t.dictionary_body.line_height() / 2.0;
+    blocks.iter().map(move |block| match block.kind {
+        BlockKind::Gap => StyledBlock::Gap(gap),
+        BlockKind::Rule => StyledBlock::Rule { space: gap, thickness: t.hairline, gray: LINE },
+        BlockKind::Text | BlockKind::Heading => styled(block, t),
+    })
+}
+
 /// All visible content shares one pagination, including provenance and errors.
 fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<StyledBlock> {
     if pending {
@@ -84,11 +94,7 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
                     blocks.push(rule());
                 }
                 blocks.push(plain(entry.headword.clone(), t.dictionary_headword));
-                blocks.extend(entry.blocks.iter().map(|block| match block.kind {
-                    BlockKind::Gap => StyledBlock::Gap(gap),
-                    BlockKind::Rule => rule(),
-                    BlockKind::Text | BlockKind::Heading => styled(block, t),
-                }));
+                blocks.extend(styled_blocks(&entry.blocks, t));
             }
         }
         State::Missing => blocks.push(plain(MISSING.into(), t.body)),

@@ -5,8 +5,8 @@ mod layout;
 mod search;
 mod selection;
 use crate::document::{
-    FontFace, Metadata, Position, SelectionQuery, TocEntry,
-    thread::{Command, Page, Reply, SelectionRequest, Worker},
+    FontFace, Link, Metadata, Position, SelectionQuery, TocEntry,
+    thread::{Command, LinkRequest, Page, Reply, SelectionRequest, Worker},
 };
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
@@ -16,6 +16,7 @@ use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
 use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
 use crate::screens::contents::{Contents, ContentsEvent};
 use crate::screens::dictionary::{Lookup, LookupEvent, SelectionAction, SelectionActions};
+use crate::screens::footnote::{Footnote, FootnoteEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
 use crate::screens::{Action, EventCx, Screen};
@@ -93,6 +94,9 @@ pub struct Reader {
     back_rect: Rect,
     /// The current touch started on the back pill.
     back_touch: bool,
+    /// A tapped link waiting for the book thread, and where it is on the page.
+    link_pending: Option<(LinkRequest, Rect)>,
+    next_link: u64,
 }
 /// What the bars show beyond the page itself: chapter offsets, reading
 /// speed, and the clock and battery as of the last reader redraw.
@@ -130,6 +134,7 @@ enum Overlay {
     SelectionActions(Box<SelectionActions>),
     Search(Box<SearchView>),
     Highlights(Box<annotations::View>),
+    Footnote(Box<Footnote>),
 }
 impl Reader {
     pub fn book_id(&self) -> &str {
@@ -197,6 +202,8 @@ impl Reader {
             back: None,
             back_rect: Rect::default(),
             back_touch: false,
+            link_pending: None,
+            next_link: 0,
         }
     }
     /// The book's saved reading speed and the average carried over from
@@ -270,6 +277,7 @@ impl Reader {
                     self.display(page, cx);
                 }
             }
+            Reply::Link { request, result } => self.link_arrived(request, result, cx),
             Reply::Search { request, result } => {
                 if self.search.receive(request, result)
                     && (matches!(self.overlay, Overlay::Search(_)) || self.search_bar.is_some())
@@ -530,6 +538,52 @@ impl Reader {
         let origin = self.back.take().or_else(|| self.here());
         self.jump_position(page, position, cx);
         self.back = origin;
+    }
+    /// Asks the book thread where the link under `p` leads: the nearest link
+    /// text within `slop` pixels on the displayed page. False when there is
+    /// none, so the tap turns the page as usual.
+    fn follow_link(&mut self, p: crate::geom::Point, slop: i32) -> bool {
+        if self.laying_out || self.layout_at.is_some() {
+            return false;
+        }
+        let Some(page) = self.shown.as_ref().filter(|page| page.generation == self.cache.generation) else {
+            return false;
+        };
+        let distance = |r: &Rect| {
+            let dx = i64::from((r.x - p.x).max(p.x - (r.right() - 1)).max(0));
+            let dy = i64::from((r.y - p.y).max(p.y - (r.bottom() - 1)).max(0));
+            dx * dx + dy * dy
+        };
+        let slop = i64::from(slop);
+        let Some(&(link, rect)) =
+            page.links.iter().filter(|(_, r)| distance(r) <= slop * slop).min_by_key(|(_, r)| distance(r))
+        else {
+            return false;
+        };
+        self.next_link += 1;
+        let request = LinkRequest { generation: page.generation, page: page.number, link, id: self.next_link };
+        self.link_pending = Some((request, rect));
+        self.worker.send(Command::Link(request));
+        true
+    }
+    /// A footnote opens over the page it's marked on; any other link jumps,
+    /// with the way back offered. Only for the tap still waiting, while its
+    /// page is shown with nothing over it.
+    fn link_arrived(&mut self, request: LinkRequest, result: Result<Option<Link>, String>, cx: &mut EventCx) {
+        let Some((_, marker)) = self.link_pending.take_if(|(pending, _)| *pending == request) else { return };
+        let shown = self.shown.as_ref().is_some_and(|p| p.generation == request.generation && p.number == request.page);
+        if !shown || !matches!(self.overlay, Overlay::None) || self.selection.selected.is_some() {
+            return;
+        }
+        match result {
+            Ok(Some(Link { target, note: Some(note) })) => {
+                self.overlay = Overlay::Footnote(Box::new(Footnote::new(&note, target, cx.theme, self.screen, marker)));
+                cx.redraw();
+            }
+            Ok(Some(link)) => self.jump_away(None, link.target, cx),
+            Ok(None) => {}
+            Err(message) => log::warn!("link: {message}"),
+        }
     }
     /// The back pill shows on the page a jump arrived at, over the bare page.
     fn back_visible(&self) -> bool {
@@ -991,11 +1045,22 @@ impl Reader {
             }
             return Action::None;
         }
-        if matches!(self.overlay, Overlay::None)
-            && !self.pending_turn
-            && self.selection.selected.is_none()
-            && let Gesture::Tap(p) = g
+        // A tap on a link follows it; one beside a link, outside any
+        // highlight, still does, since markers are small.
+        let page_tap = match g {
+            Gesture::Tap(p)
+                if matches!(self.overlay, Overlay::None) && !self.pending_turn && self.selection.selected.is_none() =>
+            {
+                Some(p)
+            }
+            _ => None,
+        };
+        if let Some(p) = page_tap
+            && self.follow_link(p, 0)
         {
+            return Action::None;
+        }
+        if let Some(p) = page_tap {
             let ids: Vec<_> = self
                 .shown
                 .as_ref()
@@ -1015,6 +1080,9 @@ impl Reader {
                     view.detail(i);
                 }
                 cx.redraw();
+                return Action::None;
+            }
+            if self.follow_link(p, cx.theme.mm(2.0)) {
                 return Action::None;
             }
         }
@@ -1203,6 +1271,14 @@ impl Reader {
                 }
                 None => {}
             },
+            Overlay::Footnote(note) => match note.on_gesture(&g) {
+                Some(FootnoteEvent::Close) => self.overlay = Overlay::None,
+                Some(FootnoteEvent::GoTo(position)) => {
+                    self.overlay = Overlay::None;
+                    self.jump_away(None, position, cx);
+                }
+                None => {}
+            },
             Overlay::Contents(contents) => match contents.on_gesture(&g) {
                 Some(ContentsEvent::Close) => self.menu(cx),
                 Some(ContentsEvent::Position(position)) => {
@@ -1330,6 +1406,7 @@ impl Screen for Reader {
             Overlay::SelectionActions(actions) => actions.draw(cx),
             Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
             Overlay::Highlights(view) => view.draw(cx, &self.annotations),
+            Overlay::Footnote(note) => note.draw(cx),
         }
         if self.laying_out
             || self.layout_at.is_some()
@@ -1377,6 +1454,7 @@ impl Screen for Reader {
             || matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.busy())
             || matches!(&self.overlay, Overlay::Search(_)) && self.search.running()
             || self.highlight_pending.is_some()
+            || self.link_pending.is_some()
             || self.jump != 0
             || self.selection.busy()
             || self.laying_out
@@ -1501,6 +1579,7 @@ impl Screen for Reader {
         self.search.cancel(&self.worker);
         self.highlight = None;
         self.highlight_pending = None;
+        self.link_pending = None;
         if let Some(worker) = &self.dictionary {
             worker.cancel();
         }
@@ -1570,6 +1649,7 @@ mod tests {
             annotation_revision: 0,
             annotations: vec![],
             painted: vec![],
+            links: vec![],
         })
     }
     fn test_cx(theme: &Theme, f: impl FnOnce(&mut EventCx)) {
@@ -1765,6 +1845,92 @@ mod tests {
         arrive(&mut r, 9);
         r.search_bar = Some(SearchBar::new(&theme, r.screen));
         assert!(draw(&mut r).is_empty());
+    }
+
+    #[test]
+    fn a_footnote_marker_opens_its_note_and_other_links_jump() {
+        use crate::document::{Link, Note};
+        use crate::geom::Point;
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("footnotes");
+        r.pages = 20;
+        r.laying_out = false;
+        let mut page = (*test_page(1, 3)).clone();
+        page.links = vec![(4, Rect::new(200, 300, 10, 12)), (7, Rect::new(100, 500, 200, 20))];
+        let linked = Arc::new(page);
+        r.shown = Some(linked.clone());
+        r.target = 3;
+        let tap = |r: &mut Reader, p: Point| {
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(p), cx);
+                r.on_gesture(Gesture::Tap(p), cx);
+            })
+        };
+        let link_sent = || {
+            commands.try_iter().find_map(|c| match c {
+                Command::Link(request) => Some(request),
+                _ => None,
+            })
+        };
+
+        // Away from links a tap turns the page as before.
+        r.cache.insert(test_page(1, 4), 3);
+        tap(&mut r, Point::new(590, 700));
+        assert!(link_sent().is_none());
+        assert_eq!(r.shown.as_ref().unwrap().number, 4);
+        r.shown = Some(linked.clone());
+        r.target = 3;
+
+        // Just beside the small marker still follows it.
+        tap(&mut r, Point::new(213, 306));
+        let request = link_sent().expect("the marker is followed");
+        assert_eq!((request.page, request.link), (3, 4));
+        assert!(r.busy());
+        let stale = LinkRequest { id: request.id + 1, ..request };
+        test_cx(&theme, |cx| r.receive(Reply::Link { request: stale, result: Ok(None) }, cx));
+        assert!(r.link_pending.is_some(), "another request's reply is ignored");
+        let note = Note { label: "12".into(), html: "<div>The note.</div>".into() };
+        let link = Link { target: Position("note-12".into()), note: Some(note) };
+        test_cx(&theme, |cx| r.receive(Reply::Link { request, result: Ok(Some(link)) }, cx));
+        assert!(matches!(r.overlay, Overlay::Footnote(_)));
+        assert_eq!(r.target, 3, "the reading position stays");
+        let (mut canvas, mut text, mut icons) = (Canvas::new(600, 800), TextRenderer::new(), IconRenderer::default());
+        let mut hints = vec![];
+        r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+
+        // Go to note jumps there and offers the way back.
+        let Overlay::Footnote(sheet) = &r.overlay else { unreachable!() };
+        let go = sheet.go_rect().center();
+        tap(&mut r, go);
+        assert!(matches!(r.overlay, Overlay::None));
+        let (position, jump) = commands
+            .try_iter()
+            .find_map(|c| match c {
+                Command::Position { position, jump, .. } => Some((position, jump)),
+                _ => None,
+            })
+            .expect("go to note jumps");
+        assert_eq!(position, Position("note-12".into()));
+        test_cx(&theme, |cx| r.receive(Reply::Jumped { jump, page: test_page(1, 15) }, cx));
+        assert_eq!(r.back.as_ref().map(|o| o.page), Some(3));
+
+        // A cross-reference jumps at once.
+        r.back = None;
+        r.shown = Some(linked.clone());
+        r.target = 3;
+        tap(&mut r, Point::new(150, 510));
+        let request = link_sent().expect("the link is followed");
+        assert_eq!(request.link, 7);
+        let link = Link { target: Position("chapter-2".into()), note: None };
+        test_cx(&theme, |cx| r.receive(Reply::Link { request, result: Ok(Some(link)) }, cx));
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(
+            commands
+                .try_iter()
+                .any(|c| matches!(c, Command::Position { position, .. } if position == Position("chapter-2".into())))
+        );
+        assert_eq!(r.back.as_ref().map(|o| o.page), Some(3));
     }
 
     #[test]
@@ -2330,6 +2496,7 @@ mod tests {
                 annotation_revision: 0,
                 annotations: vec![],
                 painted: vec![],
+                links: vec![],
             });
             let mut r = Reader::new(
                 screen,
@@ -2401,6 +2568,7 @@ mod tests {
                 annotation_revision: 0,
                 annotations: vec![],
                 painted: vec![],
+                links: vec![],
             })
         };
         r.pages = 10;
@@ -2544,6 +2712,7 @@ mod tests {
                     annotation_revision: 0,
                     annotations: vec![],
                     painted: vec![],
+                    links: vec![],
                 })
             };
             let mut reader = Reader::new(
@@ -2637,6 +2806,7 @@ mod tests {
                 annotation_revision: 0,
                 annotations: vec![],
                 painted: vec![],
+                links: vec![],
             }))
         };
         r.receive(
@@ -2775,6 +2945,7 @@ mod tests {
                 annotation_revision: 0,
                 annotations: vec![],
                 painted: vec![],
+                links: vec![],
             })
         };
         r.receive(

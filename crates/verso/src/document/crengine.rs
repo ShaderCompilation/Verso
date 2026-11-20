@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
 use super::{
-    Document, FontFace, Layout, Metadata, Paths, Position, SearchBatch, SearchHit, SearchStatus, Selection,
+    Document, FontFace, Layout, Link, Metadata, Note, Paths, Position, SearchBatch, SearchHit, SearchStatus, Selection,
     SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
 };
 
@@ -552,6 +552,42 @@ impl CreDocument {
             })
             .collect()
     }
+    /// The internal links on `page`, as (link number, screen rectangle) for
+    /// each piece of link text. Empty when the engine can't list them.
+    pub fn page_links(&mut self, page: usize) -> Vec<(usize, crate::geom::Rect)> {
+        let Ok(page) = c_int::try_from(page) else { return Vec::new() };
+        let n = unsafe { sys::verso_cre_page_links(self.raw, page, std::ptr::null_mut(), std::ptr::null_mut(), 0) };
+        if !(1..=10000).contains(&n) {
+            return Vec::new();
+        }
+        let mut rects = vec![sys::VersoCreRect::default(); n as usize];
+        let mut ids = vec![0; n as usize];
+        let copied = unsafe { sys::verso_cre_page_links(self.raw, page, rects.as_mut_ptr(), ids.as_mut_ptr(), n) };
+        if copied != n {
+            return Vec::new();
+        }
+        ids.into_iter()
+            .zip(rects)
+            .map(|(id, r)| (id as usize, crate::geom::Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)))
+            .collect()
+    }
+
+    /// Where link number `link` of `page` (from `page_links`) leads, and
+    /// whether it's a footnote. None when it leads nowhere in the book.
+    pub fn link(&mut self, page: usize, link: usize) -> Result<Option<Link>> {
+        let kind = unsafe { sys::verso_cre_link(self.raw, c_int::try_from(page)?, c_int::try_from(link)?) };
+        anyhow::ensure!(kind >= 0, "couldn't resolve link");
+        if kind == 0 {
+            return Ok(None);
+        }
+        let field = |f| read_string(|buf, len| unsafe { sys::verso_cre_link_text(self.raw, f, buf, len) });
+        let target = Position(field(0)?);
+        let rule = field(3)?;
+        let note = if kind == 1 { Some(Note { label: field(2)?, html: field(1)? }) } else { None };
+        log::info!("link {link} on page {}: {} ({rule})", page + 1, if note.is_some() { "footnote" } else { "jump" });
+        Ok(Some(Link { target, note }))
+    }
+
     pub fn annotation_page(&mut self, page: usize) -> Vec<usize> {
         let n = unsafe { sys::verso_cre_annotation_page(self.raw, page as c_int, std::ptr::null_mut(), 0) };
         if n <= 0 {
