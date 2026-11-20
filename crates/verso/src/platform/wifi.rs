@@ -15,14 +15,23 @@ pub fn set_enabled(on: bool) -> Result<()> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
     Off,
-    /// Enabled, but there's no route to the internet yet (still joining a
-    /// network, or none in range).
+    /// Enabled, but it has no address yet (still joining a network, or
+    /// none in range).
     Connecting,
+    /// Joined a network. It may still have no internet access (a travel
+    /// router, a hotspot without data).
     Connected,
 }
 
-/// Reads the link without changing anything. One `lipc` call and a route
-/// lookup on the Kindle, so call it off the UI thread.
+/// Wi-Fi's address on the network (`wlan0`'s), if it has joined one. Read
+/// with `getifaddrs`, so a network without a gateway counts too.
+#[cfg(feature = "kindle")]
+pub fn address() -> Option<std::net::Ipv4Addr> {
+    verso_mdns::interface_address(imp::INTERFACE).map(|a| a.addr)
+}
+
+/// Reads the link without changing anything. One `lipc` call and an
+/// address lookup on the Kindle, so call it off the UI thread.
 pub fn link() -> Result<Link> {
     if !enabled()? {
         return Ok(Link::Off);
@@ -53,16 +62,12 @@ mod imp {
         }
     }
 
-    /// Connecting a UDP socket sends nothing; it only asks the kernel for a
-    /// route, which exists once Wi-Fi has joined a network.
+    /// The Wi-Fi interface.
+    pub const INTERFACE: &str = "wlan0";
+
+    /// Wi-Fi has an address once it has joined a network.
     pub fn has_route() -> bool {
-        let route = || -> Option<()> {
-            let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-            socket.connect("192.0.2.1:9").ok()?; // TEST-NET-1: any routable address works.
-            let ip = socket.local_addr().ok()?.ip();
-            (!ip.is_unspecified() && !ip.is_loopback()).then_some(())
-        };
-        route().is_some()
+        super::address().is_some()
     }
 
     pub fn set_enabled(on: bool) -> Result<()> {

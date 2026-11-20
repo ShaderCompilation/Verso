@@ -48,21 +48,17 @@ pub fn advertise(hostname: &str) {
     imp::advertise(hostname)
 }
 
-/// The address other devices on the network reach us at. Connecting a UDP
-/// socket sends nothing; it only asks the kernel which source address its
-/// route would use. Fails when there is no network (e.g. Wi-Fi off).
+/// The address other devices on the network reach us at: Wi-Fi's, also on
+/// a network without a gateway. None when there is no network (e.g. Wi-Fi off).
 #[cfg(feature = "kindle")]
 fn local_address() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?; // TEST-NET-1: any routable address works.
-    let ip = socket.local_addr().ok()?.ip();
-    (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
+    super::wifi::address().map(|ip| ip.to_string())
 }
 
 #[cfg(feature = "kindle")]
 mod imp {
-    use super::super::mdns;
     use super::super::process::{alive, runs_replaced, spawn_detached, wait_until};
+    use super::super::{firewall, mdns};
     use super::{PORT, Status, local_address};
     use anyhow::{Context, Result, bail};
     use std::fs;
@@ -104,7 +100,7 @@ mod imp {
     pub fn advertise(hostname: &str) {
         let Some(pid) = running_pid() else { return };
         if !runs_replaced(pid, BINARY) {
-            mdns::ensure(hostname, pid);
+            mdns::ensure(hostname, pid, "dropbear");
             return;
         }
         // Takes a few seconds (the name is claimed again); not on the UI thread.
@@ -171,7 +167,7 @@ mod imp {
             bail!("{reason}");
         }
         prepare_keys()?;
-        firewall(true);
+        firewall::set(PORT, true);
         // -F: stay in the foreground, which keeps RUN_DIR as the working
         // folder for `-D .` (the spawn below detaches it instead). -R: create
         // a missing host key. -s: no password logins. Without -E it logs to
@@ -188,7 +184,7 @@ mod imp {
         if ok && wait_until(Duration::from_secs(2), || running_pid().is_some()) {
             log::info!("SSH server started on port {PORT}");
             if let Some(pid) = running_pid() {
-                mdns::ensure(hostname, pid);
+                mdns::ensure(hostname, pid, "dropbear");
                 // Claiming the name takes about a second; without a network
                 // there's nothing to wait for.
                 if local_address().is_some() {
@@ -197,7 +193,7 @@ mod imp {
             }
             return Ok(());
         }
-        firewall(false);
+        firewall::set(PORT, false);
         bail!("dropbear didn't start")
     }
 
@@ -225,7 +221,7 @@ mod imp {
         let Some(pid) = running_pid() else {
             let _ = fs::remove_file(PIDFILE);
             let _ = fs::remove_dir_all(RUN_DIR);
-            firewall(false);
+            firewall::set(PORT, false);
             mdns::wait_stopped();
             return Ok(());
         };
@@ -242,42 +238,10 @@ mod imp {
         }
         let _ = fs::remove_file(PIDFILE);
         let _ = fs::remove_dir_all(RUN_DIR);
-        firewall(false);
+        firewall::set(PORT, false);
         mdns::wait_stopped();
         log::info!("SSH server stopped");
         Ok(())
-    }
-
-    /// Opens or closes the server's port in the Kindle's firewall, with
-    /// KOReader's exact rules. Adding checks first, so rules never pile up.
-    fn firewall(open: bool) {
-        let rules = [
-            format!("INPUT -p tcp --dport {PORT} -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"),
-            format!("OUTPUT -p tcp --sport {PORT} -m conntrack --ctstate ESTABLISHED -j ACCEPT"),
-        ];
-        let iptables = |op: &str, rule: &str| {
-            Command::new("iptables")
-                .arg(op)
-                .args(rule.split_whitespace())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        };
-        for rule in &rules {
-            if open {
-                if !iptables("-C", rule) && !iptables("-A", rule) {
-                    log::warn!("couldn't open port {PORT} in the firewall");
-                }
-            } else {
-                // Remove every copy (another tool may have added one too).
-                for _ in 0..4 {
-                    if !iptables("-D", rule) {
-                        break;
-                    }
-                }
-            }
-        }
     }
 }
 

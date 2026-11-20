@@ -8,7 +8,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -76,7 +76,7 @@ pub fn run(options: Options) -> i32 {
     let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
         ^ u64::from(std::process::id());
     let mut responder = Responder::new(&options.label, seed, Instant::now());
-    let reason = serve(&socket, watch.as_ref(), &mut responder);
+    let reason = serve(&socket, watch.as_ref(), options.firewall.as_deref(), &mut responder);
     send(&socket, responder.goodbye());
     say!("stopping: {reason}");
     if let Some(interface) = &options.firewall {
@@ -87,7 +87,12 @@ pub fn run(options: Options) -> i32 {
     0
 }
 
-fn serve(socket: &UdpSocket, watch: Option<&OwnedFd>, responder: &mut Responder) -> &'static str {
+fn serve(
+    socket: &UdpSocket,
+    watch: Option<&OwnedFd>,
+    interface: Option<&str>,
+    responder: &mut Responder,
+) -> &'static str {
     let mut next_check = Instant::now();
     let mut written: Option<String> = None;
     let mut probing = responder.label().to_owned();
@@ -98,7 +103,7 @@ fn serve(socket: &UdpSocket, watch: Option<&OwnedFd>, responder: &mut Responder)
         }
         let now = Instant::now();
         if now >= next_check {
-            let link = find_link();
+            let link = find_link(interface);
             if link != responder.link() {
                 match link {
                     Some(l) => {
@@ -297,46 +302,23 @@ unsafe fn setsockopt<T>(fd: RawFd, level: libc::c_int, name: libc::c_int, value:
 }
 
 /// The interface other devices reach us on: the one holding the address
-/// our default route uses, the same address Settings shows.
-fn find_link() -> Option<Link> {
-    let addr = {
+/// our default route uses, the same address Settings shows. Without a
+/// default route (a network without a gateway), `interface`'s address.
+fn find_link(interface: Option<&str>) -> Option<Link> {
+    let routed = (|| {
         let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
         // Connecting a UDP socket sends nothing; it picks a source address.
         socket.connect("192.0.2.1:9").ok()?;
         match socket.local_addr().ok()?.ip() {
-            std::net::IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => ip,
-            _ => return None,
+            std::net::IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+            _ => None,
         }
-    };
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list`, which we walk read-only and free.
-    unsafe {
-        if libc::getifaddrs(&mut list) != 0 {
-            return None;
-        }
-        let mut found = None;
-        let mut entry = list;
-        while !entry.is_null() {
-            let e = &*entry;
-            entry = e.ifa_next;
-            if e.ifa_addr.is_null() || e.ifa_netmask.is_null() || i32::from((*e.ifa_addr).sa_family) != libc::AF_INET {
-                continue;
-            }
-            let ip = |sa: *const libc::sockaddr| {
-                let sin = &*sa.cast::<libc::sockaddr_in>();
-                Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
-            };
-            if ip(e.ifa_addr) == addr {
-                let index = libc::if_nametoindex(e.ifa_name);
-                if index != 0 {
-                    found = Some(Link { addr, netmask: ip(e.ifa_netmask), index });
-                }
-                break;
-            }
-        }
-        libc::freeifaddrs(list);
-        found
-    }
+    })();
+    let found = match routed {
+        Some(addr) => crate::interface_addresses().into_iter().map(|(_, a)| a).find(|a| a.addr == addr),
+        None => crate::interface_address(interface?),
+    }?;
+    Some(Link { addr: found.addr, netmask: found.netmask, index: found.index })
 }
 
 fn write_name(label: &str) -> io::Result<()> {

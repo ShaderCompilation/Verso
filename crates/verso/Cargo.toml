@@ -24,6 +24,7 @@ winit = { version = "0.30.13", optional = true }
 zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
 quick-xml = { version = "0.41", features = ["escape-html"] }
 flate2 = "1.1"
+qrcode = { version = "0.14", default-features = false }
 sha2 = "0.10"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 unicode-segmentation = "1.13.3"

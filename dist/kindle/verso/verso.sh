@@ -47,6 +47,10 @@ ROLLBACK="${UPDATE_DIR}/rollback.json"
 STARTED="${TMP}/verso-started"
 HUNG="${TMP}/verso-hung-$$"
 START_TIMEOUT="${VERSO_START_TIMEOUT:-120}"
+# Wi-Fi transfer (crates/verso/src/transfer/mod.rs has the same names).
+TRANSFER_AWAKE="${TMP}/verso-transfer-awake"
+TRANSFER_FIREWALL="${TMP}/verso-transfer-firewall"
+TRANSFER_PORT=80
 EXIT_INSTALL=85
 EXIT_GO_BACK=86
 TAB="$(printf '\t')"
@@ -143,6 +147,19 @@ verso_wake() {
     fi
 }
 
+# Removes every copy of the two firewall rules that open port $1
+# (crates/verso/src/platform/firewall.rs adds them).
+close_port() {
+    for rule in "INPUT -p tcp --dport $1 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT" \
+        "OUTPUT -p tcp --sport $1 -m conntrack --ctstate ESTABLISHED -j ACCEPT"; do
+        n=0
+        # shellcheck disable=SC2086 # the rule is split into words on purpose
+        while [ "${n}" -lt 4 ] && iptables -D ${rule} 2>/dev/null; do
+            n=$((n + 1))
+        done
+    done
+}
+
 restore() {
     # Nothing may interrupt this.
     trap '' INT TERM HUP USR1 USR2
@@ -168,6 +185,17 @@ restore() {
     if [ -f "${AWAKE_MARKER}" ]; then
         lipc-set-prop com.lab126.powerd preventScreenSaver 0 && rm -f "${AWAKE_MARKER}"
         log "turned off keep-awake left by an update download"
+    fi
+    # Wi-Fi transfer keeps the Kindle awake and opens port 80 while its
+    # screen is open, with a marker for each. If Verso died first, undo them.
+    if [ -f "${TRANSFER_AWAKE}" ]; then
+        lipc-set-prop com.lab126.powerd preventScreenSaver 0 && rm -f "${TRANSFER_AWAKE}"
+        log "turned off keep-awake left by Wi-Fi transfer"
+    fi
+    if [ -f "${TRANSFER_FIREWALL}" ]; then
+        close_port "${TRANSFER_PORT}"
+        rm -f "${TRANSFER_FIREWALL}"
+        log "closed port ${TRANSFER_PORT}, left open by Wi-Fi transfer"
     fi
     log "done"
     # Last: a pending USB insertion may unmount /mnt/us immediately. Finish

@@ -1,7 +1,7 @@
 //! Verso — a calm, lightweight e-reader. See docs/plan.md.
 //!
 //! Simulator only: `--screenshot out.png` renders without a window, saves a
-//! grayscale PNG at device size and exits. `--screen books|settings|gallery` picks the
+//! grayscale PNG at device size and exits. `--screen books|settings|transfer|gallery` picks the
 //! start screen; `--tap x,y`, `--press x,y` (finger down, not lifted) and
 //! `--swipe x1,y1,x2,y2` (all repeatable, played in order) run first.
 
@@ -24,6 +24,7 @@ mod platform;
 mod reader;
 mod screens;
 mod store;
+mod transfer;
 mod ui;
 mod update;
 
@@ -148,7 +149,8 @@ fn start_screen(
             Box::new(screens::books::Books::with_store(theme, rect, worker, store))
         }
         "settings" => Box::new(screens::system::SystemSettings::new(theme, rect, store, worker.waker())),
-        other => bail!("unknown screen {other:?}; try home, library, settings or gallery"),
+        "transfer" => Box::new(screens::transfer::TransferScreen::new(theme, rect, store, worker.waker())),
+        other => bail!("unknown screen {other:?}; try home, library, settings, transfer or gallery"),
     })
 }
 
@@ -254,6 +256,8 @@ fn run() -> Result<i32> {
                 // An update download cut short may have left the Kindle
                 // kept awake (a file check; rare lipc call).
                 store.updates().restore_awake_after_crash();
+                // So may Wi-Fi transfer, with port 80 open too (two file checks).
+                transfer::cleanup_after_crash(&transfer::Device::current(store.root()));
                 // A version the launcher went back from isn't offered again.
                 store.updates().note_rollback();
                 // The update check reads its files and Wi-Fi on its own thread.

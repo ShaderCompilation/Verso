@@ -83,6 +83,25 @@ make_bin() {
     for c in killall lipc-set-prop; do
         printf '#!/bin/sh\necho "%s $*" >>"${VERSO_TEST_DIR}/calls"\n' "${c}" >"${B}/${c}"
     done
+    # A firewall that keeps its rules in a file, one per line.
+    cat >"${B}/iptables" <<'EOF'
+#!/bin/sh
+echo "iptables $*" >>"${VERSO_TEST_DIR}/calls"
+f="${VERSO_TEST_DIR}/rules"
+op="$1"
+shift
+touch "${f}"
+case "${op}" in
+    -A) echo "$*" >>"${f}" ;;
+    -C) grep -qxF -- "$*" "${f}" ;;
+    -D)
+        grep -qxF -- "$*" "${f}" || exit 1
+        awk -v r="$*" 'd || $0 != r { print; next } { d = 1 }' "${f}" >"${f}.new"
+        cat "${f}.new" >"${f}"
+        ;;
+    *) exit 2 ;;
+esac
+EOF
     for c in mv rm cp mkdir sync; do
         real="$(command -v "${c}")"
         [ "${c}" = sync ] && real=true # Don't sync this machine's disks hundreds of times.
@@ -177,7 +196,8 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/steps" "${W}"/queue-* "${W}"/default-*
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}"/queue-* \
+        "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
     : >"${W}/calls"
@@ -317,6 +337,24 @@ runs_are "0.1.0"
 installed_is 1
 ui_restored_once
 no_update_state
+! grep -q 'iptables\|preventScreenSaver' "${W}/calls" || fail "touched the firewall or keep-awake"
+
+begin "Wi-Fi transfer left on"
+fresh
+# Port 80 opened twice (a rule piled up), and SSH's port 22, which stays.
+open80="INPUT -p tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"
+printf '%s\n' "${open80}" "OUTPUT -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT" "${open80}" \
+    "INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT" >"${W}/rules"
+: >"${W}/tmp/verso-transfer-awake"
+: >"${W}/tmp/verso-transfer-firewall"
+echo crash >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0"
+ui_restored_once
+absent "${W}/tmp/verso-transfer-awake" "${W}/tmp/verso-transfer-firewall"
+grep -q 'lipc-set-prop com.lab126.powerd preventScreenSaver 0' "${W}/calls" || fail "keep-awake left on"
+[ "$(cat "${W}/rules")" = "INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT" ] ||
+    fail "firewall rules left: $(cat "${W}/rules")"
 
 begin "update"
 fresh

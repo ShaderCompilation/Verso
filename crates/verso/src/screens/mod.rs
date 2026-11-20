@@ -13,6 +13,7 @@ pub mod reader;
 pub mod reader_menu;
 pub mod system;
 pub mod text_sheet;
+pub mod transfer;
 pub mod update;
 
 use std::time::Instant;

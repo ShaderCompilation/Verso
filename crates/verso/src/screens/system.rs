@@ -11,6 +11,7 @@ use crate::gfx::{HAlign, Icon};
 use crate::platform::{Waker, ssh, wifi};
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
+use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones};
@@ -94,6 +95,8 @@ pub struct SystemSettings {
     wifi_toggle: Toggle,
     wifi_pending: Option<bool>,
     wifi_top: i32,
+    /// Opens Wi-Fi transfer, beside the Wi-Fi note.
+    transfer: Button,
     ssh: ssh::Status,
     ssh_toggle: Toggle,
     /// Start (true) or stop the SSH server once "Starting…" is on screen.
@@ -207,9 +210,12 @@ impl SystemSettings {
         let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
         wifi_toggle.enabled = wifi.is_some();
         wifi_toggle.place(device_left.right(), wifi_top + t.mm(4.0), t);
+        let mut transfer = Button::new("Wi-Fi transfer", ButtonKind::Secondary);
+        let transfer_w = t.mm(40.0).min(device_left.w / 2);
+        transfer.place(Rect::new(device_left.right() - transfer_w, wifi_top + t.mm(9.0), transfer_w, t.button_h), t);
         // Updates: below Wi-Fi, or on the right in landscape.
         let landscape = device_right != device_left;
-        let update_top = if landscape { body } else { wifi_top + t.mm(21.0) };
+        let update_top = if landscape { body } else { wifi_top + t.mm(23.0) };
         let u = device_right;
         let mut check_button = Button::new("Check for updates", ButtonKind::Secondary);
         let check_w = t.mm(40.0).min(u.w / 2);
@@ -278,6 +284,7 @@ impl SystemSettings {
             wifi_toggle,
             wifi_pending: None,
             wifi_top,
+            transfer,
             ssh_was_running: ssh.running,
             ssh,
             ssh_toggle,
@@ -652,12 +659,14 @@ impl SystemSettings {
         let label = Rect::new(c.x, self.wifi_top, c.w - t.mm(12.0), t.mm(8.0));
         cx.line("Wi-Fi", t.body, label, HAlign::Left);
         self.wifi_toggle.draw(cx);
+        let note_w = self.transfer.rect().x - t.mm(3.0) - label.x;
         cx.paragraph(
             self.wifi_note(),
             t.small.gray(INK2),
-            Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(14.0)),
+            Rect::new(label.x, label.bottom() - t.mm(1.0), note_w, t.mm(14.0)),
             HAlign::Left,
         );
+        self.transfer.draw(cx);
         self.draw_updates(cx);
     }
 
@@ -746,7 +755,11 @@ impl SystemSettings {
         }
     }
 
-    fn device_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+    fn device_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
+        if self.wifi_pending.is_none() && self.ssh_pending.is_none() && self.transfer.on_gesture(g) {
+            let screen = TransferScreen::new(cx.theme, self.screen, self.store.clone(), self.waker.clone());
+            return Action::Push(Box::new(screen));
+        }
         if let Some(selected) = self.sleep.on_gesture(g) {
             let screen = if selected == 0 { SleepScreen::Cover } else { SleepScreen::Amazon };
             if !self.save(cx, "sleep screen", |s| s.sleep_screen = screen) {
@@ -763,6 +776,7 @@ impl SystemSettings {
         if let Some(PressEvent::Tap) = self.version_press.on_gesture(g, self.version) {
             self.tap_version(cx);
         }
+        Action::None
     }
 }
 
@@ -945,7 +959,7 @@ impl Screen for SystemSettings {
             Tab::Reading => self.reading_gesture(&g, cx),
             Tab::Display => return self.display_gesture(&g, cx),
             Tab::Library => return self.library_gesture(&g, cx),
-            Tab::Device => self.device_gesture(&g, cx),
+            Tab::Device => return self.device_gesture(&g, cx),
             Tab::Advanced => self.advanced_gesture(&g, cx),
         }
         Action::None

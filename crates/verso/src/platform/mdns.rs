@@ -1,8 +1,10 @@
 //! Lets computers on the Wi-Fi find the Kindle as `verso.local` while the
-//! SSH server runs, through the bundled responder (crates/verso-mdns,
-//! installed as verso/bin/verso-mdns). The responder watches the SSH server
-//! and exits when it does, whoever stops it (Verso or KOReader).
-//! See docs/device-tools.md.
+//! SSH server runs or Wi-Fi transfer is open, through the bundled responder
+//! (crates/verso-mdns, installed as verso/bin/verso-mdns). The responder
+//! watches the process it serves and exits when it does: the SSH server
+//! (whoever stops it, Verso or KOReader), or Verso itself for Wi-Fi
+//! transfer, so it can't outlive a crash. See docs/device-tools.md and
+//! docs/web-app.md.
 
 use std::fs::File;
 use std::path::Path;
@@ -16,9 +18,9 @@ const BINARY: &str = "/mnt/us/verso/bin/verso-mdns";
 const LOG: &str = "/tmp/verso-mdns.log";
 const INTERFACE: &str = "wlan0";
 
-/// Starts the responder for the SSH server `ssh_pid`, unless it's already
-/// running the current build.
-pub fn ensure(label: &str, ssh_pid: i32) {
+/// Starts the responder for the process `pid` called `name` (the SSH
+/// server), unless it's already running the current build.
+pub fn ensure(label: &str, pid: i32, name: &str) {
     if let Some(pid) = verso_mdns::running_pid() {
         if !runs_replaced(pid, BINARY) {
             return;
@@ -37,7 +39,7 @@ pub fn ensure(label: &str, ssh_pid: i32) {
     let log = File::create(LOG).map_or_else(|_| Stdio::null(), Stdio::from);
     let mut command = Command::new(BINARY);
     command
-        .args(["--watch", &ssh_pid.to_string(), "--watch-name", "dropbear", "--firewall", INTERFACE, label])
+        .args(["--watch", &pid.to_string(), "--watch-name", name, "--firewall", INTERFACE, label])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
@@ -45,6 +47,25 @@ pub fn ensure(label: &str, ssh_pid: i32) {
         Ok(true) => log::info!("mDNS: advertising {label}.local"),
         Ok(false) => log::warn!("mDNS: couldn't start the responder"),
         Err(e) => log::warn!("mDNS: couldn't start the responder: {e}"),
+    }
+}
+
+/// For Wi-Fi transfer: starts a responder that lasts as long as Verso,
+/// unless one runs already (the SSH server's). The PID of the one it
+/// started, once it's running.
+pub fn start_for_verso(label: &str) -> Option<i32> {
+    if verso_mdns::running_pid().is_some() {
+        return None;
+    }
+    ensure(label, std::process::id() as i32, "verso");
+    wait_until(PIDFILE_GRACE, || verso_mdns::running_pid().is_some());
+    verso_mdns::running_pid()
+}
+
+/// Stops the responder `start_for_verso` started, if it still runs.
+pub fn stop(pid: i32) {
+    if verso_mdns::running_pid() == Some(pid) {
+        terminate(pid);
     }
 }
 

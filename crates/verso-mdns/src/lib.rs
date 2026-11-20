@@ -50,6 +50,62 @@ pub fn next_label(label: &str) -> String {
     format!("{base}{suffix}")
 }
 
+/// An IPv4 address of a network interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InterfaceAddr {
+    pub addr: std::net::Ipv4Addr,
+    pub netmask: std::net::Ipv4Addr,
+    /// The interface's index, for joining multicast groups on it.
+    pub index: u32,
+}
+
+/// The IPv4 addresses of interfaces that are up and running, with the
+/// interface names (`getifaddrs`).
+#[cfg(target_os = "linux")]
+pub fn interface_addresses() -> Vec<(String, InterfaceAddr)> {
+    use std::net::Ipv4Addr;
+    let mut found = Vec::new();
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list`, which we walk read-only and free.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return found;
+        }
+        let mut entry = list;
+        while !entry.is_null() {
+            let e = &*entry;
+            entry = e.ifa_next;
+            let up = libc::IFF_UP as libc::c_uint | libc::IFF_RUNNING as libc::c_uint;
+            if e.ifa_addr.is_null()
+                || e.ifa_netmask.is_null()
+                || i32::from((*e.ifa_addr).sa_family) != libc::AF_INET
+                || e.ifa_flags & up != up
+            {
+                continue;
+            }
+            let ip = |sa: *const libc::sockaddr| {
+                let sin = &*sa.cast::<libc::sockaddr_in>();
+                Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
+            };
+            let index = libc::if_nametoindex(e.ifa_name);
+            if index != 0 {
+                let name = std::ffi::CStr::from_ptr(e.ifa_name).to_string_lossy().into_owned();
+                found.push((name, InterfaceAddr { addr: ip(e.ifa_addr), netmask: ip(e.ifa_netmask), index }));
+            }
+        }
+        libc::freeifaddrs(list);
+    }
+    found
+}
+
+/// The address of the interface called `name` (`wlan0` on the Kindle),
+/// if it's up and has one. Unlike a route lookup, this works on a network
+/// without a gateway (a travel router, a phone's hotspot without data).
+#[cfg(target_os = "linux")]
+pub fn interface_address(name: &str) -> Option<InterfaceAddr> {
+    interface_addresses().into_iter().find(|(n, _)| n == name).map(|(_, a)| a)
+}
+
 /// The running responder's PID, if there is one.
 pub fn running_pid() -> Option<i32> {
     let pid: i32 = std::fs::read_to_string(PID_FILE).ok()?.trim().parse().ok()?;

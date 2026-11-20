@@ -11,6 +11,8 @@ use crate::gfx::Canvas;
 pub mod awake;
 #[cfg(feature = "desktop")]
 mod desktop;
+#[cfg(feature = "kindle")]
+pub mod firewall;
 #[cfg(any(feature = "kindle", test))]
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod flash;
@@ -19,7 +21,7 @@ mod headless;
 #[cfg(feature = "kindle")]
 mod kindle;
 #[cfg(feature = "kindle")]
-mod mdns;
+pub mod mdns;
 #[cfg(any(feature = "kindle", test))]
 mod power;
 #[cfg(any(feature = "kindle", test))]

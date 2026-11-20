@@ -353,6 +353,10 @@ impl Store {
             })
             .clone()
     }
+    /// Verso's data folder (`/mnt/us/verso/data` on the Kindle).
+    pub fn root(&self) -> PathBuf {
+        self.root.clone()
+    }
     pub fn wordforms_dir(&self) -> PathBuf {
         self.wordforms.clone()
     }

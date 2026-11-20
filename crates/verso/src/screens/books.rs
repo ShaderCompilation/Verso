@@ -209,6 +209,8 @@ pub struct Books {
     exit: IconButton,
     search_action: IconButton,
     settings_action: IconButton,
+    /// Opens Wi-Fi transfer ("Add books over Wi-Fi").
+    transfer_action: IconButton,
     search: Option<SearchSession>,
     rescan: Button,
     sort: Segmented,
@@ -311,6 +313,8 @@ impl Books {
         search_action.place_at(Point::new(rescan.rect().x - t.mm(2.0) - t.target / 2, t.top_bar / 2), t);
         let mut settings_action = IconButton::new(Icon::Settings);
         settings_action.place_at(Point::new(search_action.rect().x - t.target / 2, t.top_bar / 2), t);
+        let mut transfer_action = IconButton::new(Icon::Wifi);
+        transfer_action.place_at(Point::new(settings_action.rect().x - t.target / 2, t.top_bar / 2), t);
         let mut pager = Pager::new(1);
         pager.jump = true;
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
@@ -363,6 +367,7 @@ impl Books {
             exit,
             search_action,
             settings_action,
+            transfer_action,
             search: None,
             rescan,
             sort,
@@ -1799,6 +1804,7 @@ impl Screen for Books {
             self.exit.draw(cx);
             self.search_action.draw(cx);
             self.settings_action.draw(cx);
+            self.transfer_action.draw(cx);
             if self.update_dot {
                 draw_dot(cx, self.settings_action.rect());
             }
@@ -2221,6 +2227,14 @@ impl Screen for Books {
             }
             if self.selection.is_none() && self.settings_action.on_gesture(&g) {
                 return Action::Push(Box::new(crate::screens::system::SystemSettings::new(
+                    cx.theme,
+                    self.screen,
+                    self.store.clone(),
+                    self.worker.waker(),
+                )));
+            }
+            if self.selection.is_none() && self.transfer_action.on_gesture(&g) {
+                return Action::Push(Box::new(crate::screens::transfer::TransferScreen::new(
                     cx.theme,
                     self.screen,
                     self.store.clone(),

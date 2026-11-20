@@ -1,0 +1,575 @@
+//! Wi-Fi transfer: a small web app served by the Kindle while its screen
+//! (screens/transfer.rs) is open. See docs/web-app.md.
+//!
+//! A session turns Wi-Fi on and keeps the Kindle awake if needed, opens
+//! port 80, starts the server and a `verso.local` responder, then watches
+//! the address. Stopping undoes all of it in reverse; leaving the screen
+//! also turns Wi-Fi back off if the session turned it on. Keep-awake and
+//! the firewall rules are marked with files in /tmp first, so if Verso
+//! dies (it builds with panic = "abort") the launcher's restore() and the
+//! next start undo them (`cleanup_after_crash`).
+
+mod api;
+mod auth;
+mod device;
+mod http;
+mod server;
+
+use std::net::Ipv4Addr;
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use crate::platform::{Battery, Waker};
+use api::{Api, Context};
+use auth::Auth;
+use server::{Server, Timeouts};
+
+pub use device::Device;
+
+/// How long the screen waits for Wi-Fi to connect before offering Try again
+/// (the same bound as the SSH row's re-reads).
+pub const NETWORK_WAIT: Duration = Duration::from_secs(90);
+/// The server stops after this long without a request.
+pub const IDLE: Duration = Duration::from_secs(10 * 60);
+/// Marker files, in the device's marker folder (/tmp on the Kindle). The
+/// launcher (dist/kindle/verso/verso.sh) uses the same names.
+const AWAKE_MARKER: &str = "verso-transfer-awake";
+const FIREWALL_MARKER: &str = "verso-transfer-firewall";
+/// How often the address and name are read again: often while waiting for
+/// Wi-Fi to connect, rarely once it has.
+const POLL_WAITING: Duration = Duration::from_secs(1);
+const POLL_READY: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Turning Wi-Fi on, keeping awake, opening the port.
+    Starting,
+    /// Serving, but Wi-Fi hasn't connected yet.
+    Waiting,
+    /// Still not connected after NETWORK_WAIT: Try again.
+    NoNetwork,
+    Ready,
+    Stopped(Stop),
+    Failed(Failure),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    Idle,
+    Slept,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    Wifi,
+    PortInUse,
+    Server,
+}
+
+/// A line in the screen's activity list, newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))] // filled by the Books and Dictionaries tabs (Phases 2–3)
+pub enum Activity {
+    Receiving { name: String },
+    Received { name: String, folder: String },
+    Deleted { name: String },
+    Dictionary { name: String },
+}
+
+/// What the screen shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    pub phase: Phase,
+    pub address: Option<Ipv4Addr>,
+    /// The name the responder won, without `.local`.
+    pub hostname: Option<String>,
+    /// The port in the addresses shown (80 on the Kindle).
+    pub port: u16,
+    pub code: String,
+    pub activity: Vec<Activity>,
+}
+
+impl Snapshot {
+    fn origin(&self, host: &str) -> String {
+        if self.port == 80 { format!("http://{host}") } else { format!("http://{host}:{}", self.port) }
+    }
+
+    /// `http://verso.local`, once the name is known.
+    pub fn name_url(&self) -> Option<String> {
+        Some(self.origin(&format!("{}.local", self.hostname.as_ref()?)))
+    }
+
+    /// `http://192.168.1.42`, once there's an address.
+    pub fn ip_url(&self) -> Option<String> {
+        Some(self.origin(&self.address?.to_string()))
+    }
+
+    /// What the QR code holds: the IP, and the code in the fragment, which
+    /// browsers don't send to the server.
+    pub fn qr_url(&self) -> Option<String> {
+        Some(format!("{}/#code={}", self.ip_url()?, self.code))
+    }
+}
+
+pub struct Session {
+    device: Arc<Device>,
+    shared: Arc<Shared>,
+    thread: Option<JoinHandle<()>>,
+    waker: Waker,
+    /// The name to advertise (`Settings::hostname`).
+    label: String,
+    developer: bool,
+    /// The last code shown: a new start never shows the same one.
+    last_code: String,
+}
+
+struct Shared {
+    state: Mutex<State>,
+    wake: Condvar,
+    battery: Mutex<Option<Battery>>,
+}
+
+struct State {
+    phase: Phase,
+    address: Option<Ipv4Addr>,
+    hostname: Option<String>,
+    activity: Vec<Activity>,
+    /// Counts changes the screen should draw.
+    revision: u64,
+    stop: bool,
+    retry: bool,
+    api: Option<Arc<Api>>,
+    running: Running,
+    /// Wi-Fi was off and the session turned it on; leaving puts it back.
+    wifi_turned_on: bool,
+}
+
+/// What a running session holds, to give back when it stops.
+#[derive(Default)]
+struct Running {
+    server: Option<Server>,
+    awake: bool,
+    firewall: bool,
+    responder: Option<i32>,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Session {
+    /// Starts serving; the screen follows along through `snapshot`, and
+    /// `waker` is called whenever it changes.
+    pub fn start(device: Arc<Device>, waker: Waker, label: String, developer: bool) -> Self {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                phase: Phase::Starting,
+                address: None,
+                hostname: None,
+                activity: device.activity.clone(),
+                revision: 0,
+                stop: false,
+                retry: false,
+                api: None,
+                running: Running::default(),
+                wifi_turned_on: false,
+            }),
+            wake: Condvar::new(),
+            battery: Mutex::new(None),
+        });
+        let mut session = Self { device, shared, thread: None, waker, label, developer, last_code: String::new() };
+        session.spawn();
+        session
+    }
+
+    fn spawn(&mut self) {
+        let code = match &self.device.code {
+            Some(code) => code.clone(),
+            None => loop {
+                let code = auth::random_code();
+                if code != self.last_code {
+                    break code;
+                }
+            },
+        };
+        self.last_code = code.clone();
+        // Made before locking: it reads the names, which takes the lock.
+        let api = Arc::new(Api::new(Auth::with_code(code), self.context()));
+        {
+            let mut state = self.shared.lock();
+            state.stop = false;
+            state.retry = false;
+            state.phase = Phase::Starting;
+            state.revision += 1;
+            state.api = Some(api);
+            if let Some(phase) = self.device.forced {
+                // Simulator captures of states that are hard to reach.
+                state.phase = phase;
+                return;
+            }
+        }
+        let (device, shared, waker, label) =
+            (self.device.clone(), self.shared.clone(), self.waker.clone(), self.label.clone());
+        let thread = std::thread::Builder::new().name("transfer".into()).spawn(move || {
+            run(&device, &shared, &waker, &label);
+        });
+        match thread {
+            Ok(thread) => self.thread = Some(thread),
+            Err(e) => {
+                log::error!("Wi-Fi transfer: starting its thread: {e}");
+                self.shared.lock().phase = Phase::Failed(Failure::Server);
+            }
+        }
+    }
+
+    /// The API's view of the device; it holds the session weakly, so the
+    /// session (which owns the API) can still be dropped.
+    fn context(&self) -> Context {
+        let (device, weak) = (self.device.clone(), Arc::downgrade(&self.shared));
+        let names = {
+            let (device, weak) = (device.clone(), weak.clone());
+            move || {
+                let mut names = device.local_names.clone();
+                let state = weak.upgrade().map(|s| {
+                    let state = s.lock();
+                    (state.address, state.hostname.clone())
+                });
+                let (cached_ip, cached_name) = state.unwrap_or_default();
+                for ip in [cached_ip, (device.address)()].into_iter().flatten() {
+                    names.push(ip.to_string());
+                }
+                for name in [cached_name, (device.hostname)()].into_iter().flatten() {
+                    names.push(format!("{name}.local"));
+                }
+                names
+            }
+        };
+        let status = {
+            let (device, weak, developer) = (device.clone(), weak.clone(), self.developer);
+            move || status(&device, &weak, developer)
+        };
+        let changed = {
+            let (weak, waker) = (weak, self.waker.clone());
+            move || {
+                if let Some(shared) = weak.upgrade() {
+                    shared.lock().revision += 1;
+                    waker.wake();
+                }
+            }
+        };
+        Context {
+            port: self.device.listen.port(),
+            names: Box::new(names),
+            status: Box::new(status),
+            changed: Box::new(changed),
+        }
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        let state = self.shared.lock();
+        let code = state.api.as_ref().map(|api| api.code().0).unwrap_or_default();
+        Snapshot {
+            phase: state.phase,
+            address: state.address,
+            hostname: state.hostname.clone(),
+            port: self.device.display_port.unwrap_or(self.device.listen.port()),
+            code,
+            activity: state.activity.clone(),
+        }
+    }
+
+    /// Changes whenever the snapshot may have.
+    pub fn revision(&self) -> u64 {
+        let state = self.shared.lock();
+        state.revision + state.api.as_ref().map_or(0, |api| api.code().1)
+    }
+
+    /// For `/api/status`; the screen passes on each reading.
+    pub fn set_battery(&self, battery: Option<Battery>) {
+        *self.shared.battery.lock().unwrap_or_else(|e| e.into_inner()) = battery;
+    }
+
+    /// Wait for Wi-Fi again, after NETWORK_WAIT ran out.
+    pub fn retry(&self) {
+        let mut state = self.shared.lock();
+        state.retry = true;
+        self.shared.wake.notify_all();
+    }
+
+    /// Starts again after a stop or a failure, with a new code.
+    pub fn restart(&mut self) {
+        self.halt();
+        self.spawn();
+    }
+
+    /// When the idle stop is due: IDLE after the last request ended. None
+    /// while a request is in progress or nothing is served.
+    pub fn idle_deadline(&self) -> Option<Instant> {
+        let state = self.shared.lock();
+        let since = state.running.server.as_ref()?.idle_since()?;
+        Some(since + self.device.idle)
+    }
+
+    /// Stops serving and gives everything back except Wi-Fi, which stays as
+    /// it is until the screen closes (`close`).
+    pub fn stop(&mut self, why: Stop) {
+        let was = self.shared.lock().phase;
+        self.halt();
+        let mut state = self.shared.lock();
+        if !matches!(was, Phase::Stopped(_) | Phase::Failed(_)) {
+            log::info!("Wi-Fi transfer: stopped ({why:?})");
+            state.phase = Phase::Stopped(why);
+            state.revision += 1;
+        }
+    }
+
+    /// Ends the session: everything given back, Wi-Fi as it was before.
+    pub fn close(&mut self) {
+        self.halt();
+        let turned_on = std::mem::take(&mut self.shared.lock().wifi_turned_on);
+        if turned_on {
+            log::info!("Wi-Fi transfer: turning Wi-Fi back off");
+            if let Err(e) = (self.device.set_wifi)(false) {
+                log::warn!("Wi-Fi transfer: turning Wi-Fi off: {e:#}");
+            }
+        }
+    }
+
+    /// Stops the session's thread and gives back what it holds.
+    fn halt(&mut self) {
+        self.shared.lock().stop = true;
+        self.shared.wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let running = std::mem::take(&mut self.shared.lock().running);
+        running.release(&self.device);
+    }
+
+    /// Adds a line to the activity list (newest first) and redraws.
+    #[allow(dead_code)] // uploads, deletes and installs report here (Phases 2–3)
+    pub fn push_activity(&self, activity: Activity) {
+        let mut state = self.shared.lock();
+        state.activity.insert(0, activity);
+        state.activity.truncate(50);
+        state.revision += 1;
+        drop(state);
+        self.waker.wake();
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+impl Running {
+    /// Gives everything back, newest first: the server, the port, the name,
+    /// keep-awake.
+    fn release(mut self, device: &Device) {
+        if let Some(mut server) = self.server.take() {
+            server.stop();
+        }
+        if std::mem::take(&mut self.firewall) {
+            (device.firewall)(false);
+            remove_marker(&device.markers, FIREWALL_MARKER);
+        }
+        if let Some(pid) = self.responder.take() {
+            (device.stop_responder)(pid);
+        }
+        if std::mem::take(&mut self.awake) {
+            match (device.keep_awake)(false) {
+                Ok(()) => remove_marker(&device.markers, AWAKE_MARKER),
+                Err(e) => log::warn!("Wi-Fi transfer: turning keep-awake off: {e:#}"),
+            }
+        }
+    }
+}
+
+fn remove_marker(dir: &Path, name: &str) {
+    let path = dir.join(name);
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("removing {}: {e}", path.display());
+    }
+}
+
+fn write_marker(dir: &Path, name: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join(name),
+        "1
+",
+    )
+}
+
+/// `/api/status`.
+fn status(device: &Device, shared: &Weak<Shared>, developer: bool) -> serde_json::Value {
+    let (name, battery) = match shared.upgrade() {
+        Some(shared) => {
+            let state = shared.lock();
+            let name = state.hostname.as_ref().map(|h| format!("{h}.local")).or(state.address.map(|a| a.to_string()));
+            (name, *shared.battery.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+        None => (None, None),
+    };
+    let free = crate::update::download::free_space(&device.storage).ok();
+    serde_json::json!({
+        "name": name,
+        "free": free,
+        "battery": battery.map(|b| serde_json::json!({ "percent": b.percent, "charging": b.charging })),
+        "developer": developer,
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// The session's thread: starts everything, then follows the address until
+/// told to stop.
+fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
+    let stopping = || shared.lock().stop;
+    let fail = |failure: Failure| {
+        let running = {
+            let mut state = shared.lock();
+            state.phase = Phase::Failed(failure);
+            state.revision += 1;
+            std::mem::take(&mut state.running)
+        };
+        running.release(device);
+        waker.wake();
+    };
+
+    match (device.wifi_enabled)() {
+        Ok(true) => {}
+        Ok(false) => {
+            log::info!("Wi-Fi transfer: turning Wi-Fi on");
+            shared.lock().wifi_turned_on = true;
+            if let Err(e) = (device.set_wifi)(true) {
+                log::error!("Wi-Fi transfer: turning Wi-Fi on: {e:#}");
+                return fail(Failure::Wifi);
+            }
+        }
+        Err(e) => {
+            log::error!("Wi-Fi transfer: reading Wi-Fi state: {e:#}");
+            return fail(Failure::Wifi);
+        }
+    }
+    if stopping() {
+        return;
+    }
+
+    // Marked first, so a crash right after is undone by the launcher.
+    match (device.kept_awake)() {
+        Ok(false) => match write_marker(&device.markers, AWAKE_MARKER) {
+            Ok(()) => {
+                shared.lock().running.awake = true;
+                if let Err(e) = (device.keep_awake)(true) {
+                    log::warn!("Wi-Fi transfer: keeping the Kindle awake: {e:#}");
+                }
+            }
+            Err(e) => log::warn!("Wi-Fi transfer: not keeping the Kindle awake: writing the marker: {e}"),
+        },
+        Ok(true) => {}
+        Err(e) => log::warn!("Wi-Fi transfer: not keeping the Kindle awake: {e:#}"),
+    }
+
+    let Some(api) = shared.lock().api.clone() else { return };
+    match Server::start(device.listen, api, Timeouts::default()) {
+        Ok(server) => shared.lock().running.server = Some(server),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            log::error!("Wi-Fi transfer: port {} is in use", device.listen.port());
+            return fail(Failure::PortInUse);
+        }
+        Err(e) => {
+            log::error!("Wi-Fi transfer: starting the server on {}: {e}", device.listen);
+            return fail(Failure::Server);
+        }
+    }
+    if let Err(e) = write_marker(&device.markers, FIREWALL_MARKER) {
+        log::warn!("Wi-Fi transfer: writing the firewall marker: {e}");
+    }
+    shared.lock().running.firewall = true;
+    (device.firewall)(true);
+
+    let mut waiting_since = Instant::now();
+    loop {
+        let address = (device.address)();
+        let responder_needed = address.is_some() && {
+            let state = shared.lock();
+            state.running.responder.is_none() && !state.stop
+        };
+        // An SSH server's responder already advertises the name.
+        if responder_needed
+            && (device.hostname)().is_none()
+            && let Some(pid) = (device.start_responder)(label)
+        {
+            shared.lock().running.responder = Some(pid);
+        }
+        let hostname = (device.hostname)();
+        let mut state = shared.lock();
+        if state.stop {
+            return;
+        }
+        let before = (state.phase, state.address, state.hostname.clone());
+        if std::mem::take(&mut state.retry) && state.phase == Phase::NoNetwork {
+            state.phase = Phase::Waiting;
+            waiting_since = Instant::now();
+        }
+        state.phase = match (state.phase, address) {
+            (_, Some(_)) => Phase::Ready,
+            (Phase::Ready | Phase::Starting, None) => {
+                waiting_since = Instant::now();
+                Phase::Waiting
+            }
+            (Phase::Waiting, None) if waiting_since.elapsed() >= device.network_wait => Phase::NoNetwork,
+            (phase, None) => phase,
+        };
+        state.address = address;
+        state.hostname = hostname;
+        if (state.phase, state.address, state.hostname.clone()) != before {
+            if state.phase != before.0 {
+                log::info!("Wi-Fi transfer: {:?} at {:?} as {:?}", state.phase, state.address, state.hostname);
+            }
+            state.revision += 1;
+            waker.wake();
+        }
+        let poll = if state.phase == Phase::Ready && state.hostname.is_some() {
+            POLL_READY
+        } else {
+            POLL_WAITING.min(device.network_wait.max(Duration::from_millis(20)))
+        };
+        drop(shared.wake.wait_timeout_while(state, poll, |s| !s.stop && !s.retry));
+    }
+}
+
+/// At startup: a Wi-Fi transfer cut short by a crash may have left the
+/// Kindle kept awake or port 80 open (the launcher's restore() undoes this
+/// too; this covers a restart inside the launcher's loop).
+pub fn cleanup_after_crash(device: &Device) {
+    if device.markers.join(AWAKE_MARKER).exists() {
+        log::info!("turning off keep-awake left by Wi-Fi transfer");
+        match (device.keep_awake)(false) {
+            Ok(()) => remove_marker(&device.markers, AWAKE_MARKER),
+            Err(e) => log::warn!("turning off keep-awake: {e:#}"),
+        }
+    }
+    if device.markers.join(FIREWALL_MARKER).exists() {
+        log::info!("closing port {} left open by Wi-Fi transfer", device.listen.port());
+        (device.firewall)(false);
+        remove_marker(&device.markers, FIREWALL_MARKER);
+    }
+}
+
+/// Where the markers go, for tests.
+#[cfg(test)]
+fn marker_paths(dir: &Path) -> [std::path::PathBuf; 2] {
+    [dir.join(AWAKE_MARKER), dir.join(FIREWALL_MARKER)]
+}
+
+#[cfg(test)]
+mod tests;
