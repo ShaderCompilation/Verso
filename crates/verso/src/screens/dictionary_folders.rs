@@ -605,9 +605,11 @@ mod tests {
         with_cx(&f.theme, |cx| s.on_background(cx));
         assert_eq!(s.folders, vec![parent.clone(), child.clone()]);
         // A fast catalog reply can clear `pending` within that same
-        // on_background call, so observe the refresh through its result
-        // instead of its pending flag.
+        // on_background call, so the flag may already be down. Either the
+        // refresh is still running (the new row is unchecked) or its reply
+        // has arrived; both prove the change triggered a refresh.
         if s.pending {
+            assert!(s.state(2).starts_with("Checking"), "a refresh in flight leaves the new folder unchecked");
             wait(&mut s);
         }
         assert!(s.status(1).starts_with("No dictionaries · "));
