@@ -30,6 +30,7 @@ pub struct Kindle {
     wake_fd: std::sync::Arc<std::os::fd::OwnedFd>,
     _power: PowerEvents,
     power_rx: std::sync::mpsc::Receiver<Event>,
+    frontlight_rx: Option<std::sync::mpsc::Receiver<Option<Frontlight>>>,
     battery_due: Instant,
     sleeping: bool,
     native_sleep: bool,
@@ -60,6 +61,7 @@ impl Kindle {
         let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
         let (tx, power_rx) = std::sync::mpsc::channel();
         let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()))?;
+        let frontlight_rx = spawn_frontlight_read(fd_waker(wake_fd.clone()));
         Ok(Self {
             info,
             display,
@@ -68,6 +70,7 @@ impl Kindle {
             wake_fd,
             _power: power,
             power_rx,
+            frontlight_rx,
             battery_due: Instant::now() + Duration::from_secs(60),
             sleeping: false,
             native_sleep: false,
@@ -105,6 +108,21 @@ impl Kindle {
             self.status = None;
         }
         event
+    }
+
+    fn take_frontlight(&mut self) -> Option<Option<Frontlight>> {
+        let rx = self.frontlight_rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(light) => {
+                self.frontlight_rx = None;
+                Some(light)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.frontlight_rx = None;
+                Some(None)
+            }
+        }
     }
 }
 
@@ -167,10 +185,10 @@ impl Platform for Kindle {
         fd_waker(self.wake_fd.clone())
     }
     fn frontlight(&mut self) -> Option<Frontlight> {
-        Some(Frontlight {
-            brightness: property("flIntensity")?.clamp(0, 24) as u8,
-            warmth: property("currentAmberLevel").map(|v| v.clamp(0, 24) as u8),
-        })
+        read_frontlight()
+    }
+    fn initial_frontlight(&mut self) -> Option<Option<Frontlight>> {
+        self.take_frontlight()
     }
     fn set_frontlight(&mut self, value: Frontlight) -> Result<()> {
         set_property("flIntensity", value.brightness.min(24))?;
@@ -200,6 +218,9 @@ impl Platform for Kindle {
             // request once so input remains usable and the user can retry.
             if QUIT.swap(false, Ordering::Relaxed) {
                 return Ok(Some(Event::Quit));
+            }
+            if let Some(light) = self.take_frontlight() {
+                return Ok(Some(Event::Frontlight(light)));
             }
             if let Ok(e) = self.power_rx.try_recv() {
                 return Ok(Some(self.system_event(e)));
@@ -246,7 +267,16 @@ impl Platform for Kindle {
                     unsafe {
                         libc::read(self.wake_fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8);
                     }
+                    if let Some(light) = self.take_frontlight() {
+                        if value > 1 {
+                            self.queue.push_back(Event::Background);
+                        }
+                        return Ok(Some(Event::Frontlight(light)));
+                    }
                     let event = self.power_rx.try_recv().unwrap_or(Event::Background);
+                    if value > 1 && !matches!(event, Event::Background) {
+                        self.queue.push_back(Event::Background);
+                    }
                     return Ok(Some(self.system_event(event)));
                 }
                 let pfd = &pfds[0];
@@ -292,6 +322,28 @@ fn fd_waker(fd: std::sync::Arc<std::os::fd::OwnedFd>) -> Waker {
             libc::write(fd.as_raw_fd(), (&one as *const u64).cast(), 8);
         }
     })
+}
+fn read_frontlight() -> Option<Frontlight> {
+    Some(Frontlight {
+        brightness: property("flIntensity")?.clamp(0, 24) as u8,
+        warmth: property("currentAmberLevel").map(|v| v.clamp(0, 24) as u8),
+    })
+}
+fn spawn_frontlight_read(waker: Waker) -> Option<std::sync::mpsc::Receiver<Option<Frontlight>>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    match std::thread::Builder::new().name("verso-frontlight".into()).spawn(move || {
+        let started = Instant::now();
+        let value = read_frontlight();
+        log::debug!("frontlight read off-thread in {} us: {value:?}", started.elapsed().as_micros());
+        let _ = tx.send(value);
+        waker.wake();
+    }) {
+        Ok(_) => Some(rx),
+        Err(e) => {
+            log::warn!("couldn't start frontlight thread: {e}");
+            None
+        }
+    }
 }
 fn property(name: &str) -> Option<i32> {
     let out = std::process::Command::new("lipc-get-prop").args(["com.lab126.powerd", name]).output().ok()?;

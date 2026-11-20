@@ -409,6 +409,10 @@ impl Books {
         };
         s.pager.page = s.navigation.page();
         s.refresh(t);
+        if s.is_home() {
+            let covers = s.home_covers(t);
+            s.thumbnails.prefetch(covers);
+        }
         s
     }
     fn selected_sort(&self) -> Sort {
@@ -724,6 +728,34 @@ impl Books {
     /// same size in every cell, like covers.
     fn folder_rect(&self, cell: Rect, parent_line: bool, t: &Theme) -> Rect {
         grid_folder_rect(&self.grid, cell, parent_line, t)
+    }
+    /// The covers Home's first draw will load: the resume card first, then
+    /// the Recent books row. Shared geometry with `draw` guarantees cache hits.
+    fn home_covers(&self, t: &Theme) -> Vec<CoverSpec> {
+        if !self.is_home() {
+            return Vec::new();
+        }
+        let mut specs = Vec::new();
+        let mut add = |book: &Book, rect: Rect| {
+            if let Cover::Ready(key) = &book.cover {
+                specs.push(CoverSpec {
+                    book_id: book.id.clone(),
+                    key: key.clone(),
+                    w: rect.w,
+                    h: rect.h,
+                    fit: Fit::Cover,
+                });
+            }
+        };
+        if let Some(book) = self.continue_id.as_ref().and_then(|id| self.book(id)) {
+            add(book, continue_cover_rect(self.continue_rect));
+        }
+        for (i, cell) in self.grid.cells() {
+            if let Some(book) = self.grid_book(i) {
+                add(book, self.cover_rect(cell, t));
+            }
+        }
+        specs
     }
     /// The covers on the pages either side of the current one, next page
     /// first, for the prefetcher to decode while this one is on screen.
@@ -1622,6 +1654,10 @@ impl Books {
         );
     }
 }
+fn continue_cover_rect(r: Rect) -> Rect {
+    Rect::new(r.x, r.y, r.h * 2 / 3, r.h)
+}
+
 fn grid_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
     let (w, h) = grid.base_cell_size();
     let cover_h = (h - t.mm(10.0)).min(w * 3 / 2).max(1);
@@ -1851,7 +1887,7 @@ impl Screen for Books {
         }
         if let Some(book) = self.continue_id.as_ref().filter(|_| self.is_home()).and_then(|id| self.book(id)).cloned() {
             let r = self.continue_rect;
-            let cover = Rect::new(r.x, r.y, r.h * 2 / 3, r.h);
+            let cover = continue_cover_rect(r);
             draw_cover(cx, &book, cover, &self.store, &mut self.thumbnails);
             cx.hint(cover, RefreshMode::Ui);
             if self.continue_press.is_down() {
@@ -4936,6 +4972,63 @@ mod tests {
         assert!(books.update_dot, "the Settings dot stays while an update exists");
         assert_eq!((books.continue_rect, books.notice_rect), layout, "its spot stays reserved");
         std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn home_startup_prefetches_exact_first_draw_covers_and_draw_keeps_queue() -> anyhow::Result<()> {
+        for (w, h) in [(1272, 1696), (1696, 1272)] {
+            let root = std::env::temp_dir().join(format!("verso-home-prefetch-{w}x{h}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let store = Store::at(root.clone());
+            std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
+            let mut index = LibraryIndex::default();
+            for i in 0..5 {
+                let id = format!("b{i}");
+                let mut b = book(i);
+                b.id = id.clone();
+                b.cover = Cover::Ready(id.clone());
+                image::GrayImage::from_pixel(covers::WIDTH, covers::HEIGHT, image::Luma([40 + i as u8 * 20]))
+                    .save(store.cover_path(&id))?;
+                store.save_book(
+                    &id,
+                    &BookState {
+                        position: if i == 0 { crate::document::Position("p1".into()) } else { Default::default() },
+                        progress: if i == 0 { 3500 } else { 0 },
+                        last_opened: 100 - i as u64,
+                        ..Default::default()
+                    },
+                )?;
+                index.books.push(b);
+            }
+            store.rebuild_home_summary_until(&index, &|| false)?;
+            let t = Theme::for_dpi(300);
+            let screen = Rect::new(0, 0, w, h);
+            let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+            books.thumbnails = Thumbnails::prefetching(store.clone());
+            let specs = books.home_covers(&t);
+            let expected = 1 + books.grid.cells().len();
+            assert_eq!(specs.len(), expected, "{w}x{h}: resume + visible recent covers");
+            assert!(expected >= 4, "{w}x{h}: resume + recent row");
+            books.thumbnails.prefetch(specs.clone());
+            books.thumbnails.wait_prefetch();
+            assert_eq!(books.thumbnails.images.len(), specs.len());
+            // Hide cover files on disk: any size or fit mismatch in draw() fails.
+            let cover_dir = store.cover_path("x").parent().unwrap().to_owned();
+            std::fs::remove_dir_all(&cover_dir)?;
+            let mut canvas = crate::gfx::Canvas::new(w as u32, h as u32);
+            let mut text = crate::gfx::TextRenderer::new();
+            let mut icons = crate::gfx::IconRenderer::default();
+            let mut hints = Vec::new();
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+            assert!(books.thumbnails.failed.is_empty(), "{w}x{h}: every Home cover must hit prefetch");
+            assert!(books.thumbnails.requests.is_empty());
+            assert_eq!(books.thumbnails.images.len(), specs.len());
+            // Home's empty neighbour_covers must not wipe the startup prefetch set.
+            assert!(!books.thumbnails.prefetching.is_empty());
+            drop(books);
+            std::fs::remove_dir_all(root).ok();
+        }
         Ok(())
     }
 }

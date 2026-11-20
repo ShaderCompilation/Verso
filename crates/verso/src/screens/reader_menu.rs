@@ -52,23 +52,13 @@ impl ReaderMenu {
         prev.place_at(crate::geom::Point::new(m + t.target / 2, progress.rect().center().y), t);
         let mut next = IconButton::new(Icon::ChevronRight);
         next.place_at(crate::geom::Point::new(screen.w - m - t.target / 2, progress.rect().center().y), t);
-        // Each slider row: a label column, then the slider.
-        let make_slider = |row: Rect, value| {
-            let mut s = Slider::new(0.0, 24.0, 1.0, value as f32);
-            s.place(Rect::new(row.x + t.mm(20.0), row.y, row.w - t.mm(20.0), t.mm(6.0)), t);
-            s
-        };
-        let full = Rect::new(m, panel.y + t.mm(27.0), screen.w - 2 * m, t.mm(6.0));
-        let (light_row, warmth_row) = match light {
-            Some(Frontlight { warmth: Some(_), .. }) if wide => {
-                let gap = t.mm(10.0);
-                let w = (full.w - gap) / 2;
-                (Rect { w, ..full }, Rect { x: full.right() - w, w, ..full })
+        let (light_slider, warmth) = match light {
+            Some(v) => {
+                let (l, w) = light_sliders(t, screen, panel, v);
+                (Some(l), w)
             }
-            _ => (full, Rect { y: panel.y + t.mm(39.0), ..full }),
+            None => (None, None),
         };
-        let light_slider = light.map(|v| make_slider(light_row, v.brightness));
-        let warmth = light.and_then(|v| v.warmth.map(|w| make_slider(warmth_row, w)));
         let gap = t.mm(3.0);
         let width = (screen.w - 2 * m - 3 * gap) / 4;
         let y = screen.bottom() - t.mm(13.0);
@@ -95,6 +85,17 @@ impl ReaderMenu {
             text,
             outside: false,
         }
+    }
+    /// Populates the light controls if the menu opened before an asynchronous
+    /// startup frontlight reading arrived.
+    pub fn set_frontlight_if_missing(&mut self, t: &Theme, screen: Rect, light: Frontlight) -> bool {
+        if self.light.is_some() {
+            return false;
+        }
+        let (light_slider, warmth) = light_sliders(t, screen, self.panel, light);
+        self.light = Some(light_slider);
+        self.warmth = warmth;
+        true
     }
     pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize, pages_ready: bool) {
         let t = cx.theme;
@@ -169,4 +170,23 @@ impl ReaderMenu {
         }
         None
     }
+}
+
+fn light_sliders(t: &Theme, screen: Rect, panel: Rect, light: Frontlight) -> (Slider, Option<Slider>) {
+    let m = t.margin;
+    let wide = screen.w > screen.h;
+    let make_slider = |row: Rect, value| {
+        let mut s = Slider::new(0.0, 24.0, 1.0, value as f32);
+        s.place(Rect::new(row.x + t.mm(20.0), row.y, row.w - t.mm(20.0), t.mm(6.0)), t);
+        s
+    };
+    let full = Rect::new(m, panel.y + t.mm(27.0), screen.w - 2 * m, t.mm(6.0));
+    let (light_row, warmth_row) = if light.warmth.is_some() && wide {
+        let gap = t.mm(10.0);
+        let w = (full.w - gap) / 2;
+        (Rect { w, ..full }, Rect { x: full.right() - w, w, ..full })
+    } else {
+        (full, Rect { y: panel.y + t.mm(39.0), ..full })
+    };
+    (make_slider(light_row, light.brightness), light.warmth.map(|w| make_slider(warmth_row, w)))
 }

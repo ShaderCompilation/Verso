@@ -116,6 +116,8 @@ pub enum Event {
     WakeRepaint,
     PowerChanged,
     Usb(bool),
+    /// Asynchronous startup frontlight reading from hardware.
+    Frontlight(Option<Frontlight>),
     /// Leave the app (window closed, or a signal on the device).
     Quit,
 }
@@ -181,6 +183,12 @@ pub trait Platform {
     fn unhandled_text_input(&mut self, _input: &TextInput, _repeat: bool) {}
     fn frontlight(&mut self) -> Option<Frontlight> {
         None
+    }
+    /// Non-blocking startup frontlight read. Immediate backends return `Some`;
+    /// backends that query hardware off-thread return `None` until ready and
+    /// deliver `Event::Frontlight` when the read completes.
+    fn initial_frontlight(&mut self) -> Option<Option<Frontlight>> {
+        Some(self.frontlight())
     }
     fn set_frontlight(&mut self, _value: Frontlight) -> Result<()> {
         Ok(())

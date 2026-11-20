@@ -212,7 +212,9 @@ fn run() -> Result<i32> {
         log::info!("showing the rollback note: {:?}", rollback.reason);
         app.show_rollback(screens::update::RollbackSheet::new(&theme, bounds, store.updates(), &rollback));
     }
-    app.frontlight = platform.frontlight();
+    if let Some(light) = platform.initial_frontlight() {
+        app.frontlight = light;
+    }
     app.set_battery(platform.battery());
     if let Some(connected) = platform.usb_connected() {
         app.on_usb(connected);
@@ -356,6 +358,7 @@ fn run() -> Result<i32> {
                         gestures.reset();
                     }
                 }
+                Some(Event::Frontlight(light)) => app.set_initial_frontlight(light),
                 Some(Event::Quit) => {
                     if cfg!(feature = "desktop") && opts.screenshot.is_none() {
                         app.request_exit();
