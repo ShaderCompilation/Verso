@@ -12,6 +12,7 @@
 
 mod api;
 mod auth;
+mod books;
 mod device;
 mod http;
 mod server;
@@ -22,12 +23,17 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::library::worker::Worker as LibraryWorker;
 use crate::platform::{Battery, Waker};
+use crate::store::Store;
 use api::{Api, Context};
 use auth::Auth;
+use books::{ActivitySink, Books};
 use server::{Server, Timeouts};
 
 pub use device::Device;
+#[cfg(test)]
+pub(crate) use device::fake;
 
 /// How long the screen waits for Wi-Fi to connect before offering Try again
 /// (the same bound as the SSH row's re-reads).
@@ -73,12 +79,21 @@ pub enum Failure {
 
 /// A line in the screen's activity list, newest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))] // filled by the Books and Dictionaries tabs (Phases 2–3)
 pub enum Activity {
-    Receiving { name: String },
-    Received { name: String, folder: String },
-    Deleted { name: String },
-    Dictionary { name: String },
+    Receiving {
+        name: String,
+    },
+    Received {
+        name: String,
+        folder: String,
+    },
+    Deleted {
+        name: String,
+    },
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // filled by the Dictionaries tab (Phase 3)
+    Dictionary {
+        name: String,
+    },
 }
 
 /// What the screen shows.
@@ -118,6 +133,8 @@ impl Snapshot {
 
 pub struct Session {
     device: Arc<Device>,
+    store: Store,
+    library: LibraryWorker,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     waker: Waker,
@@ -138,7 +155,11 @@ struct State {
     phase: Phase,
     address: Option<Ipv4Addr>,
     hostname: Option<String>,
-    activity: Vec<Activity>,
+    /// `(id, activity)` newest first; `id` matches a `Receiving` row to its finish.
+    activity: Vec<(u64, Activity)>,
+    next_activity_id: u64,
+    /// Active uploads in progress (used to confirm Done on the Kindle screen).
+    receiving: usize,
     /// Counts changes the screen should draw.
     revision: u64,
     stop: bool,
@@ -147,6 +168,53 @@ struct State {
     running: Running,
     /// Wi-Fi was off and the session turned it on; leaving puts it back.
     wifi_turned_on: bool,
+}
+
+struct SessionActivity {
+    shared: Weak<Shared>,
+    waker: Waker,
+}
+
+impl ActivitySink for SessionActivity {
+    fn begin_receiving(&self, name: String) -> u64 {
+        let Some(shared) = self.shared.upgrade() else { return 0 };
+        let mut state = shared.lock();
+        state.next_activity_id += 1;
+        let id = state.next_activity_id;
+        state.receiving += 1;
+        state.activity.insert(0, (id, Activity::Receiving { name }));
+        state.activity.truncate(50);
+        state.revision += 1;
+        drop(state);
+        self.waker.wake();
+        id
+    }
+
+    fn finish_receiving(&self, id: u64, received: Option<Activity>) {
+        let Some(shared) = self.shared.upgrade() else { return };
+        let mut state = shared.lock();
+        state.receiving = state.receiving.saturating_sub(1);
+        state.activity.retain(|(entry_id, _)| *entry_id != id);
+        if let Some(activity) = received {
+            state.activity.insert(0, (id, activity));
+            state.activity.truncate(50);
+        }
+        state.revision += 1;
+        drop(state);
+        self.waker.wake();
+    }
+
+    fn push(&self, activity: Activity) {
+        let Some(shared) = self.shared.upgrade() else { return };
+        let mut state = shared.lock();
+        state.next_activity_id += 1;
+        let id = state.next_activity_id;
+        state.activity.insert(0, (id, activity));
+        state.activity.truncate(50);
+        state.revision += 1;
+        drop(state);
+        self.waker.wake();
+    }
 }
 
 /// What a running session holds, to give back when it stops.
@@ -166,13 +234,25 @@ impl Shared {
 impl Session {
     /// Starts serving; the screen follows along through `snapshot`, and
     /// `waker` is called whenever it changes.
-    pub fn start(device: Arc<Device>, waker: Waker, label: String, developer: bool) -> Self {
+    pub fn start(
+        device: Arc<Device>,
+        store: Store,
+        library: LibraryWorker,
+        waker: Waker,
+        label: String,
+        developer: bool,
+    ) -> Self {
+        let initial_activity: Vec<(u64, Activity)> =
+            device.activity.iter().cloned().enumerate().map(|(i, a)| (i as u64 + 1, a)).collect();
+        let next_activity_id = initial_activity.len() as u64;
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 phase: Phase::Starting,
                 address: None,
                 hostname: None,
-                activity: device.activity.clone(),
+                activity: initial_activity,
+                next_activity_id,
+                receiving: 0,
                 revision: 0,
                 stop: false,
                 retry: false,
@@ -183,7 +263,8 @@ impl Session {
             wake: Condvar::new(),
             battery: Mutex::new(None),
         });
-        let mut session = Self { device, shared, thread: None, waker, label, developer, last_code: String::new() };
+        let mut session =
+            Self { device, store, library, shared, thread: None, waker, label, developer, last_code: String::new() };
         session.spawn();
         session
     }
@@ -255,7 +336,7 @@ impl Session {
             move || status(&device, &weak, developer)
         };
         let changed = {
-            let (weak, waker) = (weak, self.waker.clone());
+            let (weak, waker) = (weak.clone(), self.waker.clone());
             move || {
                 if let Some(shared) = weak.upgrade() {
                     shared.lock().revision += 1;
@@ -263,11 +344,14 @@ impl Session {
                 }
             }
         };
+        let activity: Arc<dyn ActivitySink> = Arc::new(SessionActivity { shared: weak, waker: self.waker.clone() });
+        let books = Books::new(self.store.clone(), self.library.clone(), self.device.free_space.clone(), activity);
         Context {
             port: self.device.listen.port(),
             names: Box::new(names),
             status: Box::new(status),
             changed: Box::new(changed),
+            books: Some(books),
         }
     }
 
@@ -280,8 +364,13 @@ impl Session {
             hostname: state.hostname.clone(),
             port: self.device.display_port.unwrap_or(self.device.listen.port()),
             code,
-            activity: state.activity.clone(),
+            activity: state.activity.iter().map(|(_, a)| a.clone()).collect(),
         }
+    }
+
+    /// True while a file upload is currently being received.
+    pub fn receiving(&self) -> bool {
+        self.shared.lock().receiving > 0
     }
 
     /// Changes whenever the snapshot may have.
@@ -353,10 +442,12 @@ impl Session {
     }
 
     /// Adds a line to the activity list (newest first) and redraws.
-    #[allow(dead_code)] // uploads, deletes and installs report here (Phases 2–3)
+    #[allow(dead_code)] // Dictionaries tab (Phase 3)
     pub fn push_activity(&self, activity: Activity) {
         let mut state = self.shared.lock();
-        state.activity.insert(0, activity);
+        state.next_activity_id += 1;
+        let id = state.next_activity_id;
+        state.activity.insert(0, (id, activity));
         state.activity.truncate(50);
         state.revision += 1;
         drop(state);
@@ -414,7 +505,7 @@ fn status(device: &Device, shared: &Weak<Shared>, developer: bool) -> serde_json
         }
         None => (None, None),
     };
-    let free = crate::update::download::free_space(&device.storage).ok();
+    let free = (device.free_space)(&device.storage).ok();
     serde_json::json!({
         "name": name,
         "free": free,

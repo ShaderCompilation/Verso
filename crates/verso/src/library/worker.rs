@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -106,8 +106,12 @@ struct Shared {
     requested: bool,
     retry: bool,
     paused: bool,
+    /// Number of active [`CoverPause`] guards (e.g. Wi-Fi transfer open).
+    covers_paused: usize,
     priority: Vec<String>,
     latest: Option<Snapshot>,
+    /// The worker's current index, readable without emptying `latest`.
+    current: Option<Arc<LibraryIndex>>,
     status: Option<Status>,
     home_requested: bool,
     latest_home: Option<(Summary, u64)>,
@@ -116,9 +120,11 @@ struct Shared {
     /// Book ids whose visible thumbnail failed to load, and those since repaired.
     repairs: Vec<String>,
     repaired: Vec<String>,
-    /// Paths of deleted books to drop from the index.
-    changes: Vec<(u64, PathChange)>,
+    /// Queued index edits: `(revision, change, rescan)`.
+    changes: Vec<(u64, PathChange, bool)>,
     revision: u64,
+    /// Highest `revision` applied to `current` and persisted.
+    applied_revision: u64,
     /// A new folder list from Settings, used from the next pass.
     roots: Option<Vec<PathBuf>>,
     /// Cover sizes the library screen drew since the worker last looked.
@@ -126,6 +132,15 @@ struct Shared {
     /// Pending Home warm-up request and its completed result.
     warm_request: Option<WarmRequest>,
     warm_result: Option<WarmResult>,
+}
+
+#[derive(Default)]
+struct SyncState {
+    state: Mutex<Shared>,
+    wake: Condvar,
+    /// Notified whenever `current` becomes ready, `applied_revision` advances,
+    /// or the worker stops.
+    applied: Condvar,
 }
 const REPAIR_LIMIT: usize = 32;
 /// A page of book covers plus a page of folder previews (8 tiles × 4) and
@@ -145,42 +160,60 @@ fn push_error(errors: &mut Vec<String>, error: String) {
 
 /// The worker thread's side of the shared state.
 struct Channel {
-    shared: Arc<(Mutex<Shared>, Condvar)>,
+    shared: Arc<SyncState>,
     waker: Waker,
 }
 impl Channel {
     fn lock(&self) -> MutexGuard<'_, Shared> {
-        self.shared.0.lock().unwrap()
+        self.shared.state.lock().unwrap()
     }
     fn wait<'a>(&self, state: MutexGuard<'a, Shared>) -> MutexGuard<'a, Shared> {
-        self.shared.1.wait(state).unwrap()
+        self.shared.wake.wait(state).unwrap()
+    }
+    fn notify_applied(&self) {
+        self.shared.applied.notify_all();
     }
     fn stopped(&self) -> bool {
         self.lock().stop
     }
-    /// Scan and fingerprint reads block while a book is open; true on shutdown.
+    /// Scan reads block while a book is open; true on shutdown or queued edits.
     fn yield_point(&self) -> bool {
         let mut state = self.lock();
         while state.paused && !state.stop && state.changes.is_empty() {
             state = self.wait(state);
         }
-        state.stop || !state.changes.is_empty()
-    }
-    /// Cover and identity work also stop for a new scan request.
-    /// A deletion also interrupts, and asks for the pass to run again after it.
-    fn interrupted(&self) -> bool {
-        let mut state = self.lock();
-        while state.paused && !state.stop && !state.requested && state.changes.is_empty() {
-            state = self.wait(state);
-        }
         if !state.changes.is_empty() {
+            // A scan was interrupted before completing; run it again after the
+            // queued changes are applied.
             state.requested = true;
         }
-        state.stop || state.requested
+        state.stop || !state.changes.is_empty()
+    }
+    /// Fingerprint reads also yield while cover work is paused (Wi-Fi transfer)
+    /// and never escalate a non-scanning edit into a full scan pass.
+    fn fingerprint_yield(&self) -> bool {
+        let mut state = self.lock();
+        while (state.paused || state.covers_paused > 0) && !state.stop && !state.requested && state.changes.is_empty() {
+            state = self.wait(state);
+        }
+        if state.changes.iter().any(|(_, _, rescan)| *rescan) {
+            state.requested = true;
+        }
+        state.stop || state.requested || !state.changes.is_empty()
+    }
+    /// Cover and identity work stop for a new scan request or queued edits.
+    fn interrupted(&self) -> bool {
+        self.fingerprint_yield()
     }
     fn content(&self, snapshot: Snapshot) {
+        let current = Arc::new(snapshot.index.clone());
+        let mut state = self.lock();
+        state.current = Some(current);
         // A replaced, unconsumed publication already has a pending wake.
-        if self.lock().latest.replace(snapshot).is_none() {
+        let wake = state.latest.replace(snapshot).is_none();
+        drop(state);
+        self.notify_applied();
+        if wake {
             self.waker.wake();
         }
     }
@@ -235,6 +268,9 @@ struct Background {
     unsaved: bool,
     /// Displayed metadata or covers changed since the Home summary was refreshed.
     home_stale: bool,
+    /// Pending cover generation (from added books, new tile sizes, or an
+    /// interrupted cover pass), run once cover work isn't paused, without a scan.
+    covers_needed: bool,
     /// The last status sent to the UI; identical updates are not resent.
     status: Status,
     last_errors: Vec<String>,
@@ -251,6 +287,10 @@ struct Background {
 }
 impl Background {
     fn run(mut self) {
+        {
+            self.channel.lock().current = Some(Arc::new(self.index.clone()));
+            self.channel.notify_applied();
+        }
         if self.store.home_summary().is_none_or(|summary| !summary.complete)
             || self.store.opened().is_none_or(|opened| !opened.complete)
         {
@@ -258,14 +298,15 @@ impl Background {
         }
         self.tile_sizes = covers::tile_sizes(&self.store);
         loop {
-            let (retry, scan, home, repairs, tiles) = {
+            let (retry, scan, home, run_covers, repairs) = {
                 let mut state = self.channel.lock();
                 while !state.stop
                     && !state.requested
                     && !state.home_requested
                     && state.changes.is_empty()
                     && state.drawn_sizes.is_empty()
-                    && (state.paused || (state.repairs.is_empty() && state.warm_request.is_none()))
+                    && ((state.paused || state.covers_paused > 0) || (!self.covers_needed && state.repairs.is_empty()))
+                    && (state.paused || state.warm_request.is_none())
                 {
                     state = self.channel.wait(state);
                 }
@@ -278,20 +319,17 @@ impl Background {
                 }
                 let drawn = std::mem::take(&mut state.drawn_sizes);
                 drop(state);
-                let tiles = self.use_tile_sizes(&drawn);
-                let changed = !changes.is_empty();
+                if self.use_tile_sizes(&drawn) {
+                    self.covers_needed = true;
+                }
+                let needs_scan = changes.iter().any(|(_, _, rescan)| *rescan);
                 self.change_paths(&changes);
                 let mut state = self.channel.lock();
-                (
-                    std::mem::take(&mut state.retry),
-                    // A newer edit may have interrupted a pass after its
-                    // requested flag was consumed. Every drained batch needs
-                    // its own completed pass, including the final status.
-                    std::mem::take(&mut state.requested) || changed,
-                    std::mem::take(&mut state.home_requested),
-                    !state.paused && !state.repairs.is_empty(),
-                    tiles,
-                )
+                let covers_ok = !state.paused && state.covers_paused == 0;
+                let scan = std::mem::take(&mut state.requested) || needs_scan;
+                let run_covers = !scan && covers_ok && std::mem::take(&mut self.covers_needed);
+                let repairs = !scan && !run_covers && covers_ok && !state.repairs.is_empty();
+                (std::mem::take(&mut state.retry), scan, std::mem::take(&mut state.home_requested), run_covers, repairs)
             };
             if home {
                 self.rebuild_home();
@@ -300,17 +338,20 @@ impl Background {
                 if !self.pass(retry) {
                     break;
                 }
-            } else if tiles {
-                // A new tile size: its thumbnails for every book, without a scan.
+            } else if run_covers {
+                // Missing covers (from added books or a new tile size), without a scan.
                 let mut errors = self.last_errors.clone();
                 self.set_status(false, true, &errors);
-                self.covers(&mut errors);
+                let interrupted = self.covers(&mut errors);
+                if interrupted && !self.channel.stopped() {
+                    self.covers_needed = true;
+                }
                 self.save(&mut errors, "covers");
                 if std::mem::take(&mut self.home_stale) {
                     self.refresh_home_metadata();
                 }
                 self.publish();
-                self.set_status(false, false, &errors);
+                self.set_status(false, interrupted && !self.channel.stopped(), &errors);
                 self.last_errors = errors;
             } else if repairs {
                 // Outside a pass, only an actual cover change is saved and published.
@@ -330,6 +371,7 @@ impl Background {
         // queued index edits even when shutdown interrupted the current pass.
         let changes = std::mem::take(&mut self.channel.lock().changes);
         self.change_paths(&changes);
+        self.channel.notify_applied();
     }
 
     /// One scan, cover and identity pass. Returns false on shutdown.
@@ -383,6 +425,11 @@ impl Background {
         }
 
         let mut interrupted = self.covers(&mut errors);
+        if interrupted && !self.channel.stopped() {
+            self.covers_needed = true;
+        } else if !interrupted {
+            self.covers_needed = false;
+        }
 
         let identity_started = Instant::now();
         // Fingerprinting new additions is deferred until metadata and covers are
@@ -400,7 +447,7 @@ impl Background {
             let book = &self.index.books[i];
             if book.available && book.fingerprint.is_empty() && !book.fingerprint_attempted {
                 let channel = &self.channel;
-                let result = fingerprint(&book.path, &|| channel.yield_point());
+                let result = fingerprint(&book.path, &|| channel.fingerprint_yield());
                 // Shutdown and queued folder edits cancel the read. Leave the
                 // book unattempted so the restarted pass hashes it again.
                 if result.as_ref().is_err_and(|e| e.is::<Cancelled>()) {
@@ -529,12 +576,16 @@ impl Background {
 
     fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>) -> Next {
         let mut state = self.channel.lock();
-        while state.paused && !state.stop && !state.requested && state.changes.is_empty() {
+        while (state.paused || state.covers_paused > 0) && !state.stop && !state.requested && state.changes.is_empty() {
             state = self.channel.wait(state);
         }
-        // Removing shifts book indices, so the pass restarts after a deletion.
+        // Removing or adding shifts book indices, so stop this cover pass. Only
+        // edits that asked for a scan pass trigger one.
         if !state.changes.is_empty() {
-            state.requested = true;
+            if state.changes.iter().any(|(_, _, rescan)| *rescan) {
+                state.requested = true;
+            }
+            return Next::Interrupted;
         }
         if state.stop || state.requested {
             return Next::Interrupted;
@@ -546,22 +597,28 @@ impl Background {
         Next::Cover(visible.unwrap_or_else(|| *pending.first().unwrap()))
     }
 
-    fn change_paths(&mut self, changes: &[(u64, PathChange)]) {
+    fn change_paths(&mut self, changes: &[(u64, PathChange, bool)]) {
         if changes.is_empty() {
             return;
         }
-        for (revision, change) in changes {
-            if let PathChange::Remove(path) = change {
-                for book in self.index.books.iter().filter(|b| b.path.starts_with(path)) {
-                    if let Err(e) = self.store.remove_book(&book.id) {
-                        log::warn!("removing deleted reading state: {e}");
+        for (revision, change, _) in changes {
+            match change {
+                PathChange::Remove(path) => {
+                    for book in self.index.books.iter().filter(|b| b.path.starts_with(path)) {
+                        if let Err(e) = self.store.remove_book(&book.id) {
+                            log::warn!("removing deleted reading state: {e}");
+                        }
+                        let key = match &book.cover {
+                            Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
+                            Cover::Pending => covers::key(book),
+                        };
+                        covers::remove(&self.store, &key, &self.tile_sizes);
                     }
-                    let key = match &book.cover {
-                        Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
-                        Cover::Pending => covers::key(book),
-                    };
-                    covers::remove(&self.store, &key, &self.tile_sizes);
                 }
+                PathChange::Add(_) => {
+                    self.covers_needed = true;
+                }
+                PathChange::Move(_, _) | PathChange::AddEmpty(_) => {}
             }
             change.apply(&mut self.index);
             self.revision = *revision;
@@ -577,6 +634,11 @@ impl Background {
             Err(e) => log::warn!("rebuilding Home after file edits: {e:#}"),
         }
         self.publish();
+        {
+            let mut state = self.channel.lock();
+            state.applied_revision = state.applied_revision.max(self.revision);
+        }
+        self.channel.notify_applied();
     }
     /// Records a displayed content change.
     fn changed(&mut self) {
@@ -838,13 +900,52 @@ fn hierarchy(cache: &mut Option<(u64, Arc<Collections>)>, index: &LibraryIndex, 
     collections
 }
 
-pub struct Worker {
-    shared: Arc<(Mutex<Shared>, Condvar)>,
-    join: Option<JoinHandle<()>>,
+pub(crate) struct WorkerInner {
+    shared: Arc<SyncState>,
+    join: Mutex<Option<JoinHandle<()>>>,
 }
+
+impl Drop for WorkerInner {
+    fn drop(&mut self) {
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.stop = true;
+            self.shared.wake.notify_all();
+            self.shared.applied.notify_all();
+        }
+        if let Some(join) = self.join.lock().unwrap().take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Pauses background cover and fingerprint work while held (for example while
+/// Wi-Fi transfer is open); dropping resumes it and wakes the worker so covers
+/// for newly added books are generated without a scan pass.
+pub struct CoverPause {
+    shared: Arc<SyncState>,
+}
+
+impl Drop for CoverPause {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.covers_paused = state.covers_paused.saturating_sub(1);
+        self.shared.wake.notify_all();
+    }
+}
+
+#[derive(Clone)]
+pub struct Worker {
+    inner: Arc<WorkerInner>,
+}
+
 impl Worker {
     pub fn new(store: Store, roots: Vec<PathBuf>, waker: Waker) -> Self {
-        let shared = Arc::new((Mutex::new(Shared { requested: true, ..Shared::default() }), Condvar::new()));
+        let shared = Arc::new(SyncState {
+            state: Mutex::new(Shared { requested: true, ..Shared::default() }),
+            wake: Condvar::new(),
+            applied: Condvar::new(),
+        });
         let channel = Channel { shared: shared.clone(), waker };
         let join = std::thread::Builder::new()
             .name("verso-library".into())
@@ -860,6 +961,7 @@ impl Worker {
                     unpublished: false,
                     unsaved: false,
                     home_stale: false,
+                    covers_needed: false,
                     status: Status::default(),
                     last_errors: Vec::new(),
                     attempted: HashSet::new(),
@@ -871,79 +973,135 @@ impl Worker {
                 .run()
             })
             .expect("start library thread");
-        Self { shared, join: Some(join) }
+        Self { inner: Arc::new(WorkerInner { shared, join: Mutex::new(Some(join)) }) }
+    }
+    pub(crate) fn weak(&self) -> Weak<WorkerInner> {
+        Arc::downgrade(&self.inner)
+    }
+    pub(crate) fn from_inner(inner: Arc<WorkerInner>) -> Self {
+        Self { inner }
+    }
+    fn state(&self) -> MutexGuard<'_, Shared> {
+        self.inner.shared.state.lock().unwrap()
+    }
+    /// The worker's current index, readable without emptying the UI's `take()`
+    /// mailbox. Waits briefly if the worker has not yet read `library.json`.
+    pub fn current(&self) -> Arc<LibraryIndex> {
+        let mut state = self.state();
+        while state.current.is_none() && !state.stop {
+            state = self.inner.shared.applied.wait(state).unwrap();
+        }
+        state.current.clone().unwrap_or_else(|| Arc::new(LibraryIndex::default()))
+    }
+    /// Pauses cover and fingerprint work until the returned guard is dropped.
+    pub fn pause_covers(&self) -> CoverPause {
+        let mut state = self.state();
+        state.covers_paused += 1;
+        self.inner.shared.wake.notify_all();
+        CoverPause { shared: self.inner.shared.clone() }
+    }
+    /// Applies index edits directly without triggering a filesystem scan pass,
+    /// and waits until the worker has applied, persisted and published them.
+    pub fn apply_sync(&self, changes: Vec<PathChange>) -> u64 {
+        let mut state = self.state();
+        if changes.is_empty() {
+            return state.applied_revision;
+        }
+        for change in changes {
+            state.revision += 1;
+            let revision = state.revision;
+            state.changes.push((revision, change, false));
+        }
+        let target = state.revision;
+        self.inner.shared.wake.notify_all();
+        while state.applied_revision < target && !state.stop {
+            state = self.inner.shared.applied.wait(state).unwrap();
+        }
+        target
+    }
+    /// Inserts one newly received book through `PathChange::Add` without a scan
+    /// pass, returning the entry with its assigned id and annotation id.
+    pub fn add_book(&self, book: Book) -> Option<Book> {
+        let path = collections::normalize(&book.path);
+        self.apply_sync(vec![PathChange::Add(Box::new(book))]);
+        self.current().books.iter().find(|b| b.path == path && b.available).cloned()
     }
     /// Cover sizes the library drew, each once a session. The most recent
     /// [`covers::TILE_SIZES`] get thumbnails of their own, so paging decodes
     /// covers without resizing them.
     pub fn drew_cover_sizes(&self, sizes: Vec<(u32, u32)>) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         state.drawn_sizes.extend(sizes);
-        self.shared.1.notify_one();
+        self.inner.shared.wake.notify_all();
     }
     pub fn rescan(&self) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         state.requested = true;
         state.retry = true;
-        self.shared.1.notify_one();
+        self.inner.shared.wake.notify_all();
     }
     /// Scan a new folder list. A running pass stops at its next cover or
     /// identity check; books outside the new folders become unavailable but
     /// keep their entries, so adding a folder back restores them.
     pub fn set_roots(&self, roots: Vec<PathBuf>) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         state.roots = Some(roots);
         state.requested = true;
-        self.shared.1.notify_one();
+        self.inner.shared.wake.notify_all();
     }
     /// Recompute resume selection after finished/hidden flags change without a
     /// filesystem rescan. Authoritative book records stay on the save path.
     pub fn refresh_home(&self) {
-        self.shared.0.lock().unwrap().home_requested = true;
-        self.shared.1.notify_one();
+        self.state().home_requested = true;
+        self.inner.shared.wake.notify_all();
     }
     pub fn take_home(&self) -> Option<(Summary, u64)> {
-        self.shared.0.lock().unwrap().latest_home.take()
+        self.state().latest_home.take()
     }
     /// True once after a rebuild changed `opened.json`; read it again then.
     pub fn take_opened_changed(&self) -> bool {
-        std::mem::take(&mut self.shared.0.lock().unwrap().opened_changed)
+        std::mem::take(&mut self.state().opened_changed)
     }
     /// While paused (a book is opening or open), scan, cover, warm-up and
     /// identity work stops at its next check: between files, covers or 64 KiB
     /// fingerprint reads.
     pub fn pause(&self, paused: bool) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         state.paused = paused;
         if paused {
             state.warm_request = None;
         }
-        self.shared.1.notify_one();
+        self.inner.shared.wake.notify_all();
     }
     /// Prepares the remembered browsing page off the UI thread. Replaces any
     /// earlier pending request or unconsumed result.
     pub fn warm(&self, request: WarmRequest) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         state.warm_request = Some(request);
         state.warm_result = None;
-        self.shared.1.notify_one();
+        self.inner.shared.wake.notify_all();
     }
     /// The finished Home warm-up, if any.
     pub fn take_warm(&self) -> Option<WarmResult> {
-        self.shared.0.lock().unwrap().warm_result.take()
+        self.state().warm_result.take()
     }
     pub fn change_paths(&self, changes: Vec<PathChange>) -> Vec<(u64, PathChange)> {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         let mut queued = Vec::new();
+        let mut rescan = false;
         for change in changes {
+            let needs_scan = !matches!(change, PathChange::Add(_));
+            rescan |= needs_scan;
             state.revision += 1;
-            let item = (state.revision, change);
-            state.changes.push(item.clone());
-            queued.push(item);
+            let rev = state.revision;
+            state.changes.push((rev, change.clone(), needs_scan));
+            queued.push((rev, change));
         }
-        // Wake/interrupt even a scan paused behind an open book.
-        state.requested = true;
-        self.shared.1.notify_one();
+        if rescan {
+            // Wake/interrupt even a scan paused behind an open book.
+            state.requested = true;
+        }
+        self.inner.shared.wake.notify_all();
         queued
     }
     pub fn move_paths(&self, paths: Vec<(PathBuf, PathBuf)>) -> Vec<(u64, PathChange)> {
@@ -956,38 +1114,29 @@ impl Worker {
         self.change_paths(vec![PathChange::AddEmpty(path)])
     }
     pub fn prioritize(&self, ids: Vec<String>) {
-        self.shared.0.lock().unwrap().priority = ids.into_iter().take(PRIORITY_LIMIT).collect();
+        self.state().priority = ids.into_iter().take(PRIORITY_LIMIT).collect();
     }
     /// The newest changed index, if any.
     pub fn take(&self) -> Option<Snapshot> {
-        self.shared.0.lock().unwrap().latest.take()
+        self.state().latest.take()
     }
     /// The newest scan/cover status and errors, if they changed.
     pub fn take_status(&self) -> Option<Status> {
-        self.shared.0.lock().unwrap().status.take()
+        self.state().status.take()
     }
     /// Request regeneration of thumbnails whose cache failed to load on screen.
     pub fn repair(&self, ids: impl IntoIterator<Item = String>) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.state();
         for id in ids {
             if state.repairs.len() < REPAIR_LIMIT && !state.repairs.contains(&id) {
                 state.repairs.push(id);
             }
         }
-        self.shared.1.notify_one();
+        self.inner.shared.wake.notify_all();
     }
     /// Ids of repaired thumbnails; their visible load can be retried once.
     pub fn take_repaired(&self) -> Vec<String> {
-        std::mem::take(&mut self.shared.0.lock().unwrap().repaired)
-    }
-}
-impl Drop for Worker {
-    fn drop(&mut self) {
-        self.shared.0.lock().unwrap().stop = true;
-        self.shared.1.notify_one();
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        std::mem::take(&mut self.state().repaired)
     }
 }
 
@@ -1040,6 +1189,11 @@ impl std::fmt::Display for Cancelled {
     }
 }
 impl std::error::Error for Cancelled {}
+
+#[cfg(test)]
+pub(crate) fn fingerprint_for_test(path: &Path) -> Result<String> {
+    fingerprint(path, &|| false)
+}
 
 fn fingerprint(path: &Path, cancelled: &impl Fn() -> bool) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
@@ -1695,27 +1849,27 @@ mod folder_tests {
         // The waker consumes every publication. On the first checkpoint (new
         // books shown with filename titles), it queues a folder edit, which
         // cancels the scan before any metadata is read.
-        type SharedState = Arc<(Mutex<Shared>, Condvar)>;
+        type SharedState = Arc<SyncState>;
         let cell: Arc<OnceLock<SharedState>> = Arc::default();
         let edited = Arc::new(AtomicBool::new(false));
         let seen: Arc<Mutex<Vec<(bool, u64, usize)>>> = Arc::default();
         let waker = {
             let (cell, edited, seen, empty) = (cell.clone(), edited.clone(), seen.clone(), empty.clone());
             Waker::new(move || {
-                let mut state = cell.wait().0.lock().unwrap();
+                let mut state = cell.wait().state.lock().unwrap();
                 state.status = None;
                 if let Some(snapshot) = state.latest.take() {
                     seen.lock().unwrap().push((snapshot.partial, snapshot.revision, snapshot.index.books.len()));
                     if snapshot.partial && !edited.swap(true, Ordering::SeqCst) {
                         state.revision += 1;
                         let revision = state.revision;
-                        state.changes.push((revision, PathChange::AddEmpty(empty.clone())));
+                        state.changes.push((revision, PathChange::AddEmpty(empty.clone()), true));
                     }
                 }
             })
         };
         let worker = Worker::new(store.clone(), vec![library.clone()], waker);
-        cell.set(worker.shared.clone()).ok();
+        cell.set(worker.inner.shared.clone()).ok();
         let deadline = Instant::now() + Duration::from_secs(10);
         // The edit's own publication is the first complete one at its revision.
         let first = loop {
@@ -1816,13 +1970,13 @@ mod folder_tests {
         // and publish an idle status even though the flag is already false.
         let late = files::create_folder(&root.join("library"), "Late batch")?;
         {
-            let mut state = worker.shared.0.lock().unwrap();
+            let mut state = worker.inner.shared.state.lock().unwrap();
             state.requested = false;
             state.revision += 1;
             let revision = state.revision;
-            state.changes.push((revision, PathChange::AddEmpty(late.clone())));
+            state.changes.push((revision, PathChange::AddEmpty(late.clone()), true));
         }
-        worker.shared.1.notify_one();
+        worker.inner.shared.wake.notify_all();
         loop {
             if let Some(status) = worker.take_status()
                 && !status.working
@@ -1838,6 +1992,68 @@ mod folder_tests {
         drop(worker);
         assert!(store.library().empty_folders.contains(&at_exit), "shutdown commits queued operations");
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn shared_store_handle_reads_current_without_emptying_take_and_adds_without_scan() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let library = dir.path().join("library");
+        std::fs::create_dir_all(&library)?;
+        let store = Store::at(dir.path().join("data"));
+        store.save_library_folders(vec![library.clone()])?;
+
+        let a = store.library_worker(Waker::new(|| {}));
+        let b = store.clone().library_worker(Waker::new(|| {}));
+        let started = Instant::now();
+        loop {
+            if let Some(status) = a.take_status()
+                && !status.working
+            {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Drain the initial empty snapshot so the next `take()` comes from `add_book`.
+        let _ = a.take();
+
+        let epub = library.join("added.epub");
+        let unscanned = library.join("unscanned.epub");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        std::fs::copy(&fixture, &epub)?;
+        std::fs::copy(&fixture, &unscanned)?;
+        let metadata = epub::read(&epub)?;
+        let file_stamp = stamp(&std::fs::metadata(&epub)?)?;
+        let fp = fingerprint_for_test(&epub)?;
+
+        let added = b
+            .add_book(Book {
+                path: epub.clone(),
+                id: String::new(),
+                annotation_id: String::new(),
+                legacy_id: book_id(&epub)?,
+                fingerprint: fp.clone(),
+                fingerprint_attempted: true,
+                stamp: file_stamp,
+                metadata,
+                error: None,
+                cover: Cover::Pending,
+                available: true,
+                metadata_pending: false,
+            })
+            .expect("book inserted");
+        assert_eq!(added.fingerprint, fp);
+
+        // Both handles see the same updated index via `current()`, and reading
+        // `current()` leaves `take()` intact for the UI screen.
+        assert_eq!(a.current().books.len(), 1, "no scan pass ran");
+        assert_eq!(b.current().books.len(), 1);
+        assert_eq!(a.current().books[0].id, added.id);
+        let snapshot = a.take().expect("current() must not empty the UI take() mailbox");
+        assert_eq!(snapshot.index.books.len(), 1);
+        assert_eq!(snapshot.index.books[0].id, added.id);
+        assert!(!snapshot.index.books.iter().any(|book| book.path == unscanned));
         Ok(())
     }
 }

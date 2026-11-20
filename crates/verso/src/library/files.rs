@@ -101,6 +101,42 @@ pub struct Deletion {
     pub error: Option<anyhow::Error>,
 }
 
+/// Result of deleting one book file, its KOReader sidecar and its reading state.
+/// Shared by the book menu and Wi-Fi transfer's Books tab so both behave alike.
+pub struct BookDeletion {
+    /// Index edits for the library worker: removing the book (which also drops
+    /// its cached covers) and marking its parent empty if it was the last item.
+    pub changes: Vec<super::PathChange>,
+    /// The book is gone, but removing its KOReader `.sdr` sidecar failed.
+    pub sidecar_error: Option<anyhow::Error>,
+}
+
+/// Deletes a book file, its KOReader sidecar and its reading state; annotations
+/// stay in place. A missing book file still cleans up its sidecar, reading state
+/// and index entry.
+pub fn delete_book(id: &str, path: &Path, store: &Store) -> Result<BookDeletion> {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(e.into());
+    }
+    log::info!("deleted {}", path.display());
+    // The confirmation promises the reading progress goes too, and a
+    // leftover sidecar would hide a folder this delete just emptied.
+    let sidecar_error = delete_sidecar(path).err();
+    if let Some(e) = &sidecar_error {
+        log::warn!("deleting sidecar of {}: {e:#}", path.display());
+    }
+    if let Err(e) = store.remove_book(id) {
+        log::warn!("removing reading state of {}: {e}", path.display());
+    }
+    let mut changes = vec![super::PathChange::Remove(path.to_owned())];
+    if let Some(parent) = path.parent().filter(|p| is_empty(p)) {
+        changes.push(super::PathChange::AddEmpty(parent.to_owned()));
+    }
+    Ok(BookDeletion { changes, sidecar_error })
+}
+
 /// The caller removes the returned books from its view; covers belong to the
 /// worker. Only books whose files are gone lose their reading state, so a book
 /// that a failed delete left in place keeps its progress.
@@ -266,7 +302,7 @@ fn occupied(path: &Path) -> Result<bool> {
         Err(e) => Err(e.into()),
     }
 }
-fn target_free(path: &Path, book: bool) -> Result<bool> {
+pub(crate) fn target_free(path: &Path, book: bool) -> Result<bool> {
     // Reserve a sidecar name even for a book without one: an orphan sidecar
     // must never become associated with the incoming book.
     Ok(!occupied(path)? && (!book || !occupied(&sidecar(path))?))
@@ -319,7 +355,7 @@ fn move_target(
 /// Refuse replacement atomically where available. Kindle's FUSE mount rejects
 /// RENAME_NOREPLACE, so recheck immediately before ordinary rename there, as for
 /// folder renaming. That fallback cannot exclude a concurrent external writer.
-fn rename_free(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_free(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let from_c = std::ffi::CString::new(from.as_os_str().as_bytes())?;
     let to_c = std::ffi::CString::new(to.as_os_str().as_bytes())?;

@@ -9,6 +9,7 @@
 <style>
 :root {
   --ink: #1d1d1b; --ink2: #6b6964; --line: #dcd9d2; --paper: #fbfaf7; --wash: #f1efe9; --accent: #1d1d1b;
+  --danger: #8a1c1c;
   color-scheme: light;
 }
 * { box-sizing: border-box; }
@@ -30,7 +31,7 @@ nav button {
   padding: .75rem .75rem .6rem; cursor: pointer; white-space: nowrap;
 }
 nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
-main { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+main { max-width: 52rem; margin: 0 auto; padding: 1.25rem 1.25rem 3rem; }
 .empty { color: var(--ink2); padding: 2.5rem 1rem; text-align: center; border: 1px dashed var(--line); border-radius: .5rem; }
 .card {
   max-width: 24rem; margin: 12vh auto 0; padding: 1.75rem 1.5rem; background: #fff;
@@ -38,25 +39,122 @@ main { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
 }
 .card h2 { margin: 0 0 .5rem; font: 600 1.25rem/1.3 Georgia, "Times New Roman", serif; }
 .card p { margin: 0 0 1rem; color: var(--ink2); }
-form { display: flex; gap: .5rem; }
-input {
+.signin-form { display: flex; gap: .5rem; }
+.code-input {
   flex: 1; min-width: 0; font: 600 1.5rem/1 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .4em;
   padding: .55rem .75rem; border: 1px solid var(--ink2); border-radius: .4rem; background: #fff; color: var(--ink);
 }
-button.primary {
-  font: 600 1rem/1 system-ui, sans-serif; padding: 0 1.1rem; border-radius: .4rem; border: 1px solid var(--accent);
-  background: var(--accent); color: #fff; cursor: pointer;
+button, .btn {
+  font: inherit; line-height: 1.2; border-radius: .4rem; cursor: pointer;
+  padding: .5rem .85rem; border: 1px solid var(--line); background: #fff; color: var(--ink);
+  text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: .35rem;
 }
-button.primary:disabled { opacity: .5; cursor: default; }
-.error { color: #8a1c1c; min-height: 1.45em; margin: .75rem 0 0; }
+button:hover:not(:disabled), .btn:hover { border-color: var(--ink2); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary {
+  font-weight: 600; border-color: var(--accent); background: var(--accent); color: #fff;
+}
+button.danger {
+  font-weight: 600; border-color: var(--danger); background: var(--danger); color: #fff;
+}
+button.ghost { border-color: transparent; background: transparent; color: var(--ink2); padding: .4rem .55rem; }
+button.ghost:hover:not(:disabled) { color: var(--ink); background: var(--wash); border-color: transparent; }
+.error { color: var(--danger); min-height: 1.45em; margin: .75rem 0 0; }
+.drop {
+  border: 1.5px dashed var(--ink2); border-radius: .65rem; background: #fff;
+  padding: 1.25rem 1rem; text-align: center; transition: background .12s, border-color .12s;
+}
+.drop.over { background: var(--wash); border-color: var(--ink); }
+.drop-main { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; justify-content: center; }
+.drop-dest {
+  margin-top: .85rem; padding-top: .85rem; border-top: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; justify-content: center; font-size: .92rem;
+}
+.drop-dest label { color: var(--ink2); }
+select, input[type="text"], input[type="search"] {
+  font: inherit; padding: .42rem .65rem; border: 1px solid var(--line); border-radius: .4rem;
+  background: #fff; color: var(--ink); min-width: 0;
+}
+select:focus, input:focus { outline: 2px solid var(--ink); outline-offset: 1px; }
+.mkdir-row {
+  margin-top: .75rem; display: flex; flex-wrap: wrap; gap: .45rem; justify-content: center; align-items: center;
+}
+.mkdir-row input { width: 15rem; max-width: 100%; }
+.upload-box {
+  margin-top: .9rem; padding: .75rem .9rem; background: #fff; border: 1px solid var(--line); border-radius: .5rem;
+}
+.upload-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; justify-content: space-between; font-size: .92rem; }
+.upload-name { font-weight: 600; word-break: break-word; }
+.upload-meta { color: var(--ink2); font-size: .88rem; }
+.upload-box progress { width: 100%; height: .55rem; margin-top: .5rem; accent-color: var(--ink); }
+.notices { margin-top: .75rem; display: flex; flex-direction: column; gap: .4rem; }
+.notice {
+  display: flex; gap: .6rem; align-items: baseline; justify-content: space-between;
+  padding: .55rem .8rem; border-radius: .45rem; font-size: .92rem;
+  border: 1px solid var(--line); background: #fff;
+}
+.notice.err { border-color: #dfbdbd; background: #fdf5f5; color: var(--danger); }
+.toolbar {
+  margin: 1.25rem 0 .85rem; display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; justify-content: space-between;
+}
+.search-wrap { flex: 1 1 14rem; display: flex; gap: .35rem; align-items: center; }
+.search-wrap input { flex: 1; }
+.seg {
+  display: inline-flex; border: 1px solid var(--line); border-radius: .45rem; background: var(--wash); padding: .15rem;
+}
+.seg button {
+  border: 0; background: transparent; color: var(--ink2); padding: .35rem .75rem; font-size: .9rem; border-radius: .35rem;
+}
+.seg button[aria-pressed="true"] { background: #fff; color: var(--ink); font-weight: 600; }
+details.group {
+  border: 1px solid var(--line); border-radius: .55rem; background: #fff; margin-bottom: .65rem; overflow: hidden;
+}
+details.group summary {
+  list-style: none; cursor: pointer; padding: .65rem .9rem; font-weight: 600;
+  display: flex; align-items: center; gap: .5rem; background: var(--paper);
+}
+details.group summary::-webkit-details-marker { display: none; }
+details.group summary::before { content: "▸"; color: var(--ink2); width: .8rem; display: inline-block; }
+details.group[open] summary::before { content: "▾"; }
+.group-count { color: var(--ink2); font-weight: 400; font-size: .9rem; }
+.book-list { list-style: none; margin: 0; padding: 0; }
+.book-row {
+  display: flex; flex-wrap: wrap; gap: .35rem .75rem; align-items: center; justify-content: space-between;
+  padding: .65rem .9rem; border-top: 1px solid var(--line);
+}
+.book-info { flex: 1 1 16rem; min-width: 0; }
+.book-title { font-weight: 500; word-break: break-word; }
+.book-author { color: var(--ink2); }
+.book-meta {
+  display: flex; align-items: center; gap: .75rem; color: var(--ink2); font-size: .88rem; white-space: nowrap;
+}
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; padding: 0; border-radius: .35rem;
+  border: 1px solid transparent; background: transparent; color: var(--ink2); text-decoration: none; cursor: pointer;
+}
+.icon-btn:hover { background: var(--wash); color: var(--ink); border-color: var(--line); }
+.icon-btn.del:hover { color: var(--danger); }
+.icon-btn svg { width: 1.05rem; height: 1.05rem; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(29, 29, 27, .35);
+  display: flex; align-items: center; justify-content: center; padding: 1rem; z-index: 10;
+}
+.modal {
+  max-width: 26rem; width: 100%; background: #fff; border: 1px solid var(--line);
+  border-radius: .75rem; padding: 1.25rem 1.35rem;
+}
+.modal h3 { margin: 0 0 .5rem; font: 600 1.1rem/1.3 Georgia, "Times New Roman", serif; }
+.modal p { margin: 0 0 1.15rem; color: var(--ink2); }
+.modal-actions { display: flex; gap: .5rem; justify-content: flex-end; }
 </style>
 </head>
 <body>
 <section id="signin" class="card" hidden>
   <h2>Verso</h2>
   <p>Enter the code shown on your Kindle.</p>
-  <form id="form">
-    <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code"
+  <form id="form" class="signin-form">
+    <input id="code" class="code-input" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code"
            aria-label="Code" required>
     <button class="primary" id="go">Connect</button>
   </form>
@@ -80,8 +178,57 @@ button.primary:disabled { opacity: .5; cursor: default; }
   </nav>
   <main>
     <section role="tabpanel" id="books" aria-labelledby="tab-books">
-      <p class="empty">Sending and managing books comes next.</p>
+      <div id="book-drop" class="drop">
+        <div class="drop-main">
+          <span>Drop EPUBs here, or</span>
+          <button type="button" class="primary" id="book-pick">Choose files</button>
+          <input type="file" id="book-input" multiple hidden>
+        </div>
+        <div class="drop-dest">
+          <label for="book-folder">Save to:</label>
+          <select id="book-folder"></select>
+          <button type="button" id="mkdir-toggle">+ New folder</button>
+        </div>
+        <form id="mkdir-form" class="mkdir-row" hidden>
+          <input type="text" id="mkdir-name" placeholder="Folder name" aria-label="New folder name" required>
+          <button type="submit" class="primary" id="mkdir-submit">Create</button>
+          <button type="button" id="mkdir-cancel">Cancel</button>
+        </form>
+      </div>
+
+      <div id="upload-box" class="upload-box" hidden>
+        <div class="upload-head">
+          <div>
+            <span>Uploading </span>
+            <span id="upload-name" class="upload-name"></span>
+            <span id="upload-pct" class="upload-meta"></span>
+          </div>
+          <div>
+            <span id="upload-queued" class="upload-meta"></span>
+            <button type="button" class="ghost" id="upload-cancel">Cancel</button>
+          </div>
+        </div>
+        <progress id="upload-bar" max="100" value="0"></progress>
+      </div>
+
+      <div id="book-notices" class="notices" aria-live="polite"></div>
+
+      <div class="toolbar">
+        <div class="search-wrap">
+          <input type="search" id="book-search" placeholder="Search books…" aria-label="Search books">
+        </div>
+        <div class="seg" role="group" aria-label="Books view">
+          <button type="button" id="sub-books" aria-pressed="true">Books</button>
+          <button type="button" id="sub-highlights" aria-pressed="false">Highlights</button>
+        </div>
+      </div>
+
+      <div id="books-list"></div>
+      <div id="highlights-view" hidden>
+        <p class="empty">Downloading highlights comes next.</p>
+      </div>
     </section>
+
     <section role="tabpanel" id="dictionaries" aria-labelledby="tab-dictionaries" hidden>
       <p class="empty">Installing dictionaries comes next.</p>
     </section>
@@ -90,6 +237,29 @@ button.primary:disabled { opacity: .5; cursor: default; }
     </section>
   </main>
 </div>
+
+<div id="confirm-backdrop" class="modal-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h3 id="confirm-title">Delete book?</h3>
+    <p id="confirm-text"></p>
+    <div class="modal-actions">
+      <button type="button" id="confirm-cancel">Cancel</button>
+      <button type="button" class="danger" id="confirm-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+<template id="icon-download">
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>
+  </svg>
+</template>
+<template id="icon-trash">
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+  </svg>
+</template>
+
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -111,8 +281,12 @@ async function call(path, options = {}) {
 
 function size(bytes) {
   if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + " GB";
-  if (bytes >= 1e6) return Math.round(bytes / 1e6) + " MB";
+  if (bytes >= 1e6) return (bytes / 1e6).toFixed(bytes >= 1e7 ? 0 : 1) + " MB";
   return Math.max(1, Math.round(bytes / 1e3)) + " KB";
+}
+
+function svgIcon(id) {
+  return $(id).content.firstElementChild.cloneNode(true);
 }
 
 async function loadStatus() {
@@ -120,9 +294,9 @@ async function loadStatus() {
   if (response.status === 401) {
     show("signin");
     $("code").focus();
-    return;
+    return false;
   }
-  if (!response.ok) return;
+  if (!response.ok) return false;
   const status = await response.json();
   $("name").textContent = status.name ? "· " + status.name : "";
   const facts = [];
@@ -130,6 +304,7 @@ async function loadStatus() {
   if (status.battery) facts.push(status.battery.percent + "% battery" + (status.battery.charging ? ", charging" : ""));
   $("facts").textContent = facts.join(" · ");
   show("app");
+  return true;
 }
 
 const messages = {
@@ -149,7 +324,7 @@ async function signIn(code, retries = 2) {
     });
     if (response.ok) {
       $("code").value = "";
-      await loadStatus();
+      if (await loadStatus()) await loadBooks();
       return;
     }
     if (response.status === 429 && retries > 0) {
@@ -184,8 +359,387 @@ function select(name) {
 }
 select("books");
 
+// ---- Books tab ----
+
+let libraryData = { default_folder: "", folders: [], books: [] };
+let chosenFolder = "";
+let openGroups = new Set();
+let hasRenderedGroups = false;
+let uploadQueue = [];
+let activeXhr = null;
+let pendingDelete = null;
+
+function addNotice(text, isError) {
+  const wrap = $("book-notices");
+  const el = document.createElement("div");
+  el.className = isError ? "notice err" : "notice";
+  const span = document.createElement("span");
+  span.textContent = text;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "ghost";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "Dismiss");
+  close.addEventListener("click", () => el.remove());
+  el.append(span, close);
+  wrap.prepend(el);
+  while (wrap.children.length > 5) wrap.lastChild.remove();
+}
+
+async function loadBooks() {
+  const response = await call("/api/books");
+  if (response.status === 401) {
+    show("signin");
+    return;
+  }
+  if (!response.ok) return;
+  libraryData = await response.json();
+  renderFolders();
+  renderBooks();
+}
+
+function renderFolders() {
+  const sel = $("book-folder");
+  const prev = chosenFolder || sel.value || libraryData.default_folder || "";
+  sel.replaceChildren();
+  for (const f of libraryData.folders) {
+    const opt = document.createElement("option");
+    opt.value = f.path;
+    opt.textContent = f.label;
+    sel.appendChild(opt);
+  }
+  if (libraryData.folders.some((f) => f.path === prev)) {
+    sel.value = prev;
+  } else if (libraryData.default_folder) {
+    sel.value = libraryData.default_folder;
+  }
+  chosenFolder = sel.value;
+}
+
+$("book-folder").addEventListener("change", () => {
+  chosenFolder = $("book-folder").value;
+});
+
+function renderBooks() {
+  const list = $("books-list");
+  list.replaceChildren();
+  const q = $("book-search").value.trim().toLowerCase();
+  const filtered = q
+    ? libraryData.books.filter((b) =>
+        (b.title || "").toLowerCase().includes(q) ||
+        (b.author || "").toLowerCase().includes(q) ||
+        (b.filename || "").toLowerCase().includes(q) ||
+        (b.group || "").toLowerCase().includes(q)
+      )
+    : libraryData.books;
+
+  if (filtered.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = q ? "No books match \"" + $("book-search").value.trim() + "\"." : "No books in the library yet.";
+    list.appendChild(p);
+    return;
+  }
+
+  const map = new Map();
+  for (const b of filtered) {
+    const key = b.folder + "\0" + b.group;
+    if (!map.has(key)) map.set(key, { key, label: b.group, books: [] });
+    map.get(key).books.push(b);
+  }
+  const groups = Array.from(map.values()).sort((a, b) => {
+    const aLoose = a.label === "Loose books" || a.label.endsWith(" (loose)");
+    const bLoose = b.label === "Loose books" || b.label.endsWith(" (loose)");
+    if (aLoose !== bLoose) return aLoose ? 1 : -1;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+  });
+
+  if (!hasRenderedGroups) {
+    hasRenderedGroups = true;
+    if (groups.length === 1 || filtered.length <= 30) {
+      for (const g of groups) openGroups.add(g.key);
+    }
+  }
+
+  for (const g of groups) {
+    const details = document.createElement("details");
+    details.className = "group";
+    details.open = q ? true : openGroups.has(g.key);
+    details.addEventListener("toggle", () => {
+      if (!q) {
+        if (details.open) openGroups.add(g.key);
+        else openGroups.delete(g.key);
+      }
+    });
+
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.textContent = g.label;
+    const count = document.createElement("span");
+    count.className = "group-count";
+    count.textContent = "(" + g.books.length + ")";
+    summary.append(label, count);
+    details.appendChild(summary);
+
+    const ul = document.createElement("ul");
+    ul.className = "book-list";
+    for (const b of g.books) {
+      const li = document.createElement("li");
+      li.className = "book-row";
+
+      const info = document.createElement("div");
+      info.className = "book-info";
+      const title = document.createElement("span");
+      title.className = "book-title";
+      title.textContent = b.title || b.filename;
+      info.appendChild(title);
+      if (b.author) {
+        const author = document.createElement("span");
+        author.className = "book-author";
+        author.textContent = " — " + b.author;
+        info.appendChild(author);
+      }
+
+      const meta = document.createElement("div");
+      meta.className = "book-meta";
+      const prog = document.createElement("span");
+      prog.textContent = b.finished ? "done" : (typeof b.progress === "number" ? b.progress + "%" : "new");
+      const sz = document.createElement("span");
+      sz.textContent = size(b.size || 0);
+
+      const dl = document.createElement("a");
+      dl.className = "icon-btn";
+      dl.href = "/api/books/" + encodeURIComponent(b.id);
+      dl.setAttribute("download", b.filename || "");
+      dl.title = "Download " + (b.filename || "book");
+      dl.setAttribute("aria-label", "Download " + (b.title || b.filename));
+      dl.appendChild(svgIcon("icon-download"));
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "icon-btn del";
+      del.title = "Delete";
+      del.setAttribute("aria-label", "Delete " + (b.title || b.filename));
+      del.appendChild(svgIcon("icon-trash"));
+      del.addEventListener("click", () => askDelete(b));
+
+      meta.append(prog, sz, dl, del);
+      li.append(info, meta);
+      ul.appendChild(li);
+    }
+    details.appendChild(ul);
+    list.appendChild(details);
+  }
+}
+
+$("book-search").addEventListener("input", renderBooks);
+
+function setSubView(which) {
+  const isBooks = which === "books";
+  $("sub-books").setAttribute("aria-pressed", String(isBooks));
+  $("sub-highlights").setAttribute("aria-pressed", String(!isBooks));
+  $("books-list").hidden = !isBooks;
+  $("highlights-view").hidden = isBooks;
+}
+$("sub-books").addEventListener("click", () => setSubView("books"));
+$("sub-highlights").addEventListener("click", () => setSubView("highlights"));
+
+// New folder inline form
+$("mkdir-toggle").addEventListener("click", () => {
+  const form = $("mkdir-form");
+  form.hidden = !form.hidden;
+  if (!form.hidden) {
+    $("mkdir-name").value = "";
+    $("mkdir-name").focus();
+  }
+});
+$("mkdir-cancel").addEventListener("click", () => {
+  $("mkdir-form").hidden = true;
+});
+$("mkdir-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = $("mkdir-name").value.trim();
+  const parent = $("book-folder").value;
+  if (!name || !parent) return;
+  $("mkdir-submit").disabled = true;
+  try {
+    const response = await call("/api/books/mkdir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parent, name }),
+    });
+    const data = await response.json();
+    if (response.ok) {
+      chosenFolder = data.path;
+      $("mkdir-form").hidden = true;
+      await loadBooks();
+      addNotice("Created folder \"" + data.label + "\".", false);
+    } else {
+      addNotice(data.error || "Couldn't create folder.", true);
+    }
+  } finally {
+    $("mkdir-submit").disabled = false;
+  }
+});
+
+// Upload queue (XMLHttpRequest for progress; raw body PUT)
+function queueFiles(fileList) {
+  const folder = $("book-folder").value;
+  if (!folder) {
+    addNotice("Choose a destination folder first.", true);
+    return;
+  }
+  for (const file of fileList) {
+    if (!file.name.toLowerCase().endsWith(".epub")) {
+      addNotice(file.name + ": only EPUB books can be added here. Use the Files tab for other files.", true);
+      continue;
+    }
+    uploadQueue.push({ file, folder });
+  }
+  updateQueueUi();
+  if (!activeXhr) runNextUpload();
+}
+
+function updateQueueUi() {
+  if (!activeXhr && uploadQueue.length === 0) {
+    $("upload-box").hidden = true;
+    return;
+  }
+  $("upload-box").hidden = false;
+  $("upload-queued").textContent = uploadQueue.length > 0 ? uploadQueue.length + " more queued" : "";
+}
+
+function runNextUpload() {
+  if (uploadQueue.length === 0) {
+    activeXhr = null;
+    updateQueueUi();
+    return;
+  }
+  const item = uploadQueue.shift();
+  $("upload-name").textContent = item.file.name;
+  $("upload-pct").textContent = " 0%";
+  $("upload-bar").value = 0;
+  updateQueueUi();
+
+  const xhr = new XMLHttpRequest();
+  activeXhr = xhr;
+  const params = new URLSearchParams({ folder: item.folder, name: item.file.name });
+  xhr.open("PUT", "/api/books?" + params.toString());
+  xhr.withCredentials = true;
+  xhr.setRequestHeader("X-Verso-Request", "1");
+
+  xhr.upload.onprogress = (ev) => {
+    if (ev.lengthComputable && ev.total > 0) {
+      const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+      $("upload-bar").value = pct;
+      $("upload-pct").textContent = " " + pct + "%";
+    }
+  };
+  xhr.onload = async () => {
+    activeXhr = null;
+    if (xhr.status === 401) {
+      uploadQueue = [];
+      updateQueueUi();
+      show("signin");
+      return;
+    }
+    let data = {};
+    try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const saved = data.filename && data.filename !== item.file.name ? " (saved as " + data.filename + ")" : "";
+      addNotice("Added \"" + (data.title || item.file.name) + "\"" + saved + ".", false);
+      await Promise.all([loadBooks(), loadStatus()]).catch(() => {});
+    } else {
+      addNotice(item.file.name + ": " + (data.error || "Upload failed (" + xhr.status + ")."), true);
+    }
+    runNextUpload();
+  };
+  xhr.onerror = () => {
+    activeXhr = null;
+    uploadQueue = [];
+    updateQueueUi();
+    show("gone");
+  };
+  xhr.onabort = () => {
+    activeXhr = null;
+    addNotice("Cancelled " + item.file.name + ".", false);
+    runNextUpload();
+  };
+  xhr.send(item.file);
+}
+
+$("upload-cancel").addEventListener("click", () => {
+  if (activeXhr) activeXhr.abort();
+});
+
+$("book-pick").addEventListener("click", () => $("book-input").click());
+$("book-input").addEventListener("change", () => {
+  if ($("book-input").files.length > 0) {
+    queueFiles($("book-input").files);
+    $("book-input").value = "";
+  }
+});
+
+const drop = $("book-drop");
+drop.addEventListener("dragover", (ev) => {
+  ev.preventDefault();
+  drop.classList.add("over");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  drop.classList.remove("over");
+  if (ev.dataTransfer && ev.dataTransfer.files.length > 0) queueFiles(ev.dataTransfer.files);
+});
+
+// Delete confirmation dialog
+function askDelete(book) {
+  pendingDelete = book;
+  $("confirm-title").textContent = "Delete \"" + (book.title || book.filename) + "\"?";
+  $("confirm-text").textContent = "This removes the EPUB file and your reading progress from the Kindle.";
+  $("confirm-backdrop").hidden = false;
+  $("confirm-cancel").focus();
+}
+function closeConfirm() {
+  pendingDelete = null;
+  $("confirm-backdrop").hidden = true;
+}
+$("confirm-cancel").addEventListener("click", closeConfirm);
+$("confirm-backdrop").addEventListener("click", (ev) => {
+  if (ev.target === $("confirm-backdrop")) closeConfirm();
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !$("confirm-backdrop").hidden) closeConfirm();
+});
+$("confirm-ok").addEventListener("click", async () => {
+  const book = pendingDelete;
+  if (!book) return;
+  $("confirm-ok").disabled = true;
+  try {
+    const response = await call("/api/books/" + encodeURIComponent(book.id), { method: "DELETE" });
+    if (response.status === 401) {
+      closeConfirm();
+      show("signin");
+      return;
+    }
+    const data = await response.json();
+    closeConfirm();
+    if (response.ok) {
+      if (data.warning) addNotice(data.warning, true);
+      else addNotice("Deleted \"" + (book.title || book.filename) + "\".", false);
+      await Promise.all([loadBooks(), loadStatus()]);
+    } else {
+      addNotice(data.error || "Couldn't delete the book.", true);
+    }
+  } finally {
+    $("confirm-ok").disabled = false;
+  }
+});
+
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && !$("app").hidden) loadStatus().catch(() => {});
+  if (document.visibilityState === "visible" && !$("app").hidden) {
+    loadStatus().then((ok) => ok && loadBooks()).catch(() => {});
+  }
 });
 
 // The QR code carries the code in the fragment, which browsers never send.
@@ -195,7 +749,7 @@ if (given) {
   history.replaceState(null, "", location.pathname + location.search);
   signIn(given).catch(() => {});
 } else {
-  loadStatus().catch(() => {});
+  loadStatus().then((ok) => ok && loadBooks()).catch(() => {});
 }
 </script>
 </body>

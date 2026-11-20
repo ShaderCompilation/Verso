@@ -56,7 +56,6 @@ impl Request {
     }
 
     /// A decoded query parameter.
-    #[cfg_attr(not(test), allow(dead_code))] // uploads take names and folders (Phase 2)
     pub fn param(&self, name: &str) -> Option<String> {
         self.query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -346,24 +345,44 @@ impl Conn {
 
     /// Sends a response. `keep_alive`: the connection stays open for the
     /// next request; otherwise the response says it closes.
-    pub fn respond(&mut self, response: &Response, keep_alive: bool) -> io::Result<()> {
+    pub fn respond(&mut self, response: &mut Response, keep_alive: bool) -> io::Result<()> {
+        let len = response.body.len();
         let mut head = format!("HTTP/1.1 {} {}\r\n", response.status, reason(response.status));
         for (name, value) in &response.headers {
             head.push_str(&format!("{name}: {value}\r\n"));
         }
-        head.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
+        head.push_str(&format!("Content-Length: {len}\r\n"));
         if !keep_alive {
             head.push_str("Connection: close\r\n");
         }
         head.push_str("\r\n");
         let mut out = head.into_bytes();
-        // One write for small responses, so the head and body go out together.
-        if response.body.len() <= BUFFER {
-            out.extend_from_slice(&response.body);
-            return self.write_all(&out);
+        match &mut response.body {
+            ResponseBody::Bytes(body) => {
+                // One write for small responses, so the head and body go out together.
+                if body.len() <= BUFFER {
+                    out.extend_from_slice(body);
+                    return self.write_all(&out);
+                }
+                self.write_all(&out)?;
+                self.write_all(body)
+            }
+            ResponseBody::File { file, len } => {
+                self.write_all(&out)?;
+                let mut buf = vec![0u8; BUFFER];
+                let mut remaining = *len;
+                while remaining > 0 {
+                    let want = remaining.min(buf.len() as u64) as usize;
+                    let n = file.read(&mut buf[..want])?;
+                    if n == 0 {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "file shrank during download"));
+                    }
+                    self.write_all(&buf[..n])?;
+                    remaining -= n as u64;
+                }
+                Ok(())
+            }
         }
-        self.write_all(&out)?;
-        self.write_all(&response.body)
     }
 
     /// Closes after an answer that left part of a request body unread:
@@ -451,17 +470,34 @@ impl Read for Body<'_> {
     }
 }
 
+/// A response body: small payloads in memory, or a file streamed in 64 KB
+/// chunks so downloads keep RSS flat.
+#[derive(Debug)]
+pub enum ResponseBody {
+    Bytes(Vec<u8>),
+    File { file: std::fs::File, len: u64 },
+}
+
+impl ResponseBody {
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(b) => b.len() as u64,
+            Self::File { len, .. } => *len,
+        }
+    }
+}
+
 /// A complete response; the server adds Content-Length and Connection.
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(&'static str, String)>,
-    pub body: Vec<u8>,
+    pub body: ResponseBody,
 }
 
 impl Response {
     pub fn new(status: u16) -> Self {
-        Self { status, headers: Vec::new(), body: Vec::new() }
+        Self { status, headers: Vec::new(), body: ResponseBody::Bytes(Vec::new()) }
     }
 
     pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
@@ -470,8 +506,13 @@ impl Response {
     }
 
     pub fn body(mut self, content_type: &str, body: impl Into<Vec<u8>>) -> Self {
-        self.body = body.into();
+        self.body = ResponseBody::Bytes(body.into());
         self.header("Content-Type", content_type)
+    }
+
+    /// Streams `file` (`len` bytes) as a safe attachment download.
+    pub fn file(file: std::fs::File, len: u64, download_name: &str) -> Self {
+        Self { status: 200, headers: download_headers(download_name), body: ResponseBody::File { file, len } }
     }
 
     /// A short plain-text answer, used for errors.
@@ -505,13 +546,13 @@ pub fn reason(status: u16) -> &'static str {
         501 => "Not Implemented",
         503 => "Service Unavailable",
         505 => "HTTP Version Not Supported",
+        507 => "Insufficient Storage",
         _ => "Unknown",
     }
 }
 
 /// The headers every download carries (books, highlights, files): saved,
 /// never shown under the page's origin, whatever the file holds.
-#[cfg_attr(not(test), allow(dead_code))] // the Books and Files tabs (Phases 2–4)
 pub fn download_headers(name: &str) -> Vec<(&'static str, String)> {
     let ascii: String = name
         .chars()

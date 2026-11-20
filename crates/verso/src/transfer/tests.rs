@@ -27,7 +27,12 @@ impl Fixture {
     }
 
     fn start(&self, device: Device) -> Session {
-        Session::start(Arc::new(device), Waker::new(|| {}), "verso".into(), false)
+        let store = crate::store::Store::at(self.dir.path().join("data"));
+        let books = self.dir.path().join("books");
+        let _ = std::fs::create_dir_all(&books);
+        let _ = store.save_library_folders(vec![books]);
+        let library = store.library_worker(Waker::new(|| {}));
+        Session::start(Arc::new(device), store, library, Waker::new(|| {}), "verso".into(), false)
     }
 
     fn calls(&self) -> Vec<String> {

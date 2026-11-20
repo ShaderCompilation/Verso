@@ -3,7 +3,8 @@
 //! platform's; the simulator and tests fake them.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -14,6 +15,7 @@ type Hook<T> = Box<dyn Fn() -> T + Send + Sync>;
 type Set<T> = Box<dyn Fn(T) -> Result<()> + Send + Sync>;
 type Do<T> = Box<dyn Fn(T) + Send + Sync>;
 type StartResponder = Box<dyn Fn(&str) -> Option<i32> + Send + Sync>;
+pub type FreeSpace = Arc<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>;
 
 pub struct Device {
     pub wifi_enabled: Hook<Result<bool>>,
@@ -39,6 +41,8 @@ pub struct Device {
     pub markers: PathBuf,
     /// Free space is reported for this folder.
     pub storage: PathBuf,
+    /// Reads available bytes on the filesystem containing the given folder.
+    pub free_space: FreeSpace,
     pub network_wait: Duration,
     pub idle: Duration,
     /// Simulator captures: the port shown instead of the real one, a fixed
@@ -81,6 +85,7 @@ fn kindle() -> Device {
         local_names: Vec::new(),
         markers: PathBuf::from("/tmp"),
         storage: PathBuf::from("/mnt/us"),
+        free_space: Arc::new(crate::update::download::free_space),
         network_wait: NETWORK_WAIT,
         idle: IDLE,
         display_port: None,
@@ -137,6 +142,7 @@ pub fn simulator(storage: PathBuf, options: &str) -> Device {
         local_names: vec!["127.0.0.1".into(), "localhost".into()],
         markers: std::env::temp_dir().join("verso-simulator"),
         storage,
+        free_space: Arc::new(crate::update::download::free_space),
         network_wait: NETWORK_WAIT,
         idle: IDLE,
         display_port: kindle_like.then_some(80),
@@ -244,6 +250,7 @@ pub mod fake {
             local_names: vec!["127.0.0.1".into()],
             markers,
             storage: std::env::temp_dir(),
+            free_space: Arc::new(crate::update::download::free_space),
             network_wait: Duration::from_millis(300),
             idle: Duration::from_millis(400),
             display_port: None,

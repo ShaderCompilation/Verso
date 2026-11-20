@@ -148,6 +148,9 @@ pub struct Store {
     pub(crate) dictionary_service:
         std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::dictionary::worker::Service>>>,
     pub(crate) dictionary_folder_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Shared library worker: screens and Wi-Fi transfer share one handle while
+    /// any is open, and dropping the last handle stops and joins its thread.
+    library_worker: std::sync::Arc<std::sync::Mutex<std::sync::Weak<crate::library::worker::WorkerInner>>>,
     selected_home: std::sync::Arc<std::sync::Mutex<Option<crate::library::Book>>>,
     /// The book known to lead `opened.json`, so its saves (page turns) skip
     /// reading the file. None when unknown.
@@ -193,12 +196,25 @@ impl Store {
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
+            library_worker: Default::default(),
             updates: Default::default(),
         }
     }
     /// A worker keeps the data paths and counters, without owning its service registry.
     pub(crate) fn dictionary_context(&self) -> Self {
         Self { dictionary_service: Default::default(), ..self.clone() }
+    }
+    /// Returns the shared library worker, starting one if none is running.
+    pub fn library_worker(&self, waker: crate::platform::Waker) -> crate::library::worker::Worker {
+        let mut slot = self.library_worker.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(inner) = slot.upgrade() {
+            return crate::library::worker::Worker::from_inner(inner);
+        }
+        let context =
+            Self { dictionary_service: Default::default(), library_worker: Default::default(), ..self.clone() };
+        let worker = crate::library::worker::Worker::new(context, self.library_folders(), waker);
+        *slot = worker.weak();
+        worker
     }
     pub fn settings(&self) -> Settings {
         let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
@@ -384,6 +400,7 @@ impl Store {
             settings_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
+            library_worker: Default::default(),
             updates: Default::default(),
         }
     }

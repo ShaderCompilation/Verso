@@ -9,6 +9,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::auth::{self, Auth, Login};
+use super::books::Books;
 use super::http::{Body, Method, Request, Response};
 use super::server::Handler;
 
@@ -25,6 +26,8 @@ pub struct Context {
     pub status: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
     /// Something the Kindle screen shows changed (a new code).
     pub changed: Box<dyn Fn() + Send + Sync>,
+    /// Books tab handlers; None only in minimal auth/routing unit tests.
+    pub books: Option<Books>,
 }
 
 pub struct Api {
@@ -84,8 +87,23 @@ impl Api {
         }
         match (method, path) {
             (Method::Get, "/api/status") => Response::json(200, &(self.cx.status)()),
-            _ => Response::json(404, &json!({ "error": "not-found" })),
+            (Method::Get, "/api/books") => self.books().map_or_else(not_found, |b| b.list(request)),
+            (Method::Put, "/api/books") => self.books().map_or_else(not_found, |b| b.upload(request, body)),
+            (Method::Post, "/api/books/mkdir") => self.books().map_or_else(not_found, |b| b.mkdir(body)),
+            (Method::Get, p) if book_id_segment(p).is_some() => {
+                let id = book_id_segment(p).unwrap();
+                self.books().map_or_else(not_found, |b| b.download(id))
+            }
+            (Method::Delete, p) if book_id_segment(p).is_some() => {
+                let id = book_id_segment(p).unwrap();
+                self.books().map_or_else(not_found, |b| b.delete(id))
+            }
+            _ => not_found(),
         }
+    }
+
+    fn books(&self) -> Option<&Books> {
+        self.cx.books.as_ref()
     }
 
     fn login(&self, body: &mut Body<'_>) -> Response {
@@ -125,6 +143,15 @@ impl Handler for Api {
         }
         response
     }
+}
+
+fn not_found() -> Response {
+    Response::json(404, &json!({ "error": "not-found" }))
+}
+
+fn book_id_segment(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/books/")?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
 }
 
 fn page() -> Response {
@@ -221,6 +248,7 @@ mod tests {
                         changes.fetch_add(1, Ordering::SeqCst);
                     }
                 }),
+                books: None,
             },
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api.clone(), Timeouts::default()).unwrap();

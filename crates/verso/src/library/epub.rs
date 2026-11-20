@@ -143,7 +143,10 @@ fn cover_page<R: Read + Seek>(zip: &mut ZipArchive<R>, path: &str) -> Option<Str
     resolve(path, image(&page)?).ok()
 }
 
-pub fn read(path: &Path) -> Result<Metadata> {
+/// Reads package metadata from an EPUB archive without filling an empty title
+/// from the filename. Callers reading a temporary `.part` file fill the title
+/// from the final filename after renaming.
+pub fn read_metadata(path: &Path) -> Result<Metadata> {
     let mut zip = ZipArchive::new(std::fs::File::open(path)?)?;
     ensure!(zip.len() <= 50_000, "too many EPUB entries");
     let container = xml(&entry(&mut zip, "META-INF/container.xml", XML_LIMIT)?)?;
@@ -203,6 +206,11 @@ pub fn read(path: &Path) -> Result<Metadata> {
             break;
         }
     }
+    Ok(result)
+}
+
+pub fn read(path: &Path) -> Result<Metadata> {
+    let mut result = read_metadata(path)?;
     if result.title.is_empty() {
         result.title = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
     }

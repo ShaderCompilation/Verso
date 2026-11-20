@@ -98,6 +98,31 @@ impl LibraryIndex {
             self.empty_folders.sort();
         }
     }
+    /// Inserts one newly received book using the same identity rules as a scan
+    /// (`assign_ids`), without running a filesystem scan pass.
+    pub fn add_book(&mut self, mut book: Book) -> Book {
+        book.path = collections::normalize(&book.path);
+        book.available = true;
+        book.metadata_pending = false;
+        book.error = None;
+        if !book.fingerprint.is_empty() {
+            book.fingerprint_attempted = true;
+        }
+        // A destination receiving a book is no longer empty.
+        self.empty_folders.retain(|p| !book.path.starts_with(p));
+        let previous = self.books.clone();
+        let old_ids: std::collections::HashMap<PathBuf, String> =
+            previous.iter().map(|b| (b.path.clone(), b.id.clone())).collect();
+        let path = book.path.clone();
+        self.books.retain(|b| b.path != path);
+        self.books.push(book);
+        assign_ids(&mut self.books, &previous);
+        // Drop any unavailable tombstone whose identity moved onto an available book.
+        let available_ids: std::collections::HashSet<String> =
+            self.books.iter().filter(|b| b.available).map(|b| b.id.clone()).collect();
+        self.books.retain(|b| b.available || old_ids.get(&b.path).is_none_or(|id| !available_ids.contains(id)));
+        self.books.iter().find(|b| b.path == path).cloned().expect("added book is in index")
+    }
 }
 impl Default for LibraryIndex {
     fn default() -> Self {
@@ -117,6 +142,8 @@ pub enum PathChange {
     Move(PathBuf, PathBuf),
     Remove(PathBuf),
     AddEmpty(PathBuf),
+    /// A newly added book with its metadata and fingerprint already read.
+    Add(Box<Book>),
 }
 impl PathChange {
     pub fn apply(&self, index: &mut LibraryIndex) {
@@ -124,6 +151,9 @@ impl PathChange {
             Self::Move(from, to) => index.move_path(from, to),
             Self::Remove(path) => index.remove_path(path),
             Self::AddEmpty(path) => index.add_empty_folder(path.clone()),
+            Self::Add(book) => {
+                index.add_book((**book).clone());
+            }
         }
     }
     pub fn apply_home(&self, home: &mut home::Summary) {
@@ -134,7 +164,7 @@ impl PathChange {
                 }
             }
             Self::Remove(path) => home.books.retain(|e| !e.book.path.starts_with(path)),
-            Self::AddEmpty(_) => {}
+            Self::AddEmpty(_) | Self::Add(_) => {}
         }
     }
 }

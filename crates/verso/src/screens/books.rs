@@ -294,7 +294,7 @@ impl Books {
         let home = home.unwrap_or_default();
         let navigation = store.navigation();
         let tabs = Segmented::texts(&["Home", "Collections", "All books"], 0);
-        let library = LibraryWorker::new(store.clone(), roots.clone(), worker.waker());
+        let library = store.library_worker(worker.waker());
         let navigation_writer = NavigationWriter::new(store.clone(), worker.waker());
         let mut top = TopBar::new("Home", false);
         top.border = false;
@@ -1626,32 +1626,20 @@ impl Books {
     /// from the index and removes its cached cover; this view updates at once.
     fn delete(&mut self, id: &str, cx: &mut EventCx) {
         let Some(book) = self.book(id).cloned() else { return };
-        if let Err(e) = std::fs::remove_file(&book.path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            log::warn!("deleting {}: {e}", book.path.display());
-            cx.toast(format!("Couldn't delete the book: {e}"), None);
-            return;
-        }
-        log::info!("deleted {}", book.path.display());
-        // The confirmation promises the reading progress goes too, and a
-        // leftover sidecar would hide a folder this delete just emptied.
-        let sidecar_error = files::delete_sidecar(&book.path).err();
-        if let Some(e) = &sidecar_error {
-            log::warn!("deleting sidecar of {}: {e:#}", book.path.display());
-        }
-        if let Err(e) = self.store.remove_book(&book.id) {
-            log::warn!("removing reading state of {}: {e}", book.path.display());
-        }
-        let mut changes = self.library.remove_paths(vec![book.path.clone()]);
-        if let Some(parent) = book.path.parent().filter(|p| files::is_empty(p)) {
-            changes.extend(self.library.add_empty_folder(parent.to_owned()));
-        }
+        let deletion = match files::delete_book(&book.id, &book.path, &self.store) {
+            Ok(deletion) => deletion,
+            Err(e) => {
+                log::warn!("deleting {}: {e:#}", book.path.display());
+                cx.toast(format!("Couldn't delete the book: {e:#}"), None);
+                return;
+            }
+        };
+        let changes = self.library.change_paths(deletion.changes);
         self.remove_book_state(&book.id);
         self.home.books.retain(|e| e.book.id != book.id);
         self.apply_changes(changes, cx);
         cx.toast(
-            match sidecar_error {
+            match deletion.sidecar_error {
                 None => format!("Deleted “{}”", book.metadata.title),
                 Some(_) => format!("Deleted “{}”, but couldn't remove its KOReader data", book.metadata.title),
             },

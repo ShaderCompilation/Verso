@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::{Family, HAlign, Icon, TextStyle, Weight};
+use crate::library::worker::CoverPause;
 use crate::platform::Waker;
 use crate::screens::{Action, EventCx, Screen};
 use crate::store::Store;
@@ -15,11 +16,14 @@ use crate::transfer::{Activity, Device, Failure, Phase, Session, Snapshot, Stop}
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::DrawCx;
-use crate::ui::widgets::{Button, ButtonKind, TopBar};
+use crate::ui::widgets::{Button, ButtonKind, Sheet, TopBar};
 
 pub struct TransferScreen {
+    screen: Rect,
     top: TopBar,
     session: Session,
+    /// Pauses library cover work while this screen is open; released on Done/Drop.
+    cover_pause: Option<CoverPause>,
     snapshot: Snapshot,
     revision: u64,
     /// A phase forced for a simulator capture: nothing runs.
@@ -33,14 +37,61 @@ pub struct TransferScreen {
     done: Button,
     /// Try again, or Start again after a stop.
     again: Button,
+    /// Shown when Done is tapped while an upload is still being received.
+    confirm_stop: Option<ConfirmStop>,
     /// Done was tapped: "Stopping…" is on screen, then the session closes.
     closing: bool,
     /// The QR code and the link it holds.
     qr: Option<(String, qrcode::QrCode)>,
 }
 
+/// Confirmation sheet shown when tapping Done during an active upload.
+struct ConfirmStop {
+    sheet: Sheet,
+    text: Rect,
+    keep: Button,
+    stop: Button,
+}
+
+impl ConfirmStop {
+    fn new(t: &Theme, screen: Rect) -> Self {
+        let sheet = Sheet::open("Stop Wi-Fi transfer?", t.mm(58.0).min(screen.h - t.top_bar), screen, t);
+        let c = sheet.content(t);
+        let buttons_y = c.bottom() - t.margin - t.button_h;
+        let text = Rect { h: buttons_y - c.y - t.mm(3.0), ..c };
+        let w = (c.w - t.mm(3.0)) / 2;
+        let mut keep = Button::new("Keep waiting", ButtonKind::Secondary);
+        keep.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
+        let mut stop = Button::new("Stop", ButtonKind::Primary);
+        stop.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
+        Self { sheet, text, keep, stop }
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        let message = "A file is still being received. Stopping now will cancel it.";
+        let height = cx.text.measure(message, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
+        cx.paragraph(message, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
+        self.keep.draw(cx);
+        self.stop.draw(cx);
+    }
+
+    /// `Some(true)` to stop and cancel the upload, `Some(false)` to keep waiting.
+    fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
+        if self.sheet.on_gesture(g) || self.keep.on_gesture(g) {
+            return Some(false);
+        }
+        self.stop.on_gesture(g).then_some(true)
+    }
+}
+
 impl TransferScreen {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
+        let device = Device::current(store.root());
+        Self::with_device(t, screen, store, device, waker)
+    }
+
+    pub(crate) fn with_device(t: &Theme, screen: Rect, store: Store, device: Device, waker: Waker) -> Self {
         let mut top = TopBar::new("Wi-Fi transfer", true);
         top.place(screen, t);
         let content = screen.split_top(t.top_bar).1.inset(t.margin);
@@ -73,15 +124,38 @@ impl TransferScreen {
         let again_w = t.mm(45.0).min(info.w);
         again.place(Rect::new(info.x + (info.w - again_w) / 2, info.y + t.mm(52.0), again_w, t.button_h), t);
         let settings = store.settings();
-        let device = Device::current(store.root());
         let forced = device.forced.is_some();
-        let session = Session::start(Arc::new(device), waker, settings.hostname, settings.developer);
+        let library = store.library_worker(waker.clone());
+        let cover_pause = Some(library.pause_covers());
+        let session =
+            Session::start(Arc::new(device), store.clone(), library, waker, settings.hostname, settings.developer);
         let snapshot = session.snapshot();
         let revision = session.revision();
-        let mut this =
-            Self { top, session, snapshot, revision, forced, store, info, list, done, again, closing: false, qr: None };
+        let mut this = Self {
+            screen,
+            top,
+            session,
+            cover_pause,
+            snapshot,
+            revision,
+            forced,
+            store,
+            info,
+            list,
+            done,
+            again,
+            confirm_stop: None,
+            closing: false,
+            qr: None,
+        };
         this.sync();
         this
+    }
+
+    fn begin_closing(&mut self) {
+        self.closing = true;
+        self.done.label = "Stopping…".into();
+        self.done.enabled = false;
     }
 
     /// Reads the session again; true if anything visible changed.
@@ -278,6 +352,9 @@ impl Screen for TransferScreen {
         }
         self.draw_activity(cx);
         self.done.draw(cx);
+        if let Some(sheet) = &self.confirm_stop {
+            sheet.draw(cx);
+        }
     }
 
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
@@ -285,10 +362,23 @@ impl Screen for TransferScreen {
             return Action::None;
         }
         cx.redraw();
+        if let Some(sheet) = &mut self.confirm_stop {
+            match sheet.on_gesture(&g) {
+                Some(true) => {
+                    self.confirm_stop = None;
+                    self.begin_closing();
+                }
+                Some(false) => self.confirm_stop = None,
+                None => {}
+            }
+            return Action::None;
+        }
         if self.top.on_gesture(&g) || self.done.on_gesture(&g) {
-            self.closing = true;
-            self.done.label = "Stopping…".into();
-            self.done.enabled = false;
+            if self.session.receiving() {
+                self.confirm_stop = Some(ConfirmStop::new(cx.theme, self.screen));
+            } else {
+                self.begin_closing();
+            }
             return Action::None;
         }
         if self.has_again() && self.again.on_gesture(&g) {
@@ -315,6 +405,7 @@ impl Screen for TransferScreen {
 
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
         if self.session.idle_deadline().is_some_and(|due| cx.now >= due) {
+            self.confirm_stop = None;
             self.session.stop(Stop::Idle);
             self.refresh();
             cx.redraw();
@@ -323,6 +414,7 @@ impl Screen for TransferScreen {
     }
 
     fn on_sleep(&mut self) {
+        self.confirm_stop = None;
         self.session.stop(Stop::Slept);
         self.refresh();
     }
@@ -334,6 +426,7 @@ impl Screen for TransferScreen {
     /// Exiting (also to connect USB) stops the server and puts Wi-Fi back.
     fn on_quit(&mut self) -> anyhow::Result<()> {
         self.session.close();
+        self.cover_pause = None;
         Ok(())
     }
 
@@ -349,6 +442,128 @@ impl Screen for TransferScreen {
     /// "Stopping…" is on screen: stop, then leave.
     fn run_pending_work(&mut self, _cx: &mut EventCx) -> Action {
         self.session.close();
+        self.cover_pause = None;
         Action::Pop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::Point;
+    use crate::transfer::fake::{Net, device as fake_device};
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    fn tap(screen: &mut TransferScreen, point: Point, cx: &mut EventCx) -> Action {
+        screen.on_gesture(Gesture::Down(point), cx);
+        screen.on_gesture(Gesture::Tap(point), cx)
+    }
+
+    #[test]
+    fn done_during_upload_asks_then_cancels_and_deletes_part_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let books_dir = dir.path().join("books");
+        std::fs::create_dir_all(&books_dir).unwrap();
+        let store = Store::at(dir.path().join("data"));
+        store.save_library_folders(vec![books_dir.clone()]).unwrap();
+        let net = Arc::new(Mutex::new(Net { wifi: true, address: Some(Ipv4Addr::LOCALHOST), ..Net::default() }));
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut dev = fake_device(&net, dir.path().join("markers"));
+        dev.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let theme = Theme::for_dpi(300);
+        let bounds = Rect::new(0, 0, 1272, 1696);
+        let mut screen = TransferScreen::with_device(&theme, bounds, store, dev, Waker::new(|| {}));
+
+        let started = Instant::now();
+        while screen.session.snapshot().phase != Phase::Ready {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let code = screen.session.snapshot().code;
+
+        // Sign in and start an upload that stalls mid-body.
+        let mut login = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        login.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = format!("{{\"code\":\"{code}\"}}");
+        let req = format!(
+            "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Verso-Request: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        login.write_all(req.as_bytes()).unwrap();
+        let mut resp = String::new();
+        login.read_to_string(&mut resp).unwrap();
+        let cookie = resp.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap().split(';').next().unwrap();
+
+        let encoded_folder: String = books_dir
+            .to_str()
+            .unwrap()
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect();
+        let mut upload = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let head = format!(
+            "PUT /api/books?folder={encoded_folder}&name=Stalled.epub HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\nX-Verso-Request: 1\r\nContent-Length: 500000\r\n\r\n"
+        );
+        upload.write_all(head.as_bytes()).unwrap();
+        let mut chunk = Vec::from(*b"PK\x03\x04");
+        chunk.extend(vec![0u8; 70_000]);
+        upload.write_all(&chunk).unwrap();
+
+        let part = books_dir.join("Stalled.epub.part");
+        let started = Instant::now();
+        while !part.exists() || !screen.session.receiving() {
+            assert!(started.elapsed() < Duration::from_secs(5), "upload didn't enter receiving state");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut frontlight = None;
+        let mut light_request = None;
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut needs_redraw = false;
+        let mut cx = EventCx {
+            theme: &theme,
+            screen: bounds,
+            now: Instant::now(),
+            frontlight: &mut frontlight,
+            light_request: &mut light_request,
+            battery: None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut needs_redraw,
+        };
+
+        // Tapping Done during an upload opens the confirmation sheet instead of closing.
+        let done_pt = screen.done.rect().center();
+        tap(&mut screen, done_pt, &mut cx);
+        assert!(screen.confirm_stop.is_some());
+        assert!(!screen.closing);
+        assert!(part.exists());
+
+        // Keep waiting dismisses the sheet and leaves the upload running.
+        let keep_pt = screen.confirm_stop.as_ref().unwrap().keep.rect().center();
+        tap(&mut screen, keep_pt, &mut cx);
+        assert!(screen.confirm_stop.is_none());
+        assert!(!screen.closing);
+        assert!(screen.session.receiving());
+
+        // Done → Stop cancels the upload, deletes its part file, and pops.
+        tap(&mut screen, done_pt, &mut cx);
+        let stop_pt = screen.confirm_stop.as_ref().unwrap().stop.rect().center();
+        tap(&mut screen, stop_pt, &mut cx);
+        assert!(screen.closing);
+        assert!(matches!(screen.run_pending_work(&mut cx), Action::Pop));
+        assert!(!part.exists(), "confirmed stop deletes the part file");
+        assert!(!books_dir.join("Stalled.epub").exists());
+        assert!(!screen.session.receiving());
     }
 }

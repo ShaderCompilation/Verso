@@ -235,7 +235,8 @@ fn serve(stream: TcpStream, shared: &Shared, handler: &dyn Handler) {
             Err(HeadError::Status(status, why)) => {
                 log::debug!("web app: refused a request: {status} {why}");
                 let _active = Active::begin(shared);
-                if conn.respond(&Response::text(status, why), false).is_ok() {
+                let mut response = Response::text(status, why);
+                if conn.respond(&mut response, false).is_ok() {
                     conn.linger();
                 }
                 return;
@@ -243,13 +244,13 @@ fn serve(stream: TcpStream, shared: &Shared, handler: &dyn Handler) {
         };
         let active = Active::begin(shared);
         let mut body = conn.body(request.content_length);
-        let response = handler.handle(&request, &mut body);
+        let mut response = handler.handle(&request, &mut body);
         log::debug!("web app: {:?} {} → {}", request.method, request.path, response.status);
         // An unread body is dropped if it's small; a broken one ends the connection.
         let finished = !body.failed() && (body.remaining() == 0 || body.skip(DRAIN).unwrap_or(false));
         let broken = body.failed();
         let keep_alive = request.keep_alive && finished && !shared.cancelled();
-        let sent = conn.respond(&response, keep_alive);
+        let sent = conn.respond(&mut response, keep_alive);
         drop(active);
         if sent.is_err() || !keep_alive {
             if sent.is_ok() && !finished && !broken {
@@ -263,13 +264,11 @@ fn serve(stream: TcpStream, shared: &Shared, handler: &dyn Handler) {
 /// A file being received: written under a temporary name, and deleted
 /// unless it's finished, however its handler ends (an error, a broken
 /// connection, the server stopping).
-#[cfg_attr(not(test), allow(dead_code))] // uploads (Phases 2–4)
 pub struct PartFile {
     path: PathBuf,
     file: Option<File>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl PartFile {
     /// Creates `path`, which must not exist yet.
     pub fn create(path: PathBuf) -> io::Result<Self> {
@@ -277,12 +276,35 @@ impl PartFile {
         Ok(Self { path, file: Some(file) })
     }
 
-    /// Flushes the file to storage and renames it to `to`.
-    pub fn finish(mut self, to: &Path) -> io::Result<()> {
-        if let Some(file) = self.file.take() {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Flushes and closes the write handle while keeping the part file
+    /// guarded for cleanup until renamed.
+    pub fn sync_and_close(&mut self) -> io::Result<()> {
+        if let Some(mut file) = self.file.take() {
+            file.flush()?;
             file.sync_all()?;
         }
+        Ok(())
+    }
+
+    /// Flushes the file to storage and renames it to `to`.
+    #[cfg_attr(not(test), allow(dead_code))] // used by overwrite uploads (Phase 4) and tests
+    pub fn finish(mut self, to: &Path) -> io::Result<()> {
+        self.sync_and_close()?;
         std::fs::rename(&self.path, to)?;
+        self.path = PathBuf::new();
+        Ok(())
+    }
+
+    /// Renames to `to` without overwriting an existing file. On error, keeps
+    /// the part file path so a caller can retry on `AlreadyExists` or let Drop
+    /// delete it.
+    pub fn try_finish_noreplace(&mut self, to: &Path) -> io::Result<()> {
+        self.sync_and_close()?;
+        crate::library::files::rename_free(&self.path, to)?;
         self.path = PathBuf::new();
         Ok(())
     }
