@@ -48,7 +48,6 @@ STARTED="${TMP}/verso-started"
 HUNG="${TMP}/verso-hung-$$"
 START_TIMEOUT="${VERSO_START_TIMEOUT:-120}"
 # Wi-Fi transfer (crates/verso/src/transfer/mod.rs has the same names).
-TRANSFER_AWAKE="${TMP}/verso-transfer-awake"
 TRANSFER_FIREWALL="${TMP}/verso-transfer-firewall"
 TRANSFER_PORT=80
 EXIT_INSTALL=85
@@ -186,12 +185,9 @@ restore() {
         lipc-set-prop com.lab126.powerd preventScreenSaver 0 && rm -f "${AWAKE_MARKER}"
         log "turned off keep-awake left by an update download"
     fi
-    # Wi-Fi transfer keeps the Kindle awake and opens port 80 while its
-    # screen is open, with a marker for each. If Verso died first, undo them.
-    if [ -f "${TRANSFER_AWAKE}" ]; then
-        lipc-set-prop com.lab126.powerd preventScreenSaver 0 && rm -f "${TRANSFER_AWAKE}"
-        log "turned off keep-awake left by Wi-Fi transfer"
-    fi
+    # Wi-Fi transfer opens port 80 while its screen is open, with a marker.
+    # If Verso died first, close it. (It keeps the Kindle awake by restarting
+    # the idle countdown, which needs no undoing.)
     if [ -f "${TRANSFER_FIREWALL}" ]; then
         close_port "${TRANSFER_PORT}"
         rm -f "${TRANSFER_FIREWALL}"

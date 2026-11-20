@@ -345,14 +345,13 @@ fresh
 open80="INPUT -p tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"
 printf '%s\n' "${open80}" "OUTPUT -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT" "${open80}" \
     "INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT" >"${W}/rules"
-: >"${W}/tmp/verso-transfer-awake"
 : >"${W}/tmp/verso-transfer-firewall"
 echo crash >"${W}/queue-0.1.0"
 launch
 runs_are "0.1.0"
 ui_restored_once
-absent "${W}/tmp/verso-transfer-awake" "${W}/tmp/verso-transfer-firewall"
-grep -q 'lipc-set-prop com.lab126.powerd preventScreenSaver 0' "${W}/calls" || fail "keep-awake left on"
+absent "${W}/tmp/verso-transfer-firewall"
+! grep -q 'preventScreenSaver' "${W}/calls" || fail "touched keep-awake"
 [ "$(cat "${W}/rules")" = "INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT" ] ||
     fail "firewall rules left: $(cat "${W}/rules")"
 

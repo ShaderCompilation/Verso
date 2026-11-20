@@ -1,4 +1,4 @@
-//! What Wi-Fi transfer needs from the device: Wi-Fi, keep-awake, the
+//! What Wi-Fi transfer needs from the device: Wi-Fi, staying awake, the
 //! firewall, the address and the `verso.local` responder. The Kindle uses the
 //! platform's; the simulator and tests fake them.
 
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use super::{Activity, IDLE, NETWORK_WAIT, Phase};
+use super::{Activity, IDLE, NETWORK_WAIT, POSTPONE_SLEEP, Phase};
 
 type Hook<T> = Box<dyn Fn() -> T + Send + Sync>;
 type Set<T> = Box<dyn Fn(T) -> Result<()> + Send + Sync>;
@@ -18,8 +18,10 @@ type StartResponder = Box<dyn Fn(&str) -> Option<i32> + Send + Sync>;
 pub struct Device {
     pub wifi_enabled: Hook<Result<bool>>,
     pub set_wifi: Set<bool>,
-    pub kept_awake: Hook<Result<bool>>,
-    pub keep_awake: Set<bool>,
+    /// Restarts the idle countdown before the Kindle would sleep; called
+    /// every `postpone_every` while serving (platform::awake).
+    pub postpone_sleep: Hook<Result<()>>,
+    pub postpone_every: Duration,
     /// The address other devices reach us at (wlan0's on the Kindle).
     pub address: Hook<Option<Ipv4Addr>>,
     /// Opens (true) or closes the server's port in the firewall.
@@ -68,8 +70,8 @@ fn kindle() -> Device {
     Device {
         wifi_enabled: Box::new(wifi::enabled),
         set_wifi: Box::new(wifi::set_enabled),
-        kept_awake: Box::new(awake::kept_awake),
-        keep_awake: Box::new(awake::keep_awake),
+        postpone_sleep: Box::new(awake::postpone_sleep),
+        postpone_every: POSTPONE_SLEEP,
         address: Box::new(wifi::address),
         firewall: Box::new(|open| firewall::set(PORT, open)),
         start_responder: Box::new(mdns::start_for_verso),
@@ -124,8 +126,8 @@ pub fn simulator(storage: PathBuf, options: &str) -> Device {
             wifi.store(on, Ordering::Relaxed);
             Ok(())
         }),
-        kept_awake: Box::new(crate::platform::awake::kept_awake),
-        keep_awake: Box::new(crate::platform::awake::keep_awake),
+        postpone_sleep: Box::new(crate::platform::awake::postpone_sleep),
+        postpone_every: POSTPONE_SLEEP,
         address: Box::new(move || Some(if kindle_like { Ipv4Addr::new(192, 168, 1, 42) } else { Ipv4Addr::LOCALHOST })),
         firewall: Box::new(|open| log::info!("simulator: port {} {}", 80, if open { "opened" } else { "closed" })),
         start_responder: Box::new(|_| None),
@@ -167,7 +169,9 @@ pub mod fake {
     #[derive(Default)]
     pub struct Net {
         pub wifi: bool,
-        pub awake: bool,
+        /// How often the idle countdown was restarted (not in `calls`: it
+        /// repeats while serving).
+        pub postponed: u32,
         pub address: Option<Ipv4Addr>,
         /// Another responder (SSH's) already has a name.
         pub other_responder: Option<String>,
@@ -193,19 +197,14 @@ pub mod fake {
                     Ok(())
                 }
             }),
-            kept_awake: Box::new({
+            postpone_sleep: Box::new({
                 let n = n();
-                move || Ok(n.lock().unwrap().awake)
-            }),
-            keep_awake: Box::new({
-                let n = n();
-                move |on| {
-                    let mut net = n.lock().unwrap();
-                    net.calls.push(format!("awake {on}"));
-                    net.awake = on;
+                move || {
+                    n.lock().unwrap().postponed += 1;
                     Ok(())
                 }
             }),
+            postpone_every: Duration::from_millis(30),
             address: Box::new({
                 let n = n();
                 move || n.lock().unwrap().address

@@ -258,7 +258,7 @@ fn run() -> Result<i32> {
                 // An update download cut short may have left the Kindle
                 // kept awake (a file check; rare lipc call).
                 store.updates().restore_awake_after_crash();
-                // So may Wi-Fi transfer, with port 80 open too (two file checks).
+                // Wi-Fi transfer may have left port 80 open (a file check).
                 transfer::cleanup_after_crash(&transfer::Device::current(store.root()));
                 // A version the launcher went back from isn't offered again.
                 store.updates().note_rollback();

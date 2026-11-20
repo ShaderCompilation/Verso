@@ -1,13 +1,14 @@
 //! Wi-Fi transfer: a small web app served by the Kindle while its screen
 //! (screens/transfer.rs) is open. See docs/web-app.md.
 //!
-//! A session turns Wi-Fi on and keeps the Kindle awake if needed, opens
-//! port 80, starts the server and a `verso.local` responder, then watches
-//! the address. Stopping undoes all of it in reverse; leaving the screen
-//! also turns Wi-Fi back off if the session turned it on. Keep-awake and
-//! the firewall rules are marked with files in /tmp first, so if Verso
-//! dies (it builds with panic = "abort") the launcher's restore() and the
-//! next start undo them (`cleanup_after_crash`).
+//! A session turns Wi-Fi on if needed, opens port 80, starts the server and
+//! a `verso.local` responder, then watches the address and keeps the Kindle
+//! awake by restarting its idle countdown every minute, which leaves the
+//! power button working. Stopping undoes all of it in reverse; leaving the
+//! screen also turns Wi-Fi back off if the session turned it on. The
+//! firewall rules are marked with a file in /tmp first, so if Verso dies (it
+//! builds with panic = "abort") the launcher's restore() and the next start
+//! undo them (`cleanup_after_crash`).
 
 mod api;
 mod auth;
@@ -33,9 +34,11 @@ pub use device::Device;
 pub const NETWORK_WAIT: Duration = Duration::from_secs(90);
 /// The server stops after this long without a request.
 pub const IDLE: Duration = Duration::from_secs(10 * 60);
-/// Marker files, in the device's marker folder (/tmp on the Kindle). The
-/// launcher (dist/kindle/verso/verso.sh) uses the same names.
-const AWAKE_MARKER: &str = "verso-transfer-awake";
+/// How often the Kindle's idle countdown is restarted while serving: well
+/// under the shortest sleep timeout the Kindle offers.
+pub const POSTPONE_SLEEP: Duration = Duration::from_secs(60);
+/// The marker file, in the device's marker folder (/tmp on the Kindle). The
+/// launcher (dist/kindle/verso/verso.sh) uses the same name.
 const FIREWALL_MARKER: &str = "verso-transfer-firewall";
 /// How often the address and name are read again: often while waiting for
 /// Wi-Fi to connect, rarely once it has.
@@ -44,7 +47,7 @@ const POLL_READY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
-    /// Turning Wi-Fi on, keeping awake, opening the port.
+    /// Turning Wi-Fi on, opening the port.
     Starting,
     /// Serving, but Wi-Fi hasn't connected yet.
     Waiting,
@@ -150,7 +153,6 @@ struct State {
 #[derive(Default)]
 struct Running {
     server: Option<Server>,
-    awake: bool,
     firewall: bool,
     responder: Option<i32>,
 }
@@ -369,8 +371,7 @@ impl Drop for Session {
 }
 
 impl Running {
-    /// Gives everything back, newest first: the server, the port, the name,
-    /// keep-awake.
+    /// Gives everything back, newest first: the server, the port, the name.
     fn release(mut self, device: &Device) {
         if let Some(mut server) = self.server.take() {
             server.stop();
@@ -381,12 +382,6 @@ impl Running {
         }
         if let Some(pid) = self.responder.take() {
             (device.stop_responder)(pid);
-        }
-        if std::mem::take(&mut self.awake) {
-            match (device.keep_awake)(false) {
-                Ok(()) => remove_marker(&device.markers, AWAKE_MARKER),
-                Err(e) => log::warn!("Wi-Fi transfer: turning keep-awake off: {e:#}"),
-            }
         }
     }
 }
@@ -463,20 +458,9 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
         return;
     }
 
-    // Marked first, so a crash right after is undone by the launcher.
-    match (device.kept_awake)() {
-        Ok(false) => match write_marker(&device.markers, AWAKE_MARKER) {
-            Ok(()) => {
-                shared.lock().running.awake = true;
-                if let Err(e) = (device.keep_awake)(true) {
-                    log::warn!("Wi-Fi transfer: keeping the Kindle awake: {e:#}");
-                }
-            }
-            Err(e) => log::warn!("Wi-Fi transfer: not keeping the Kindle awake: writing the marker: {e}"),
-        },
-        Ok(true) => {}
-        Err(e) => log::warn!("Wi-Fi transfer: not keeping the Kindle awake: {e:#}"),
-    }
+    // Keeping awake by restarting the idle countdown, not powerd's
+    // preventScreenSaver, which also makes it ignore the power button.
+    let mut awake = Awake::new(device);
 
     let Some(api) = shared.lock().api.clone() else { return };
     match Server::start(device.listen, api, Timeouts::default()) {
@@ -498,6 +482,7 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
 
     let mut waiting_since = Instant::now();
     loop {
+        awake.tick();
         let address = (device.address)();
         let responder_needed = address.is_some() && {
             let state = shared.lock();
@@ -542,22 +527,54 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
             POLL_READY
         } else {
             POLL_WAITING.min(device.network_wait.max(Duration::from_millis(20)))
-        };
+        }
+        .min(awake.due_in());
         drop(shared.wake.wait_timeout_while(state, poll, |s| !s.stop && !s.retry));
     }
 }
 
-/// At startup: a Wi-Fi transfer cut short by a crash may have left the
-/// Kindle kept awake or port 80 open (the launcher's restore() undoes this
-/// too; this covers a restart inside the launcher's loop).
-pub fn cleanup_after_crash(device: &Device) {
-    if device.markers.join(AWAKE_MARKER).exists() {
-        log::info!("turning off keep-awake left by Wi-Fi transfer");
-        match (device.keep_awake)(false) {
-            Ok(()) => remove_marker(&device.markers, AWAKE_MARKER),
-            Err(e) => log::warn!("turning off keep-awake: {e:#}"),
+/// Restarts the Kindle's idle countdown every `postpone_every`, from the
+/// session's thread; it stops with the thread, so the Kindle's own sleep
+/// timeout runs again once the server stops.
+struct Awake<'a> {
+    device: &'a Device,
+    last: Instant,
+    warned: bool,
+}
+
+impl<'a> Awake<'a> {
+    fn new(device: &'a Device) -> Self {
+        let mut awake = Self { device, last: Instant::now(), warned: false };
+        awake.postpone();
+        awake
+    }
+
+    fn tick(&mut self) {
+        if self.last.elapsed() >= self.device.postpone_every {
+            self.postpone();
         }
     }
+
+    fn due_in(&self) -> Duration {
+        self.device.postpone_every.saturating_sub(self.last.elapsed())
+    }
+
+    fn postpone(&mut self) {
+        self.last = Instant::now();
+        // Fails while the Kindle is asleep (the screen stops the session
+        // then); once in the log is enough.
+        if let Err(e) = (self.device.postpone_sleep)()
+            && !std::mem::replace(&mut self.warned, true)
+        {
+            log::warn!("Wi-Fi transfer: keeping the Kindle awake: {e:#}");
+        }
+    }
+}
+
+/// At startup: a Wi-Fi transfer cut short by a crash may have left port 80
+/// open (the launcher's restore() undoes this too; this covers a restart
+/// inside the launcher's loop).
+pub fn cleanup_after_crash(device: &Device) {
     if device.markers.join(FIREWALL_MARKER).exists() {
         log::info!("closing port {} left open by Wi-Fi transfer", device.listen.port());
         (device.firewall)(false);
@@ -565,10 +582,10 @@ pub fn cleanup_after_crash(device: &Device) {
     }
 }
 
-/// Where the markers go, for tests.
+/// Where the marker goes, for tests.
 #[cfg(test)]
-fn marker_paths(dir: &Path) -> [std::path::PathBuf; 2] {
-    [dir.join(AWAKE_MARKER), dir.join(FIREWALL_MARKER)]
+fn marker_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(FIREWALL_MARKER)
 }
 
 #[cfg(test)]

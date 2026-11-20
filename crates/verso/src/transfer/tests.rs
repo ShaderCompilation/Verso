@@ -34,8 +34,12 @@ impl Fixture {
         std::mem::take(&mut self.net.lock().unwrap().calls)
     }
 
-    fn markers(&self) -> [bool; 2] {
-        marker_paths(self.dir.path()).map(|p| p.exists())
+    fn marker(&self) -> bool {
+        marker_path(self.dir.path()).exists()
+    }
+
+    fn postponed(&self) -> u32 {
+        self.net.lock().unwrap().postponed
     }
 }
 
@@ -78,33 +82,37 @@ fn starts_everything_and_puts_it_all_back() {
     assert_eq!(ready.name_url().as_deref(), Some(&*format!("http://verso.local:{port}")));
     assert_eq!(ready.qr_url(), Some(format!("http://192.168.1.42:{port}/#code={}", ready.code)));
     assert!(ready.code.len() == 4);
-    assert_eq!(f.calls(), ["wifi true", "awake true", "firewall true", "responder verso"]);
-    assert_eq!(f.markers(), [true, true]);
+    assert_eq!(f.calls(), ["wifi true", "firewall true", "responder verso"]);
+    assert!(f.marker());
     assert!(request(port).unwrap().starts_with("HTTP/1.1 401"), "the server answers");
+    // The idle countdown is restarted every postpone_every while serving.
+    let start = Instant::now();
+    while f.postponed() < 3 {
+        assert!(start.elapsed() < Duration::from_secs(5), "postponed {} times", f.postponed());
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     session.close();
-    assert_eq!(f.calls(), ["firewall false", "stop responder 4242", "awake false", "wifi false"]);
-    assert_eq!(f.markers(), [false, false]);
+    assert_eq!(f.calls(), ["firewall false", "stop responder 4242", "wifi false"]);
+    assert!(!f.marker());
+    let postponed = f.postponed();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(f.postponed(), postponed, "and no longer once closed");
     assert!(request(port).is_err(), "nothing listens after closing");
     session.close();
     assert!(f.calls().is_empty(), "closing twice does nothing more");
 }
 
 #[test]
-fn leaves_wifi_awake_and_another_responder_alone() {
-    let f = Fixture::new(Net {
-        wifi: true,
-        awake: true,
-        address: Some(IP),
-        other_responder: Some("verso-2".into()),
-        ..Net::default()
-    });
+fn leaves_wifi_and_another_responder_alone() {
+    let f =
+        Fixture::new(Net { wifi: true, address: Some(IP), other_responder: Some("verso-2".into()), ..Net::default() });
     let mut session = f.start(f.device());
     let ready = wait_for(&session, "ready", |s| s.phase == Phase::Ready && s.hostname.is_some());
     assert_eq!(ready.hostname.as_deref(), Some("verso-2"));
     session.close();
     assert_eq!(f.calls(), ["firewall true", "firewall false"]);
-    assert_eq!(f.markers(), [false, false]);
+    assert!(!f.marker());
 }
 
 #[test]
@@ -138,8 +146,8 @@ fn reports_wifi_and_port_failures() {
     device.listen = taken.local_addr().unwrap();
     let mut session = f.start(device);
     wait_for(&session, "port in use", |s| s.phase == Phase::Failed(Failure::PortInUse));
-    assert_eq!(f.calls(), ["awake true", "awake false"], "keep-awake is given back at once");
-    assert_eq!(f.markers(), [false, false]);
+    assert!(f.calls().is_empty(), "the port is never opened");
+    assert!(!f.marker());
     drop(taken);
     session.restart();
     wait_for(&session, "ready after trying again", |s| s.phase == Phase::Ready);
@@ -156,17 +164,20 @@ fn sleep_stops_everything_but_wifi_and_a_new_start_has_a_new_code() {
     f.calls();
     session.stop(Stop::Slept);
     assert_eq!(session.snapshot().phase, Phase::Stopped(Stop::Slept));
-    assert_eq!(f.calls(), ["firewall false", "stop responder 4242", "awake false"]);
-    assert_eq!(f.markers(), [false, false]);
+    assert_eq!(f.calls(), ["firewall false", "stop responder 4242"]);
+    assert!(!f.marker());
+    let postponed = f.postponed();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(f.postponed(), postponed, "the Kindle may sleep again once stopped");
     assert!(request(port).is_err());
     assert!(session.idle_deadline().is_none());
 
     session.restart();
     let second = wait_for(&session, "ready again", |s| s.phase == Phase::Ready && s.hostname.is_some());
     assert_ne!(first.code, second.code);
-    assert_eq!(f.calls(), ["awake true", "firewall true", "responder verso"], "Wi-Fi is still on");
+    assert_eq!(f.calls(), ["firewall true", "responder verso"], "Wi-Fi is still on");
     session.close();
-    assert_eq!(f.calls(), ["firewall false", "stop responder 4242", "awake false", "wifi false"]);
+    assert_eq!(f.calls(), ["firewall false", "stop responder 4242", "wifi false"]);
 }
 
 #[test]
@@ -190,16 +201,14 @@ fn idle_deadline_follows_requests() {
 
 #[test]
 fn cleans_up_after_a_crash() {
-    let f = Fixture::new(Net { awake: true, ..Net::default() });
+    let f = Fixture::new(Net::default());
     let device = f.device();
     cleanup_after_crash(&device);
-    assert!(f.calls().is_empty(), "nothing to do without markers");
-    for path in marker_paths(f.dir.path()) {
-        std::fs::write(path, "1\n").unwrap();
-    }
+    assert!(f.calls().is_empty(), "nothing to do without a marker");
+    std::fs::write(marker_path(f.dir.path()), "1\n").unwrap();
     cleanup_after_crash(&device);
-    assert_eq!(f.calls(), ["awake false", "firewall false"]);
-    assert_eq!(f.markers(), [false, false]);
+    assert_eq!(f.calls(), ["firewall false"]);
+    assert!(!f.marker());
 }
 
 #[test]
@@ -210,5 +219,5 @@ fn dropping_the_session_closes_it() {
     drop(session);
     let calls = f.calls();
     assert_eq!(calls.last().map(String::as_str), Some("wifi false"), "{calls:?}");
-    assert_eq!(f.markers(), [false, false]);
+    assert!(!f.marker());
 }
