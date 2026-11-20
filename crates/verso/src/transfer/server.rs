@@ -518,6 +518,13 @@ mod tests {
         drop(idle);
         waiting.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         assert_eq!(response(&mut waiting), (200, "ok /late".into()));
-        assert!(server.idle_since().unwrap() > before, "a finished request restarts the idle time");
+        // The response reaches the client before the serving thread finishes
+        // the request's bookkeeping, so the idle stamp can still be pending;
+        // wait for it instead of racing it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.idle_since().is_none_or(|at| at <= before) {
+            assert!(Instant::now() < deadline, "a finished request restarts the idle time");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }

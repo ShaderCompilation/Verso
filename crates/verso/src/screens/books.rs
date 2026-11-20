@@ -280,6 +280,13 @@ impl Books {
     }
     /// Screens sharing one Store also share its dictionary service.
     pub fn with_store(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Self {
+        Self::with_library(t, screen, worker, store, None)
+    }
+    /// [`Books::with_store`]'s setup with the library worker supplied by the
+    /// caller, so tests can pass [`LibraryWorker::stub`] and run without the
+    /// background thread; `None` starts the real worker where `with_store`
+    /// always has.
+    fn with_library(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store, library: Option<LibraryWorker>) -> Self {
         let roots = store.library_folders();
         let settings_seen = store.settings_saves();
         let settings = store.settings();
@@ -294,7 +301,7 @@ impl Books {
         let home = home.unwrap_or_default();
         let navigation = store.navigation();
         let tabs = Segmented::texts(&["Home", "Collections", "All books"], 0);
-        let library = store.library_worker(worker.waker());
+        let library = library.unwrap_or_else(|| store.library_worker(worker.waker()));
         let navigation_writer = NavigationWriter::new(store.clone(), worker.waker());
         let mut top = TopBar::new("Home", false);
         top.border = false;
@@ -2895,6 +2902,16 @@ mod tests {
     use super::*;
     use crate::library::selection_tests::book;
     fn browsing_books(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Books {
+        // The stubbed library worker never scans or saves, so synthetic
+        // fixtures cannot be rewritten mid-test by its startup pass.
+        let mut books = Books::with_library(t, screen, worker, store, Some(LibraryWorker::stub()));
+        books.home_active = false;
+        books.refresh(t);
+        books
+    }
+    /// Like [`browsing_books`], but with the real background worker, for tests
+    /// that wait for its saves, snapshots or status replies.
+    fn browsing_books_live(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Books {
         let mut books = Books::with_store(t, screen, worker, store);
         books.home_active = false;
         books.refresh(t);
@@ -3631,6 +3648,9 @@ mod tests {
             assert_eq!(search.field.value(), "Title");
             assert_eq!(search.scope, Scope::Collection("/books/Fiction".into()));
             assert_eq!(books.states[&id].progress, 4321);
+            // The writer thread persists asynchronously; make the newest
+            // snapshot durable so the file read below cannot race it.
+            books.navigation_writer.flush().unwrap();
             assert_eq!(store.navigation(), before, "search paging never overwrites library navigation");
             books.open(id, cx);
             let reader = books.reader.as_mut().unwrap();
@@ -3887,7 +3907,7 @@ mod tests {
         store.save_book("0", &BookState { progress: 1234, ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let mut books = browsing_books_live(&t, screen, Rc::new(Worker::stub()), store.clone());
         let item = |books: &Books| {
             let menu = &books.menu.as_ref().unwrap().1;
             Point::new(
@@ -4808,14 +4828,15 @@ mod tests {
         store.save_book(&book.id, &BookState { last_opened: 7, progress: 1000, ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let mut books =
+            Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
         let on_home = |books: &Books| books.home.books.iter().any(|e| e.book.id == book.id);
         with_cx(&t, screen, |cx| {
             assert!(on_home(&books));
             books.delete(&book.id, cx);
             assert!(!books.browsing_ready && books.index.books.is_empty(), "Home deletes don't load the index");
             assert!(!on_home(&books));
-            // The stub worker never saves, like a worker that hasn't caught up.
+            // The stubbed library worker never saves, like one that hasn't caught up.
             assert!(store.library().books.iter().any(|b| b.id == book.id));
             books.reload_home();
             books.apply_pending(cx);
@@ -5006,7 +5027,8 @@ mod tests {
             store.rebuild_home_summary_until(&index, &|| false)?;
             let t = Theme::for_dpi(300);
             let screen = Rect::new(0, 0, w, h);
-            let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+            let mut books =
+                Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
             books.thumbnails = Thumbnails::prefetching(store.clone());
             let specs = books.home_covers(&t);
             let expected = 1 + books.grid.cells().len();

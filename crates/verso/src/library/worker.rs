@@ -1026,6 +1026,13 @@ impl Worker {
         self.apply_sync(vec![PathChange::Add(Box::new(book))]);
         self.current().books.iter().find(|b| b.path == path && b.available).cloned()
     }
+    /// A worker without its background thread: requests are recorded but
+    /// nothing processes them, exactly like a worker that never catches up.
+    /// For tests that exercise the browsing UI, not background scanning.
+    #[cfg(test)]
+    pub fn stub() -> Self {
+        Self { shared: Arc::new((Mutex::new(Shared::default()), Condvar::new())), join: None }
+    }
     /// Cover sizes the library drew, each once a session. The most recent
     /// [`covers::TILE_SIZES`] get thumbnails of their own, so paging decodes
     /// covers without resizing them.

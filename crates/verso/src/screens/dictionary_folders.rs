@@ -604,8 +604,12 @@ mod tests {
         assert!(target.add(&child).is_ok());
         with_cx(&f.theme, |cx| s.on_background(cx));
         assert_eq!(s.folders, vec![parent.clone(), child.clone()]);
-        assert!(s.pending, "a successful change refreshes the catalog");
-        wait(&mut s);
+        // A fast catalog reply can clear `pending` within that same
+        // on_background call, so observe the refresh through its result
+        // instead of its pending flag.
+        if s.pending {
+            wait(&mut s);
+        }
         assert!(s.status(1).starts_with("No dictionaries · "));
         assert_eq!(s.label(2), "en");
         assert_eq!(s.details_text(2).lines().next(), Some(child.display().to_string().as_str()), "full path");
