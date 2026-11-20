@@ -1374,8 +1374,8 @@ impl Books {
             (Some(Icon::Info), "Details".into()),
             (Some(Icon::Check), "Mark finished".into()),
         ];
-        if !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
-            items.push((None, "Remove from continue reading".into()));
+        if self.is_home() && !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
+            items.push((Some(Icon::Close), "Remove from continue reading".into()));
         }
         if !self.is_home() {
             items.push((Some(Icon::SquareCheck), "Select".into()));
@@ -3833,6 +3833,17 @@ mod tests {
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        // Browsing (collections, all books) never offers the removal.
+        store
+            .save_book(
+                "0",
+                &BookState { position: crate::document::Position("saved-position".into()), ..Default::default() },
+            )
+            .unwrap();
+        books.open_menu("0".into(), Point::new(600, 600), &t);
+        assert!(!books.menu.as_ref().unwrap().1.items.iter().any(|(_, l)| l == "Remove from continue reading"));
+        books.menu = None;
+        books.home_active = true;
         with_cx(&t, screen, |cx| {
             for (position, hidden, finished, can_remove) in [
                 ("", false, false, false),
@@ -3854,7 +3865,7 @@ mod tests {
                 books.open_menu("0".into(), Point::new(600, 600), &t);
                 let menu = &books.menu.as_ref().unwrap().1;
                 assert_eq!(menu.items.iter().any(|(_, label)| label == "Remove from continue reading"), can_remove);
-                assert_eq!(menu.items.len(), if can_remove { 7 } else { 6 });
+                assert_eq!(menu.items.len(), if can_remove { 5 } else { 4 });
                 let rect = menu.rect();
                 let delete =
                     Point::new(rect.center().x, rect.y + t.mm(1.0) + (menu.items.len() as i32 - 1) * t.row + t.row / 2);
