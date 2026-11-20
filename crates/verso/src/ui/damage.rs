@@ -59,16 +59,27 @@ impl FrameDiff {
         canvas.copy_gray(canvas.bounds(), &mut self.prev, self.width as usize);
     }
 
-    /// Synchronizes the baseline for a rectangle that will be sent to the
-    /// screen unconditionally, so tile comparison skips its pixels.
-    pub fn commit_rect(&mut self, canvas: &Canvas, rect: Rect) {
-        if let Some(r) = rect.intersect(&canvas.bounds()) {
-            canvas.copy_gray(r, &mut self.prev, self.width as usize);
-        }
+    /// Compares `canvas` with the last committed frame.
+    #[cfg(test)]
+    pub fn changed(&mut self, canvas: &Canvas) -> Tiles {
+        self.changed_outside(canvas, &[])
     }
 
-    /// Compares `canvas` with the last committed frame.
-    pub fn changed(&mut self, canvas: &Canvas) -> Tiles {
+    /// Compares `canvas` with the last committed frame everywhere except
+    /// inside `skip`, and commits `skip` unconditionally. For areas that are
+    /// sent to the panel anyway (a forced `Full` grid flash), so comparing
+    /// them is wasted reading. Tiles straddling a skipped edge are still
+    /// marked if their outside part changed.
+    pub fn changed_outside(&mut self, canvas: &Canvas, skip: &[Rect]) -> Tiles {
+        let bounds = canvas.bounds();
+        let skip: Vec<Rect> = skip.iter().filter_map(|r| r.intersect(&bounds)).collect();
+        self.compare(canvas, &skip)
+    }
+
+    /// Tile comparison outside `skip` (clipped to the canvas), copying the
+    /// skipped pixels into the baseline in the same pass while their rows
+    /// are in cache.
+    fn compare(&mut self, canvas: &Canvas, skip: &[Rect]) -> Tiles {
         let cur = canvas.gray_data();
         let stride = self.width as usize;
         let (cols, rows) = ((self.width + TILE - 1) / TILE, (self.height + TILE - 1) / TILE);
@@ -76,21 +87,70 @@ impl FrameDiff {
         for (row, tiles) in dirty.chunks_mut(cols as usize).enumerate() {
             let y0 = row * TILE as usize;
             let y1 = (y0 + TILE as usize).min(self.height as usize);
-            let band = y0 * stride..y1 * stride;
-            if cur[band.clone()] == self.prev[band] {
-                continue;
+            let band_skipped = skip.iter().any(|r| (r.y as usize) < y1 && r.bottom() as usize > y0);
+            if !band_skipped {
+                let band = y0 * stride..y1 * stride;
+                if same(&cur[band.clone()], &self.prev[band]) {
+                    continue;
+                }
             }
+            // The parts of a line outside every skipped rect, and the skipped
+            // ones (merged). Recomputed per line only in bands where a skipped
+            // rect starts or ends.
+            let spans_at = |y: usize| {
+                let mut taken: Vec<(usize, usize)> = skip
+                    .iter()
+                    .filter(|r| (r.y as usize) <= y && y < r.bottom() as usize)
+                    .map(|r| (r.x as usize, r.right() as usize))
+                    .collect();
+                taken.sort_unstable();
+                let (mut outside, mut merged, mut x) = (Vec::new(), Vec::<(usize, usize)>::new(), 0);
+                for (s, e) in taken {
+                    if s > x {
+                        outside.push((x, s));
+                    }
+                    match merged.last_mut() {
+                        Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                        _ => merged.push((s, e)),
+                    }
+                    x = x.max(e);
+                }
+                if x < stride {
+                    outside.push((x, stride));
+                }
+                (outside, merged)
+            };
+            let uniform = skip.iter().all(|r| {
+                let (top, bottom) = (r.y as usize, r.bottom() as usize);
+                bottom <= y0 || top >= y1 || (top <= y0 && bottom >= y1)
+            });
+            let band_spans = if uniform { spans_at(y0) } else { Default::default() };
             for y in y0..y1 {
                 let line = y * stride..(y + 1) * stride;
                 let a = &cur[line.clone()];
-                let b = &self.prev[line];
-                if a == b {
-                    continue;
+                let b = &mut self.prev[line];
+                let line_spans;
+                let (outside, taken) = if uniform {
+                    &band_spans
+                } else {
+                    line_spans = spans_at(y);
+                    &line_spans
+                };
+                for &(s, e) in taken {
+                    b[s..e].copy_from_slice(&a[s..e]);
                 }
-                for (col, d) in tiles.iter_mut().enumerate().filter(|(_, d)| !**d) {
-                    let x0 = col * TILE as usize;
-                    let x1 = (x0 + TILE as usize).min(stride);
-                    *d = a[x0..x1] != b[x0..x1];
+                for &(s, e) in outside {
+                    if same(&a[s..e], &b[s..e]) {
+                        continue;
+                    }
+                    let first = s / TILE as usize;
+                    for (col, d) in tiles[first..=(e - 1) / TILE as usize].iter_mut().enumerate() {
+                        if !*d {
+                            let x0 = ((first + col) * TILE as usize).max(s);
+                            let x1 = ((first + col + 1) * TILE as usize).min(e);
+                            *d = a[x0..x1] != b[x0..x1];
+                        }
+                    }
                 }
             }
         }
@@ -208,6 +268,24 @@ fn merge_touching(rects: &mut Vec<(Rect, RefreshMode)>) {
             return;
         }
     }
+}
+
+/// `a == b` for equal-length rows of pixels, in 64-byte blocks the
+/// compiler turns into NEON on the Kindle. glibc's ARM `memcmp` is
+/// several times slower on the long, mostly equal rows tile diffing reads.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<64>(), b.as_chunks::<64>());
+    for (x, y) in ca.iter().zip(cb) {
+        let mut diff = 0u8;
+        for i in 0..64 {
+            diff |= x[i] ^ y[i];
+        }
+        if diff != 0 {
+            return false;
+        }
+    }
+    ra == rb
 }
 
 fn contains(outer: &Rect, inner: &Rect) -> bool {
@@ -388,14 +466,127 @@ mod tests {
     }
 
     #[test]
-    fn commit_rect_skips_unaligned_forced_full_edges() {
+    fn skipped_rects_compare_as_if_committed_first() {
+        // Random frames and skip rects (overlapping, unaligned, off-screen):
+        // skipping must mark exactly what committing the rects first and
+        // comparing everything marked, and leave the same baseline.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        for _ in 0..200 {
+            let mut canvas = Canvas::new(70, 53);
+            let mut skipping = FrameDiff::new(&canvas);
+            let mut committing = FrameDiff::new(&canvas);
+            for _ in 0..next(6) {
+                let r = Rect::new(next(80) as i32 - 5, next(60) as i32 - 5, next(20) as i32 + 1, next(20) as i32 + 1);
+                canvas.fill_rect(r, next(255) as u8);
+            }
+            let skip: Vec<Rect> = (0..next(4))
+                .map(|_| Rect::new(next(80) as i32 - 5, next(60) as i32 - 5, next(50) as i32 + 1, next(40) as i32 + 1))
+                .collect();
+            for &r in &skip {
+                if let Some(r) = r.intersect(&canvas.bounds()) {
+                    canvas.copy_gray(r, &mut committing.prev, committing.width as usize);
+                }
+            }
+            let expected = committing.changed(&canvas);
+            let tiles = skipping.changed_outside(&canvas, &skip);
+            assert_eq!(tiles.dirty, expected.dirty, "skip {skip:?}");
+            skipping.commit(&canvas, &tiles);
+            committing.commit(&canvas, &expected);
+            assert!(skipping.prev == committing.prev);
+            assert!(!skipping.changed(&canvas).any());
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture diff_timing`: a
+    /// grid-only library frame on the PW6 canvas.
+    #[test]
+    #[ignore]
+    fn diff_timing() {
+        let (w, h) = (1272, 1696);
+        let mut canvas = Canvas::new(w, h);
+        let grid = Rect::new(59, 609, 1154, 886);
+        let mut diff = FrameDiff::new(&canvas);
+        let runs = 50;
+        let mut time = |skip: bool| {
+            let mut spent = std::time::Duration::ZERO;
+            for i in 0..runs {
+                canvas.fill_rect(grid, (i * 7) as u8);
+                canvas.fill_rect(Rect::new(500, 1560, 200, 30), (i * 11) as u8);
+                let started = std::time::Instant::now();
+                if skip {
+                    let tiles = diff.changed_outside(&canvas, &[grid]);
+                    diff.commit(&canvas, &tiles);
+                } else {
+                    canvas.copy_gray(grid, &mut diff.prev, w as usize);
+                    let tiles = diff.changed(&canvas);
+                    diff.commit(&canvas, &tiles);
+                }
+                spent += started.elapsed();
+            }
+            spent / runs
+        };
+        let before = time(false);
+        let after = time(true);
+        let skip = [grid];
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(diff.compare(&canvas, &skip));
+        }
+        let compare = started.elapsed() / runs;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(diff.compare(&canvas, &[]));
+        }
+        let compare_all = started.elapsed() / runs;
+        let tiles = diff.compare(&canvas, &[]);
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            diff.commit(&canvas, &tiles);
+        }
+        let commit = started.elapsed() / runs;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            canvas.copy_gray(grid, &mut diff.prev, w as usize);
+        }
+        let copy_grid = started.elapsed() / runs;
+        println!(
+            "MiB parts: compare outside {compare:?}, compare all {compare_all:?}, clean commit {commit:?}, grid copy {copy_grid:?}"
+        );
+        println!("commit + compare all: {before:?}, compare outside: {after:?}");
+        let n = 1 << 20;
+        let (a, mut b) = (vec![1u8; n], vec![1u8; n]);
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            b.copy_from_slice(std::hint::black_box(&a));
+        }
+        let copy = started.elapsed() / runs;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            assert!(std::hint::black_box(&a[..]) == std::hint::black_box(&b[..]));
+        }
+        let eq = started.elapsed() / runs;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            assert!(super::same(std::hint::black_box(&a[..]), std::hint::black_box(&b[..])));
+        }
+        let fast = started.elapsed() / runs;
+        println!("1 MiB: copy {copy:?}, slice == {eq:?}, same() {fast:?}");
+    }
+
+    #[test]
+    fn skipped_rects_drop_unaligned_forced_full_edges() {
         let (mut canvas, mut diff) = setup();
         let grid = Rect::new(10, 20, 120, 50);
         canvas.fill_rect(grid, 0);
         // A separate change outside the forced rect (e.g. pager).
         canvas.fill_rect(Rect::new(10, 84, 20, 6), 0);
-        diff.commit_rect(&canvas, grid);
-        let tiles = diff.changed(&canvas);
+        let tiles = diff.changed_outside(&canvas, &[grid]);
         let forced = [Update { rect: grid, mode: Full }];
         let updates = plan(&tiles, bounds(), &[], Ui, &forced);
         diff.commit(&canvas, &tiles);

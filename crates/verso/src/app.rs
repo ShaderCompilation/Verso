@@ -240,13 +240,11 @@ impl App {
             vec![Update { rect: self.canvas.bounds(), mode }]
         } else {
             // Pixels covered by a forced Full refresh will be sent to the panel
-            // with the strongest mode anyway; commit them first so tile diffing
-            // skips them and doesn't emit a redundant Ui update along unaligned
-            // edges of the forced rect.
-            for u in forced.iter().filter(|u| u.mode == RefreshMode::Full) {
-                self.diff.commit_rect(&self.canvas, u.rect);
-            }
-            let tiles = self.diff.changed(&self.canvas);
+            // with the strongest mode anyway: tile diffing neither reads them
+            // (most of a grid-only library frame's diff time) nor emits a
+            // redundant Ui update along unaligned edges of the forced rect.
+            let full: Vec<Rect> = forced.iter().filter(|u| u.mode == RefreshMode::Full).map(|u| u.rect).collect();
+            let tiles = self.diff.changed_outside(&self.canvas, &full);
             let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
             updates
