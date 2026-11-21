@@ -35,6 +35,7 @@ impl ActivitySink for Recorded {
 struct Env {
     dir: tempfile::TempDir,
     root: PathBuf,
+    store: Store,
     server: Server,
     cookie: String,
     library_changed: Arc<AtomicBool>,
@@ -101,7 +102,7 @@ impl Env {
         let activity = Arc::new(Recorded::default());
         let files = Files::new(
             root.clone(),
-            store,
+            store.clone(),
             Arc::new(|_| Ok(10 * 1024 * 1024 * 1024)),
             activity.clone(),
             developer,
@@ -123,7 +124,7 @@ impl Env {
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api, Timeouts::default()).unwrap();
         let mut env =
-            Self { dir, root, server, cookie: String::new(), library_changed, dictionaries_changed, activity };
+            Self { dir, root, store, server, cookie: String::new(), library_changed, dictionaries_changed, activity };
         let (status, head, _) =
             env.raw("POST /api/login HTTP/1.1\r\nHost: verso.local\r\nX-Verso-Request: 1\r\n", br#"{"code":"4827"}"#);
         assert_eq!(status, 200);
@@ -351,10 +352,94 @@ fn developers_see_jailbreak_and_system_folders_read_only() {
     assert_eq!(env.put("libkh/new", false, b"x").0, 403);
     assert_eq!(env.delete("libkh/hotfix", false).0, 403);
     assert_eq!(env.post("rename", json!({ "path": "system", "name": "old" })).0, 403);
-    // Caches stay hidden even for developers, and live data stays read-only
-    // until Restart to apply exists.
+    // Caches stay hidden even for developers.
     assert_eq!(env.list("verso/cache").0, 404);
+}
+
+#[test]
+fn developers_write_app_files_at_once_and_live_data_for_a_restart() {
+    let env = Env::with_developer(true);
+    // App files: written like user content, nothing to restart for.
+    assert_eq!(env.entry("verso", "verso.sh")["writable"], true);
+    assert_eq!(env.entry("verso", "verso.sh")["readonly"], false);
+    assert_eq!(env.put("verso/verso.sh", true, b"#!/bin/sh\necho new").0, 201);
+    assert_eq!(env.put("extensions/verso/menu.json", true, b"{\"new\":1}").0, 201);
+    assert_eq!(env.post("mkdir", json!({ "path": "verso/bin", "name": "tools" })).0, 201);
+    assert_eq!(env.post("rename", json!({ "path": "verso/bin/tools", "name": "more" })).0, 200);
+    assert_eq!(env.delete("verso/bin/more", false).0, 200);
+    let (_, data) = env.list("verso/data");
+    assert_eq!((data["writable"].clone(), data["live"].clone()), (json!(true), json!(false)));
+    assert!(!env.store.live_data_edited(), "app files need no restart");
+
+    // Verso's own folders stay where they are, caches stay hidden, and the
+    // jailbreak stays read-only.
+    for path in ["verso", "verso/data", "extensions/verso", "verso/data/dictionaries", "verso/data/exports"] {
+        assert_eq!(env.post("rename", json!({ "path": path, "name": "renamed" })).0, 403, "rename {path}");
+        assert_eq!(env.post("move", json!({ "path": path, "to": "documents" })).0, 403, "move {path}");
+        assert_eq!(env.delete(path, true).0, 403, "delete {path}");
+    }
+    assert_eq!(env.put("verso/data/covers/x.png", false, b"x").0, 404);
+    assert_eq!(env.post("mkdir", json!({ "path": "verso/data", "name": "covers" })).0, 403);
+    assert_eq!(env.post("mkdir", json!({ "path": "verso", "name": "cache" })).0, 403);
+    assert_eq!(env.put("libkh/new", false, b"x").0, 403);
+    assert!(!env.store.live_data_edited());
+
+    // Live data: written, and noted for Restart to apply.
+    let (_, books) = env.list("verso/data/books");
+    assert_eq!((books["writable"].clone(), books["live"].clone()), (json!(true), json!(true)));
+    assert_eq!(env.entry("verso/data", "settings.json")["readonly"], false);
+    assert_eq!(env.put("verso/data/settings.json", false, b"{}").0, 409, "replacing still asks");
+    assert_eq!(env.put("verso/data/settings.json", true, b"{\"developer\":true}").0, 201);
+    assert!(env.store.live_data_edited());
+    assert_eq!(fs::read_to_string(env.root.join("verso/data/settings.json")).unwrap(), "{\"developer\":true}");
+}
+
+#[test]
+fn every_write_into_live_data_is_noted() {
+    type Op = fn(&Env) -> u16;
+    let ops: [(&str, Op); 7] = [
+        ("upload", |env| env.put("verso/data/books/new.json", false, b"{}").0),
+        ("new folder", |env| env.post("mkdir", json!({ "path": "verso/data/annotations", "name": "x" })).0),
+        ("rename", |env| env.post("rename", json!({ "path": "verso/data/books/a.json", "name": "b.json" })).0),
+        ("move out", |env| env.post("move", json!({ "path": "verso/data/books/a.json", "to": "documents" })).0),
+        ("move in", |env| env.post("move", json!({ "path": "documents/notes.txt", "to": "verso/data/books" })).0),
+        ("delete", |env| env.delete("verso/data/books/a.json", false).0),
+        ("delete a folder", |env| env.delete("verso/data/annotations", false).0),
+    ];
+    for (name, op) in ops {
+        let env = Env::with_developer(true);
+        fs::write(env.root.join("verso/data/books/a.json"), "{}").unwrap();
+        // A link from user content counts as live data too.
+        std::os::unix::fs::symlink(env.root.join("verso/data/books"), env.root.join("documents/states")).unwrap();
+        assert!(!env.store.live_data_edited());
+        let status = op(&env);
+        assert!((200..300).contains(&status), "{name}: {status}");
+        assert!(env.store.live_data_edited(), "{name}");
+    }
+    let env = Env::with_developer(true);
+    std::os::unix::fs::symlink(env.root.join("verso/data/books"), env.root.join("documents/states")).unwrap();
+    assert_eq!(env.put("documents/states/linked.json", false, b"{}").0, 201);
+    assert!(env.store.live_data_edited(), "through a link");
+    // Without developer mode, nothing gets that far.
+    let env = Env::new();
     assert_eq!(env.put("verso/data/settings.json", true, b"{}").0, 403);
+    assert!(!env.store.live_data_edited());
+}
+
+#[test]
+fn developers_cant_reach_live_data_or_caches_by_other_fat_spellings() {
+    let env = Env::build(true, fat_listing);
+    for d in ["verso/data.", "verso/data/covers.", "verso/DATA~1"] {
+        fs::create_dir_all(env.root.join(d)).unwrap();
+    }
+    fs::write(env.root.join("verso/data./settings.json"), "{}").unwrap();
+    assert_eq!(env.put("verso/data./settings.json", true, b"x").0, 400);
+    assert_eq!(env.put("verso/data/covers./x.png", false, b"x").0, 400);
+    assert_eq!(env.put("verso/DATA~1/settings.json", false, b"x").0, 400);
+    assert_eq!(env.post("mkdir", json!({ "path": "verso/data", "name": "covers." })).0, 409);
+    assert_eq!(fs::read_to_string(env.root.join("verso/data./settings.json")).unwrap(), "{}");
+    // Deeper names are only names.
+    assert_eq!(env.put("verso/data/books/a~1.json", false, b"{}").0, 201);
 }
 
 #[test]

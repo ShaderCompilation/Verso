@@ -55,6 +55,9 @@ pub struct Device {
     pub forced: Option<Phase>,
     /// The activity list to start with.
     pub activity: Vec<Activity>,
+    /// Simulator captures: Verso's data counts as edited from the start, so
+    /// Done shows the Restart sheet.
+    pub edited: bool,
 }
 
 impl Device {
@@ -96,6 +99,7 @@ fn kindle() -> Device {
         code: None,
         forced: None,
         activity: Vec::new(),
+        edited: false,
     }
 }
 
@@ -103,8 +107,9 @@ fn kindle() -> Device {
 /// Wi-Fi or firewall. VERSO_SIM_TRANSFER, a comma-separated list, sets it
 /// up for captures: `kindle` shows a Kindle's address and name, `code=NNNN`
 /// fixes the code, `activity` fills the list, `wifi-off` starts with Wi-Fi
-/// off, and `phase=starting|waiting|no-network|idle|slept|no-wifi|port`
-/// shows that state without starting anything.
+/// off, `edited` counts Verso's data as edited (the Restart sheet), and
+/// `phase=starting|waiting|no-network|idle|slept|no-wifi|port` shows that
+/// state without starting anything.
 #[cfg(not(feature = "kindle"))]
 pub fn simulator(storage: PathBuf, options: &str) -> Device {
     use std::sync::Arc;
@@ -154,6 +159,7 @@ pub fn simulator(storage: PathBuf, options: &str) -> Device {
         code: value("code").map(str::to_owned),
         forced,
         activity: if has("activity") { sample_activity() } else { Vec::new() },
+        edited: has("edited"),
     }
 }
 
@@ -263,6 +269,7 @@ pub mod fake {
             code: None,
             forced: None,
             activity: Vec::new(),
+            edited: false,
         }
     }
 }

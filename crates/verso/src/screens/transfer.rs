@@ -17,6 +17,7 @@ use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::{Button, ButtonKind, Sheet, TopBar};
+use verso_update::launcher::{self, EXIT_RESTART};
 
 pub struct TransferScreen {
     screen: Rect,
@@ -41,8 +42,16 @@ pub struct TransferScreen {
     again: Button,
     /// Shown when Done is tapped while an upload is still being received.
     confirm_stop: Option<ConfirmStop>,
+    /// Shown on Done after Verso's live data was edited (developer mode).
+    restart_sheet: Option<RestartSheet>,
+    /// The launcher can start Verso again (protocol 2). Otherwise the
+    /// Restart sheet offers Exit, and the person opens Verso again.
+    can_restart: bool,
     /// Done was tapped: "Stopping…" is on screen, then the session closes.
     closing: bool,
+    /// Restart (or Exit) was chosen on the Restart sheet: closing leaves
+    /// Verso without saving.
+    restarting: bool,
     /// The QR code and the link it holds.
     qr: Option<(String, qrcode::QrCode)>,
 }
@@ -87,6 +96,68 @@ impl ConfirmStop {
     }
 }
 
+/// "Restart Verso to apply changes": Done after a developer wrote into
+/// Verso's live data, which Verso holds in memory and saves over on exit.
+struct RestartSheet {
+    sheet: Sheet,
+    text: Rect,
+    later: Button,
+    restart: Button,
+    can_restart: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartChoice {
+    /// The sheet was closed: back to the screen, still serving.
+    Dismiss,
+    Later,
+    Restart,
+}
+
+impl RestartSheet {
+    fn new(t: &Theme, screen: Rect, can_restart: bool) -> Self {
+        let sheet = Sheet::open("Restart Verso to apply changes", t.mm(52.0).min(screen.h - t.top_bar), screen, t);
+        let c = sheet.content(t);
+        let buttons_y = c.bottom() - t.margin - t.button_h;
+        let text = Rect { h: buttons_y - c.y - t.mm(3.0), ..c };
+        let w = (c.w - t.mm(3.0)) / 2;
+        let mut later = Button::new("Later", ButtonKind::Secondary);
+        later.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
+        let mut restart = Button::new(if can_restart { "Restart" } else { "Exit" }, ButtonKind::Primary);
+        restart.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
+        Self { sheet, text, later, restart, can_restart }
+    }
+
+    fn message(&self) -> &'static str {
+        if self.can_restart {
+            "You changed Verso’s data over Wi-Fi. Verso reads it when it starts, and until then it may save over \
+             your changes. Restart now to apply them."
+        } else {
+            "You changed Verso’s data over Wi-Fi. Exit Verso and open it again to apply your changes; until then \
+             it may save over them. Exit doesn’t save."
+        }
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        let message = self.message();
+        let height = cx.text.measure(message, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
+        cx.paragraph(message, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
+        self.later.draw(cx);
+        self.restart.draw(cx);
+    }
+
+    fn on_gesture(&mut self, g: &Gesture) -> Option<RestartChoice> {
+        if self.sheet.on_gesture(g) {
+            return Some(RestartChoice::Dismiss);
+        }
+        if self.later.on_gesture(g) {
+            return Some(RestartChoice::Later);
+        }
+        self.restart.on_gesture(g).then_some(RestartChoice::Restart)
+    }
+}
+
 impl TransferScreen {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
         let device = Device::current(store.root());
@@ -127,6 +198,9 @@ impl TransferScreen {
         again.place(Rect::new(info.x + (info.w - again_w) / 2, info.y + t.mm(52.0), again_w, t.button_h), t);
         let settings = store.settings();
         let forced = device.forced.is_some();
+        if device.edited {
+            store.note_live_data_edit();
+        }
         let library = store.library_worker(waker.clone());
         let cover_pause = Some(library.pause_covers());
         let session = Session::start(
@@ -154,7 +228,10 @@ impl TransferScreen {
             done,
             again,
             confirm_stop: None,
+            restart_sheet: None,
+            can_restart: launcher::protocol() >= 2,
             closing: false,
+            restarting: false,
             qr: None,
         };
         this.sync();
@@ -163,10 +240,14 @@ impl TransferScreen {
 
     /// Stops the session, resumes cover work, and rescans what the web app
     /// changed: the library after Files tab changes in a library folder, the
-    /// dictionary catalog after dictionary changes.
+    /// dictionary catalog after dictionary changes. Not when restarting:
+    /// the rescans would save, and the next start scans anyway.
     fn finish(&mut self) {
         self.session.close();
         self.cover_pause = None;
+        if self.restarting {
+            return;
+        }
         if self.session.library_changed() {
             log::info!("Wi-Fi transfer: library files changed, rescanning");
             self.library.rescan();
@@ -180,8 +261,18 @@ impl TransferScreen {
 
     fn begin_closing(&mut self) {
         self.closing = true;
-        self.done.label = "Stopping…".into();
+        self.done.label = if self.restarting { "Restarting…" } else { "Stopping…" }.into();
         self.done.enabled = false;
+    }
+
+    /// Done, once no upload is in the way: closes, or first asks to restart
+    /// when Verso's live data was edited.
+    fn leave(&mut self, cx: &mut EventCx) {
+        if self.store.live_data_edited() {
+            self.restart_sheet = Some(RestartSheet::new(cx.theme, self.screen, self.can_restart));
+        } else {
+            self.begin_closing();
+        }
     }
 
     /// Reads the session again; true if anything visible changed.
@@ -216,6 +307,9 @@ impl TransferScreen {
     /// the SSH row does, so the Kindle keeps its name next time.
     fn remember_hostname(&mut self) {
         let Some(name) = &self.snapshot.hostname else { return };
+        if self.store.live_data_edited() {
+            return; // It would save over a hand-edited settings.json.
+        }
         let mut settings = self.store.settings();
         if &settings.hostname == name {
             return;
@@ -381,6 +475,9 @@ impl Screen for TransferScreen {
         if let Some(sheet) = &self.confirm_stop {
             sheet.draw(cx);
         }
+        if let Some(sheet) = &self.restart_sheet {
+            sheet.draw(cx);
+        }
     }
 
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
@@ -388,11 +485,28 @@ impl Screen for TransferScreen {
             return Action::None;
         }
         cx.redraw();
+        if let Some(sheet) = &mut self.restart_sheet {
+            match sheet.on_gesture(&g) {
+                Some(RestartChoice::Dismiss) => self.restart_sheet = None,
+                Some(RestartChoice::Later) => {
+                    self.restart_sheet = None;
+                    cx.toast("Verso may save over your changes until it starts again.", None);
+                    self.begin_closing();
+                }
+                Some(RestartChoice::Restart) => {
+                    self.restart_sheet = None;
+                    self.restarting = true;
+                    self.begin_closing();
+                }
+                None => {}
+            }
+            return Action::None;
+        }
         if let Some(sheet) = &mut self.confirm_stop {
             match sheet.on_gesture(&g) {
                 Some(true) => {
                     self.confirm_stop = None;
-                    self.begin_closing();
+                    self.leave(cx);
                 }
                 Some(false) => self.confirm_stop = None,
                 None => {}
@@ -403,7 +517,7 @@ impl Screen for TransferScreen {
             if self.session.receiving() {
                 self.confirm_stop = Some(ConfirmStop::new(cx.theme, self.screen));
             } else {
-                self.begin_closing();
+                self.leave(cx);
             }
             return Action::None;
         }
@@ -432,6 +546,7 @@ impl Screen for TransferScreen {
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
         if self.session.idle_deadline().is_some_and(|due| cx.now >= due) {
             self.confirm_stop = None;
+            self.restart_sheet = None;
             self.session.stop(Stop::Idle);
             self.refresh();
             cx.redraw();
@@ -441,6 +556,7 @@ impl Screen for TransferScreen {
 
     fn on_sleep(&mut self) {
         self.confirm_stop = None;
+        self.restart_sheet = None;
         self.session.stop(Stop::Slept);
         self.refresh();
     }
@@ -464,10 +580,19 @@ impl Screen for TransferScreen {
         self.closing
     }
 
-    /// "Stopping…" is on screen: stop, then leave.
+    /// "Stopping…" is on screen: stop, then leave. Restart stops the server,
+    /// closes the port and puts Wi-Fi back like Done, then leaves Verso
+    /// with nothing more saved (`Store::freeze`), so it reads the edits when
+    /// the launcher starts it again.
     fn run_pending_work(&mut self, _cx: &mut EventCx) -> Action {
         self.finish();
-        Action::Pop
+        if !self.restarting {
+            return Action::Pop;
+        }
+        self.store.freeze();
+        let code = if self.can_restart { EXIT_RESTART } else { 0 };
+        log::info!("Wi-Fi transfer: leaving to apply edits to Verso's data (exit code {code})");
+        Action::ExitWith(code)
     }
 }
 
@@ -589,6 +714,96 @@ mod tests {
         assert!(!part.exists(), "confirmed stop deletes the part file");
         assert!(!books_dir.join("Stalled.epub").exists());
         assert!(!screen.session.receiving());
+    }
+
+    /// A screen whose session shows a phase without serving, over its own
+    /// data folder.
+    fn idle_screen(edited: bool, can_restart: bool) -> (tempfile::TempDir, Store, TransferScreen) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("data"));
+        let net = Arc::new(Mutex::new(Net { wifi: true, address: Some(Ipv4Addr::LOCALHOST), ..Net::default() }));
+        let mut dev = fake_device(&net, dir.path().join("markers"));
+        dev.forced = Some(Phase::Stopped(Stop::Idle));
+        dev.edited = edited;
+        let theme = Theme::for_dpi(300);
+        let mut screen =
+            TransferScreen::with_device(&theme, Rect::new(0, 0, 1272, 1696), store.clone(), dev, Waker::new(|| {}));
+        screen.can_restart = can_restart;
+        (dir, store, screen)
+    }
+
+    #[test]
+    fn done_after_live_data_edits_offers_restart_and_leaves_without_saving() {
+        let theme = Theme::for_dpi(300);
+        let bounds = Rect::new(0, 0, 1272, 1696);
+        let mut frontlight = None;
+        let mut light_request = None;
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut needs_redraw = false;
+        let mut cx = EventCx {
+            theme: &theme,
+            screen: bounds,
+            now: Instant::now(),
+            frontlight: &mut frontlight,
+            light_request: &mut light_request,
+            battery: None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut needs_redraw,
+        };
+
+        // Without edits, Done just closes.
+        let (_dir, _store, mut plain) = idle_screen(false, true);
+        let done = plain.done.rect().center();
+        tap(&mut plain, done, &mut cx);
+        assert!(plain.restart_sheet.is_none() && plain.closing);
+        assert!(matches!(plain.run_pending_work(&mut cx), Action::Pop));
+
+        // With edits: the sheet; closing it goes back to the screen.
+        let (dir, store, mut screen) = idle_screen(true, true);
+        assert!(store.live_data_edited());
+        tap(&mut screen, done, &mut cx);
+        let sheet = screen.restart_sheet.as_ref().expect("the Restart sheet");
+        assert_eq!(sheet.restart.label, "Restart");
+        tap(&mut screen, Point::new(bounds.w / 2, 40), &mut cx);
+        assert!(screen.restart_sheet.is_none() && !screen.closing, "dismissed");
+
+        // Restart: nothing more is saved, and the launcher starts Verso again.
+        tap(&mut screen, done, &mut cx);
+        let restart = screen.restart_sheet.as_ref().unwrap().restart.rect().center();
+        tap(&mut screen, restart, &mut cx);
+        assert!(screen.closing && screen.restarting);
+        assert_eq!(screen.done.label, "Restarting…");
+        assert!(matches!(screen.run_pending_work(&mut cx), Action::ExitWith(EXIT_RESTART)));
+        let settings = dir.path().join("data/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "{\"developer\":true}").unwrap();
+        store.save_settings(&store.settings()).unwrap();
+        store.save_book("abc", &crate::store::BookState::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{\"developer\":true}", "the edit stays");
+        assert!(!dir.path().join("data/books/abc.json").exists());
+        screen.on_quit().unwrap();
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{\"developer\":true}");
+
+        // Under an older launcher: Exit, with code 0.
+        let (_dir, _store, mut old) = idle_screen(true, false);
+        tap(&mut old, done, &mut cx);
+        assert_eq!(old.restart_sheet.as_ref().unwrap().restart.label, "Exit");
+        let exit = old.restart_sheet.as_ref().unwrap().restart.rect().center();
+        tap(&mut old, exit, &mut cx);
+        assert!(matches!(old.run_pending_work(&mut cx), Action::ExitWith(0)));
+
+        // Later: closes as usual, with a warning, and saves still happen.
+        let (dir, store, mut later) = idle_screen(true, true);
+        tap(&mut later, done, &mut cx);
+        let button = later.restart_sheet.as_ref().unwrap().later.rect().center();
+        tap(&mut later, button, &mut cx);
+        assert!(later.closing && !later.restarting);
+        assert!(matches!(later.run_pending_work(&mut cx), Action::Pop));
+        assert!(cx.toast.is_some(), "Later warns");
+        store.save_settings(&store.settings()).unwrap();
+        assert!(dir.path().join("data/settings.json").exists());
     }
 
     #[test]

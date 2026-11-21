@@ -43,7 +43,8 @@ TAB="$(printf '\t')"
 # A fake Verso: records the run, prints a line to the log, then does the next
 # thing queued for its version (queue-<v>), else its default (default-<v>):
 # stage (stage version 2 and ask for the update, as Verso does), update (ask
-# without staging), ok, goback, fail, crash, panic, hang or powerloss.
+# without staging), ok, goback, restart (Restart to apply, noting the
+# protocol the launcher told it), fail, crash, panic, hang or powerloss.
 make_app() {
     printf '#!/bin/sh\n# Fake Verso %s (scripts/test-launcher.sh)\nV=%s\n' "$1" "$1"
     cat <<'EOF'
@@ -61,6 +62,7 @@ case "${b:-ok}" in
     stage) VERSO_TEST_STAGE=1 ${VERSO_TEST_SHELL} "${VERSO_TEST_SCRIPT}"; : >"${VERSO_STARTED_MARKER}"; exit 85 ;;
     update) : >"${VERSO_STARTED_MARKER}"; exit 85 ;;
     goback) : >"${VERSO_STARTED_MARKER}"; exit 86 ;;
+    restart) echo "${VERSO_LAUNCHER_PROTOCOL:-}" >>"${T}/protocol"; : >"${VERSO_STARTED_MARKER}"; exit 87 ;;
     fail) echo "Error: opening the framebuffer" >&2; exit 3 ;;
     crash) kill -SEGV $$ ;;
     panic)
@@ -196,7 +198,7 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}"/queue-* \
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}"/queue-* \
         "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
@@ -470,6 +472,37 @@ echo goback >"${W}/queue-0.1.0"
 launch
 runs_are "0.1.0"
 installed_is 1
+ui_restored_once
+
+begin "restart to apply"
+fresh
+printf 'restart\nrestart\n' >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0 0.1.0 0.1.0"
+installed_is 1
+no_update_state
+ui_restored_once
+[ "$(tr '\n' ' ' <"${W}/protocol")" = "2 2 " ] || fail "protocol told: $(cat "${W}/protocol")"
+grep -q "restarting Verso" "${R}/verso/verso.log" || fail "no 'restarting' line in the log"
+
+begin "restart doesn't loop"
+fresh
+echo restart >"${W}/default-0.1.0"
+launch
+runs_are "0.1.0 0.1.0 0.1.0 0.1.0 0.1.0 0.1.0 0.1.0 0.1.0"
+installed_is 1
+ui_restored_once
+
+begin "restart after an update"
+fresh
+echo stage >"${W}/queue-0.1.0"
+echo restart >"${W}/queue-0.2.0"
+launch
+runs_are "0.1.0 0.2.0 0.2.0"
+installed_is 2
+no_update_state
+previous_is_v1
+absent "${U}/rollback.json"
 ui_restored_once
 
 begin "update code with nothing staged"

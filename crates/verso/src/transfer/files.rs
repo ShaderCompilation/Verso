@@ -5,7 +5,9 @@
 //! on must be spelled the way their folder lists them (`check_spelling`), so
 //! FAT's other spellings of a folder can't pass as user content. Inside `verso` everything
 //! is read-only except the folders listed as user content, so a new app file or
-//! folder there is protected without changing the table.
+//! folder there is protected without changing the table. In developer mode
+//! Verso's live data and app files can be written too; a write into live data
+//! is noted (`Store::note_live_data_edit`) for Restart to apply.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -55,10 +57,11 @@ const COUNT_LIMIT: u64 = 100_000;
 pub enum Class {
     /// Read and write.
     User,
-    /// `verso/data/*.json`, `books`, `annotations`: read only (developer
-    /// writes come with Restart to apply, Phase 5).
+    /// `verso/data/*.json`, `books`, `annotations`: read only; developer
+    /// writes take effect after Restart to apply.
     LiveData,
-    /// Everything else in `verso`, and `extensions/verso`: read only.
+    /// Everything else in `verso`, and `extensions/verso`: read only;
+    /// developers may write.
     App,
     /// Jailbreak and system files: hidden, read only in developer mode.
     System,
@@ -70,9 +73,12 @@ impl Class {
     fn rank(self) -> u8 {
         match self {
             Class::User => 0,
-            Class::LiveData | Class::App => 1,
-            Class::System => 2,
-            Class::Cache => 3,
+            Class::App => 1,
+            // Writable in the same cases as App, but a write needs Restart
+            // to apply, so a link between the two counts as live data.
+            Class::LiveData => 2,
+            Class::System => 3,
+            Class::Cache => 4,
         }
     }
 
@@ -88,8 +94,12 @@ impl Class {
         }
     }
 
-    pub fn writable(self) -> bool {
-        self == Class::User
+    pub fn writable(self, developer: bool) -> bool {
+        match self {
+            Class::User => true,
+            Class::LiveData | Class::App => developer,
+            Class::System | Class::Cache => false,
+        }
     }
 }
 
@@ -137,9 +147,10 @@ pub fn classify(rel: &[String]) -> Class {
 }
 
 /// Whether `rel` is, or holds, a path that must stay: Verso's folder, its
-/// KUAL extension, the jailbreak and system folders, the pinned folders and
-/// the root. Classes depend only on paths, so comparing against these
-/// locations checks everything inside a folder without walking it.
+/// KUAL extension, the jailbreak and system folders, the pinned folders (and
+/// `verso/data`, which holds them) and the root. Classes depend only on
+/// paths, so comparing against these locations checks everything inside a
+/// folder without walking it.
 fn holds_protected(rel: &[String]) -> bool {
     let rel = lower(rel);
     let prefix_of = |loc: &[&str]| rel.len() <= loc.len() && rel.iter().zip(loc).all(|(a, b)| a == b);
@@ -147,15 +158,21 @@ fn holds_protected(rel: &[String]) -> bool {
         || prefix_of(&["verso"])
         || prefix_of(&["extensions", "verso"])
         || SYSTEM.iter().any(|s| prefix_of(&[s]))
-        || PINNED.iter().any(|p| is(&rel, p))
+        || PINNED.iter().any(|p| prefix_of(p))
 }
 
 /// How many leading parts of `rel` decide its class by their spelling: the
-/// storage root's names (`verso`, `extensions`, the system folders) and the
-/// names in `extensions`. Deeper in `verso`, a name spelled another way only
-/// makes a path stricter (`App`), and elsewhere names don't change classes.
+/// storage root's names (`verso`, `extensions`, the system folders), the
+/// names in `extensions`, and in `verso` the next two
+/// (`verso/data/settings.json`, `verso/data/covers`): developers may write
+/// app files, so `verso/data./settings.json` must not pass as one. Deeper
+/// names and names elsewhere don't change classes.
 fn spelling_checked(rel: &[String]) -> usize {
-    let checked = if rel.first().is_some_and(|f| f.eq_ignore_ascii_case("extensions")) { 2 } else { 1 };
+    let checked = match rel.first() {
+        Some(first) if first.eq_ignore_ascii_case("extensions") => 2,
+        Some(first) if first.eq_ignore_ascii_case("verso") => 3,
+        _ => 1,
+    };
     checked.min(rel.len())
 }
 
@@ -215,8 +232,8 @@ struct Target {
 
 impl Target {
     /// Can be renamed, moved or deleted.
-    fn movable(&self) -> bool {
-        self.class.writable() && !holds_protected(&self.rel) && !holds_protected(&self.canon_rel)
+    fn movable(&self, developer: bool) -> bool {
+        self.class.writable(developer) && !holds_protected(&self.rel) && !holds_protected(&self.canon_rel)
     }
 
     fn name(&self) -> &str {
@@ -362,7 +379,7 @@ impl Files {
         if !folder.dir {
             return Err(err(400, "Choose a folder."));
         }
-        if !folder.class.writable() {
+        if !folder.class.writable(self.developer) {
             return Err(err(403, "This folder is read-only."));
         }
         Ok(folder)
@@ -398,6 +415,14 @@ impl Files {
         let related =
             |roots: Vec<PathBuf>| paths.iter().any(|p| roots.iter().any(|r| p.starts_with(r) || r.starts_with(p)));
         Affects { library: related(self.library_roots()), dictionaries: related(self.dictionary_roots()) }
+    }
+
+    /// Notes a write into Verso's live data (developer mode): Done offers
+    /// Restart to apply, and the Books tab turns read-only.
+    fn wrote(&self, classes: &[Class]) {
+        if classes.contains(&Class::LiveData) {
+            self.store.note_live_data_edit();
+        }
     }
 
     /// Notes a change for Done: the library rescans, or the dictionary
@@ -446,9 +471,9 @@ impl Files {
             "path": join(&target.rel),
             "dir": target.dir,
             "size": (!target.dir).then_some(target.len),
-            "writable": target.movable(),
+            "writable": target.movable(self.developer),
             // Shown with a lock; a pinned folder is neither.
-            "readonly": !target.class.writable(),
+            "readonly": !target.class.writable(self.developer),
             "link": target.link,
             "twice": Self::ask_twice(&needs),
             "needs": needs,
@@ -493,7 +518,7 @@ impl Files {
             // Not followed: a link's own date, and everything else needs.
             let Ok(meta) = entry.metadata() else { continue };
             if is_upload_part(&name) {
-                if folder.class.writable() && meta.is_file() {
+                if folder.class.writable(self.developer) && meta.is_file() {
                     remove_stale_part(&folder.canon.join(&name), &meta);
                 }
                 continue;
@@ -526,7 +551,9 @@ impl Files {
             200,
             &json!({
                 "path": join(&folder.rel),
-                "writable": folder.class.writable(),
+                "writable": folder.class.writable(self.developer),
+                // Developer mode: changes here apply after a restart.
+                "live": folder.class == Class::LiveData,
                 "crumbs": crumbs,
                 "entries": entries.into_iter().map(|(_, _, v)| v).collect::<Vec<_>>(),
                 "shortcuts": self.shortcuts(&canon_root, &library_roots),
@@ -652,7 +679,7 @@ impl Files {
         };
         let name = check_name(name)?.to_owned();
         let folder = self.writable_folder(&join(parent))?;
-        if !Self::child_class(&folder, &name).writable() {
+        if !Self::child_class(&folder, &name).writable(self.developer) {
             return Err(err(403, "This folder is read-only."));
         }
         self.check_new_name(&folder, &name)?;
@@ -736,6 +763,7 @@ impl Files {
             }
             Err(e) => return write_error("Couldn't save the file", e),
         }
+        self.wrote(&[Self::child_class(&folder, &name)]);
         self.changed(self.affects(&[&target]));
         let folder_name = folder.rel.last().cloned().unwrap_or_else(|| "Kindle".into());
         guard.finish(Activity::Received { name: name.clone(), folder: folder_name });
@@ -767,7 +795,8 @@ impl Files {
             Ok(folder) => folder,
             Err(response) => return response,
         };
-        if !Self::child_class(&folder, &name).writable() {
+        let class = Self::child_class(&folder, &name);
+        if !class.writable(self.developer) {
             return err(403, "This folder is read-only.");
         }
         if let Err(response) = self.check_new_name(&folder, &name) {
@@ -779,6 +808,7 @@ impl Files {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return err(409, "That name is already taken."),
             Err(e) => return write_error("Couldn't create the folder", e),
         }
+        self.wrote(&[class]);
         self.changed(self.affects(&[&target]));
         let mut rel = folder.rel.clone();
         rel.push(name);
@@ -791,10 +821,10 @@ impl Files {
         if target.rel.is_empty() {
             return Err(err(403, "The Kindle's storage itself can't be changed."));
         }
-        if !target.movable() {
+        if !target.movable(self.developer) {
             return Err(err(
                 403,
-                if target.class.writable() {
+                if target.class.writable(self.developer) {
                     "Verso and the Kindle need this folder; it can't be renamed, moved or deleted."
                 } else {
                     "This is read-only."
@@ -831,7 +861,8 @@ impl Files {
         if name == source.name() {
             return Response::json(200, &self.entry_json(&source, &self.library_roots()));
         }
-        if !Self::child_class(&parent, &name).writable() {
+        let class = Self::child_class(&parent, &name);
+        if !class.writable(self.developer) {
             return err(403, "That name belongs to Verso or the Kindle.");
         }
         if let Err(response) = self.check_new_name(&parent, &name) {
@@ -839,7 +870,7 @@ impl Files {
         }
         let from = parent.canon.join(source.name());
         let to = parent.canon.join(&name);
-        self.finish_move(&from, &to, &parent.rel, &name)
+        self.finish_move(&from, &to, &parent.rel, &name, [source.class, class])
     }
 
     /// `POST /api/files/move` with `{"path": …, "to": folder}`
@@ -873,7 +904,8 @@ impl Files {
             return err(400, "A folder can't be moved inside itself.");
         }
         let name = source.name().to_owned();
-        if !Self::child_class(&destination, &name).writable() {
+        let class = Self::child_class(&destination, &name);
+        if !class.writable(self.developer) {
             return err(403, "That folder is read-only.");
         }
         if let Err(response) = self.check_new_name(&destination, &name) {
@@ -881,10 +913,12 @@ impl Files {
         }
         let from = parent.canon.join(&name);
         let to = destination.canon.join(&name);
-        self.finish_move(&from, &to, &destination.rel, &name)
+        self.finish_move(&from, &to, &destination.rel, &name, [source.class, class])
     }
 
-    fn finish_move(&self, from: &Path, to: &Path, folder: &[String], name: &str) -> Response {
+    /// Renames `from` to `to`; `classes` are the source's and the new
+    /// path's.
+    fn finish_move(&self, from: &Path, to: &Path, folder: &[String], name: &str, classes: [Class; 2]) -> Response {
         let affects = self.affects(&[from, to]);
         match names::rename_free(from, to) {
             Ok(()) => {}
@@ -896,6 +930,7 @@ impl Files {
             Err(e) => return write_error("Couldn't move it", e),
         }
         log::info!("web app: moved {} → {}", from.display(), to.display());
+        self.wrote(&classes);
         self.changed(affects);
         let mut rel = folder.to_vec();
         rel.push(name.to_owned());
@@ -927,6 +962,7 @@ impl Files {
         let affects = self.affects(&[&target.canon, &path]);
         let removed = if target.dir && !target.link { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
         // Even a partial delete changed things.
+        self.wrote(&[target.class]);
         self.changed(affects);
         match removed {
             Ok(()) => {}

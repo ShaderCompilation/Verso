@@ -160,6 +160,10 @@ pub struct Store {
     settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The update check, shared by startup and Settings; made on first use.
     updates: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::update::Updates>>>,
+    /// Set when the web app's Files tab wrote into Verso's live data
+    /// (developer mode): Verso still holds the old values and would save
+    /// over the edits, so they wait for Restart to apply.
+    live_data_edited: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl Store {
     pub fn new() -> Self {
@@ -198,6 +202,7 @@ impl Store {
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),
             updates: Default::default(),
+            live_data_edited: Default::default(),
         }
     }
     /// A worker keeps the data paths and counters, without owning its service registry.
@@ -287,6 +292,9 @@ impl Store {
     }
     /// Removes a deleted book's reading state. A missing record is fine.
     pub fn remove_book(&self, id: &str) -> Result<()> {
+        if frozen(&self.book_path(id)) {
+            return Ok(());
+        }
         match std::fs::remove_file(self.book_path(id)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
@@ -369,6 +377,29 @@ impl Store {
             })
             .clone()
     }
+    /// Notes that the web app wrote into Verso's live data (`*.json`,
+    /// `books`, `annotations`): see `live_data_edited`.
+    pub fn note_live_data_edit(&self) {
+        if !self.live_data_edited.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            log::info!("Verso's data was edited through the web app; it applies after a restart");
+        }
+    }
+    /// True once the web app wrote into Verso's live data, until Verso
+    /// starts again: Wi-Fi transfer offers Restart to apply and keeps its
+    /// Books tab read-only.
+    pub fn live_data_edited(&self) -> bool {
+        self.live_data_edited.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Restart to apply: from now on nothing under the data folder is
+    /// written, by this store, its clones or anything else that saves there
+    /// (`atomic_bytes`). Verso is leaving so that it reads hand-edited data
+    /// again, and its saves on the way out (screens, the library worker,
+    /// the navigation and position writers, the dictionary service) would
+    /// overwrite the edits. Never undone: the process exits.
+    pub fn freeze(&self) {
+        log::info!("not saving anything more in {}: restarting to apply edits", self.root.display());
+        FROZEN.lock().unwrap_or_else(|e| e.into_inner()).push(self.root.clone());
+    }
     /// Verso's data folder (`/mnt/us/verso/data` on the Kindle).
     pub fn root(&self) -> PathBuf {
         self.root.clone()
@@ -402,6 +433,7 @@ impl Store {
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),
             updates: Default::default(),
+            live_data_edited: Default::default(),
         }
     }
     fn book_path(&self, id: &str) -> PathBuf {
@@ -436,7 +468,26 @@ fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 pub(crate) fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_bytes(path, &serde_json::to_vec(value)?)
 }
+/// Data folders frozen by `Store::freeze`. A list of folders, not one
+/// switch, so tests with their own folders don't affect each other.
+static FROZEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether `path` is in a frozen data folder: its save is skipped.
+fn frozen(path: &Path) -> bool {
+    let frozen = FROZEN.lock().unwrap_or_else(|e| e.into_inner());
+    if frozen.is_empty() || !frozen.iter().any(|root| path.starts_with(root)) {
+        return false;
+    }
+    log::debug!("not saving {}: restarting to apply edits", path.display());
+    true
+}
+
+/// Every record under the data folder is written here (or by `atomic`), so
+/// `Store::freeze` stops all of them at once.
 pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if frozen(path) {
+        return Ok(());
+    }
     let parent = path.parent().context("record has no parent directory")?;
     std::fs::create_dir_all(parent)?;
     let tmp = path.with_extension("json.tmp");
@@ -591,6 +642,34 @@ mod tests {
         );
         // A shared prefix that isn't a parent folder is a different folder.
         assert_eq!(with_folder(&folders, Path::new("/mnt/us/doc")).map(|f| f.len()), Some(3));
+    }
+    #[test]
+    fn freezing_stops_every_save_in_that_data_folder_only() -> Result<()> {
+        let frozen = tempfile::tempdir()?;
+        let other = tempfile::tempdir()?;
+        let store = Store::at(frozen.path().to_path_buf());
+        let elsewhere = Store::at(other.path().to_path_buf());
+        store.save_book("kept", &BookState::default())?;
+        assert!(!store.live_data_edited());
+        store.clone().note_live_data_edit();
+        assert!(store.live_data_edited(), "clones share it");
+        store.clone().freeze();
+        store.save_settings(&Settings::default())?;
+        store.save_library(&LibraryIndex::default())?;
+        store.save_navigation(&Navigation::default())?;
+        store.save_book("new", &BookState::default())?;
+        store.remove_book("kept")?;
+        store.save_dictionary_folders(&[])?;
+        for name in
+            ["settings.json", "library.json", "library-navigation.json", "books/new.json", "dictionary-folders.json"]
+        {
+            assert!(!frozen.path().join(name).exists(), "{name} was written");
+        }
+        assert!(frozen.path().join("books/kept.json").exists(), "nor removed");
+        elsewhere.save_settings(&Settings::default())?;
+        assert!(other.path().join("settings.json").exists(), "another data folder still saves");
+        assert!(!elsewhere.live_data_edited());
+        Ok(())
     }
     #[test]
     fn saving_settings_is_noticed_by_clones() -> Result<()> {

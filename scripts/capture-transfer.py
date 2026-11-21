@@ -45,19 +45,27 @@ def main():
         capture(f'portrait-{name}', 'portrait', options, ['--screen', 'transfer'], books)
     for name in ['ready', 'no-network', 'failed-port']:
         capture(f'landscape-{name}', 'landscape', TRANSFER[name], ['--screen', 'transfer'], books)
+    # Done after Verso's data was edited (developer mode): Restart, or Exit
+    # under a launcher older than protocol 2.
+    done = ['--screen', 'transfer', '--tap', '636,1566']
+    restart = 'kindle,code=4827,edited'
+    capture('portrait-restart', 'portrait', restart, done, books, {'VERSO_LAUNCHER_PROTOCOL': '2'})
+    capture('portrait-restart-exit', 'portrait', restart, done, books)
+    capture('landscape-restart', 'landscape', restart, ['--screen', 'transfer', '--tap', '1400,1150'], books,
+            {'VERSO_LAUNCHER_PROTOCOL': '2'})
     for name, steps in ENTRIES.items():
         capture(name, 'portrait', '', steps, books)
     print(OUT)
 
 
-def capture(name, orientation, options, steps, books):
+def capture(name, orientation, options, steps, books, extra_env=None):
     state = OUT / 'state' / name
     shutil.rmtree(state, ignore_errors=True)
     state.mkdir(parents=True)
     settings = {'library_folders': [str(books)], 'orientation': orientation}
     (state / 'settings.json').write_text(json.dumps(settings))
     env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), VERSO_SIM_BATTERY='82',
-               VERSO_SIM_TRANSFER=options, RUST_LOG='error')
+               VERSO_SIM_TRANSFER=options, RUST_LOG='error', **(extra_env or {}))
     subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps],
                    env=env, check=True, stderr=subprocess.DEVNULL)
 

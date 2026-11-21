@@ -220,6 +220,7 @@ details.group[open] summary::before { content: "▾"; }
   </nav>
   <main>
     <section role="tabpanel" id="books" aria-labelledby="tab-books">
+      <p id="books-readonly" class="readonly-note" hidden></p>
       <div id="book-drop" class="drop">
         <div class="drop-main">
           <span>Drop EPUBs here, or</span>
@@ -312,6 +313,7 @@ details.group[open] summary::before { content: "▾"; }
       <div id="files-shortcuts" class="shortcuts"></div>
       <div id="files-crumbs" class="crumbs"></div>
       <p id="files-readonly" class="readonly-note" hidden></p>
+      <p id="files-live" class="readonly-note" hidden>Verso uses changes here after it restarts: tap Done on the Kindle, then Restart. Until then the Books tab is read-only.</p>
       <div id="files-drop" class="drop">
         <div class="drop-main">
           <span>Drop files here, or</span>
@@ -446,6 +448,7 @@ async function loadStatus() {
   if (typeof status.free === "number") facts.push(size(status.free) + " free");
   if (status.battery) facts.push(status.battery.percent + "% battery" + (status.battery.charging ? ", charging" : ""));
   $("facts").textContent = facts.join(" · ");
+  setBooksLocked(!!status.restart);
   show("app");
   return true;
 }
@@ -519,6 +522,21 @@ let hasRenderedGroups = false;
 let uploadQueue = [];
 let activeXhr = null;
 let pendingDelete = null;
+// Verso's own data was edited in Files (developer mode): Books changes
+// would save over it, so they wait for Restart on the Kindle.
+let booksLocked = false;
+
+function setBooksLocked(locked) {
+  if (locked === booksLocked) return;
+  booksLocked = locked;
+  $("book-drop").hidden = locked;
+  const note = $("books-readonly");
+  note.hidden = !locked;
+  note.replaceChildren(svgIcon("icon-lock"),
+    document.createTextNode("Books are read-only until Verso restarts, because you changed its data in Files. Tap Done on the Kindle, then Restart."));
+  if (locked) uploadQueue = [];
+  renderBooks();
+}
 
 function addNoticeTo(containerId, text, isError) {
   const wrap = $(containerId);
@@ -678,7 +696,8 @@ function renderBooks() {
       del.appendChild(svgIcon("icon-trash"));
       del.addEventListener("click", () => askDelete(b));
 
-      meta.append(prog, sz, dl, del);
+      meta.append(prog, sz, dl);
+      if (!booksLocked) meta.appendChild(del);
       li.append(info, meta);
       ul.appendChild(li);
     }
@@ -804,6 +823,7 @@ $("mkdir-form").addEventListener("submit", async (event) => {
       addNotice("Created folder \"" + data.label + "\".", false);
     } else {
       addNotice(data.error || "Couldn't create folder.", true);
+      if (data.restart) loadStatus().catch(() => {});
     }
   } finally {
     $("mkdir-submit").disabled = false;
@@ -812,6 +832,7 @@ $("mkdir-form").addEventListener("submit", async (event) => {
 
 // Upload queue (XMLHttpRequest for progress; raw body PUT)
 function queueFiles(fileList) {
+  if (booksLocked) return;
   const folder = $("book-folder").value;
   if (!folder) {
     addNotice("Choose a destination folder first.", true);
@@ -879,6 +900,7 @@ function runNextUpload() {
       await Promise.all([loadBooks(), loadStatus()]).catch(() => {});
     } else {
       addNotice(item.file.name + ": " + (data.error || "Upload failed (" + xhr.status + ")."), true);
+      if (data.restart) loadStatus().catch(() => {});
     }
     runNextUpload();
   };
@@ -969,6 +991,7 @@ $("confirm-ok").addEventListener("click", async () => {
         await Promise.all([loadBooks(), loadStatus()]);
       } else {
         addNotice(data.error || "Couldn't delete the book.", true);
+        if (data.restart) loadStatus().catch(() => {});
       }
     } else {
       if (response.ok) {
@@ -1386,6 +1409,7 @@ function renderFiles() {
   const note = $("files-readonly");
   note.hidden = data.writable;
   note.replaceChildren(svgIcon("icon-lock"), document.createTextNode("This folder is read-only."));
+  $("files-live").hidden = !(data.live && data.writable);
 
   const entries = data.entries || [];
   const folders = entries.filter((e) => e.dir).length;

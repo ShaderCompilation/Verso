@@ -13,7 +13,8 @@ use std::path::Path;
 /// hand) sees a lower number, or none.
 ///
 /// 1: [`EXIT_INSTALL`], [`EXIT_GO_BACK`], [`STARTED_ENV`], trial and rollback.
-pub const PROTOCOL: u32 = 1;
+/// 2: [`EXIT_RESTART`].
+pub const PROTOCOL: u32 = 2;
 pub const PROTOCOL_ENV: &str = "VERSO_LAUNCHER_PROTOCOL";
 /// The file to create once this version has shown that it works; set only
 /// by a launcher that checks it.
@@ -25,6 +26,9 @@ pub const EXIT_INSTALL: i32 = 85;
 /// Exit code: go back to the previous version (`update/previous/`) and
 /// start Verso again.
 pub const EXIT_GO_BACK: i32 = 86;
+/// Exit code: start Verso again, without bringing back the Kindle UI
+/// (Restart to apply, after hand edits of Verso's data). Protocol 2.
+pub const EXIT_RESTART: i32 = 87;
 
 /// One of these empty files is present while the launcher moves files,
 /// naming the job; the next launch finishes it. The launcher renames one

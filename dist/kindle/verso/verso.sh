@@ -3,7 +3,8 @@
 # Kindle UI back afterwards, even if Verso crashes or is killed. It also
 # switches in updates that Verso staged, and goes back to the previous
 # version if a new one fails to start (docs/updates.md, "Installing" and
-# "Rollback"), with renames from the plan Verso staged.
+# "Rollback"), with renames from the plan Verso staged, and starts Verso
+# again when it asks (Restart to apply, docs/web-app.md).
 #
 # Started from KUAL (extensions/verso/menu.json) or by scripts/deploy.sh.
 # Installed at /mnt/us/verso/verso.sh.
@@ -52,6 +53,7 @@ TRANSFER_FIREWALL="${TMP}/verso-transfer-firewall"
 TRANSFER_PORT=80
 EXIT_INSTALL=85
 EXIT_GO_BACK=86
+EXIT_RESTART=87
 TAB="$(printf '\t')"
 
 # Run from a copy in /tmp. /mnt/us is a FUSE filesystem; if this file were
@@ -127,7 +129,7 @@ WATCHER=""
 export VERSO_LAUNCHER_PID=$$
 export VERSO_SYSTEM_ACK="${TMP}/verso-system-$$"
 # What this launcher understands (crates/verso-update/src/launcher.rs).
-export VERSO_LAUNCHER_PROTOCOL=1
+export VERSO_LAUNCHER_PROTOCOL=2
 export VERSO_STARTED_MARKER="${STARTED}"
 
 # Only the launcher changes the UI's running state. Verso asks for a native
@@ -550,7 +552,8 @@ while :; do
             continue
         fi
     fi
-    # Restarts are for updates and going back; never loop on their own.
+    # Restarts are for updates, going back and Restart to apply; never loop
+    # on their own.
     [ "${RUNS}" -lt 8 ] || break
     case "${RC}" in
         "${EXIT_INSTALL}")
@@ -563,6 +566,12 @@ while :; do
         "${EXIT_GO_BACK}")
             mark_log
             go_back requested "" && continue
+            ;;
+        "${EXIT_RESTART}")
+            # Verso saved nothing on the way out, so it reads data edited
+            # by hand (over Wi-Fi transfer) when it starts again.
+            log "restarting Verso"
+            continue
             ;;
     esac
     break

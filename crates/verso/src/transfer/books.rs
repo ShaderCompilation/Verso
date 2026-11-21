@@ -124,8 +124,23 @@ impl Books {
         )
     }
 
+    /// Books tab changes save the library index and reading state at once,
+    /// so after a developer edited Verso's live data they wait for Restart
+    /// to apply: they would overwrite the edits. `409`, with `restart`.
+    fn locked(&self) -> Option<Response> {
+        self.store.live_data_edited().then(|| {
+            Response::json(
+                409,
+                &json!({ "error": "Restart Verso to apply your edits first: tap Done on the Kindle.", "restart": true }),
+            )
+        })
+    }
+
     /// `PUT /api/books?folder=…&name=…`
     pub fn upload(&self, request: &Request, body: &mut Body<'_>) -> Response {
+        if let Some(locked) = self.locked() {
+            return locked;
+        }
         let Some(folder_param) = request.param("folder") else {
             return err(400, "Choose a destination folder.");
         };
@@ -244,6 +259,9 @@ impl Books {
 
     /// `POST /api/books/mkdir`
     pub fn mkdir(&self, body: &mut Body<'_>) -> Response {
+        if let Some(locked) = self.locked() {
+            return locked;
+        }
         let Ok(Some(bytes)) = body.read_small(4096) else {
             return err(413, "Request too large.");
         };
@@ -306,6 +324,9 @@ impl Books {
 
     /// `DELETE /api/books/<id>`
     pub fn delete(&self, id: &str) -> Response {
+        if let Some(locked) = self.locked() {
+            return locked;
+        }
         let index = self.library.current();
         let Some(book) = index.books.iter().find(|b| b.available && b.id == id).cloned() else {
             return err(404, "Book not found.");
@@ -1484,6 +1505,26 @@ mod tests {
             assert!(!env.worker.current().books.iter().any(|b| &b.id == id));
             assert_eq!(Collection::load(&env.store, ann).unwrap().records.len(), 1);
         }
+    }
+
+    #[test]
+    fn books_tab_is_read_only_after_live_data_edits() {
+        let env = Env::new();
+        let (status, book) = env.upload(&env.library_dir, "Kept.epub", &epub_bytes("Kept", "Author", &[]));
+        assert_eq!(status, 201, "{book}");
+        let id = book["id"].as_str().unwrap().to_owned();
+        env.store.note_live_data_edit();
+        let (status, body) = env.upload(&env.library_dir, "New.epub", &epub_bytes("New", "Author", &[]));
+        assert_eq!((status, body["restart"].clone()), (409, json!(true)), "{body}");
+        assert!(!env.library_dir.join("New.epub").exists());
+        let mkdir = json!({ "parent": env.library_dir.to_str().unwrap(), "name": "Shelf" });
+        assert_eq!(env.json("POST", "/api/books/mkdir", mkdir.to_string().as_bytes()).0, 409);
+        assert!(!env.library_dir.join("Shelf").exists());
+        assert_eq!(env.json("DELETE", &format!("/api/books/{id}"), b"").0, 409);
+        assert!(env.library_dir.join("Kept.epub").exists());
+        // Reading is still fine.
+        assert_eq!(env.json("GET", "/api/books", b"").0, 200);
+        assert_eq!(env.req("GET", &format!("/api/books/{id}"), b"").0, 200);
     }
 
     #[test]

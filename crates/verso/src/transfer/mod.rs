@@ -344,8 +344,8 @@ impl Session {
             }
         };
         let status = {
-            let (device, weak, developer) = (device.clone(), weak.clone(), self.developer);
-            move || status(&device, &weak, developer)
+            let (device, weak, developer, store) = (device.clone(), weak.clone(), self.developer, self.store.clone());
+            move || status(&device, &weak, developer, &store)
         };
         let changed = {
             let (weak, waker) = (weak.clone(), self.waker.clone());
@@ -541,8 +541,9 @@ fn write_marker(dir: &Path, name: &str) -> std::io::Result<()> {
     )
 }
 
-/// `/api/status`.
-fn status(device: &Device, shared: &Weak<Shared>, developer: bool) -> serde_json::Value {
+/// `/api/status`. `restart`: Verso's live data was edited, so the Books
+/// tab is read-only until Restart to apply.
+fn status(device: &Device, shared: &Weak<Shared>, developer: bool, store: &Store) -> serde_json::Value {
     let (name, battery) = match shared.upgrade() {
         Some(shared) => {
             let state = shared.lock();
@@ -557,6 +558,7 @@ fn status(device: &Device, shared: &Weak<Shared>, developer: bool) -> serde_json
         "free": free,
         "battery": battery.map(|b| serde_json::json!({ "percent": b.percent, "charging": b.charging })),
         "developer": developer,
+        "restart": store.live_data_edited(),
         "version": env!("CARGO_PKG_VERSION"),
     })
 }
