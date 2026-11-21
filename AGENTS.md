@@ -9,6 +9,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 - **Use the existing plan.** `docs/plan.md` is the implementation plan. When asked to implement a phase or item, work from it and keep its progress current. Create a separate plan or wait for plan approval only when the user explicitly asks for that workflow. Make routine technical decisions as part of implementation and record them in the relevant docs.
 - **Show the tradeoffs on significant technical decisions.** Make routine code-level decisions yourself. For significant ones (adding a library, choosing an engine or approach), explain the tradeoffs in plain language with a recommendation before adopting it. Record each decision as a short "Decision / Why" note in the relevant doc.
 - **Keep docs current.** Update the status markers (✅ 🔄 ⬜) in `docs/plan.md` as work progresses. Mark device facts as **(measured)** or **(to verify)**.
+- **No backwards compatibility needed yet.** Verso hasn't launched and only runs on the user's test Kindle. Don't keep legacy data migrations, deprecated config fields, or compatibility shims—cleanly replace formats and code when a design changes. (Still keep the user's books and reading progress intact on the device.)
 - **Push back if appropriate.** If the user asks for features that are very hard to implement, unconventional or are likely to cause performance issues state that plainly.
 
 ## Commits
