@@ -1,7 +1,7 @@
 //! Draws the reader's top and bottom bars over the rendered page, and the
 //! same bars in miniature for the Page layout sketch.
 use crate::geom::Rect;
-use crate::gfx::{HAlign, Icon, TextStyle};
+use crate::gfx::{HAlign, TextStyle};
 use crate::page_layout::{Bar, PageGeometry, PageLayout, ProgressLine};
 use crate::reader::bars::{BarData, ItemText, Need, fit};
 use crate::ui::theme::{INK2, LINE, PAPER, Theme};
@@ -97,7 +97,7 @@ pub(super) fn slots(cx: &mut DrawCx, texts: &[Option<(ItemText, u8)>; 3], rect: 
             x + w - tail_w
         };
         if let Some(battery) = text.battery {
-            battery_icon(cx, Rect::new(tail_x, rect.y + (rect.h - icon) / 2, icon, icon), battery, *gray);
+            cx.battery_icon(Rect::new(tail_x, rect.y + (rect.h - icon) / 2, icon, icon), battery, *gray);
         }
         cx.line_measured(&text.tail, text_style, from(tail_x + lead(text)));
     }
@@ -106,22 +106,6 @@ pub(super) fn slots(cx: &mut DrawCx, texts: &[Option<(ItemText, u8)>; 3], rect: 
 /// The battery icon's square: a little taller than the text.
 fn battery_icon_size(style: &BarStyle) -> i32 {
     (style.text.size * 1.25).round() as i32
-}
-
-/// A battery outline filled to its level, or with a bolt while charging.
-fn battery_icon(cx: &mut DrawCx, square: Rect, battery: crate::platform::Battery, gray: u8) {
-    let icon = if battery.charging { Icon::BatteryCharging } else { Icon::Battery };
-    cx.icons.draw(cx.canvas, icon, square, gray);
-    if !battery.charging {
-        // Inside the 24-unit outline (body x 2–18, y 7–17, 2-unit stroke),
-        // one unit clear of the stroke: x 4–16, y 9–15.
-        let unit = square.w as f32 / 24.0;
-        let full = 12.0 * unit;
-        let w = (full * battery.percent.min(100) as f32 / 100.0).round() as i32;
-        let x = square.x + (4.0 * unit).round() as i32;
-        let y = square.y + (9.0 * unit).round() as i32;
-        cx.fill(Rect::new(x, y, w.max(1), (6.0 * unit).round() as i32), gray);
-    }
 }
 
 /// The progress line along one edge of `rect`, with chapter ticks if `marks`.

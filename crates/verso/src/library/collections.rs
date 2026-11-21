@@ -1,27 +1,15 @@
 //! A filesystem-free view of the available index. Paths identify folders;
 //! book identities and all reading/cover state remain in the library.
-use super::{LibraryIndex, Sort};
+use super::LibraryIndex;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Tab {
-    #[default]
-    AllBooks,
-    Collections,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Navigation {
-    pub tab: Tab,
     pub folder: Option<PathBuf>,
-    pub all_page: usize,
-    pub all_sort: Option<Sort>,
-    pub collections_sort: Option<Sort>,
     pub home_page: usize,
     pub folder_pages: BTreeMap<PathBuf, usize>,
 }
@@ -39,36 +27,15 @@ impl Navigation {
             .collect();
     }
 
-    pub fn sort(&self, fallback: Sort) -> Sort {
-        match self.tab {
-            Tab::AllBooks => self.all_sort,
-            Tab::Collections => self.collections_sort,
-        }
-        .unwrap_or(fallback)
-    }
-    pub fn set_sort(&mut self, sort: Sort) {
-        match self.tab {
-            Tab::AllBooks => self.all_sort = Some(sort),
-            Tab::Collections => self.collections_sort = Some(sort),
-        }
-    }
     pub fn page(&self) -> usize {
-        match self.tab {
-            Tab::AllBooks => self.all_page,
-            Tab::Collections => {
-                self.folder.as_ref().map_or(self.home_page, |p| self.folder_pages.get(p).copied().unwrap_or(0))
-            }
-        }
+        self.folder.as_ref().map_or(self.home_page, |p| self.folder_pages.get(p).copied().unwrap_or(0))
     }
     pub fn set_page(&mut self, page: usize) {
-        match self.tab {
-            Tab::AllBooks => self.all_page = page,
-            Tab::Collections => match &self.folder {
-                Some(path) => {
-                    self.folder_pages.insert(path.clone(), page);
-                }
-                None => self.home_page = page,
-            },
+        match &self.folder {
+            Some(path) => {
+                self.folder_pages.insert(path.clone(), page);
+            }
+            None => self.home_page = page,
         }
     }
 }
@@ -176,6 +143,41 @@ impl Collections {
     pub fn restore(&self, folder: Option<&Path>) -> Option<PathBuf> {
         folder?.ancestors().find(|p| self.folders.contains_key(*p)).map(Path::to_owned)
     }
+
+    /// When only one root is active (one non-empty root, or a single configured
+    /// root when empty), Library skips the root-chooser level and uses that root
+    /// as its top level directly.
+    pub fn single_root<'a>(&'a self, configured_roots: &'a [PathBuf]) -> Option<&'a Path> {
+        if self.roots.len() == 1 {
+            self.roots.iter().next().map(PathBuf::as_path)
+        } else if self.roots.is_empty() && configured_roots.len() == 1 {
+            Some(configured_roots[0].as_path())
+        } else {
+            None
+        }
+    }
+
+    /// Keeps the closest surviving ancestor, falling back to the top level
+    /// (the single active root when only one root is active, or `None`).
+    pub fn restore_for(&self, folder: Option<&Path>, configured_roots: &[PathBuf]) -> Option<PathBuf> {
+        let restored = self.restore(folder);
+        match self.single_root(configured_roots) {
+            Some(root) => Some(restored.unwrap_or_else(|| root.to_owned())),
+            None => restored,
+        }
+    }
+
+    /// Top-level Library counts for Home's Library card:
+    /// `(root_count, folders, books)`.
+    pub fn top_level_counts(&self, configured_roots: &[PathBuf]) -> (usize, usize, usize) {
+        if let Some(root) = self.single_root(configured_roots) {
+            let (folders, books) = self.folders.get(root).map_or((0, 0), |f| (f.children.len(), f.books.len()));
+            (1, folders, books)
+        } else {
+            let n = self.roots.len();
+            (n, n, 0)
+        }
+    }
 }
 
 /// `Path::starts_with` for normalized paths, comparing bytes instead of
@@ -279,6 +281,41 @@ mod tests {
         let moved = Collections::from_index(&index, &roots);
         assert_eq!(moved.folders[Path::new("/b")].count, 2);
         assert!(!moved.folders.contains_key(Path::new("/a/Fiction")));
+    }
+
+    #[test]
+    fn single_root_skipping_and_top_level_counts() {
+        let mut a = book(0);
+        a.path = "/my-lib/Sub/one.epub".into();
+        let mut loose = book(1);
+        loose.path = "/my-lib/loose.epub".into();
+        let index = LibraryIndex { books: vec![a, loose], ..Default::default() };
+
+        // Two configured roots, but only one has EPUBs -> skips root chooser.
+        let roots = vec![PathBuf::from("/documents"), PathBuf::from("/my-lib")];
+        let tree = Collections::from_index(&index, &roots);
+        assert_eq!(tree.single_root(&roots), Some(Path::new("/my-lib")));
+        assert_eq!(tree.top_level_counts(&roots), (1, 1, 1));
+        assert_eq!(tree.restore_for(None, &roots), Some(PathBuf::from("/my-lib")));
+        assert_eq!(tree.restore_for(Some(Path::new("/my-lib/Sub")), &roots), Some(PathBuf::from("/my-lib/Sub")));
+        assert_eq!(tree.restore_for(Some(Path::new("/removed")), &roots), Some(PathBuf::from("/my-lib")));
+
+        // Both roots active -> multi-root top level ("Library").
+        let mut second = book(2);
+        second.path = "/documents/other.epub".into();
+        let multi_index = LibraryIndex { books: vec![index.books[0].clone(), second], ..Default::default() };
+        let multi = Collections::from_index(&multi_index, &roots);
+        assert_eq!(multi.single_root(&roots), None);
+        assert_eq!(multi.top_level_counts(&roots), (2, 2, 0));
+        assert_eq!(multi.restore_for(None, &roots), None);
+        assert_eq!(multi.restore_for(Some(Path::new("/removed")), &roots), None);
+
+        // Single configured empty root -> still skips root chooser.
+        let single_cfg = vec![PathBuf::from("/my-lib")];
+        let empty = Collections::from_index(&LibraryIndex::default(), &single_cfg);
+        assert_eq!(empty.single_root(&single_cfg), Some(Path::new("/my-lib")));
+        assert_eq!(empty.top_level_counts(&single_cfg), (1, 0, 0));
+        assert_eq!(empty.restore_for(None, &single_cfg), Some(PathBuf::from("/my-lib")));
     }
 }
 

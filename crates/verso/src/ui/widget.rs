@@ -84,6 +84,45 @@ impl<'a> DrawCx<'a> {
             self.line(&label, self.theme.caption, rect, HAlign::Right);
         }
     }
+
+    /// A battery outline filled to its level, or with a bolt while charging.
+    pub fn battery_icon(&mut self, square: Rect, battery: crate::platform::Battery, gray: u8) {
+        if square.is_empty() {
+            return;
+        }
+        let icon = if battery.charging { Icon::BatteryCharging } else { Icon::Battery };
+        self.icons.draw(self.canvas, icon, square, gray);
+        if !battery.charging {
+            // Inside the 24-unit outline (body x 2–18, y 7–17, 2-unit stroke),
+            // one unit clear of the stroke: x 4–16, y 9–15.
+            let unit = square.w as f32 / 24.0;
+            let full = 12.0 * unit;
+            let w = (full * battery.percent.min(100) as f32 / 100.0).round() as i32;
+            let x = square.x + (4.0 * unit).round() as i32;
+            let y = square.y + (9.0 * unit).round() as i32;
+            self.fill(Rect::new(x, y, w.max(1), (6.0 * unit).round() as i32), gray);
+        }
+    }
+
+    /// Dynamic battery icon (proportional fill or charging bolt) + `"82%"`,
+    /// left-aligned inside `rect` and clipped to it so it never overflows.
+    pub fn battery_indicator(&mut self, rect: Rect) {
+        let Some(battery) = self.battery else { return };
+        if rect.is_empty() {
+            return;
+        }
+        let t = self.theme;
+        let style = t.small.gray(crate::ui::theme::INK);
+        let icon = t.mm(5.4).min(rect.h).min(rect.w);
+        let square = Rect::new(rect.x, rect.y + (rect.h - icon) / 2, icon, icon);
+        self.battery_icon(square, battery, style.gray);
+        let gap = t.mm(0.8);
+        let text_x = square.right() + gap;
+        if text_x < rect.right() {
+            let label = format!("{}%", battery.percent.min(100));
+            self.line(&label, style, Rect::new(text_x, rect.y, rect.right() - text_x, rect.h), HAlign::Left);
+        }
+    }
 }
 
 /// Tracks a finger on something you can tap.
@@ -178,5 +217,42 @@ mod tests {
         assert!(p.is_down(), "still pressed while held");
         assert_eq!(p.on_gesture(&Gesture::End(IN), AREA), Some(PressEvent::LongPressEnd));
         assert!(!p.is_down());
+    }
+
+    #[test]
+    fn battery_indicator_fills_by_level_shows_bolt_and_stays_in_bounds() {
+        use crate::platform::Battery;
+        use crate::ui::theme::PAPER;
+        let t = Theme::for_dpi(300);
+        let slot = Rect::new(460, 0, 170, t.top_bar);
+        let render = |battery: Option<Battery>, rect: Rect| {
+            let mut canvas = Canvas::new(800, t.top_bar as u32);
+            canvas.fill(PAPER);
+            let (mut text, mut icons, mut hits) = (TextRenderer::new(), IconRenderer::default(), vec![]);
+            let mut cx = DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hits);
+            cx.battery = battery;
+            cx.battery_indicator(rect);
+            canvas.gray_data().to_vec()
+        };
+        let ink = |pixels: &[u8], r: Rect| {
+            (r.y..r.bottom())
+                .flat_map(|y| (r.x..r.right()).map(move |x| pixels[y as usize * 800 + x as usize]))
+                .filter(|&p| p < PAPER)
+                .count()
+        };
+        let full_screen = Rect::new(0, 0, 800, t.top_bar);
+        let none = render(None, slot);
+        assert_eq!(ink(&none, full_screen), 0);
+        let low = render(Some(Battery { percent: 15, charging: false }), slot);
+        let high = render(Some(Battery { percent: 95, charging: false }), slot);
+        let charging = render(Some(Battery { percent: 95, charging: true }), slot);
+        assert!(ink(&high, slot) > ink(&low, slot), "fill grows with charge");
+        assert_ne!(high, charging, "charging draws the bolt instead of the fill");
+        assert_eq!(ink(&high, slot), ink(&high, full_screen), "nothing overflows the battery slot");
+        assert_eq!(ink(&charging, slot), ink(&charging, full_screen), "charging never overflows either");
+        // Even a tight slot clips cleanly without drawing past its right edge.
+        let tight = Rect::new(460, 0, 90, t.top_bar);
+        let clipped = render(Some(Battery { percent: 100, charging: true }), tight);
+        assert_eq!(ink(&clipped, tight), ink(&clipped, full_screen));
     }
 }

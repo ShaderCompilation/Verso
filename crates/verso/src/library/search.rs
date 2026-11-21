@@ -88,7 +88,6 @@ pub fn benchmark(index: &LibraryIndex) -> serde_json::Value {
     let bytes: usize = cache.entries.values().flat_map(|e| &e.fields).map(String::len).sum();
     let mut matching = Vec::new();
     let mut preparation = Vec::new();
-    let states = HashMap::new();
     for _ in 0..32 {
         for query in ["", "e", "the", "ГРАФ", "Николай", "unlikely-needle-7654321"] {
             let started = Instant::now();
@@ -96,7 +95,7 @@ pub fn benchmark(index: &LibraryIndex) -> serde_json::Value {
             let selected: Vec<_> = index.books.iter().filter(|b| cache.matches(b, &query, &Scope::All)).collect();
             matching.push(started.elapsed().as_secs_f64() * 1000.0);
             let mut books: Vec<_> = selected.into_iter().cloned().collect();
-            super::sort_books(&mut books, &states, super::Sort::Recent);
+            super::sort_books(&mut books);
             std::hint::black_box(books);
             preparation.push(started.elapsed().as_secs_f64() * 1000.0);
         }

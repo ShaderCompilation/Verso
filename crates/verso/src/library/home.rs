@@ -61,14 +61,34 @@ pub struct Summary {
     #[serde(default)]
     pub complete: bool,
     pub books: Vec<Entry>,
+    /// Cached top-level Library counts so Home renders its Library card without
+    /// loading `library.json` or building `Collections` on startup.
+    #[serde(default)]
+    pub library_root_count: usize,
+    #[serde(default)]
+    pub library_folders: usize,
+    #[serde(default)]
+    pub library_books: usize,
 }
 impl Default for Summary {
     fn default() -> Self {
-        Self { version: Self::VERSION, complete: false, books: Vec::new() }
+        Self {
+            version: Self::VERSION,
+            complete: false,
+            books: Vec::new(),
+            library_root_count: 0,
+            library_folders: 0,
+            library_books: 0,
+        }
     }
 }
 impl Summary {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
+    pub fn set_library_counts(&mut self, (roots, folders, books): (usize, usize, usize)) {
+        self.library_root_count = roots;
+        self.library_folders = folders;
+        self.library_books = books;
+    }
     pub fn valid(&self) -> bool {
         self.version == Self::VERSION
             && self.books.len() <= MAX_BOOKS

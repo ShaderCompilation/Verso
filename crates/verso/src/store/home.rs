@@ -52,6 +52,7 @@ impl Store {
     pub fn rebuild_home_summary_until(
         &self,
         index: &LibraryIndex,
+        counts: (usize, usize, usize),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Summary, bool)> {
         let started = std::time::Instant::now();
@@ -71,6 +72,7 @@ impl Store {
             anyhow::bail!("Home rebuild cancelled");
         }
         summary.complete = true;
+        summary.set_library_counts(counts);
         if let Err(error) = self.persist_home(&summary) {
             self.invalidate_home_locked();
             return Err(error);
@@ -94,7 +96,9 @@ impl Store {
     }
     #[cfg(test)]
     pub fn rebuild_home_summary(&self, index: &LibraryIndex) -> Result<Summary> {
-        self.rebuild_home_summary_until(index, &|| false).map(|(summary, _)| summary)
+        let roots = self.library_folders();
+        let counts = crate::library::collections::Collections::from_index(index, &roots).top_level_counts(&roots);
+        self.rebuild_home_summary_until(index, counts, &|| false).map(|(summary, _)| summary)
     }
 
     /// Confirmed cover/metadata changes need only update the bounded selection.
@@ -180,8 +184,10 @@ impl Store {
         summary.books.retain(|entry| entry.book.id != id);
         summary.books.push(entry);
         let complete = summary.complete;
+        let counts = (summary.library_root_count, summary.library_folders, summary.library_books);
         let mut summary = Summary::select(summary.books);
         summary.complete = complete;
+        summary.set_library_counts(counts);
         let result = self.persist_home(&summary);
         if result.is_err() {
             let _ = std::fs::remove_file(self.root.join("home.json"));
@@ -349,9 +355,34 @@ mod tests {
         store.rebuild_home_summary(&index)?;
         assert!(store.home_summary().is_some_and(|s| s.complete));
         assert!(store.opened().is_some_and(|o| o.complete));
-        assert!(store.rebuild_home_summary_until(&index, &|| true).is_err());
+        assert!(store.rebuild_home_summary_until(&index, (0, 0, 0), &|| true).is_err());
         assert!(store.home_summary().is_none(), "cancelled rebuild removes stale home.json");
         assert!(store.opened().is_none(), "cancelled rebuild removes stale opened.json");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn library_counts_are_cached_on_rebuild_and_preserved_across_book_saves() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-home-counts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::at(root.clone());
+        store.save_library_folders(vec!["/books".into()])?;
+        let mut b0 = book(0);
+        b0.path = "/books/loose.epub".into();
+        let mut b1 = book(1);
+        b1.path = "/books/Tolkien/hobbit.epub".into();
+        let index = LibraryIndex { books: vec![b0.clone(), b1], ..Default::default() };
+        store.rebuild_home_summary(&index)?;
+        let summary = store.home_summary().unwrap();
+        assert_eq!((summary.library_root_count, summary.library_folders, summary.library_books), (1, 1, 1));
+        store.select_home_book(&b0);
+        store.save_book(
+            &b0.id,
+            &BookState { position: Position("p".into()), progress: 2000, last_opened: 12, ..Default::default() },
+        )?;
+        let after = store.home_summary().unwrap();
+        assert_eq!((after.library_root_count, after.library_folders, after.library_books), (1, 1, 1));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

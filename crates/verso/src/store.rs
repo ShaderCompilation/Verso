@@ -4,8 +4,8 @@ mod home;
 pub mod navigation;
 pub mod position;
 use crate::document::{Position, TextShaping, Typography};
+use crate::library::LibraryIndex;
 use crate::library::collections::{Navigation, distinct_roots, normalize};
-use crate::library::{LibraryIndex, Sort};
 use crate::page_layout::PageLayout;
 pub use crate::platform::Orientation;
 pub use crate::reader::TapZones;
@@ -32,7 +32,6 @@ pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library_folder: Option<PathBuf>, // Legacy single-folder setting.
     pub library_folders: Option<Vec<PathBuf>>,
-    pub library_sort: Sort,
     /// Page turns between full flashes that clear ghosting; 0 never flashes
     /// periodically (chapter starts and pictures still do).
     pub page_flash: u32,
@@ -60,7 +59,6 @@ impl Default for Settings {
             sleep_screen: SleepScreen::Cover,
             library_folder: None,
             library_folders: None,
-            library_sort: Sort::Recent,
             page_flash: DEFAULT_PAGE_FLASH,
             tap_zones: TapZones::Standard,
             orientation: Orientation::Portrait,

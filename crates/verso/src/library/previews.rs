@@ -305,9 +305,9 @@ mod tests {
         let opened = Opened::select([("3".into(), 20), ("5".into(), 30), ("1".into(), 10)]);
         let ranks = opened.ranks();
         assert_eq!(ids(&index, &pick(&index, &tree, folder, &ranks)), ["3", "1", "4", "2"]);
-        // Title order is the Title sort's, case-insensitive.
+        // Title order is case-insensitive.
         let mut direct: Vec<_> = index.books[1..=4].iter().filter(|b| b.id != "3").cloned().collect();
-        sort_books(&mut direct, &HashMap::new(), crate::library::Sort::Title);
+        sort_books(&mut direct);
         assert_eq!(direct.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["4", "2", "1"]);
         // Only books inside the folder count.
         let sub = pick(&index, &tree, Path::new("/b/F/Sub"), &ranks);

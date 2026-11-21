@@ -1,4 +1,4 @@
-//! Selection belongs to one browsing list; only the page and sort may change.
+//! Selection belongs to one browsing list; only the page may change.
 use super::*;
 use crate::ui::theme::PAPER;
 

@@ -92,7 +92,7 @@ impl Books {
         let annotated = annotated_book_ids(&self.store);
 
         let mut books: Vec<&Book> = index.books.iter().filter(|b| b.available).collect();
-        books.sort_by(|a, b| library::compare_books(a, 0, b, 0, library::Sort::Title));
+        books.sort_by(|a, b| library::compare_books(a, b));
 
         let mut out = Vec::with_capacity(books.len());
         for book in books {
@@ -405,7 +405,7 @@ impl Books {
     pub fn highlights_zip(&self) -> Response {
         let index = self.library.current();
         let mut books: Vec<&Book> = index.books.iter().filter(|b| b.available).collect();
-        books.sort_by(|a, b| library::compare_books(a, 0, b, 0, library::Sort::Title));
+        books.sort_by(|a, b| library::compare_books(a, b));
 
         let exported = annotations::created_now();
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));

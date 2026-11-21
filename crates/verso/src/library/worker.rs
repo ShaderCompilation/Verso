@@ -1,10 +1,10 @@
 //! One coalescing library worker. Progress/errors and index content are published
 //! separately: status is small and always delivered, while an index is cloned,
 //! published and saved only after its content actually changed.
-use super::collections::{self, Collections, Navigation, Tab};
+use super::collections::{self, Collections, Navigation};
 use super::home::Summary;
 use super::previews;
-use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Sort, Stamp, assign_ids, covers, epub};
+use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
 use crate::store::{BookState, FolderPreview, Store, book_id};
 use anyhow::Result;
@@ -54,14 +54,10 @@ pub(crate) const LISTED_STATES: usize = 32;
 pub struct WarmRequest {
     pub seq: u64,
     pub navigation: Navigation,
-    pub sort: Sort,
     pub per_page: usize,
     pub folder_preview: FolderPreview,
     /// True when the screen has not yet loaded all saved reading states.
     pub need_states: bool,
-    /// Known `last_opened` times already cached on the UI thread, used when
-    /// sorting by `Sort::Recent` without re-reading states from disk.
-    pub known_opened: HashMap<String, u64>,
     /// Already-loaded `opened.json` preview ranks, if any.
     pub known_ranks: Option<Arc<HashMap<String, u32>>>,
 }
@@ -84,7 +80,6 @@ pub enum WarmTile {
 /// Result of preparing the remembered browsing page off the UI thread.
 pub struct WarmResult {
     pub seq: u64,
-    pub tab: Tab,
     pub page: usize,
     pub total_items: usize,
     pub tiles: Vec<WarmTile>,
@@ -297,6 +292,9 @@ struct Background {
     /// The last hierarchy built, keyed by a hash of what it depends on, so
     /// cover and metadata changes reuse it.
     collections: Option<(u64, Arc<Collections>)>,
+    /// Roots changed via Settings: refresh Home's cached library counts even if
+    /// the book index itself is unchanged.
+    roots_changed: bool,
 }
 impl Background {
     fn run(mut self) {
@@ -328,8 +326,11 @@ impl Background {
                     break;
                 }
                 let changes = std::mem::take(&mut state.changes);
-                if let Some(roots) = state.roots.take() {
+                if let Some(roots) = state.roots.take()
+                    && roots != self.roots
+                {
                     self.roots = roots;
+                    self.roots_changed = true;
                 }
                 let drawn = std::mem::take(&mut state.drawn_sizes);
                 drop(state);
@@ -428,14 +429,16 @@ impl Background {
         };
         log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
         errors.extend(scan.errors);
-        if checkpointed || self.index != scan.index {
-            let stale = stale_cover_keys(&self.index, &scan.index);
-            self.index = scan.index;
-            for key in stale {
-                covers::remove(&self.store, &key, &self.tile_sizes);
+        if checkpointed || self.index != scan.index || std::mem::take(&mut self.roots_changed) {
+            if checkpointed || self.index != scan.index {
+                let stale = stale_cover_keys(&self.index, &scan.index);
+                self.index = scan.index;
+                for key in stale {
+                    covers::remove(&self.store, &key, &self.tile_sizes);
+                }
+                self.unsaved = true;
+                self.unpublished = true;
             }
-            self.unsaved = true;
-            self.unpublished = true;
             self.home_stale = false;
             self.rebuild_home();
         }
@@ -679,8 +682,9 @@ impl Background {
             self.set_status(self.status.scanning, self.status.working, &all);
         }
         // This also runs during shutdown; stop between records then.
+        let counts = hierarchy(&mut self.collections, &self.index, &self.roots).top_level_counts(&self.roots);
         let channel = &self.channel;
-        match self.store.rebuild_home_summary_until(&self.index, &|| channel.stopped()) {
+        match self.store.rebuild_home_summary_until(&self.index, counts, &|| channel.stopped()) {
             Ok(rebuilt) => self.channel.rebuilt(rebuilt, self.revision),
             Err(_) if self.channel.stopped() => {}
             Err(e) => log::warn!("rebuilding Home after file edits: {e:#}"),
@@ -734,15 +738,16 @@ impl Background {
         self.channel.status(self.status.clone());
     }
 
-    fn rebuild_home(&self) {
+    fn rebuild_home(&mut self) {
+        let counts = hierarchy(&mut self.collections, &self.index, &self.roots).top_level_counts(&self.roots);
         let channel = &self.channel;
-        match self.store.rebuild_home_summary_until(&self.index, &|| channel.stopped()) {
+        match self.store.rebuild_home_summary_until(&self.index, counts, &|| channel.stopped()) {
             Ok(rebuilt) => channel.rebuilt(rebuilt, self.revision),
             Err(_) if channel.stopped() => {}
             Err(error) => log::warn!("rebuilding Home summary: {error:#}"),
         }
     }
-    fn refresh_home_metadata(&self) {
+    fn refresh_home_metadata(&mut self) {
         match self.store.refresh_home_metadata(&self.index) {
             Ok(Some(summary)) => self.channel.home(summary, self.revision),
             Ok(None) => self.rebuild_home(),
@@ -764,15 +769,10 @@ impl Background {
         }
         let collections = hierarchy(&mut self.collections, &self.index, &self.roots);
         let mut navigation = request.navigation;
-        navigation.folder = collections.restore(navigation.folder.as_deref());
-        let in_collections = navigation.tab == Tab::Collections;
-        let folders = if in_collections { collections.children(navigation.folder.as_deref()) } else { Vec::new() };
+        navigation.folder = collections.restore_for(navigation.folder.as_deref(), &self.roots);
+        let folders = collections.children(navigation.folder.as_deref());
         let folder_node = navigation.folder.as_ref().and_then(|p| collections.folders.get(p));
-        let book_indices: Vec<usize> = if in_collections {
-            folder_node.map_or_else(Vec::new, |f| f.indices.clone())
-        } else {
-            self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect()
-        };
+        let book_indices: Vec<usize> = folder_node.map_or_else(Vec::new, |f| f.indices.clone());
 
         let (mut states, mut states_complete, mut reads, mut listed) = (None, false, 0, false);
         if request.need_states && !book_indices.is_empty() {
@@ -838,21 +838,7 @@ impl Background {
         let b_start = start.saturating_sub(folders.len());
         let b_end = end.saturating_sub(folders.len());
         if b_start < b_end {
-            let selected = super::select_page_indices(
-                &self.index.books,
-                book_indices,
-                |id| {
-                    request
-                        .known_opened
-                        .get(id)
-                        .copied()
-                        .or_else(|| states.as_ref().and_then(|s| s.get(id)).map(|s| s.last_opened))
-                        .unwrap_or(0)
-                },
-                request.sort,
-                b_start,
-                b_end,
-            );
+            let selected = super::select_page_indices(&self.index.books, book_indices, b_start, b_end);
             for i in selected {
                 let book = &self.index.books[i];
                 tiles.push(WarmTile::Book { id: book.id.clone(), cover: book.cover.clone() });
@@ -864,7 +850,6 @@ impl Background {
         }
         self.channel.warm(WarmResult {
             seq: request.seq,
-            tab: navigation.tab,
             page,
             total_items,
             tiles,
@@ -1021,6 +1006,7 @@ impl Worker {
                     revision: 0,
                     published: false,
                     collections: None,
+                    roots_changed: false,
                 }
                 .run()
             })

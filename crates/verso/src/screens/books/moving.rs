@@ -110,23 +110,17 @@ impl Books {
             cx.toast("The selection has changed", None);
             return;
         }
-        // Snapshot paths before switching away from All books or search.
+        // Snapshot paths before switching away from search.
         self.start_selection(targets[0].clone(), cx);
         let Some(selection) = &mut self.selection else { return };
         selection.items = targets.into_iter().collect();
         selection.carrying = true;
         self.carry = Some(Carry { items, paste: None });
-        // The sort control still shows the tab being left: keep it under that
-        // tab, then show the Collections sort. Home has no sort of its own.
-        if !self.is_home() {
-            self.navigation.set_sort(self.selected_sort());
-        }
         self.search = None;
         self.search_action.icon = Icon::Search;
         self.home_active = false;
-        self.top.title = "Library".into();
-        self.navigation.tab = Tab::Collections;
-        self.select_saved_sort();
+        self.prepare_browsing();
+        self.navigation.folder = self.collections.restore_for(self.navigation.folder.as_deref(), &self.roots);
         self.pager.page = self.navigation.page();
         self.refresh(cx.theme);
         self.save_navigation();
@@ -284,7 +278,6 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
         books.home_active = false;
-        books.navigation.tab = Tab::Collections;
         books.navigation.folder = Some(library.join("Source"));
         books.refresh(&t);
         Ok((books, store, root, t, screen))
@@ -304,9 +297,6 @@ mod tests {
             tap(&mut b, book_cell, cx);
             assert!(b.reader.is_none());
             assert_eq!(b.selection.as_ref().unwrap().items, frozen);
-            let tab = Point::new(b.tabs.rect().right() - t.target, b.tabs.rect().center().y);
-            tap(&mut b, tab, cx);
-            assert_eq!(b.navigation.tab, Tab::Collections);
             let back = b.back.rect().center();
             tap(&mut b, back, cx);
             assert_eq!(b.navigation.folder, Some(library.clone()));
@@ -317,7 +307,8 @@ mod tests {
             b.on_text_input(&TextInput::Submit, cx);
             assert!(library.join("New destination").is_dir());
             assert!(b.carrying());
-            b.navigate(None, cx);
+            // Multi-root top level (`folder == None`) requires choosing a destination folder.
+            b.navigation.folder = None;
             assert_eq!(b.paste_reason(), Some("Choose a destination folder"));
             b.navigate(Some(library.join("New destination")), cx);
             assert!(b.paste_reason().is_none());
@@ -332,29 +323,13 @@ mod tests {
             b.start_paste(cx);
             assert!(library.join("Source/Tree").is_dir());
             b.end_selection(cx);
-            // Each tab remembers its own sort: moving from All books must not
-            // overwrite the Collections one.
-            b.navigation.set_sort(Sort::Recent);
-            b.navigation.tab = Tab::AllBooks;
-            b.navigation.set_sort(Sort::Recent);
-            b.select_saved_sort();
-            b.sort.selected = 1;
-            b.refresh(&t);
-            b.start_move(vec![Target::Book("0".into())], cx);
-            assert!(b.carrying() && b.navigation.tab == Tab::Collections);
-            assert_eq!(b.navigation.sort(b.default_sort), Sort::Recent, "Collections keeps its sort");
-            assert_eq!(b.selected_sort(), Sort::Recent);
-            b.navigation.tab = Tab::AllBooks;
-            assert_eq!(b.navigation.sort(b.default_sort), Sort::Title, "All books keeps the sort it had");
-            b.navigation.tab = Tab::Collections;
-            b.end_selection(cx);
             b.toggle_search(cx);
             b.on_text_input(&TextInput::Submit, cx);
             assert_eq!(b.search_action.icon, Icon::Close);
             b.start_move(vec![Target::Book("0".into())], cx);
-            assert!(b.search.is_none() && b.carrying() && b.navigation.tab == Tab::Collections);
+            assert!(b.search.is_none() && b.carrying());
             assert_eq!(b.search_action.icon, Icon::Search);
-            assert_eq!(b.top.title, "Library");
+            assert!(!b.is_home());
         });
         drop(b);
         std::fs::remove_dir_all(root)?;
