@@ -408,6 +408,212 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "    if ( mimeType != U\"application/epub+zip\" )\n        return false;",
         "    if ( mimeType.empty() )\n        return !m_arc->OpenStream(U\"META-INF/container.xml\", LVOM_READ).isNull();\n    if ( mimeType != U\"application/epub+zip\" )\n        return false;",
     ),
+    // Large images inside an SVG used to cost two full-size copies: libpng
+    // decoded the whole image into one buffer, and smooth scaling (always on
+    // inside an SVG) kept another to scale from. The 2481x3509 PNG cover of
+    // *Go with Domain* took 70 MB that way (docs/svg-covers.md). A PNG without
+    // interlacing is now decoded one line at a time.
+    (
+        "crengine/src/lvimg.cpp",
+        "        png_set_interlace_handling(png_ptr);",
+        "        const int verso_png_passes = png_set_interlace_handling(png_ptr);",
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "        size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);\n        size_t image_size = height * rowbytes;",
+        r#"        if ( verso_png_passes == 1 ) {
+            // Verso: one line at a time (see build.rs).
+            png_bytep row = (png_bytep) malloc(png_get_rowbytes(png_ptr, info_ptr));
+            if ( !row )
+                lvpng_error_func(png_ptr, "cannot allocate png row");
+            for (size_t y = 0; y < height; y++) {
+                png_read_row(png_ptr, row, NULL);
+                callback->OnLineDecoded( this, y, reinterpret_cast<lUInt32 *>(row) );
+            }
+            png_read_end(png_ptr, info_ptr);
+            callback->OnEndDecode(this, false);
+            free(row);
+        } else {
+        size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
+        size_t image_size = height * rowbytes;"#,
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "        callback->OnEndDecode(this, false);\n        free(storage);\n    }",
+        "        callback->OnEndDecode(this, false);\n        free(storage);\n        }\n    }",
+    ),
+    // Smooth scaling now keeps the image shrunk by the largest whole factor
+    // that leaves it at least as large as the target, averaging each block of
+    // pixels as the lines come in, and scales from that. The copy is then less
+    // than 4 times the target's area, however large the image is.
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "    lUInt8 * __restrict decoded;\n    bool isNinePatch;",
+        r#"    lUInt8 * __restrict decoded;
+    // Verso: the shrink factor, the size of the shrunk copy in decoded, the
+    // sums of the source lines not yet written to it, and whether the lines
+    // have come in order so far (an interlaced GIF sends them out of order).
+    int shrink, red_dx, red_dy, next_y;
+    bool lines_in_order;
+    lUInt32 * __restrict acc;
+    // Verso: writes the average of the source lines summed in acc (rows of
+    // them) as line ry of the shrunk copy, and clears acc.
+    // Divides by multiplying with a 32.32 fixed-point reciprocal: the Kindle
+    // build has no hardware divide, and a division per channel made the
+    // 2481x3509 cover draw 150 ms slower.
+    void flushShrunkLine( int ry, int rows ) {
+        lUInt8 * __restrict out = decoded + ry * (red_dx * 4);
+        const int last_cols = src_dx - (red_dx - 1) * shrink;
+        const lUInt64 inv = ((1ULL << 32) + rows * shrink / 2) / (lUInt64)(rows * shrink);
+        const lUInt64 inv_last = ((1ULL << 32) + rows * last_cols / 2) / (lUInt64)(rows * last_cols);
+        for (int x = 0; x < red_dx; x++) {
+            const lUInt64 r = x == red_dx - 1 ? inv_last : inv;
+            for (int c = 0; c < 4; c++)
+                out[x * 4 + c] = (lUInt8)((acc[x * 4 + c] * r + (1ULL << 31)) >> 32);
+        }
+        memset(acc, 0, red_dx * 4 * sizeof(lUInt32));
+    }
+    bool isNinePatch;"#,
+    ),
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "        if (smoothscale) {\n            // Byte-sized buffer, we're 32bpp, so, 4 bytes per pixel.\n            decoded = new lUInt8[src_dy * (src_dx * 4)];\n        }",
+        r#"        // Verso: shrunk by a whole factor while decoding (see build.rs).
+        shrink = 1;
+        next_y = 0;
+        lines_in_order = true;
+        acc = NULL;
+        if (smoothscale) {
+            if (!isNinePatch) {
+                shrink = src_dx / dst_dx < src_dy / dst_dy ? src_dx / dst_dx : src_dy / dst_dy;
+                if (shrink < 2)
+                    shrink = 1;
+            }
+            red_dx = (src_dx + shrink - 1) / shrink;
+            red_dy = (src_dy + shrink - 1) / shrink;
+            // Byte-sized buffer, we're 32bpp, so, 4 bytes per pixel.
+            decoded = new lUInt8[red_dy * (red_dx * 4)];
+            if (shrink > 1)
+                acc = new lUInt32[red_dx * 4]();
+        }"#,
+    ),
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "        if (decoded)\n            delete[] decoded;",
+        "        if (decoded)\n            delete[] decoded;\n        if (acc)\n            delete[] acc;",
+    ),
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "            memcpy(decoded + (y * (src_dx * 4)), data, (src_dx * 4));\n            return true;",
+        r#"            if (shrink == 1) {
+                memcpy(decoded + (y * (src_dx * 4)), data, (src_dx * 4));
+                return true;
+            }
+            if (lines_in_order && y != next_y) {
+                // Out of order: write what is summed so far, then use only
+                // every shrink-th line.
+                if (next_y % shrink)
+                    flushShrunkLine((next_y - 1) / shrink, next_y % shrink);
+                lines_in_order = false;
+            }
+            if (!lines_in_order && y % shrink)
+                return true;
+            const lUInt8 * __restrict p = (const lUInt8 *)data;
+            lUInt32 * __restrict a = acc;
+            for (int x = 0; x < src_dx; a += 4) {
+                const int end = x + shrink < src_dx ? x + shrink : src_dx;
+                for (; x < end; x++, p += 4) {
+                    a[0] += p[0];
+                    a[1] += p[1];
+                    a[2] += p[2];
+                    a[3] += p[3];
+                }
+            }
+            if (!lines_in_order) {
+                flushShrunkLine(y / shrink, 1);
+            } else {
+                next_y = y + 1;
+                if (next_y % shrink == 0 || next_y == src_dy)
+                    flushShrunkLine(y / shrink, y % shrink + 1);
+            }
+            return true;"#,
+    ),
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "sdata = CRe::qSmoothScaleImage(decoded, src_dx, src_dy, false, dst_dx, dst_dy);",
+        "sdata = CRe::qSmoothScaleImage(decoded, red_dx, red_dy, false, dst_dx, dst_dy);",
+    ),
+    // When its caller gives no target size, an SVG is drawn at the size it
+    // declares, which a book can set to anything (10000x10000 would be 400 MB).
+    // Draw it at most at the screen's pixel count instead, and stretch the
+    // lines back to the declared size, which the caller expects.
+    (
+        "crengine/include/lvimg.h",
+        "LVImageSourceRef LVCreateDummyImageSource",
+        "/// Verso: the most pixels an SVG with no target size is drawn at: the\n/// screen's pixel count, set by verso_cre_new() and verso_cre_set_size().\nextern int verso_max_image_pixels;\n\nLVImageSourceRef LVCreateDummyImageSource",
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "LVImageDecoderCallback::~LVImageDecoderCallback()\n{\n}",
+        "LVImageDecoderCallback::~LVImageDecoderCallback()\n{\n}\n\nint verso_max_image_pixels = 1272 * 1696;",
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "    int render_w = have_target_size ? target_w : _width;\n    int render_h = have_target_size ? target_h : _height;",
+        r#"    int render_w = have_target_size ? target_w : _width;
+    int render_h = have_target_size ? target_h : _height;
+    // Verso: no larger than the screen without a target size (see build.rs).
+    const bool capped = !have_target_size && verso_max_image_pixels > 0
+                        && (lInt64)render_w * render_h > verso_max_image_pixels;
+    if ( capped ) {
+        while ( (lInt64)render_w * render_h > verso_max_image_pixels ) {
+            render_w = (render_w + 1) / 2;
+            render_h = (render_h + 1) / 2;
+        }
+    }"#,
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "    lUInt32 * __restrict src = (lUInt32 *)bitmap.data();\n    lUInt32 * __restrict row = new lUInt32 [ render_w ];\n    for (int y=0; y<render_h; y++) {\n        size_t px_count = render_w;\n        lUInt32 * __restrict dst = row;\n        while (px_count--) {",
+        r#"    // Verso: a capped SVG is converted at the size it was drawn at, and each
+    // line is repeated across the declared size, which the callback expects.
+    const int out_w = capped ? _width : render_w;
+    const int out_h = capped ? _height : render_h;
+    lUInt32 * conv = new lUInt32 [ render_w ];
+    lUInt32 * row = capped ? new lUInt32 [ out_w ] : conv;
+    int last_sy = -1;
+    for (int y=0; y<out_h; y++) {
+        const int sy = capped ? (int)((lInt64)y * render_h / out_h) : y;
+        if ( sy != last_sy ) {
+        last_sy = sy;
+        lUInt32 * __restrict src = (lUInt32 *)bitmap.data() + (size_t)sy * render_w;
+        size_t px_count = render_w;
+        lUInt32 * __restrict dst = conv;
+        while (px_count--) {"#,
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "            src++;\n        }\n        callback->OnLineDecoded( this, y, row );\n    }\n    delete[] row;",
+        r#"            src++;
+        }
+        }
+        if ( capped ) {
+            int sx = 0, ex = 0;
+            for (int x=0; x<out_w; x++) {
+                row[x] = conv[sx];
+                ex += render_w;
+                while ( ex >= out_w ) {
+                    ex -= out_w;
+                    sx++;
+                }
+            }
+        }
+        callback->OnLineDecoded( this, y, row );
+    }
+    delete[] conv;
+    if ( capped )
+        delete[] row;"#,
+    ),
 ];
 
 /// crengine's own source list (CRE_SRCS in its CMakeLists.txt).

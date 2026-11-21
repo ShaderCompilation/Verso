@@ -785,6 +785,7 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         props->setInt(PROP_MIN_FILE_SIZE_TO_CACHE, 0); // cache every book (see crsetup.h)
         v->propsApply(props);
         v->Resize(width, height);
+        verso_max_image_pixels = width * height; // caps SVGs without a target size
         VersoCreDoc *doc = new VersoCreDoc();
         doc->view = v;
         return doc;
@@ -868,6 +869,7 @@ void verso_cre_set_line_spacing(VersoCreDoc *doc, int percent) {
 void verso_cre_set_size(VersoCreDoc *doc, int width, int height) {
     try {
         doc->view->Resize(width, height);
+        verso_max_image_pixels = width * height;
     } catch (...) {
     }
 }
