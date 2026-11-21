@@ -675,7 +675,7 @@ mod tests {
         chunk.extend(vec![0u8; 70_000]);
         upload.write_all(&chunk).unwrap();
 
-        let part = books_dir.join("Stalled.epub.part");
+        let part = books_dir.join(".verso-upload.part");
         let started = Instant::now();
         while !part.exists() || !screen.session.receiving() {
             assert!(started.elapsed() < Duration::from_secs(5), "upload didn't enter receiving state");

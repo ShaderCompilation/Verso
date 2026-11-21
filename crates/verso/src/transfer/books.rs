@@ -180,7 +180,10 @@ impl Books {
         let display_stem = Path::new(&name).file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let guard = UploadGuard::start(&*self.activity, display_stem);
 
-        let mut part = match create_part(&dest_dir, &name) {
+        // A hidden `.verso-upload*.part` name, so a part file left by a crash
+        // or power loss is recognized and swept like the Files tab's.
+        super::files::sweep_stale_parts(&dest_dir);
+        let mut part = match create_part(&dest_dir, super::files::UPLOAD_PART) {
             Ok(part) => part,
             Err(e) => return write_error("Couldn't start saving the book", e),
         };
@@ -1046,7 +1049,7 @@ mod tests {
         let mut partial = Vec::from(*ZIP_HEADER);
         partial.extend(vec![0u8; 100_000]);
         stream.write_all(&partial).unwrap();
-        let part = env.library_dir.join("Halfway.epub.part");
+        let part = env.library_dir.join(".verso-upload.part");
         let started = Instant::now();
         while !part.exists() {
             assert!(started.elapsed() < Duration::from_secs(5), "part file never created");

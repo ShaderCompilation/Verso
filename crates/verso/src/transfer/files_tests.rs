@@ -799,6 +799,19 @@ fn upload_checks_answer_before_any_body_is_sent() {
 }
 
 #[test]
+fn sweeping_a_folder_removes_only_stale_parts() {
+    let env = Env::new();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let stale = env.root.join("documents/.verso-upload.part");
+    File::create(&stale).unwrap().set_modified(old).unwrap();
+    let fresh = env.root.join("documents/.verso-upload.2.part");
+    File::create(&fresh).unwrap();
+    super::sweep_stale_parts(&env.root.join("documents"));
+    assert!(!stale.exists());
+    assert!(fresh.exists());
+}
+
+#[test]
 fn listings_remove_parts_left_by_unfinished_uploads() {
     let env = Env::new();
     let old = std::time::SystemTime::now() - Duration::from_secs(3600);

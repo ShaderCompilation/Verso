@@ -41,7 +41,7 @@ const KOREADER: [&[&str]; 2] = [&["koreader"], &["extensions", "koreader"]];
 
 /// The part file uploads write to: `.verso-upload.part`, or
 /// `.verso-upload.2.part` and so on while several go to one folder.
-const UPLOAD_PART: &str = ".verso-upload";
+pub(super) const UPLOAD_PART: &str = ".verso-upload";
 
 /// A part file older than this was left by an upload that never finished
 /// (a crash or power loss). A running upload writes at least every `STALL`.
@@ -982,6 +982,22 @@ impl Files {
 struct Affects {
     library: bool,
     dictionaries: bool,
+}
+
+/// Removes the stale part files (see `STALE_PART`) a crashed upload left in `dir`.
+pub(super) fn sweep_stale_parts(dir: &Path) {
+    let Ok(read) = fs::read_dir(dir) else { return };
+    for entry in read.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        if !is_upload_part(&name) {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            remove_stale_part(&entry.path(), &meta);
+        }
+    }
 }
 
 /// An upload's part file: `.verso-upload.part` or `.verso-upload.<n>.part`.

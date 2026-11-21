@@ -505,16 +505,28 @@ impl Dictionaries {
 
         let mut installed = Vec::with_capacity(ready.len());
         let mut installed_names = Vec::with_capacity(ready.len());
+        let mut installed_dirs: Vec<PathBuf> = Vec::with_capacity(ready.len());
         let mut guard = guard;
+        // All or nothing: a failure removes the dictionaries already installed
+        // from this upload, so a retry doesn't duplicate them.
+        let roll_back = |dirs: &[PathBuf]| {
+            for dir in dirs {
+                let _ = fs::remove_dir_all(dir);
+            }
+        };
 
         for item in ready {
             let safe_name = safe_folder_name(&item.info.name);
             let (dest_dir, folder_name) = match claim_unique_folder(&dict_root, &safe_name) {
                 Ok(pair) => pair,
-                Err(e) => return write_error("Couldn't create dictionary folder", e),
+                Err(e) => {
+                    roll_back(&installed_dirs);
+                    return write_error("Couldn't create dictionary folder", e);
+                }
             };
+            installed_dirs.push(dest_dir.clone());
             if let Err(e) = move_dictionary_files(&item.base, &dest_dir, &dir_counts) {
-                let _ = fs::remove_dir_all(&dest_dir);
+                roll_back(&installed_dirs);
                 return write_error("Couldn't install dictionary files", e);
             }
             installed_names.push(item.info.name.clone());
@@ -694,14 +706,34 @@ fn validate_loose_name(raw: &str) -> Result<String, &'static str> {
     {
         return Err("Invalid dictionary file name.");
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if !LOOSE_SUFFIXES.iter().any(|ext| lower.ends_with(ext)) {
-        return Err("Only StarDict files (.ifo, .idx, .dict, .syn and their .gz/.dz forms) can be uploaded here.");
+    if trimmed.contains(WINDOWS_UNSAFE) {
+        return Err("File names can't contain : * ? \" < > |, which a Windows computer can't copy.");
     }
+    let lower = trimmed.to_ascii_lowercase();
+    let Some(ext) = LOOSE_SUFFIXES.iter().find(|ext| lower.ends_with(**ext)) else {
+        return Err("Only StarDict files (.ifo, .idx, .dict, .syn and their .gz/.dz forms) can be uploaded here.");
+    };
     if trimmed.len() > 235 {
         return Err("That file name is too long.");
     }
-    Ok(trimmed.to_owned())
+    // The installer finds files by their lowercase suffix.
+    let stem = &trimmed[..trimmed.len() - ext.len()];
+    Ok(format!("{stem}{ext}"))
+}
+
+/// Characters a Windows computer can't show or copy in a file name (the
+/// rest of `library::files::check_name`'s set; `/` and `\\` are rejected earlier).
+const WINDOWS_UNSAFE: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+
+/// Lowercases a StarDict file's suffix (`X.IFO` → `X.ifo`), which the
+/// installer matches case-sensitively. Other files are left alone.
+fn normalize_suffix(path: PathBuf) -> PathBuf {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return path };
+    let lower = name.to_ascii_lowercase();
+    match LOOSE_SUFFIXES.iter().find(|ext| lower.ends_with(**ext)) {
+        Some(ext) => path.with_file_name(format!("{}{ext}", &name[..name.len() - ext.len()])),
+        None => path,
+    }
 }
 
 /// Validates an archive entry path against absolute paths, `..`, backslashes
@@ -724,7 +756,18 @@ pub(crate) fn validate_archive_path(raw: &str) -> Result<PathBuf, Response> {
     for component in Path::new(raw).components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(part) => clean.push(part),
+            Component::Normal(part) => {
+                let text = part.to_string_lossy();
+                if text.contains(WINDOWS_UNSAFE) {
+                    return Err(err(
+                        400,
+                        &format!(
+                            "Archive file name {text:?} has a character a Windows computer can't copy (: * ? \" < > |)."
+                        ),
+                    ));
+                }
+                clean.push(part)
+            }
             Component::ParentDir => {
                 return Err(err(400, "Archive contains a path escape ('..'), which isn't allowed."));
             }
@@ -733,7 +776,7 @@ pub(crate) fn validate_archive_path(raw: &str) -> Result<PathBuf, Response> {
             }
         }
     }
-    Ok(clean)
+    Ok(normalize_suffix(clean))
 }
 
 fn is_macos_leftover(rel: &Path) -> bool {

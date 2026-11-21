@@ -576,6 +576,19 @@ fn delete_closes_files_removes_cache_and_only_touches_verso_folder() {
 }
 
 #[test]
+fn loose_names_get_lowercase_suffixes_and_refuse_windows_unsafe_characters() {
+    assert_eq!(validate_loose_name("Oz.IFO").as_deref(), Ok("Oz.ifo"));
+    assert_eq!(validate_loose_name("Oz.Dict.DZ").as_deref(), Ok("Oz.dict.dz"));
+    assert_eq!(validate_loose_name("Oz.idx").as_deref(), Ok("Oz.idx"));
+    for bad in ["a:b.ifo", "a*.ifo", "a?.ifo", "a\"b.ifo", "a<b>.ifo", "a|b.ifo"] {
+        assert!(validate_loose_name(bad).is_err(), "{bad}");
+    }
+    assert_eq!(validate_archive_path("d/Oz.IFO.GZ").ok(), Some(PathBuf::from("d/Oz.ifo.gz")));
+    assert_eq!(validate_archive_path("d/res/Pic.PNG").ok(), Some(PathBuf::from("d/res/Pic.PNG")));
+    assert!(validate_archive_path("d/res/a|b.png").is_err());
+}
+
+#[test]
 fn archive_paths_are_cleaned_or_refused() {
     assert_eq!(validate_archive_path("./a/./b.ifo").ok(), Some(PathBuf::from("a/b.ifo")));
     for bad in ["../a", "a/../../b", "/etc/passwd", "C:/x", "a\\..\\b", "a\0b"] {
