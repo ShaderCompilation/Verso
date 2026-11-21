@@ -749,6 +749,8 @@ impl View {
 pub(super) struct ExtendBar {
     buttons: Vec<Button>,
     rect: Rect,
+    /// The current touch started on the bar (and not on a selection handle).
+    owns: bool,
 }
 impl ExtendBar {
     pub fn new(t: &Theme, screen: Rect) -> Self {
@@ -764,7 +766,7 @@ impl ExtendBar {
                 b
             })
             .collect();
-        Self { buttons, rect }
+        Self { buttons, rect, owns: false }
     }
     pub fn draw(&mut self, cx: &mut DrawCx, page: usize, pages: usize, busy: bool) {
         cx.fill(self.rect, PAPER);
@@ -775,9 +777,20 @@ impl ExtendBar {
             b.draw(cx);
         }
     }
-    pub fn gesture(&mut self, g: &Gesture) -> (bool, Option<usize>) {
-        if !self.rect.contains(g.pos()) {
+    /// Returns whether the bar owns this touch. Ownership is decided by where
+    /// the touch starts, so a drag that began on a selection handle (which
+    /// takes priority over the buttons under it) is never swallowed on its way
+    /// through the strip, and a touch that began on the bar never reaches the
+    /// selection.
+    pub fn gesture(&mut self, g: &Gesture, on_handle: bool) -> (bool, Option<usize>) {
+        if let Gesture::Down(p) = *g {
+            self.owns = self.rect.contains(p) && !on_handle;
+        }
+        if !self.owns {
             return (false, None);
+        }
+        if g.ends_touch() {
+            self.owns = false;
         }
         let e = self.buttons.iter_mut().position(|b| b.on_gesture(g));
         (true, e)

@@ -1006,7 +1006,8 @@ impl Reader {
     fn gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         if self.selection.extending {
             if let Some(bar) = &mut self.extension {
-                let (owned, event) = bar.gesture(&g);
+                let on_handle = matches!(g, Gesture::Down(p) if self.selection.on_handle(p, cx.theme));
+                let (owned, event) = bar.gesture(&g, on_handle);
                 if owned {
                     if let Some(e) = event {
                         match e {
@@ -1375,10 +1376,11 @@ impl Screen for Reader {
                 cx.canvas.invert_rect(*rect);
             }
         }
-        self.selection.draw(cx);
         if let Some(bar) = &mut self.extension {
             bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
         }
+        // After the bar, so a handle over its buttons stays visible.
+        self.selection.draw(cx);
         if !self.selection.extending
             && let Some(bar) = &mut self.search_bar
         {
@@ -2286,6 +2288,50 @@ mod tests {
         assert!(r.layout_at.is_some(), "the margin change lays out once, after wake");
         std::fs::remove_dir_all(path.parent().unwrap())?;
         Ok(())
+    }
+
+    #[test]
+    fn extension_bar_never_takes_a_selection_handle_or_a_drag_through_its_strip() {
+        use crate::{
+            document::{Selection, TextRange},
+            geom::{Point, Rect},
+        };
+        let (mut r, _commands) = test_reader("extension-handle");
+        let theme = Theme::for_dpi(150);
+        r.pages = 10;
+        r.target = 2;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 2));
+        // The last line ends 12 mm above the bottom, so its end handle sits inside the 13 mm bar.
+        let line = Rect::new(100, r.screen.h - theme.mm(12.0) - 30, 200, 30);
+        r.selection.selected = Some(Selection {
+            range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+            text: "two words".into(),
+            rects: vec![line],
+            start_page: 2,
+            start_visible: true,
+            end_visible: true,
+        });
+        r.selection.extend();
+        r.extension = Some(annotations::ExtendBar::new(&theme, r.screen));
+        let handle = Point::new(line.right(), line.bottom() + theme.mm(1.2));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(handle), cx);
+        });
+        assert!(r.selection.adjusting(Gesture::Move(handle), &theme), "the handle was grabbed");
+        // Dragging on through the strip and lifting there still reaches the selection.
+        let low = Point::new(handle.x, r.screen.h - theme.mm(2.0));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Move(low), cx);
+            r.on_gesture(Gesture::End(low), cx);
+        });
+        assert!(!r.selection.adjusting(Gesture::Move(low), &theme), "the drag ended");
+        // A touch that starts on the bar itself still belongs to the bar.
+        let blank = Point::new(10, r.screen.h - theme.mm(2.0));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(blank), cx);
+        });
+        assert!(!r.selection.adjusting(Gesture::Move(blank), &theme));
     }
 
     #[test]

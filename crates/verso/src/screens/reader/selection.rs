@@ -52,8 +52,13 @@ impl SelectionState {
         if self.captured {
             return !matches!(g, Gesture::Down(_));
         }
-        matches!(g, Gesture::Down(p) if self.handles(theme.mm(1.2).max(2)).is_some_and(|handles|
-            handles.iter().any(|(center, _)| center.distance(p) <= theme.mm(4.0) as f32)))
+        matches!(g, Gesture::Down(p) if self.on_handle(p, theme))
+    }
+
+    /// Whether a touch at `p` would grab one of the selection's handles.
+    pub fn on_handle(&self, p: Point, theme: &crate::ui::theme::Theme) -> bool {
+        self.handles(theme.mm(1.2).max(2))
+            .is_some_and(|handles| handles.iter().any(|(center, _)| center.distance(p) <= theme.mm(4.0) as f32))
     }
 
     fn finish(&mut self, context: SelectionRequest, worker: &Worker) {
