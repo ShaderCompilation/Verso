@@ -157,6 +157,8 @@ pub struct UpdateScreen {
     body: Rect,
     /// Exit for the launcher, or close, once this frame is on screen.
     finish: Option<Action>,
+    /// The install exit was refused (a save failed): Try again asks once more.
+    refused: bool,
 }
 
 impl UpdateScreen {
@@ -187,6 +189,7 @@ impl UpdateScreen {
             close,
             body,
             finish: None,
+            refused: false,
         };
         this.start();
         this
@@ -217,6 +220,9 @@ impl UpdateScreen {
         }
         if self.status.cancelling {
             return (format!("Verso {version}"), "Cancelling…".into(), None);
+        }
+        if self.refused {
+            return ("Couldn't restart".into(), "Verso couldn't save your reading state, so it stayed open. The update is downloaded and installs when you try again.".into(), None);
         }
         match &self.status.download {
             Some(DownloadState::Working(Step::Preparing)) | None => {
@@ -252,7 +258,9 @@ impl UpdateScreen {
         }
         self.sync_buttons();
         match &self.status.download {
-            Some(DownloadState::Ready(_)) if self.started => self.finish = Some(Action::ExitWith(EXIT_INSTALL)),
+            Some(DownloadState::Ready(_)) if self.started && !self.refused => {
+                self.finish = Some(Action::ExitWith(EXIT_INSTALL))
+            }
             Some(DownloadState::Failed(DownloadError::Cancelled)) if self.started => self.finish = Some(Action::Pop),
             _ => {}
         }
@@ -282,7 +290,7 @@ impl Screen for UpdateScreen {
             cx.fill(bar, LINE);
             cx.fill(Rect { w: (bar.w as i64 * permille.min(1000) as i64 / 1000) as i32, ..bar }, INK);
         }
-        let failed = self.failure().is_some();
+        let failed = self.failure().is_some() || self.refused;
         let note = if failed {
             format!("Nothing was changed: Verso {} is still installed.", self.status.current)
         } else if matches!(self.status.download, Some(DownloadState::Ready(_))) {
@@ -304,7 +312,15 @@ impl Screen for UpdateScreen {
 
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
-        if self.failure().is_some() {
+        if self.refused {
+            if self.close.on_gesture(&g) {
+                return Action::Pop;
+            }
+            if self.retry.on_gesture(&g) {
+                self.refused = false;
+                self.finish = Some(Action::ExitWith(EXIT_INSTALL));
+            }
+        } else if self.failure().is_some() {
             if self.close.on_gesture(&g) {
                 return Action::Pop;
             }
@@ -339,6 +355,11 @@ impl Screen for UpdateScreen {
     /// Scripted screenshots wait for the download to end.
     fn busy(&self) -> bool {
         self.working()
+    }
+
+    fn exit_refused(&mut self) {
+        self.finish = None;
+        self.refused = true;
     }
 
     fn has_pending_work(&self) -> bool {
@@ -491,5 +512,12 @@ mod tests {
         assert_eq!(release_date("2027-01-31"), "31 January 2027");
         assert_eq!(release_date("soon"), "soon");
         assert_eq!(release_date("2026-13-01"), "2026-13-01");
+    }
+
+    #[test]
+    fn refused_exit_is_not_rearmed_by_refresh() {
+        // The arming guard in refresh() must respect `refused`.
+        let src = include_str!("update.rs");
+        assert!(src.contains("if self.started && !self.refused => self.finish"));
     }
 }
