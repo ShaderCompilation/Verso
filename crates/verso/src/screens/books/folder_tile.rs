@@ -64,14 +64,15 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
         }
         FolderPreview::Stack => {
             // Same-size covers, each shifted up and right behind the one in front.
+            // 1- and 2-book stacks pin their front cover to the bottom-left baseline
+            // so every front cover and badge aligns across the row.
             let d = t.mm(2.0);
             let w = (r.w - 2 * d).min((r.h - 2 * d) * 2 / 3).max(1);
             let h = w * 3 / 2;
-            let x = r.x + (r.w - w - 2 * d) / 2;
-            let bounds = Rect::new(x, r.y, w + 2 * d, h + 2 * d);
-            // Shorter stacks stay centred in the same box.
-            let shift = (3 - n as i32) * d / 2;
-            let at = |k: usize| Rect::new(x + shift + k as i32 * d, r.y + 2 * d - shift - k as i32 * d, w, h);
+            let x = r.x;
+            let front_y = r.bottom() - h;
+            let bounds = Rect::new(x, front_y - 2 * d, w + 2 * d, h + 2 * d);
+            let at = |k: usize| Rect::new(x + k as i32 * d, front_y - k as i32 * d, w, h);
             let covers = (0..n).rev().map(|k| (k, at(k), if k == 0 { Fit::Cover } else { Fit::Behind(d) })).collect();
             Layout { covers, front: at(0), tab: None, bounds }
         }
@@ -79,12 +80,12 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
             let tab_h = t.mm(2.0);
             let w = r.w.min((r.h - tab_h) * 2 / 3).max(1);
             let h = w * 3 / 2;
-            let cover = Rect::new(r.x + (r.w - w) / 2, r.y + tab_h, w, h);
+            let cover = Rect::new(r.x, r.bottom() - h, w, h);
             Layout {
                 covers: vec![(0, cover, Fit::Cover)],
                 front: cover,
-                tab: Some(Rect::new(cover.x, r.y, w * 2 / 5, tab_h)),
-                bounds: Rect::new(cover.x, r.y, w, h + tab_h),
+                tab: Some(Rect::new(cover.x, cover.y - tab_h, w * 2 / 5, tab_h)),
+                bounds: Rect::new(cover.x, cover.y - tab_h, w, h + tab_h),
             }
         }
     })
@@ -104,16 +105,18 @@ pub(super) fn draw(
 ) -> Option<Rect> {
     let t = cx.theme;
     let layout = layout(mode, books.len(), r, t)?;
+    let outline = cover_outline(t) as f32;
     for &(i, rect, fit) in &layout.covers {
         if let Some(cover) = cache.load(store, books[i], rect.w, rect.h, fit) {
             cover.blit(cx.canvas, rect);
-            // A stack's covers need an edge where they overlap.
-            if mode == FolderPreview::Stack {
-                cx.canvas.stroke_rounded_rect(rect, 0.0, t.hairline as f32, INK);
+            // Stack and Covers covers get a crisp 2 px outline; Latest draws a
+            // folder frame below.
+            if matches!(mode, FolderPreview::Stack | FolderPreview::Covers) {
+                cx.canvas.stroke_rounded_rect(rect, 0.0, outline, INK);
             }
         } else {
             cx.fill(rect, PLACEHOLDER);
-            cx.canvas.stroke_rounded_rect(rect, 0.0, t.hairline as f32, INK3);
+            cx.canvas.stroke_rounded_rect(rect, 0.0, outline, INK3);
         }
     }
     if let Some(tab) = layout.tab {
@@ -134,14 +137,15 @@ pub(super) fn draw(
 fn draw_badge(cx: &mut DrawCx, count: usize, front: Rect) {
     let t = cx.theme;
     let text = count.to_string();
+    let style = t.caption.weight(Weight::SemiBold).gray(INK);
     let h = t.mm(4.5);
-    let w = (cx.text.width(&text, t.caption).ceil() as i32 + t.mm(2.5)).max(h).min(front.w);
+    let w = (cx.text.width(&text, style).ceil() as i32 + t.mm(2.5)).max(h).min(front.w);
     let inset = t.mm(1.0);
     let badge = Rect::new(front.right() - inset - w, front.bottom() - inset - h, w, h);
     let radius = h as f32 / 2.0;
     cx.canvas.fill_rounded_rect(badge, radius, PAPER);
     cx.canvas.stroke_rounded_rect(badge, radius, t.border as f32, INK);
-    cx.line(&text, t.caption.gray(INK), badge, HAlign::Center);
+    cx.line(&text, style, badge, HAlign::Center);
 }
 
 #[cfg(test)]
@@ -149,8 +153,8 @@ mod tests {
     use super::*;
 
     fn tile() -> (Theme, Rect) {
-        // A portrait Collections tile on the Kindle (1272 × 1696).
-        (Theme::for_dpi(300), Rect::new(59, 609, 257, 365))
+        // A portrait 4 × 3 Library folder tile on the Kindle (1272 × 1696).
+        (Theme::for_dpi(300), Rect::new(59, 344, 258, 355))
     }
     fn inside(outer: Rect, inner: Rect) -> bool {
         inner.x >= outer.x && inner.y >= outer.y && inner.right() <= outer.right() && inner.bottom() <= outer.bottom()
@@ -229,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_draws_same_size_covers_back_to_front() {
+    fn stack_draws_same_size_covers_back_to_front_pinned_bottom_left() {
         let (t, r) = tile();
         let l = layout(FolderPreview::Stack, 4, r, &t).unwrap();
         assert!(inside(r, l.bounds));
@@ -240,19 +244,56 @@ mod tests {
         assert_eq!((middle.x - front.x, front.y - middle.y), (d, d));
         assert_eq!((back.x - middle.x, middle.y - back.y), (d, d));
         assert_eq!(l.front, front);
+        assert_eq!((front.x, front.bottom()), (r.x, r.bottom()), "front cover pins to bottom-left baseline");
         assert!(l.covers.iter().all(|c| inside(l.bounds, c.1)));
         // The front cover is larger than a small thumbnail and decodes the
         // full one; the hidden ones decode small files.
         assert!(front.w as u32 > covers::SMALL_WIDTH);
         assert_eq!(l.covers.iter().map(|c| c.2).collect::<Vec<_>>(), [Fit::Behind(d), Fit::Behind(d), Fit::Cover]);
-        // One or two books show only those, centred in the same box.
+        // 1- and 2-book stacks keep their front cover pinned to the exact same bottom-left baseline.
         let two = layout(FolderPreview::Stack, 2, r, &t).unwrap();
         assert_eq!(two.covers.len(), 2);
         assert_eq!(two.bounds, l.bounds);
+        assert_eq!(two.front, front);
+        assert_eq!(two.covers[0].1, middle);
         let one = layout(FolderPreview::Stack, 1, r, &t).unwrap();
         assert_eq!(one.covers.len(), 1);
-        assert!((one.front.center().x - l.bounds.center().x).abs() <= 1);
-        assert!((one.front.center().y - l.bounds.center().y).abs() <= 1);
+        assert_eq!(one.bounds, l.bounds);
+        assert_eq!(one.front, front);
+        assert_eq!(one.covers[0].1, front);
+    }
+
+    #[test]
+    fn stack_draws_two_pixel_ink_outline_around_loaded_covers() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-folder-outline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::at(root.clone());
+        std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
+        let mut b = crate::library::selection_tests::book(0);
+        b.cover = Cover::Ready("c0".into());
+        image::GrayImage::from_pixel(covers::WIDTH, covers::HEIGHT, image::Luma([200])).save(store.cover_path("c0"))?;
+        let (t, r) = tile();
+        let l = layout(FolderPreview::Stack, 1, r, &t).unwrap();
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        canvas.fill(PAPER);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        let mut cache = Thumbnails::default();
+        draw(
+            &mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()),
+            FolderPreview::Stack,
+            &[&b],
+            1,
+            r,
+            &store,
+            &mut cache,
+        );
+        let px = |x: i32, y: i32| canvas.gray_data()[y as usize * 1272 + x as usize];
+        assert_eq!(px(l.front.x, l.front.y), INK);
+        assert_eq!(px(l.front.x + 1, l.front.y + 1), INK);
+        assert_eq!(px(l.front.x + 5, l.front.y + 5), 200);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -262,6 +303,7 @@ mod tests {
         assert_eq!(l.covers.len(), 1);
         let cover = l.covers[0].1;
         assert_eq!(l.front, cover);
+        assert_eq!((cover.x, cover.bottom()), (r.x, r.bottom()), "left- and bottom-aligned with book covers");
         let tab = l.tab.unwrap();
         assert_eq!((tab.x, tab.bottom()), (cover.x, cover.y));
         assert!(tab.w < cover.w / 2);
@@ -271,9 +313,11 @@ mod tests {
 
     #[test]
     fn layouts_fit_landscape_and_small_screens() {
-        for (t, r) in
-            [(Theme::for_dpi(300), Rect::new(59, 609, 363, 402)), (Theme::for_dpi(167), Rect::new(33, 300, 120, 170))]
-        {
+        for (t, r) in [
+            (Theme::for_dpi(300), Rect::new(59, 344, 237, 362)),
+            (Theme::for_dpi(300), Rect::new(59, 344, 296, 272)),
+            (Theme::for_dpi(167), Rect::new(33, 190, 166, 149)),
+        ] {
             for mode in [FolderPreview::Covers, FolderPreview::Stack, FolderPreview::Latest] {
                 let l = layout(mode, 4, r, &t).unwrap();
                 assert!(inside(r, l.bounds), "{mode:?} inside {r:?}");

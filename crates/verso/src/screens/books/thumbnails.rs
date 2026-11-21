@@ -247,10 +247,10 @@ pub(super) struct Thumbnails {
 }
 
 impl Thumbnails {
-    /// About five pages of covers (a full portrait page is about 0.7 MB):
+    /// About five pages of 12 covers (a full portrait 4×3 page is about 0.82 MB):
     /// the current page, both neighbours and the page a folder was opened
     /// from, small next to the 60 MiB app target. Opening a book frees them.
-    pub(super) const MAX_BYTES: usize = 4 * 1024 * 1024;
+    pub(super) const MAX_BYTES: usize = 6 * 1024 * 1024;
 
     /// Unit tests decode on the calling thread only, so what is cached after
     /// a draw doesn't depend on timing; [`Self::prefetching`] opts in.

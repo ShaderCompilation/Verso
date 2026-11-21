@@ -60,7 +60,6 @@ struct SearchSession {
     cache: SearchCache,
     all: Button,
     current: Button,
-    context: Rect,
     keyboard: Keyboard,
 }
 
@@ -220,7 +219,6 @@ pub struct Books {
     library_card: Rect,
     library_card_press: Press,
     header: Rect,
-    status: Rect,
     menu: Option<(Target, PopupMenu)>,
     name_sheet: Option<NameSheet>,
     details: Option<Details>,
@@ -339,7 +337,7 @@ impl Books {
         let title_rect = Rect::new(t.margin, 0, (battery_rect.x - t.margin - t.mm(2.0)).max(0), t.top_bar);
         let mut pager = Pager::new(1);
         pager.jump = true;
-        pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
+        pager.compact = true;
         let fonts = worker.fonts();
         // Read with the first frame: a notice saved by an earlier check is
         // drawn at once (two small files).
@@ -384,7 +382,7 @@ impl Books {
             settings_action,
             transfer_action,
             search: None,
-            grid: Grid::new(0, 4, 2),
+            grid: Grid::new(0, 4, 3),
             pager,
             continue_id: None,
             continue_rect: Rect::default(),
@@ -393,7 +391,6 @@ impl Books {
             library_card: Rect::default(),
             library_card_press: Press::default(),
             header: Rect::default(),
-            status: Rect::default(),
             menu: None,
             name_sheet: None,
             details: None,
@@ -532,71 +529,83 @@ impl Books {
         self.continue_rect = Rect::default();
         self.home_divider_y = None;
         self.library_card = Rect::default();
-        let y = t.top_bar + t.mm(2.0);
         let landscape = self.screen.w > self.screen.h;
-        let y = if let Some(search) = &mut self.search {
+        let width = self.screen.w - 2 * t.margin;
+        let pager_w = Pager::compact_width(t);
+        let pager_h = t.mm(4.1);
+        let (cols, rows) = library_grid_dims(self.screen, t);
+        let (gap_x, gap_y) = library_grid_gaps(cols, t);
+        let grid_bottom = self.screen.bottom() - t.margin;
+        if let Some(search) = &mut self.search {
             search.all.kind = if search.scope == Scope::All { ButtonKind::Primary } else { ButtonKind::Secondary };
             search.current.kind = if search.scope == Scope::All { ButtonKind::Secondary } else { ButtonKind::Primary };
+            let y = t.top_bar + t.mm(2.0);
             let gap = t.mm(2.0);
-            if landscape {
-                // One row for the field and scope, and no scope note, so a row
-                // of results fits above the keyboard.
-                let width = self.screen.w - 2 * t.margin;
+            let header_y = if landscape {
+                // One row for the field and scope so the top row of results
+                // stays visible above the open keyboard.
                 let w = (width * 2 / 5 - gap) / 2;
                 let field_w = width - 2 * (w + gap);
                 search.field.place(Rect::new(t.margin, y, field_w, t.target));
                 search.all.place(Rect::new(t.margin + field_w + gap, y, w, t.target), t);
-                search.current.place(Rect::new(self.screen.w - t.margin - w, y, w, t.target), t);
-                search.context = Rect::default();
-                y + t.target + t.mm(3.0)
+                search.current.place(Rect::new(self.screen.right() - t.margin - w, y, w, t.target), t);
+                y + t.target + t.mm(1.8)
             } else {
-                search.field.place(Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target));
+                search.field.place(Rect::new(t.margin, y, width, t.target));
                 let scope_y = y + t.target + gap;
-                let w = (self.screen.w - 2 * t.margin - gap) / 2;
+                let w = (width - gap) / 2;
                 search.all.place(Rect::new(t.margin, scope_y, w, t.target), t);
                 search.current.place(Rect::new(t.margin + w + gap, scope_y, w, t.target), t);
-                search.context =
-                    Rect::new(t.margin, scope_y + t.target + t.mm(1.0), self.screen.w - 2 * t.margin, t.mm(6.0));
-                search.context.bottom() + gap
-            }
+                scope_y + t.target + t.mm(1.7)
+            };
+            let header_h = t.mm(7.0);
+            let grid_top = header_y + header_h + t.mm(1.8);
+            self.grid = Grid::new(self.books.len(), cols, rows);
+            self.grid.place(Rect::new(t.margin, grid_top, width, (grid_bottom - grid_top).max(t.target)), gap_x, gap_y);
+            self.pager.set(self.pager.page, self.grid.paging().pages());
+            self.grid.page = self.pager.page;
+            search.page = self.pager.page;
+            let header_cy = header_y + header_h / 2;
+            let pager_rect =
+                Rect::new(self.screen.right() - t.margin - pager_w, header_cy - pager_h / 2, pager_w, pager_h);
+            self.pager.place(pager_rect, t);
+            let header_right =
+                if self.pager.visible() { pager_rect.x - t.mm(2.0) } else { self.screen.right() - t.margin };
+            self.header = Rect::new(t.margin, header_y, (header_right - t.margin).max(0), header_h);
+            self.path_rect = Rect::default();
         } else {
-            y
-        };
-        self.path_rect = if in_library {
-            self.back.place_at(Point::new(t.margin + t.target / 2, y + t.target / 2), t);
-            self.new_folder.place_at(Point::new(self.screen.right() - t.margin - t.target / 2, y + t.target / 2), t);
-            let left = if top_level { t.margin } else { t.margin + t.target + t.mm(2.0) };
-            let right = if self.navigation.folder.is_some() {
-                self.new_folder.rect().x - t.mm(2.0)
+            let header_y = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM);
+            let header_h = t.mm(LIBRARY_HEADER_H_MM);
+            let back_cy = header_y + t.mm(3.6);
+            let controls_cy = header_y + t.mm(5.7);
+            self.grid = self.browsing_grid(self.folders.len() + self.books.len(), t);
+            self.pager.set(self.pager.page, self.grid.paging().pages());
+            self.grid.page = self.pager.page;
+            let pager_rect =
+                Rect::new(self.screen.right() - t.margin - pager_w, controls_cy - pager_h / 2, pager_w, pager_h);
+            self.pager.place(pager_rect, t);
+            self.back.place_at(Point::new(t.margin + t.icon / 2, back_cy), t);
+            let show_new_folder = self.navigation.folder.is_some();
+            let new_folder_cx = if self.pager.visible() {
+                pager_rect.x - t.mm(6.0) - t.icon / 2
+            } else {
+                self.screen.right() - t.margin - t.icon / 2
+            };
+            self.new_folder.place_at(Point::new(new_folder_cx, controls_cy), t);
+            let left = if top_level {
+                t.margin
+            } else {
+                (t.margin + t.icon + t.mm(2.0)).max(self.back.rect().right() + t.mm(0.5))
+            };
+            let right = if show_new_folder {
+                self.new_folder.rect().x - t.mm(1.5)
+            } else if self.pager.visible() {
+                pager_rect.x - t.mm(3.0)
             } else {
                 self.screen.right() - t.margin
             };
-            Rect::new(left, y, (right - left).max(0), t.mm(12.0))
-        } else {
-            Rect::default()
-        };
-        let y = if in_library { y + self.path_rect.h + t.mm(2.0) } else { y };
-        self.header = Rect::new(t.margin, y, self.screen.w - 2 * t.margin, t.target);
-        self.status = Rect::new(t.margin, self.pager.rect().y - t.mm(6.0), self.screen.w - 2 * t.margin, t.mm(6.0));
-        let top = self.header.bottom() + t.mm(1.5);
-        // Landscape search keeps its single row of results above the
-        // keyboard, whether or not the keyboard is open, so paging is the same.
-        let bottom = match &self.search {
-            Some(search) if landscape => self.status.y.min(search.keyboard.rect().y - t.mm(2.0)),
-            _ => self.status.y,
-        };
-        let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
-        let rows = ((bottom - top) / t.mm(32.0)).clamp(1, 2) as usize;
-        self.grid = Grid::new(self.folders.len() + self.books.len(), cols, rows);
-        self.grid.place(
-            Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (bottom - top).max(t.target)),
-            t.mm(3.5),
-            t.mm(3.0),
-        );
-        self.pager.set(self.pager.page, self.grid.paging().pages());
-        self.grid.page = self.pager.page;
-        if let Some(search) = &mut self.search {
-            search.page = self.pager.page;
+            self.path_rect = Rect::new(left, header_y, (right - left).max(0), header_h);
+            self.header = Rect::default();
         }
         self.retain_selection();
         self.prioritize();
@@ -609,7 +618,6 @@ impl Books {
         let short = self.screen.h < t.mm(100.0);
         let card_h = t.mm(13.2).min(self.screen.h / 8).max(t.target);
         self.library_card = Rect::new(t.margin, self.screen.bottom() - t.margin - card_h, width, card_h);
-        self.status = Rect::default();
         self.folders.clear();
         self.continue_id = self.home.resume().map(|e| e.book.id.clone());
         self.home_divider_y = None;
@@ -761,17 +769,12 @@ impl Books {
     /// Shared by `refresh` and Home's off-thread warm-up so prefetched cover
     /// sizes match the browsing grid pixel-for-pixel.
     fn browsing_grid(&self, count: usize, t: &Theme) -> Grid {
-        let y = t.top_bar + t.mm(2.0) + t.mm(12.0) + t.mm(2.0);
-        let top = y + t.target + t.mm(1.5);
-        let bottom = self.pager.rect().y - t.mm(6.0);
-        let cols = ((self.screen.w - 2 * t.margin) / t.mm(22.0)).clamp(1, 4) as usize;
-        let rows = ((bottom - top) / t.mm(32.0)).clamp(1, 2) as usize;
+        let top = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM) + t.mm(LIBRARY_HEADER_H_MM) + t.mm(LIBRARY_HEADER_GAP_MM);
+        let bottom = self.screen.bottom() - t.margin;
+        let (cols, rows) = library_grid_dims(self.screen, t);
+        let (gap_x, gap_y) = library_grid_gaps(cols, t);
         let mut grid = Grid::new(count, cols, rows);
-        grid.place(
-            Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (bottom - top).max(t.target)),
-            t.mm(3.5),
-            t.mm(3.0),
-        );
+        grid.place(Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (bottom - top).max(t.target)), gap_x, gap_y);
         grid
     }
     /// A book's cover in grid cell `cell`. Every cell's cover has the size
@@ -1132,7 +1135,6 @@ impl Books {
                 cache,
                 all: Button::new("All books", ButtonKind::Primary),
                 current,
-                context: Rect::default(),
                 keyboard,
             });
             self.search_action.icon = Icon::Close;
@@ -1711,6 +1713,31 @@ impl Books {
     }
 }
 const HOME_RECENT_LABELS_MM: f32 = 8.0;
+const LIBRARY_BOOK_LABELS_MM: f32 = 8.0;
+const LIBRARY_HEADER_TOP_MM: f32 = 2.2;
+const LIBRARY_HEADER_H_MM: f32 = 11.0;
+const LIBRARY_HEADER_GAP_MM: f32 = 2.9;
+
+/// Grid dimensions for Library and Search: 4 × 3 on Paperwhite portrait,
+/// 6 × 2 in landscape, and 3 × 3 on narrow 6" portrait screens (< 100 mm).
+fn library_grid_dims(screen: Rect, t: &Theme) -> (usize, usize) {
+    if screen.w > screen.h {
+        (6, 2)
+    } else if screen.w < t.mm(100.0) {
+        (3, 3)
+    } else {
+        (4, 3)
+    }
+}
+
+fn library_grid_gaps(cols: usize, t: &Theme) -> (i32, i32) {
+    let gap_x = match cols {
+        6 => t.mm(2.6),
+        3 => t.mm(2.8),
+        _ => t.mm(3.4),
+    };
+    (gap_x, t.mm(2.0))
+}
 
 fn continue_cover_rect(r: Rect) -> Rect {
     Rect::new(r.x, r.y, r.h * 2 / 3, r.h)
@@ -1730,22 +1757,29 @@ fn home_recent_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
     Rect::new(cell.x, cell.y, cover_w, cover_h)
 }
 
+/// Left-aligned 2:3 book cover in a Library or Search grid cell (`214 × 321`
+/// on Paperwhite portrait 4 × 3), aligning with labels and folder front covers.
 fn grid_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
     let (w, h) = grid.base_cell_size();
-    let cover_h = (h - t.mm(10.0)).min(w * 3 / 2).max(1);
+    let cover_h = (h - t.mm(LIBRARY_BOOK_LABELS_MM)).min(w * 3 / 2).max(1);
     let cover_w = (cover_h * 2 / 3).max(1);
-    Rect::new(cell.x + (cell.w - cover_w) / 2, cell.y, cover_w, cover_h)
+    Rect::new(cell.x, cell.y, cover_w, cover_h)
 }
 
 fn grid_folder_rect(grid: &Grid, cell: Rect, parent_line: bool, t: &Theme) -> Rect {
     let (w, h) = grid.base_cell_size();
-    let labels = t.mm(if parent_line { 10.0 } else { 5.0 });
-    Rect::new(cell.x, cell.y, w, (h - labels).min(w * 3 / 2))
+    let labels = t.mm(if parent_line { 8.0 } else { 5.1 });
+    Rect::new(cell.x, cell.y, w, (h - labels).min(w * 3 / 2).max(1))
 }
 
 /// Top-bar title style (`"Home"` / `"Search"`): Literata SemiBold, scaled on narrow panels.
 fn top_title_style(t: &Theme, screen: Rect) -> TextStyle {
     if screen.w < t.mm(100.0) { t.title } else { TextStyle::new(t.pt(15.4), Weight::SemiBold, Family::Serif) }
+}
+
+/// Library / Subfolder header title style: Literata SemiBold (`56 px` at 300 dpi).
+fn folder_title_style(t: &Theme, screen: Rect) -> TextStyle {
+    if screen.w < t.mm(100.0) { t.title } else { TextStyle::new(t.pt(13.4), Weight::SemiBold, Family::Serif) }
 }
 
 /// Bottom-anchored Library card on Home: folder icon, `"Library"`, cached counts, chevron.
@@ -1974,43 +2008,43 @@ impl Screen for Books {
             search.field.draw(cx);
             search.all.draw(cx);
             search.current.draw(cx);
-            let context = match &search.scope {
-                Scope::All => {
-                    if search.collection.is_some() {
-                        "All books · every library folder".into()
-                    } else {
-                        "All books · open a folder to narrow scope".into()
-                    }
+            let label = match &search.scope {
+                Scope::All => counted(self.books.len(), "result"),
+                Scope::Collection(folder) => {
+                    format!("{} · {}", counted(self.books.len(), "result"), collections::name(folder))
                 }
-                Scope::Collection(folder) => format!("Folder · {} (including subfolders)", folder.display()),
             };
-            if !search.context.is_empty() {
-                let context = path_tail(cx.text, &context, t.caption, search.context.w);
-                cx.line(&context, t.caption.gray(INK2), search.context, HAlign::Left);
-            }
+            cx.line(&label, t.heading, self.header, HAlign::Left);
+            self.pager.draw(cx);
         }
         if !self.is_home() && self.search.is_none() {
             if !self.is_top_level() {
                 self.back.draw(cx);
             }
+            let title = self.navigation.folder.as_deref().map(collections::name).unwrap_or_else(|| "Library".into());
+            cx.line(
+                &title,
+                folder_title_style(t, self.screen),
+                Rect::new(self.path_rect.x, self.path_rect.y, self.path_rect.w, t.mm(6.4)),
+                HAlign::Left,
+            );
+            let subtitle = if let Some(reason) = self.paste_reason() {
+                reason.to_owned()
+            } else if self.scanning {
+                "Scanning…".into()
+            } else {
+                smart_counts(self.folders.len(), self.books.len())
+            };
+            cx.line(
+                &subtitle,
+                t.small.gray(INK2),
+                Rect::new(self.path_rect.x, self.path_rect.y + t.mm(7.1), self.path_rect.w, t.mm(3.8)),
+                HAlign::Left,
+            );
             if self.navigation.folder.is_some() {
                 self.new_folder.draw(cx);
             }
-            let title = self.navigation.folder.as_deref().map(collections::name).unwrap_or_else(|| "Library".into());
-            cx.line(&title, t.title, Rect { h: t.mm(6.0), ..self.path_rect }, HAlign::Left);
-            let path = self
-                .navigation
-                .folder
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "Choose a folder".into());
-            let path = path_tail(cx.text, &path, t.caption, self.path_rect.w);
-            cx.line(
-                &path,
-                t.caption.gray(INK2),
-                Rect { y: self.path_rect.y + t.mm(6.0), h: t.mm(6.0), ..self.path_rect },
-                HAlign::Left,
-            );
+            self.pager.draw(cx);
         }
         if let Some(book) = self.continue_id.as_ref().filter(|_| self.is_home()).and_then(|id| self.book(id)).cloned() {
             let r = self.continue_rect;
@@ -2069,18 +2103,9 @@ impl Screen for Books {
                 cx.hline(div_y, r.x, r.right(), t.hairline, INK);
             }
         }
-        cx.line(
-            &if self.is_home() {
-                if self.books.is_empty() { String::new() } else { "Recent books".into() }
-            } else if self.search.is_some() {
-                counted(self.books.len(), "result")
-            } else {
-                smart_counts(self.folders.len(), self.books.len())
-            },
-            t.heading,
-            self.header,
-            HAlign::Left,
-        );
+        if self.is_home() && !self.books.is_empty() {
+            cx.line("Recent books", t.heading, self.header, HAlign::Left);
+        }
         let shared_names = self.shared_names();
         for (i, cell) in self.grid.cells() {
             if let Some(path) = self.folders.get(i) {
@@ -2114,24 +2139,33 @@ impl Screen for Books {
                     }
                     Some(_) => {}
                     None => {
-                        let outline = Rect::new(r.x + t.mm(1.0), r.y + r.h / 4, r.w - t.mm(2.0), r.h / 2);
+                        let outline = Rect::new(r.x + t.mm(1.0), r.y + r.h / 5, r.w - t.mm(2.0), r.h / 2);
                         cx.icons.draw(cx.canvas, Icon::Folder, outline, INK);
+                        let sub_y = outline.bottom() + t.mm(1.0);
+                        let sub_h = (r.bottom() - sub_y).min(t.mm(4.5)).max(0);
                         cx.line(
                             &folder_subtitle(folder),
-                            t.body.gray(INK2),
-                            Rect::new(r.x, outline.bottom() + t.mm(1.0), r.w, t.mm(5.0)),
+                            t.small.gray(INK2),
+                            Rect::new(r.x, sub_y, r.w, sub_h),
                             HAlign::Center,
                         );
                     }
                 }
-                cx.line(&name, t.button, Rect::new(cell.x, r.bottom() + t.mm(1.0), cell.w, t.mm(4.0)), HAlign::Left);
+                let name_y = r.bottom() + t.mm(1.1);
+                let name_h = t.mm(3.5);
+                cx.line(
+                    &name,
+                    t.small.weight(Weight::SemiBold),
+                    Rect::new(cell.x, name_y, cell.w, name_h),
+                    HAlign::Left,
+                );
                 if parent_line {
                     let context = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
                     let context = path_tail(cx.text, &context, t.caption, cell.w);
                     cx.line(
                         &context,
                         t.caption.gray(INK2),
-                        Rect::new(cell.x, r.bottom() + t.mm(5.0), cell.w, t.mm(4.0)),
+                        Rect::new(cell.x, name_y + name_h, cell.w, t.mm(3.2)),
                         HAlign::Left,
                     );
                 }
@@ -2146,8 +2180,7 @@ impl Screen for Books {
             let cover = self.cover_rect(cell, t);
             draw_cover(cx, book, cover, &self.store, &mut self.thumbnails);
             if self.grid.pressed() == Some(i) {
-                let radius = if self.is_home() { 0.0 } else { t.radius };
-                cx.canvas.stroke_rounded_rect(cover, radius, (2 * t.border) as f32, INK);
+                cx.canvas.stroke_rounded_rect(cover, 0.0, (2 * t.border) as f32, INK);
                 cx.hint(cover, RefreshMode::Fast);
             } else if self.selection.is_none() {
                 cx.hint(cover, RefreshMode::Ui);
@@ -2171,22 +2204,35 @@ impl Screen for Books {
                     HAlign::Left,
                 );
             } else {
-                let y = cover.bottom() + t.mm(1.0);
-                cx.line(&book.metadata.title, t.button, Rect::new(cell.x, y, cell.w, t.mm(4.0)), HAlign::Left);
-                let state = self.states.get(&book.id).cloned().unwrap_or_default();
-                let label = status(&state);
-                let status_w = (cx.text.width(&label, t.caption).ceil() as i32 + t.mm(1.0)).min(cell.w * 2 / 3);
+                let state = self.states.get(&book.id);
+                let bar_h = t.mm(0.5).max(2);
+                if let Some(state) = state {
+                    if state.finished {
+                        // 100% solid bar with a 2 px white gap below the cover outline
+                        // so it stays distinct from dark covers.
+                        let bar = Rect::new(cover.x, cover.bottom() + cover_outline(t), cover.w, bar_h);
+                        cx.fill(bar, INK);
+                    } else if !state.position.0.is_empty() {
+                        let bar = Rect::new(cover.x, cover.bottom(), cover.w, bar_h);
+                        let progress = state.progress.min(10000);
+                        cx.fill(bar, LINE);
+                        cx.fill(Rect { w: (bar.w as i64 * progress as i64 / 10000) as i32, ..bar }, INK);
+                    }
+                }
+                let y = cover.bottom() + t.mm(1.1);
+                let title_h = t.mm(3.4);
+                let author_h = t.mm(3.2);
                 cx.line(
-                    &book.metadata.authors,
-                    t.caption.gray(INK2),
-                    Rect::new(cell.x, y + t.mm(4.0), cell.w - status_w - t.mm(1.0), t.mm(4.0)),
+                    &book.metadata.title,
+                    t.small.weight(Weight::SemiBold),
+                    Rect::new(cell.x, y, cell.w, title_h),
                     HAlign::Left,
                 );
                 cx.line(
-                    &label,
+                    &book.metadata.authors,
                     t.caption.gray(INK2),
-                    Rect::new(cell.right() - status_w, y + t.mm(4.0), status_w, t.mm(4.0)),
-                    HAlign::Right,
+                    Rect::new(cell.x, y + title_h, cell.w, author_h),
+                    HAlign::Left,
                 );
                 self.draw_tick(cx, Target::Book(book.id.clone()), cell);
             }
@@ -2214,7 +2260,7 @@ impl Screen for Books {
             cx.paragraph(
                 &message,
                 t.body.gray(INK2),
-                Rect::new(t.margin, self.header.bottom() + t.mm(10.0), self.screen.w - 2 * t.margin, t.mm(30.0)),
+                Rect::new(t.margin, self.grid.rect().y + t.mm(4.0), self.screen.w - 2 * t.margin, t.mm(24.0)),
                 HAlign::Left,
             );
         }
@@ -2232,13 +2278,6 @@ impl Screen for Books {
             }
             let subtitle = self.library_card_subtitle();
             draw_library_card(cx, self.library_card, &subtitle, self.library_card_press.is_down());
-        } else {
-            let message = self
-                .paste_reason()
-                .or_else(|| self.errors.first().map(String::as_str))
-                .unwrap_or(if self.scanning { "Scanning library…" } else { "" });
-            cx.line(message, t.caption.gray(INK2), self.status, HAlign::Left);
-            self.pager.draw(cx);
         }
         if let Some(search) = &self.search {
             search.keyboard.draw(cx);
@@ -3128,7 +3167,7 @@ mod tests {
             let all = books.selection.as_ref().unwrap().all.rect().center();
             tap(&mut books, all, cx);
             assert_eq!(books.selection.as_ref().unwrap().items.len(), 20);
-            books.go_to_page(2, cx);
+            books.go_to_page(1, cx);
             assert_eq!(books.selection.as_ref().unwrap().items.len(), 20);
             let p = books.grid.cells()[0].1.center();
             tap(&mut books, p, cx);
@@ -3241,7 +3280,7 @@ mod tests {
         books.navigation.folder = Some("/books/Fiction/Nested".into());
         books.refresh(&t);
         let cell = books.grid.cells()[0].1;
-        let cover = Point::new(cell.center().x, cell.y + cell.h / 3);
+        let cover = books.cover_rect(cell, &t).center();
         let tick = Point::new(cell.right() - t.mm(3.0), cell.y + t.mm(3.0));
         let mut draw = |books: &mut Books| {
             let mut hints = Vec::new();
@@ -3249,7 +3288,7 @@ mod tests {
             let mode = |p: Point| hints.iter().filter(|h| h.rect.contains(p)).map(|h| h.mode).max();
             (mode(cover), mode(tick))
         };
-        assert_eq!(draw(&mut books), (Some(RefreshMode::Ui), Some(RefreshMode::Ui)));
+        assert_eq!(draw(&mut books).0, Some(RefreshMode::Ui));
         with_cx(&t, screen, |cx| books.start_selection(Target::Book(books.books[0].id.clone()), cx));
         // A cover that loads while selecting gets the default grayscale mode.
         assert_eq!(draw(&mut books), (None, Some(RefreshMode::Fast)));
@@ -3559,7 +3598,7 @@ mod tests {
     }
 
     #[test]
-    fn library_has_no_resume_card_and_shows_two_full_rows() -> anyhow::Result<()> {
+    fn library_has_no_resume_card_and_uses_responsive_grid_dimensions() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("library-grid")?;
         let id = store.library().books[0].id.clone();
         let state = BookState {
@@ -3569,17 +3608,25 @@ mod tests {
             ..Default::default()
         };
         store.save_book(&id, &state)?;
-        let t = Theme::for_dpi(300);
-        let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
-        books.navigation.folder = Some("/books/Fiction/Nested".into());
-        books.refresh(&t);
-        assert!(books.continue_id.is_none(), "a resumable book stays on Home only");
-        assert_eq!(books.continue_rect, Rect::default());
-        assert_eq!(books.books.len(), 20);
-        assert_eq!(books.grid.cells().len(), 8);
-        assert_eq!(books.pager.pages, 3);
-        drop(books);
+        for (w, h, dpi, per_page, pages) in [
+            (1272, 1696, 300, 12, 2), // Paperwhite portrait: 4 × 3
+            (1696, 1272, 300, 12, 2), // Paperwhite landscape: 6 × 2
+            (1072, 1448, 300, 9, 3),  // 6" 300 dpi portrait: 3 × 3
+            (600, 800, 167, 9, 3),    // 6" 167 dpi portrait: 3 × 3
+        ] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+            books.navigation.folder = Some("/books/Fiction/Nested".into());
+            books.refresh(&t);
+            assert!(books.continue_id.is_none(), "a resumable book stays on Home only");
+            assert_eq!(books.continue_rect, Rect::default());
+            assert_eq!(books.books.len(), 20);
+            assert_eq!(books.grid.cells().len(), per_page, "{w}x{h}");
+            assert_eq!(books.pager.pages, pages, "{w}x{h}");
+            assert!(books.pager.compact);
+            drop(books);
+        }
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -3591,7 +3638,7 @@ mod tests {
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         books.navigation.folder = Some("/books/Fiction/Nested".into());
         books.refresh(&t);
-        assert_eq!(books.pager.pages, 3);
+        assert_eq!(books.pager.pages, 2);
         let counter = books.pager.rect().center();
         let last = |books: &Books| {
             let r = books.jump.as_ref().unwrap().slider.rect();
@@ -3601,7 +3648,7 @@ mod tests {
             // Tapping above the sheet closes it without moving.
             tap(&mut books, counter, cx);
             assert!(books.jump.is_some());
-            assert_eq!(books.page_start(2), books.books[16].metadata.title);
+            assert_eq!(books.page_start(1), books.books[12].metadata.title);
             books.pending = Some(Snapshot { index: books.index.clone(), ..Default::default() });
             books.apply_pending(cx);
             assert!(books.pending.is_some(), "library updates wait for the sheet");
@@ -3613,22 +3660,23 @@ mod tests {
             let p = last(&books);
             tap(&mut books, p, cx);
             assert!(books.jump.is_none());
-            assert_eq!((books.pager.page, books.grid.page), (2, 2));
+            assert_eq!((books.pager.page, books.grid.page), (1, 1));
             // Navigation goes to the writer once the frame showing it is presented.
-            assert_ne!(store.navigation().page(), 2);
+            assert_ne!(store.navigation().page(), 1);
             books.after_present();
             books.navigation_writer.flush().unwrap();
-            assert_eq!(store.navigation().page(), 2);
+            assert_eq!(store.navigation().page(), 1);
             // Search results keep their own page.
             books.toggle_search(cx);
             books.search.as_mut().unwrap().keyboard.visible = false;
             books.pager.page = 0;
             books.refresh(cx.theme);
-            assert_eq!(books.pager.pages, 3);
-            tap(&mut books, counter, cx);
+            assert_eq!(books.pager.pages, 2);
+            let search_counter = books.pager.rect().center();
+            tap(&mut books, search_counter, cx);
             let p = last(&books);
             tap(&mut books, p, cx);
-            assert_eq!(books.search.as_ref().unwrap().page, 2);
+            assert_eq!(books.search.as_ref().unwrap().page, 1);
         });
         drop(books);
         std::fs::remove_dir_all(root)?;
@@ -4254,7 +4302,7 @@ mod tests {
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         with_cx(&t, screen, |cx| {
             books.navigate(Some("/books/Fiction/Nested".into()), cx);
-            books.pager.page = 2;
+            books.pager.page = 1;
             books.save_navigation();
             books.after_present();
             books.navigation_writer.flush().unwrap();
@@ -4262,10 +4310,10 @@ mod tests {
             books.pending = Some(Snapshot { partial: true, ..Default::default() });
             books.apply_pending(cx);
             assert_eq!(books.navigation.folder, Some("/books/Fiction/Nested".into()));
-            assert_eq!(store.navigation().page(), 2, "incomplete checkpoints cannot erase saved pages");
+            assert_eq!(store.navigation().page(), 1, "incomplete checkpoints cannot erase saved pages");
             books.pending = Some(Snapshot { index: old, ..Default::default() });
             books.apply_pending(cx);
-            assert_eq!(books.pager.page, 2);
+            assert_eq!(books.pager.page, 1);
             let p = books.grid.cells()[0].1.center();
             books.on_gesture(Gesture::Down(p), cx);
             books.on_gesture(Gesture::LongPress(p), cx);
@@ -4400,7 +4448,7 @@ mod tests {
         let mut text = crate::gfx::TextRenderer::new();
         let mut icons = crate::gfx::IconRenderer::default();
         let mut seen = HashSet::new();
-        for page in 0..3 {
+        for page in 0..2 {
             books.pager.page = page;
             books.refresh(&t);
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
@@ -4416,7 +4464,7 @@ mod tests {
         let covers = store.cover_path("0").parent().unwrap().to_owned();
         let moved = root.join("covers-away");
         std::fs::rename(&covers, &moved)?;
-        with_cx(&t, screen, |cx| books.go_to_page(1, cx));
+        with_cx(&t, screen, |cx| books.go_to_page(0, cx));
         books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
         assert!(books.thumbnails.failed.is_empty());
         std::fs::rename(&moved, &covers)?;
@@ -4427,8 +4475,8 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
-    /// Eight folders of four books with art (ids 0–31, full covers gray 128
-    /// and small ones gray 50), and a ninth whose books have none.
+    /// Twelve folders of four books with art (ids 0–47, full covers gray 128
+    /// and small ones gray 50), and a thirteenth whose books have none.
     fn preview_fixture(label: &str) -> anyhow::Result<(Store, PathBuf)> {
         let root = std::env::temp_dir().join(format!(
             "verso-previews-{label}-{}-{}",
@@ -4440,15 +4488,15 @@ mod tests {
         settings.library_folders = Some(vec!["/books".into()]);
         store.save_settings(&settings)?;
         std::fs::create_dir_all(store.cover_path("0").parent().unwrap())?;
-        let mut books: Vec<_> = (0..36)
+        let mut books: Vec<_> = (0..52)
             .map(|i| {
                 let mut b = book(i);
-                b.path = format!("/books/F{}/{i}.epub", i / 4).into();
+                b.path = format!("/books/F{:02}/{i}.epub", i / 4).into();
                 b.cover = Cover::Unavailable("no art".into());
                 b
             })
             .collect();
-        for b in &mut books[..32] {
+        for b in &mut books[..48] {
             image::GrayImage::from_pixel(288, 432, image::Luma([128])).save(store.cover_path(&b.id))?;
             image::GrayImage::from_pixel(144, 216, image::Luma([50])).save(store.small_cover_path(&b.id))?;
             b.cover = Cover::Ready(b.id.clone());
@@ -4673,7 +4721,7 @@ mod tests {
         books.folder_preview = FolderPreview::Covers;
         books.navigation.folder = Some("/books".into());
         books.refresh(&t);
-        assert_eq!((books.folders.len(), books.grid.cells().len()), (9, 8));
+        assert_eq!((books.folders.len(), books.grid.cells().len()), (13, 12));
         let mut canvas = crate::gfx::Canvas::new(1272, 1696);
         let mut text = crate::gfx::TextRenderer::new();
         let mut icons = crate::gfx::IconRenderer::default();
@@ -4692,8 +4740,8 @@ mod tests {
                 .map(|(_, e)| e.cover.sample_pixel(5, 5))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(draw(&mut books), 8, "each preview tile is a grayscale area");
-        assert_eq!(books.thumbnails.images.len(), 32, "four previews for each of eight tiles");
+        assert_eq!(draw(&mut books), 12, "each preview tile is a grayscale area");
+        assert_eq!(books.thumbnails.images.len(), 48, "four previews for each of twelve tiles");
         assert!(books.thumbnails.bytes() <= Thumbnails::MAX_BYTES);
         assert!(decoded(&books, false).iter().all(|&v| v == 50), "mosaic slots decode small files");
         // Drawing again decodes nothing new, even with the files gone.
@@ -4701,13 +4749,13 @@ mod tests {
         let moved = root.join("covers-away");
         std::fs::rename(&covers, &moved)?;
         draw(&mut books);
-        assert_eq!(books.thumbnails.images.len(), 32);
+        assert_eq!(books.thumbnails.images.len(), 48);
         assert!(books.thumbnails.failed.is_empty());
         std::fs::rename(&moved, &covers)?;
-        // The ninth folder has no art: its tile is the icon, with no hint.
+        // The thirteenth folder has no art: its tile is the icon, with no hint.
         with_cx(&t, screen, |cx| books.go_to_page(1, cx));
         assert_eq!(draw(&mut books), 0);
-        assert_eq!(books.thumbnails.images.len(), 32, "the previous page stays decoded");
+        assert_eq!(books.thumbnails.images.len(), 48, "the previous page stays decoded");
         with_cx(&t, screen, |cx| books.go_to_page(0, cx));
         let set_mode = |books: &mut Books, mode| {
             let mut settings = store.settings();
@@ -4718,18 +4766,18 @@ mod tests {
             assert!(books.thumbnails.images.is_empty(), "a new mode starts from an empty cache");
         };
         set_mode(&mut books, FolderPreview::Stack);
-        assert_eq!(draw(&mut books), 8);
-        assert_eq!(books.thumbnails.images.len(), 24);
-        assert_eq!(decoded(&books, false), [128; 8], "front covers decode the full file");
-        assert_eq!(decoded(&books, true), [50; 16], "covers behind decode small files");
+        assert_eq!(draw(&mut books), 12);
+        assert_eq!(books.thumbnails.images.len(), 36);
+        assert_eq!(decoded(&books, false), [128; 12], "front covers decode the full file");
+        assert_eq!(decoded(&books, true), [50; 24], "covers behind decode small files");
         set_mode(&mut books, FolderPreview::Latest);
-        assert_eq!(draw(&mut books), 8);
-        assert_eq!(books.thumbnails.images.len(), 8);
+        assert_eq!(draw(&mut books), 12);
+        assert_eq!(books.thumbnails.images.len(), 12);
         // The first pick is the same book in every mode.
         let latest: HashSet<_> = books.thumbnails.images.keys().map(|(key, ..)| key.clone()).collect();
         let first: HashSet<_> =
             books.visible_folders().filter_map(|f| books.preview_books(f).next()).map(|b| b.id.clone()).collect();
-        assert_eq!((latest.len(), latest), (8, first));
+        assert_eq!((latest.len(), latest), (12, first));
         set_mode(&mut books, FolderPreview::Icon);
         assert_eq!(draw(&mut books), 0);
         assert!(books.thumbnails.images.is_empty());
@@ -5031,7 +5079,7 @@ mod tests {
         let mut settings = store.settings();
         settings.library_folder = Some(root.join("books-folder"));
         store.save_settings(&settings)?;
-        let books_in_folder: Vec<_> = (0..10)
+        let books_in_folder: Vec<_> = (0..14)
             .map(|i| {
                 let mut b = book(i);
                 b.path = root.join(format!("books-folder/{i}.epub"));
@@ -5066,17 +5114,17 @@ mod tests {
             ..Default::default()
         });
         books.apply_pending(&mut cx);
-        assert_eq!(books.books.len(), 10);
+        assert_eq!(books.books.len(), 14);
         books.on_gesture(Gesture::LongPress(point), &mut cx);
         books.on_gesture(Gesture::End(point), &mut cx);
         assert!(books.menu.is_some());
-        assert_eq!(books.books.len(), 10);
+        assert_eq!(books.books.len(), 14);
         let menu_rect = books.menu.as_ref().unwrap().1.rect();
         let details = Point::new(menu_rect.center().x, menu_rect.y + t.mm(1.0) + t.row + t.row / 2);
         books.on_gesture(Gesture::Down(details), &mut cx);
         books.on_gesture(Gesture::Tap(details), &mut cx);
         assert!(books.details.is_some());
-        assert_eq!(books.books.len(), 10);
+        assert_eq!(books.books.len(), 14);
         let outside = Point::new(1, 1);
         books.on_gesture(Gesture::Down(outside), &mut cx);
         assert!(matches!(books.on_gesture(Gesture::Tap(outside), &mut cx), Action::None));
@@ -5506,6 +5554,165 @@ mod tests {
                 assert!(books.continue_rect.bottom() < books.header.y, "{w}x{h}: Continue above Recent");
                 assert_eq!(books.books.len(), 4, "{w}x{h}: 4 recent books in portrait");
             }
+            let mut canvas = crate::gfx::Canvas::new(w as u32, h as u32);
+            let mut text = crate::gfx::TextRenderer::new();
+            let mut icons = crate::gfx::IconRenderer::default();
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+            drop(books);
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn library_header_row_controls_spacing_and_folder_path_sheet() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("library-header-row")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        books.scanning = false;
+        with_cx(&t, screen, |cx| {
+            // Multi-root top level: no Back, no New folder, single page -> full title width.
+            assert!(books.is_top_level());
+            assert!(!books.pager.visible());
+            assert_eq!(books.path_rect.x, t.margin);
+            assert_eq!(books.path_rect.right(), screen.right() - t.margin);
+            assert!(books.path_rect.y >= t.top_bar && books.path_rect.bottom() < books.grid.rect().y);
+            // Subfolder with 20 books (2 pages): Back arrow, New folder, 6 mm gap, compact pager.
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            assert!(!books.is_top_level());
+            assert!(books.back.enabled && books.new_folder.enabled && books.pager.visible());
+            assert!(books.back.rect().y >= t.top_bar && books.back.rect().bottom() < books.grid.rect().y);
+            assert!(books.back.rect().right() <= books.path_rect.x);
+            assert!(books.path_rect.right() <= books.new_folder.rect().x);
+            assert!(books.new_folder.rect().right() < books.pager.rect().x);
+            let visual_gap = books.pager.rect().x - (books.new_folder.rect().center().x + t.icon / 2);
+            assert!((visual_gap - t.mm(6.0)).abs() <= 2, "6 mm gap between New folder and pager: {visual_gap}");
+            assert_eq!(books.pager.rect().right(), screen.right() - t.margin);
+            let multipage_title_w = books.path_rect.w;
+            // Tapping the folder title/subtitle area opens the "Folder path" sheet.
+            let p = books.path_rect.center();
+            tap(&mut books, p, cx);
+            assert_eq!(books.details.as_ref().unwrap().content, "/books/Fiction/Nested");
+            books.details = None;
+            // Single-page folder hides the pager and expands the title's max width.
+            books.navigate(Some("/books/Fiction".into()), cx);
+            assert!(!books.pager.visible());
+            assert!(books.path_rect.w > multipage_title_w, "hiding pager expands title width");
+            assert_eq!(books.new_folder.rect().center().x, screen.right() - t.margin - t.icon / 2);
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn library_book_tiles_dimensions_outlines_and_progress_bars() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("library-book-tiles")?;
+        std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
+        let mut index = store.library();
+        for b in index.books.iter_mut().filter(|b| b.path.starts_with("/books/Fiction/Nested")) {
+            b.cover = Cover::Ready(b.id.clone());
+            image::GrayImage::from_pixel(covers::WIDTH, covers::HEIGHT, image::Luma([200]))
+                .save(store.cover_path(&b.id))?;
+        }
+        store.save_library(&index)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.scanning = false;
+        books.navigation.folder = Some("/books/Fiction/Nested".into());
+        books.refresh(&t);
+        // Set book 0 in progress (50%), book 1 finished, book 2 unread.
+        let id0 = books.books[0].id.clone();
+        let id1 = books.books[1].id.clone();
+        let id2 = books.books[2].id.clone();
+        books.set_book_state(
+            id0,
+            BookState { position: crate::document::Position("p".into()), progress: 5000, ..Default::default() },
+        );
+        books.set_book_state(
+            id1,
+            BookState { position: crate::document::Position("done".into()), finished: true, ..Default::default() },
+        );
+        books.remove_book_state(&id2);
+        let cells = books.grid.cells();
+        assert_eq!(cells.len(), 12);
+        for (_, cell) in &cells {
+            let cover = books.cover_rect(*cell, &t);
+            assert_eq!(cover.x, cell.x, "book covers are left-aligned in the cell");
+            assert_eq!((cover.w, cover.h), (214, 321), "Paperwhite 4 × 3 book cover dimensions");
+        }
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        canvas.fill(PAPER);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+        let px = |x: i32, y: i32| canvas.gray_data()[y as usize * 1272 + x as usize];
+        // Book 0 (in progress, 50%): 2 px INK outline + 6 px bar (left INK, right LINE).
+        let c0 = books.cover_rect(cells[0].1, &t);
+        assert_eq!(px(c0.x, c0.y), INK);
+        assert_eq!(px(c0.x + 1, c0.y + 1), INK);
+        assert_eq!(px(c0.x + 5, c0.y + 5), 200);
+        assert_eq!(px(c0.x + 10, c0.bottom() + 2), INK, "in-progress filled portion");
+        assert_eq!(px(c0.right() - 10, c0.bottom() + 2), LINE, "in-progress remaining track");
+        // Book 1 (finished): 2 px white gap below cover outline, then 100% solid INK bar.
+        let c1 = books.cover_rect(cells[1].1, &t);
+        assert_eq!(px(c1.x + 10, c1.bottom()), PAPER, "2 px white gap above finished bar");
+        assert_eq!(px(c1.x + 10, c1.bottom() + 1), PAPER);
+        assert_eq!(px(c1.x + 10, c1.bottom() + 4), INK, "finished 100% solid bar");
+        assert_eq!(px(c1.right() - 10, c1.bottom() + 4), INK);
+        // Book 2 (unread): no bar below the cover.
+        let c2 = books.cover_rect(cells[2].1, &t);
+        for dy in 0..8 {
+            assert_eq!(px(c2.x + 10, c2.bottom() + dy), PAPER, "unread book has no progress bar");
+        }
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_layout_portrait_landscape_and_narrow_panels() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("search-layout")?;
+        for (w, h, dpi, expected_per_page) in [
+            (1272, 1696, 300, 12), // 4 × 3
+            (1696, 1272, 300, 12), // 6 × 2
+            (1072, 1448, 300, 9),  // 3 × 3
+            (600, 800, 167, 9),    // 3 × 3
+        ] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+            let home_battery = books.battery_rect;
+            with_cx(&t, screen, |cx| {
+                books.navigate(Some("/books/Fiction".into()), cx);
+                books.toggle_search(cx);
+                assert_eq!(books.search_action.icon, Icon::Close);
+                assert_eq!(books.battery_rect, home_battery, "{w}x{h}: battery stays fixed in Search");
+                assert!(books.pager.compact && books.pager.visible(), "{w}x{h}");
+                assert_eq!(books.grid.cells().len(), expected_per_page, "{w}x{h}");
+                assert!(books.header.right() <= books.pager.rect().x, "{w}x{h}: results header clears pager");
+                assert!(books.header.bottom() < books.grid.rect().y, "{w}x{h}");
+                assert!(books.grid.rect().bottom() <= screen.bottom() - t.margin, "{w}x{h}");
+                // Landscape keeps row 0 completely above the open keyboard.
+                if w > h {
+                    let search = books.search.as_ref().unwrap();
+                    assert_eq!(search.all.rect().y, t.top_bar + t.mm(2.0));
+                    assert_eq!(search.current.rect().y, search.all.rect().y);
+                    let row0_bottom = books.grid.cells()[0].1.bottom();
+                    assert!(
+                        row0_bottom <= search.keyboard.rect().y,
+                        "{w}x{h}: row 0 ({row0_bottom}) must fit above keyboard ({})",
+                        search.keyboard.rect().y
+                    );
+                }
+                // Results are sorted in fixed Title order.
+                let titles: Vec<_> = books.books.iter().map(|b| b.metadata.title.to_lowercase()).collect();
+                let mut sorted = titles.clone();
+                sorted.sort();
+                assert_eq!(titles, sorted, "{w}x{h}: fixed Title order");
+            });
             let mut canvas = crate::gfx::Canvas::new(w as u32, h as u32);
             let mut text = crate::gfx::TextRenderer::new();
             let mut icons = crate::gfx::IconRenderer::default();
