@@ -522,6 +522,22 @@ runs_are "0.1.0"
 installed_is 1
 absent "${U}/staged"
 
+begin "hand install clears old update state"
+fresh
+stage_v2
+mkdir -p "${U}/previous" "${U}/download"
+printf 'verso-plan\t1\nversion\t0.1.0\nfrom\t0.0.9\n' >"${U}/previous/plan.txt"
+printf '2\n' >"${U}/trial"
+printf '{"format":1,"from":"0.2.0","to":"0.1.0","reason":"hang","status":null,"time":0,"log":[]}\n' >"${U}/rollback.json"
+: >"${U}/journal-install"
+: >"${U}/hand-install"
+launch
+runs_are "0.1.0"
+installed_is 1
+no_update_state
+absent "${U}/previous" "${U}/download" "${U}/rollback.json" "${U}/hand-install"
+ui_restored_once
+
 if [ "$(id -u)" != 0 ]; then
     begin "install fails halfway"
     fresh

@@ -44,6 +44,11 @@ pub const PREVIOUS_PLAN: &str = "verso/update/previous/plan.txt";
 pub const TRIAL_PATH: &str = "verso/update/trial";
 /// Why the launcher went back, for the restored version to tell.
 pub const ROLLBACK_PATH: &str = "verso/update/rollback.json";
+/// Written by a release zip so the launcher clears stale update state from
+/// any earlier in-app update before running the hand-installed version.
+pub const HAND_INSTALL_PATH: &str = "verso/update/hand-install";
+/// The `rollback.json` format this build reads; unknown formats are ignored.
+pub const ROLLBACK_FORMAT: u32 = 1;
 
 /// The protocol of the launcher running this process; 0 when it didn't
 /// say (an older launcher, the simulator, or started by hand).
@@ -125,6 +130,7 @@ pub struct Rollback {
 
 #[derive(Deserialize)]
 struct RawRollback {
+    format: u32,
     #[serde(default)]
     from: String,
     #[serde(default)]
@@ -145,6 +151,9 @@ impl Rollback {
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let text = String::from_utf8_lossy(bytes);
         let raw: RawRollback = serde_json::from_str(&text).ok()?;
+        if raw.format != ROLLBACK_FORMAT {
+            return None;
+        }
         let reason = match (raw.reason.as_str(), raw.status) {
             ("exit", Some(status)) if status > 128 => Reason::Signal(status - 128),
             ("exit", Some(status)) => Reason::Exit(status),
@@ -208,14 +217,16 @@ mod tests {
         assert_eq!(r.log[1], "boom \"quoted\" \\ back\u{fffd}");
 
         let reason = |json: &str| Rollback::parse(json.as_bytes()).unwrap().reason;
-        assert_eq!(reason(r#"{"reason":"exit","status":101}"#), Reason::Exit(101));
-        assert_eq!(reason(r#"{"reason":"hang"}"#), Reason::Hang);
-        assert_eq!(reason(r#"{"reason":"interrupted"}"#), Reason::Interrupted);
-        assert_eq!(reason(r#"{"reason":"install"}"#), Reason::Install);
-        assert_eq!(reason(r#"{"reason":"requested"}"#), Reason::Requested);
-        assert_eq!(reason(r#"{"reason":"later"}"#), Reason::Other("later".into()));
-        let unknown = Rollback::parse(br#"{"reason":"hang","to":""}"#).unwrap();
+        assert_eq!(reason(r#"{"format":1,"reason":"exit","status":101}"#), Reason::Exit(101));
+        assert_eq!(reason(r#"{"format":1,"reason":"hang"}"#), Reason::Hang);
+        assert_eq!(reason(r#"{"format":1,"reason":"interrupted"}"#), Reason::Interrupted);
+        assert_eq!(reason(r#"{"format":1,"reason":"install"}"#), Reason::Install);
+        assert_eq!(reason(r#"{"format":1,"reason":"requested"}"#), Reason::Requested);
+        assert_eq!(reason(r#"{"format":1,"reason":"later"}"#), Reason::Other("later".into()));
+        let unknown = Rollback::parse(br#"{"format":1,"reason":"hang","to":""}"#).unwrap();
         assert_eq!((unknown.from, unknown.to), (None, None));
+        assert!(Rollback::parse(br#"{"reason":"hang"}"#).is_none(), "missing format");
+        assert!(Rollback::parse(br#"{"format":2,"reason":"hang"}"#).is_none(), "unknown format");
         assert!(Rollback::parse(b"not json").is_none());
     }
 }

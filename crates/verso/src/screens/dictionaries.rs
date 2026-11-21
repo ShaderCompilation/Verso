@@ -702,8 +702,10 @@ impl Screen for Dictionaries {
             return Action::None;
         }
         if let Some(editor) = &mut self.editor {
-            if editor.keyboard.visible && editor.keyboard.rect().contains(g.pos()) {
-                if let Some(input) = editor.keyboard.on_gesture(&g, cx.theme) {
+            if editor.keyboard.visible
+                && let Some(input) = editor.keyboard.on_gesture_inside(&g, cx.theme)
+            {
+                if let Some(input) = input {
                     self.on_text_input(&input, cx);
                 }
                 return Action::None;

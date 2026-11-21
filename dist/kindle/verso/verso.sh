@@ -45,6 +45,7 @@ STAGED="${UPDATE_DIR}/staged"
 PREVIOUS="${UPDATE_DIR}/previous"
 TRIAL="${UPDATE_DIR}/trial"
 ROLLBACK="${UPDATE_DIR}/rollback.json"
+HAND_INSTALL="${UPDATE_DIR}/hand-install"
 STARTED="${TMP}/verso-started"
 HUNG="${TMP}/verso-hung-$$"
 START_TIMEOUT="${VERSO_START_TIMEOUT:-120}"
@@ -437,9 +438,16 @@ recover() {
     [ -z "$(journal_job)" ]
 }
 
-# Before the first start: finish an interrupted job, go back from a version
-# that didn't start twice in a row, install a staged update.
+# Before the first start: clear stale update state after a zip install, finish
+# an interrupted job, go back from a version that didn't start twice in a row,
+# install a staged update.
 prepare() {
+    if [ -f "${HAND_INSTALL}" ]; then
+        log "installed from zip; clearing old update state"
+        rm -rf "${STAGED}" "${UPDATE_DIR}/download" "${PREVIOUS}" "${TRIAL}" "${ROLLBACK}" "${ROLLBACK}.new" "${UPDATE_DIR}"/journal-*
+        rm -f "${HAND_INSTALL}"
+        sync
+    fi
     recover || return 1
     if [ -f "${TRIAL}" ] && [ "$(cat "${TRIAL}" 2>/dev/null)" -ge 2 ] 2>/dev/null; then
         mark_log

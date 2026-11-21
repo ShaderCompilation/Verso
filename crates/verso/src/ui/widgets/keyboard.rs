@@ -312,6 +312,26 @@ impl Keyboard {
         self.on_gesture_at(g, t, Instant::now())
     }
 
+    /// Handles a gesture only when the touch started inside the keyboard,
+    /// leaving outside touches for the owner's own buttons (e.g. Cancel/Save).
+    /// Returns `Some(input)` when the keyboard consumed the gesture, or `None`
+    /// when the owner should route it to its own controls. A `Cancel` clears
+    /// any pressed key and still returns `None` so the owner can cancel its
+    /// controls too.
+    pub fn on_gesture_inside(&mut self, g: &Gesture, t: &Theme) -> Option<Option<TextInput>> {
+        if let Gesture::Down(p) = g {
+            self.outside = !self.rect.contains(*p);
+        }
+        if self.outside {
+            return None;
+        }
+        let input = self.on_gesture(g, t);
+        if matches!(g, Gesture::Cancel(_)) {
+            return None;
+        }
+        Some(input)
+    }
+
     /// Like `on_gesture`, with an explicit timestamp so Shift double-taps can be tested.
     pub fn on_gesture_at(&mut self, g: &Gesture, t: &Theme, now: Instant) -> Option<TextInput> {
         if let Gesture::Down(p) = g {
@@ -561,5 +581,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn on_gesture_inside_clears_press_on_drag_and_cancel() {
+        let t = Theme::for_dpi(300);
+        let mut k = Keyboard::default();
+        k.place(Rect::new(0, 0, 1272, 1696), &t);
+
+        let q = key_center(&k, |key| matches!(&key.face, KeyFace::Text(s) if s == "q"));
+        let outside = Point::new(500, 100);
+
+        // Press a key, then drag outside the keyboard rect: the press clears and is consumed.
+        assert_eq!(k.on_gesture_inside(&Gesture::Down(q), &t), Some(None));
+        assert!(k.keys.iter().any(|key| key.press.is_down()));
+        assert_eq!(k.on_gesture_inside(&Gesture::Move(outside), &t), Some(None));
+        assert!(!k.keys.iter().any(|key| key.press.is_down()));
+        assert_eq!(k.on_gesture_inside(&Gesture::End(outside), &t), Some(None));
+
+        // Cancel (e.g. sleep or USB) clears any held key and returns None so the owner cancels too.
+        assert_eq!(k.on_gesture_inside(&Gesture::Down(q), &t), Some(None));
+        assert!(k.keys.iter().any(|key| key.press.is_down()));
+        assert_eq!(k.on_gesture_inside(&Gesture::Cancel(Point::default()), &t), None);
+        assert!(!k.keys.iter().any(|key| key.press.is_down()));
+
+        // A touch starting outside is left to the owner even if dragged onto the keyboard.
+        assert_eq!(k.on_gesture_inside(&Gesture::Down(outside), &t), None);
+        assert_eq!(k.on_gesture_inside(&Gesture::Move(q), &t), None);
+        assert_eq!(k.on_gesture_inside(&Gesture::End(q), &t), None);
+        assert!(!k.keys.iter().any(|key| key.press.is_down()));
     }
 }

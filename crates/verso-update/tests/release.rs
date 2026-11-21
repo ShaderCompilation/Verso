@@ -124,9 +124,11 @@ fn zip_installs_required_components() {
             "verso/",
             "verso/fonts/",
             "verso/fonts/licences/",
+            "verso/update/",
             "verso/fonts/Literata-Regular.ttf",
             "verso/fonts/licences/OFL.txt",
             "verso/installed.json",
+            "verso/update/hand-install",
             "verso/verso",
             "verso/verso.sh"
         ]

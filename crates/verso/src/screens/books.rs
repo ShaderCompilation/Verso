@@ -146,11 +146,10 @@ impl NameSheet {
         None
     }
     fn on_gesture(&mut self, g: &Gesture, t: &Theme) -> Option<NameEvent> {
-        if self.keyboard.visible && self.keyboard.rect().contains(g.pos()) {
-            if let Some(input) = self.keyboard.on_gesture(g, t) {
-                return self.edit(&input);
-            }
-            return None;
+        if self.keyboard.visible
+            && let Some(input) = self.keyboard.on_gesture_inside(g, t)
+        {
+            return input.and_then(|i| self.edit(&i));
         }
         if self.sheet.on_gesture(g) || self.cancel.on_gesture(g) {
             return Some(NameEvent::Cancel);

@@ -214,6 +214,11 @@ fn write_zip(stage: &Path, manifest: &Manifest, installed: &Installed, out: &Pat
         entries.insert(INSTALLED_PATH.to_string(), (json, MODE_FILE)).is_none(),
         "a component owns {INSTALLED_PATH}"
     );
+    ensure!(
+        entries.insert(crate::launcher::HAND_INSTALL_PATH.to_string(), (Vec::new(), MODE_FILE)).is_none(),
+        "a component owns {}",
+        crate::launcher::HAND_INSTALL_PATH
+    );
     let mut folders = BTreeSet::new();
     for path in entries.keys() {
         let mut p = path.as_str();
