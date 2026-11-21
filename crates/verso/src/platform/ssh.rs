@@ -179,7 +179,13 @@ mod imp {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let ok = spawn_detached(&mut command).context("starting dropbear")?;
+        let ok = match spawn_detached(&mut command) {
+            Ok(ok) => ok,
+            Err(e) => {
+                firewall::set(PORT, false);
+                return Err(e).context("starting dropbear");
+            }
+        };
         // The server writes the pidfile once it's listening.
         if ok && wait_until(Duration::from_secs(2), || running_pid().is_some()) {
             log::info!("SSH server started on port {PORT}");
