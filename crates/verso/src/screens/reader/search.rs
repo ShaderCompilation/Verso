@@ -363,7 +363,9 @@ fn snippet_lines(
     let spaced_start = hit.after.starts_with(char::is_whitespace);
     let mut before: Vec<String> = clean(&hit.before).split(' ').filter(|w| !w.is_empty()).map(Into::into).collect();
     let mut cut = hit.before.chars().count() >= SNIPPET_BEFORE && !before.is_empty();
-    if cut && !hit.before.starts_with(char::is_whitespace) {
+    // A partial first word is dropped, but only when there are other words to keep: text
+    // without spaces (Chinese, Japanese, Thai) is one token, and dropping it would lose it all.
+    if cut && before.len() > 1 && !hit.before.starts_with(char::is_whitespace) {
         before.remove(0); // a partial word
     }
     let space = (measure("x x", false) - measure("xx", false)).max(1);
@@ -371,8 +373,18 @@ fn snippet_lines(
     // Keep the match within the first part of the first line.
     let joined = |words: &[String], measure: &mut dyn FnMut(&str, bool) -> i32| measure(&words.join(" "), false);
     while !before.is_empty() && joined(&before, &mut measure) + ellipsis > width * 2 / 5 {
-        before.remove(0);
         cut = true;
+        if before.len() == 1 {
+            // One unspaced run: shorten it from the front a character at a time.
+            let mut chars = before[0].chars();
+            chars.next();
+            before[0] = chars.as_str().to_string();
+            if before[0].is_empty() {
+                before.clear();
+            }
+        } else {
+            before.remove(0);
+        }
     }
     // (text, matched, space before)
     let mut tokens: Vec<(String, bool, bool)> = Vec::new();
@@ -601,6 +613,14 @@ mod tests {
         // Matches inside a word keep their neighbours attached; soft hyphens go.
         let laid = snippet_lines(&hit("Love", "lace", "\u{ad}ly"), 30, 2, mono);
         assert_eq!(text(&laid), ["Love[lace]ly"]);
+    }
+
+    #[test]
+    fn unspaced_text_keeps_its_before_context() {
+        let before = "字".repeat(SNIPPET_BEFORE);
+        let laid = snippet_lines(&hit(&before, "匹配", "后文"), 40, 2, mono);
+        let lines = text(&laid);
+        assert!(lines[0].starts_with('…') && lines[0].contains("字字字[匹配]"), "{lines:?}");
     }
 
     #[test]
