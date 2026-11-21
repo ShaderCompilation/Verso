@@ -242,7 +242,7 @@ impl Reader {
                         self.prefetch();
                     }
                     if let Overlay::Highlights(view) = &mut self.overlay {
-                        view.refresh(&self.annotations, None, cx.theme);
+                        view.refresh_keep(&self.annotations, cx.theme);
                     }
                     cx.redraw();
                 }
@@ -634,7 +634,10 @@ impl Reader {
     fn open_hit(&mut self, index: usize, cx: &mut EventCx) {
         let Some(hit) = self.search.hits.get(index).cloned() else { return };
         let Some(shown) = self.shown.clone() else { return };
-        if self.laying_out || self.layout_at.is_some() || self.search.stale(self.cache.generation) {
+        // During a relayout the page numbers are about to change: queue the
+        // hit's stable text position, like any other jump.
+        let relayout = self.laying_out || self.layout_at.is_some();
+        if !relayout && self.search.stale(self.cache.generation) {
             return;
         }
         self.search.origin.get_or_insert_with(|| Origin {
@@ -648,7 +651,7 @@ impl Reader {
         self.overlay = Overlay::None;
         self.search_bar.get_or_insert_with(|| SearchBar::new(cx.theme, self.screen));
         self.highlight = None;
-        if self.jump_position(Some(hit.page), hit.range.start.clone(), cx) {
+        if self.jump_position(Some(hit.page), hit.range.start.clone(), cx) && !relayout {
             self.next_highlight += 1;
             let request = SelectionRequest {
                 generation: self.cache.generation,
@@ -673,7 +676,13 @@ impl Reader {
         cx.redraw();
     }
     fn on_bar(&mut self, event: BarEvent, cx: &mut EventCx) {
-        self.search.refresh(self.cache.generation, &self.worker);
+        // After a relayout the old hits are useless, so restart first. After a
+        // sleep interruption they are still valid: step through them, then
+        // restart the search so it streams the rest.
+        let stale = self.search.stale(self.cache.generation);
+        if stale {
+            self.search.refresh(self.cache.generation, &self.worker);
+        }
         let current = self.search.current.unwrap_or(0);
         match event {
             BarEvent::Previous if current > 0 => self.open_hit(current - 1, cx),
@@ -687,6 +696,9 @@ impl Reader {
                 self.highlight = None;
                 self.highlight_pending = None;
             }
+        }
+        if !stale {
+            self.search.refresh(self.cache.generation, &self.worker);
         }
     }
     fn on_search(&mut self, event: SearchEvent, cx: &mut EventCx) {
@@ -1518,7 +1530,7 @@ impl Screen for Reader {
         }
         if self.annotations.drain(self.cache.generation, &self.worker, cx) {
             if let Overlay::Highlights(view) = &mut self.overlay {
-                view.refresh(&self.annotations, None, cx.theme);
+                view.refresh_keep(&self.annotations, cx.theme);
             }
             cx.redraw();
         }

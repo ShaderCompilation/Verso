@@ -408,6 +408,12 @@ impl View {
     pub fn editing_note(&self) -> bool {
         matches!(self.mode, Mode::Note(_))
     }
+    /// Refreshes after a worker reply, keeping the entries the list was opened
+    /// with (the tapped overlap subset) instead of widening it to everything.
+    pub fn refresh_keep(&mut self, state: &State, t: &Theme) {
+        let ids: Vec<usize> = self.ids.iter().copied().filter(|i| *i < state.collection.records.len()).collect();
+        self.refresh(state, Some(ids), t);
+    }
     pub fn refresh(&mut self, state: &State, ids: Option<Vec<usize>>, t: &Theme) {
         self.ids = ids.unwrap_or_else(|| state.ordered());
         self.list.rows = self
