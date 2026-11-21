@@ -580,6 +580,14 @@ impl Screen for TransferScreen {
         self.closing
     }
 
+    /// The server is already stopped; the screen shows that and offers Done again.
+    fn exit_refused(&mut self) {
+        self.closing = false;
+        self.restarting = false;
+        self.done.label = "Done".into();
+        self.done.enabled = true;
+    }
+
     /// "Stopping…" is on screen: stop, then leave. Restart stops the server,
     /// closes the port and puts Wi-Fi back like Done, then leaves Verso
     /// with nothing more saved (`Store::freeze`), so it reads the edits when

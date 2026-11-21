@@ -1007,6 +1007,9 @@ impl Screen for SystemSettings {
     fn on_sleep(&mut self) {
         self.ssh_read_on_wake = true;
     }
+    fn exit_refused(&mut self) {
+        self.go_back_sheet = None;
+    }
     fn has_pending_work(&self) -> bool {
         self.wifi_pending.is_some()
             || self.ssh_pending.is_some()

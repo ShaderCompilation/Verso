@@ -107,6 +107,9 @@ pub trait Screen {
     fn on_background(&mut self, _cx: &mut EventCx) {}
     /// Called after pixels reach the platform, before waiting for input.
     fn after_present(&mut self) {}
+    /// The exit was refused (see `on_quit`): drop any pending exit intent, or
+    /// the main loop would ask again before it reads another touch.
+    fn exit_refused(&mut self) {}
     /// Save before a normal shutdown.
     fn on_quit(&mut self) -> anyhow::Result<()> {
         self.on_sleep();

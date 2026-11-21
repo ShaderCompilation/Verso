@@ -453,7 +453,10 @@ impl App {
                 log::error!("exit: {e:#}");
                 self.toast = Some(Toast::new(e.to_string(), None, Instant::now()));
                 self.exit = false;
+                self.exit_code = None;
                 self.stop_ssh_on_exit = false;
+                // Screens that were waiting to exit stop waiting, so input is read again.
+                self.stack.iter_mut().for_each(|s| s.exit_refused());
                 if let Some(prompt) = &mut self.exit_prompt {
                     prompt.set_stopping(false);
                 }
@@ -632,6 +635,37 @@ mod tests {
         assert!(app.toast.is_some());
         assert!(!app.frame().is_empty());
         assert!(app.on_quit());
+    }
+    #[test]
+    fn refused_exit_from_pending_work_does_not_loop_without_input() {
+        struct Leaving(bool);
+        impl Screen for Leaving {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn has_pending_work(&self) -> bool {
+                self.0
+            }
+            fn run_pending_work(&mut self, _: &mut EventCx) -> Action {
+                Action::ExitWith(86)
+            }
+            fn exit_refused(&mut self) {
+                self.0 = false;
+            }
+            fn on_quit(&mut self) -> anyhow::Result<()> {
+                anyhow::bail!("Couldn't save your place")
+            }
+        }
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Leaving(true)));
+        app.frame();
+        assert!(app.has_pending_work());
+        app.run_pending_work();
+        assert!(app.wants_exit());
+        assert!(!app.on_quit());
+        assert!(!app.wants_exit() && !app.has_pending_work(), "the main loop reaches next_event again");
+        assert_eq!(app.exit_code(), 0, "no stale launcher code");
     }
     struct BookScreen {
         touches: Rc<Cell<usize>>,
