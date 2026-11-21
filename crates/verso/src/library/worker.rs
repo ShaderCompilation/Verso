@@ -355,7 +355,11 @@ impl Background {
                 // Missing covers (from added books or a new tile size), without a scan.
                 let mut errors = self.last_errors.clone();
                 self.set_status(false, true, &errors);
-                let interrupted = self.covers(&mut errors);
+                let mut interrupted = self.covers(&mut errors);
+                if !interrupted {
+                    // Identity work a scan-free edit interrupted resumes here.
+                    interrupted = self.fingerprint_books(&mut errors).0;
+                }
                 if interrupted && !self.channel.stopped() {
                     self.covers_needed = true;
                 }
@@ -453,6 +457,37 @@ impl Background {
         // visible. Only possible moves need it before identity assignment. Identity
         // is persisted but not displayed, so it changes no UI publication.
         let mut fingerprinted = 0;
+        if !interrupted {
+            (interrupted, fingerprinted) = self.fingerprint_books(&mut errors);
+        }
+        if self.channel.stopped() {
+            return false;
+        }
+        if interrupted {
+            // A scan edit restarts the pass at once. A scan-free edit does not, so
+            // leave the remaining identity work to the idle cover branch.
+            self.covers_needed = true;
+            self.publish();
+            self.set_status(false, true, &errors);
+            return true;
+        }
+        log::info!("library identities: {fingerprinted} fingerprinted in {:?}", identity_started.elapsed());
+        self.save(&mut errors, "library");
+        if std::mem::take(&mut self.home_stale) {
+            self.refresh_home_metadata();
+        }
+        self.publish();
+        self.set_status(false, false, &errors);
+        self.last_errors = errors;
+        log::info!("startup stage: background complete elapsed_us={}", self.startup.elapsed().as_micros());
+        true
+    }
+
+    /// Hashes books whose identity is still unattempted. Returns whether
+    /// shutdown or a queued edit interrupted it, and how many were hashed.
+    fn fingerprint_books(&mut self, errors: &mut Vec<String>) -> (bool, usize) {
+        let mut fingerprinted = 0;
+        let mut interrupted = false;
         for i in 0..self.index.books.len() {
             if let Some(request) = self.channel.take_warm_request() {
                 self.warm(request);
@@ -479,32 +514,14 @@ impl Background {
                         self.unsaved = true;
                         fingerprinted += 1;
                         if fingerprinted % SAVE_EVERY == 0 {
-                            self.save(&mut errors, "library identity");
+                            self.save(errors, "library identity");
                         }
                     }
-                    Err(e) => push_error(&mut errors, format!("Couldn't fingerprint {}: {e}", book.path.display())),
+                    Err(e) => push_error(errors, format!("Couldn't fingerprint {}: {e}", book.path.display())),
                 }
             }
         }
-        if self.channel.stopped() {
-            return false;
-        }
-        if interrupted {
-            // A new scan follows at once; it saves and finishes this pass's work.
-            self.publish();
-            self.set_status(false, true, &errors);
-            return true;
-        }
-        log::info!("library identities: {fingerprinted} fingerprinted in {:?}", identity_started.elapsed());
-        self.save(&mut errors, "library");
-        if std::mem::take(&mut self.home_stale) {
-            self.refresh_home_metadata();
-        }
-        self.publish();
-        self.set_status(false, false, &errors);
-        self.last_errors = errors;
-        log::info!("startup stage: background complete elapsed_us={}", self.startup.elapsed().as_micros());
-        true
+        (interrupted, fingerprinted)
     }
 
     /// Moves the sizes the library drew covers at to the front of the kept
@@ -650,9 +667,11 @@ impl Background {
             }
             self.set_status(self.status.scanning, self.status.working, &all);
         }
-        // This also runs during shutdown, after cancellation was requested.
-        match self.store.rebuild_home_summary_until(&self.index, &|| false) {
+        // This also runs during shutdown; stop between records then.
+        let channel = &self.channel;
+        match self.store.rebuild_home_summary_until(&self.index, &|| channel.stopped()) {
             Ok(rebuilt) => self.channel.rebuilt(rebuilt, self.revision),
+            Err(_) if self.channel.stopped() => {}
             Err(e) => log::warn!("rebuilding Home after file edits: {e:#}"),
         }
         self.publish();
