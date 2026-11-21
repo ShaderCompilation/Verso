@@ -74,7 +74,7 @@ device_hash_of() { awk -v id="$1" '$1 == id { print $2 }' <<<"$DEVICE_HASHES"; }
 # back" over it (docs/updates.md). A development install starts clean.
 U=$APP/update
 ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json $APP/data/cre/.version $APP/wordforms/.version &&
-    rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json.new $U/journal-*"
+    rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json $U/rollback.json.new $U/journal-*"
 tar -C "$STAGE/kual" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $EXT"
 tar -C "$STAGE/launcher" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP"
 # crengine's style sheets and hyphenation patterns, only when they changed.

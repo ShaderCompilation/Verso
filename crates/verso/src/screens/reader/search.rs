@@ -14,6 +14,7 @@ use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{Button, ButtonKind, IconButton, Keyboard, Pager, TextField, TopBar};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Must match `SNIPPET_BEFORE` in the crengine shim: a context this long was cut.
 const SNIPPET_BEFORE: usize = 80;
@@ -375,10 +376,11 @@ fn snippet_lines(
     while !before.is_empty() && joined(&before, &mut measure) + ellipsis > width * 2 / 5 {
         cut = true;
         if before.len() == 1 {
-            // One unspaced run: shorten it from the front a character at a time.
-            let mut chars = before[0].chars();
-            chars.next();
-            before[0] = chars.as_str().to_string();
+            // One unspaced run: shorten it from the front one grapheme at a time
+            // so combining marks (stress marks, Thai vowels/tones) aren't orphaned.
+            let mut graphemes = before[0].graphemes(true);
+            graphemes.next();
+            before[0] = graphemes.as_str().to_string();
             if before[0].is_empty() {
                 before.clear();
             }
@@ -724,6 +726,21 @@ mod tests {
         let laid = snippet_lines(&hit(&before, "匹配", "后文"), 40, 2, mono);
         let lines = text(&laid);
         assert!(lines[0].starts_with('…') && lines[0].contains("字字字[匹配]"), "{lines:?}");
+    }
+
+    #[test]
+    fn unspaced_before_context_drops_whole_graphemes() {
+        // 12 chars (11 graphemes), width 30 -> before limit 12, ellipsis 1 -> max 11.
+        // Dropping a single code point would orphan U+0301 at the start of the token.
+        let laid = snippet_lines(&hit("о\u{0301}бвгдежзикл", "м", ""), 30, 2, mono);
+        let kept = &laid[0][1].text;
+        assert_eq!(kept, "бвгдежзикл");
+        assert!(!kept.starts_with('\u{0301}'));
+
+        // Same with zero-width combining marks (e.g. Thai vowel + tone mark).
+        let by_grapheme = |s: &str, matched: bool| s.graphemes(true).count() as i32 + if matched { 2 } else { 0 };
+        let laid = snippet_lines(&hit("ก\u{0e34}\u{0e49}ข\u{0e35}\u{0e48}คงจ", "ฉ", ""), 12, 2, by_grapheme);
+        assert_eq!(laid[0][1].text, "คงจ");
     }
 
     #[test]
