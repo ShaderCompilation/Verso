@@ -101,6 +101,7 @@ impl Api {
         match (method, path) {
             (Method::Get, "/api/status") => Response::json(200, &(self.cx.status)()),
             (Method::Get, "/api/books") => self.books().map_or_else(not_found, |b| b.list(request)),
+            (Method::Get, "/api/books/check") => self.books().map_or_else(not_found, |b| b.check_upload(request)),
             (Method::Put, "/api/books") => self.books().map_or_else(not_found, |b| b.upload(request, body)),
             (Method::Post, "/api/books/mkdir") => self.books().map_or_else(not_found, |b| b.mkdir(body)),
             (Method::Get, p) if book_id_segment(p).is_some() => {
@@ -117,6 +118,9 @@ impl Api {
                 self.books().map_or_else(not_found, |b| b.highlights(id))
             }
             (Method::Get, "/api/dictionaries") => self.dictionaries().map_or_else(not_found, |d| d.list()),
+            (Method::Get, "/api/dictionaries/check") => {
+                self.dictionaries().map_or_else(not_found, |d| d.check_upload(request))
+            }
             (Method::Put, "/api/dictionaries") => {
                 self.dictionaries().map_or_else(not_found, |d| d.upload_archive(request, body))
             }

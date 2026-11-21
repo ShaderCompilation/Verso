@@ -290,6 +290,8 @@ pub(super) struct View {
     list: List,
     pager: Pager,
     ids: Vec<usize>,
+    /// True when opened for a tapped overlap subset rather than the full list.
+    subset: bool,
     mode: Mode,
     import: Button,
     export: Button,
@@ -360,6 +362,7 @@ impl View {
             list: List::new(vec![]),
             pager,
             ids: vec![],
+            subset: ids.is_some(),
             mode: Mode::List,
             import,
             export,
@@ -408,11 +411,13 @@ impl View {
     pub fn editing_note(&self) -> bool {
         matches!(self.mode, Mode::Note(_))
     }
-    /// Refreshes after a worker reply, keeping the entries the list was opened
-    /// with (the tapped overlap subset) instead of widening it to everything.
+    /// Refreshes after a worker reply. A view opened for a tapped overlap
+    /// keeps that subset; the full list refreshes from the whole collection so
+    /// opening it while highlights are still loading populates once ready.
     pub fn refresh_keep(&mut self, state: &State, t: &Theme) {
-        let ids: Vec<usize> = self.ids.iter().copied().filter(|i| *i < state.collection.records.len()).collect();
-        self.refresh(state, Some(ids), t);
+        let ids =
+            self.subset.then(|| self.ids.iter().copied().filter(|i| *i < state.collection.records.len()).collect());
+        self.refresh(state, ids, t);
     }
     pub fn refresh(&mut self, state: &State, ids: Option<Vec<usize>>, t: &Theme) {
         self.ids = ids.unwrap_or_else(|| state.ordered());
@@ -1020,5 +1025,26 @@ mod tests {
             view.close_note(&t);
             assert!(!view.editing_note() && !view.keyboard.visible);
         }
+    }
+    #[test]
+    fn full_list_opened_while_loading_populates_when_loaded_while_subset_stays_narrow() {
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1072, 1448);
+        let mut state = State::default();
+        let mut full = View::new(&t, screen, &state, None);
+        assert!(full.ids.is_empty(), "empty while loading");
+
+        let mut loaded = Collection::default();
+        loaded.add(entry("first", None));
+        loaded.add(entry("second", None));
+        let mut send = |_: Command| {};
+        state.apply(worker::Reply::Loaded(Ok((loaded, "fp".into()))), 1, &mut send);
+        full.refresh_keep(&state, &t);
+        assert_eq!(full.ids, vec![0, 1], "full list populates once the collection loads");
+        assert_eq!(full.list.rows.len(), 2);
+
+        let mut subset = View::new(&t, screen, &state, Some(vec![1]));
+        subset.refresh_keep(&state, &t);
+        assert_eq!(subset.ids, vec![1], "overlap subset stays narrowed across refreshes");
     }
 }

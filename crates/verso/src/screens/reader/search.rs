@@ -400,29 +400,132 @@ fn snippet_lines(
     for (k, w) in clean(&hit.after).split(' ').filter(|w| !w.is_empty()).enumerate() {
         tokens.push((w.into(), false, k > 0 || spaced_start));
     }
-    let mut out: Vec<Vec<Piece>> = vec![Vec::new()];
+    struct LaidToken {
+        text: String,
+        matched: bool,
+        spaced: bool,
+        w: i32,
+    }
+    let mut wrapped: Vec<Vec<LaidToken>> = vec![Vec::new()];
     let mut x = 0;
     for (i, (text, matched, spaced)) in tokens.iter().enumerate() {
         let w = measure(text, *matched);
         let gap = if *spaced && x > 0 { space } else { 0 };
-        let last_line = out.len() == lines;
+        let last_line = wrapped.len() == lines;
         let more = i + 1 < tokens.len();
         let limit = if last_line && more { width - ellipsis } else { width };
         if x > 0 && x + gap + w > limit {
             if last_line {
-                out.last_mut().unwrap().push(Piece { text: "…".into(), matched: false, x });
+                wrapped.last_mut().unwrap().push(LaidToken {
+                    text: "…".into(),
+                    matched: false,
+                    spaced: false,
+                    w: ellipsis,
+                });
                 break;
             }
-            out.push(Vec::new());
-            x = 0;
-            out.last_mut().unwrap().push(Piece { text: text.clone(), matched: *matched, x });
+            wrapped.push(Vec::new());
+            wrapped.last_mut().unwrap().push(LaidToken { text: text.clone(), matched: *matched, spaced: false, w });
             x = w;
             continue;
         }
-        out.last_mut().unwrap().push(Piece { text: text.clone(), matched: *matched, x: x + gap });
+        wrapped.last_mut().unwrap().push(LaidToken {
+            text: text.clone(),
+            matched: *matched,
+            spaced: *spaced && x > 0,
+            w,
+        });
         x += gap + w;
     }
-    out
+    wrapped
+        .into_iter()
+        .map(|mut line| {
+            reorder_rtl_runs(&mut line, |t| &t.text, |t| t.spaced, |t, s| t.spaced = s);
+            let mut x = 0;
+            line.into_iter()
+                .map(|t| {
+                    let gap = if t.spaced && x > 0 { space } else { 0 };
+                    let piece = Piece { text: t.text, matched: t.matched, x: x + gap };
+                    x += gap + t.w;
+                    piece
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenDir {
+    Ltr,
+    Rtl,
+    Neutral,
+}
+
+fn is_rtl_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0590..=0x05FF   // Hebrew
+        | 0x0600..=0x06FF // Arabic
+        | 0x0700..=0x074F // Syriac
+        | 0x0750..=0x077F // Arabic Supplement
+        | 0x0780..=0x07BF // Thaana
+        | 0x07C0..=0x07FF // NKo
+        | 0x08A0..=0x08FF // Arabic Extended-A
+        | 0xFB1D..=0xFB4F // Hebrew Presentation Forms
+        | 0xFB50..=0xFDFF // Arabic Presentation Forms-A
+        | 0xFE70..=0xFEFF // Arabic Presentation Forms-B
+    )
+}
+
+fn token_dir(text: &str) -> TokenDir {
+    for c in text.chars() {
+        if is_rtl_char(c) {
+            return TokenDir::Rtl;
+        }
+        if c.is_alphabetic() {
+            return TokenDir::Ltr;
+        }
+    }
+    TokenDir::Neutral
+}
+
+/// Reverses contiguous RTL runs (including neutral tokens between RTL tokens)
+/// into visual left-to-right order while preserving inter-token spacing.
+fn reorder_rtl_runs<T>(
+    line: &mut [T],
+    text: impl Fn(&T) -> &str,
+    spaced: impl Fn(&T) -> bool,
+    set_spaced: impl Fn(&mut T, bool),
+) {
+    let dirs: Vec<TokenDir> = line.iter().map(|t| token_dir(text(t))).collect();
+    let mut i = 0;
+    while i < dirs.len() {
+        if dirs[i] != TokenDir::Rtl {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i;
+        let mut j = i + 1;
+        while j < dirs.len() && dirs[j] != TokenDir::Ltr {
+            if dirs[j] == TokenDir::Rtl {
+                end = j;
+            }
+            j += 1;
+        }
+        if end > start {
+            // Preserve the gap before the run and reverse the internal gaps
+            // along with the tokens so spaced and unspaced neighbours stay intact.
+            let before_run = spaced(&line[start]);
+            let internal: Vec<bool> = (start + 1..=end).map(|k| spaced(&line[k])).collect();
+            line[start..=end].reverse();
+            set_spaced(&mut line[start], before_run);
+            for (offset, &gap) in internal.iter().rev().enumerate() {
+                set_spaced(&mut line[start + 1 + offset], gap);
+            }
+        }
+        i = end + 1;
+    }
 }
 
 fn draw_snippet(cx: &mut DrawCx, hit: &SearchHit, rect: Rect, fg: u8, invert_match: bool) {
@@ -621,6 +724,22 @@ mod tests {
         let laid = snippet_lines(&hit(&before, "匹配", "后文"), 40, 2, mono);
         let lines = text(&laid);
         assert!(lines[0].starts_with('…') && lines[0].contains("字字字[匹配]"), "{lines:?}");
+    }
+
+    #[test]
+    fn multi_word_rtl_phrases_display_in_visual_rtl_order() {
+        // Pure multi-word Hebrew phrase: logical "שלום עליכם" places "עליכם" to the left of "שלום".
+        let laid = snippet_lines(&hit("", "שלום עליכם", ""), 40, 2, mono);
+        assert_eq!(text(&laid), ["[עליכם] [שלום]"]);
+        // Mixed LTR + multi-word RTL phrase: LTR stays LTR, embedded RTL run reverses.
+        let laid = snippet_lines(&hit("He said ", "שלום עליכם", " today"), 60, 2, mono);
+        assert_eq!(text(&laid), ["He said [עליכם] [שלום] today"]);
+        // Multi-word Arabic with neutral punctuation inside the RTL run.
+        let laid = snippet_lines(&hit("«", "السلام عليكم", "»"), 40, 2, mono);
+        assert_eq!(text(&laid), ["«[عليكم] [السلام]»"]);
+        // Match inside an RTL word keeps pieces unspaced in RTL order.
+        let laid = snippet_lines(&hit("ב", "שלום", "ו"), 40, 2, mono);
+        assert_eq!(text(&laid), ["ו[שלום]ב"]);
     }
 
     #[test]

@@ -165,18 +165,75 @@ impl Dictionaries {
         Response::json(200, &json!({ "dictionaries": items }))
     }
 
-    /// `PUT /api/dictionaries?name=…`
-    pub fn upload_archive(&self, request: &Request, body: &mut Body<'_>) -> Response {
-        let Some(name_param) = request.param("name") else {
-            return err(400, "Missing archive file name.");
+    /// Checks a dictionary archive upload before reading its body. Shared with
+    /// `GET /api/dictionaries/check`.
+    fn plan_archive_upload(&self, name_param: Option<String>, size: u64) -> Result<(String, ArchiveKind), Response> {
+        let Some(name_param) = name_param else {
+            return Err(err(400, "Missing archive file name."));
         };
         let kind = match archive_kind(&name_param) {
             Ok(kind) => kind,
-            Err(msg) => return err(400, msg),
+            Err(msg) => return Err(err(400, msg)),
         };
-        if let Err(resp) = self.check_free_space(request.content_length) {
-            return resp;
+        self.check_free_space(size)?;
+        Ok((name_param, kind))
+    }
+
+    /// Checks a loose-file batch upload before reading its body. Shared with
+    /// `GET /api/dictionaries/check?batch=…`.
+    fn plan_batch_file_upload(
+        &self,
+        batch_id: &str,
+        name_param: Option<String>,
+        size: u64,
+    ) -> Result<(String, PathBuf, u64), Response> {
+        let Some(name_param) = name_param else {
+            return Err(err(400, "Missing file name."));
+        };
+        let name = match validate_loose_name(&name_param) {
+            Ok(name) => name,
+            Err(msg) => return Err(err(400, msg)),
+        };
+        let (batch_dir, current_files, current_bytes) = {
+            let batches = self.batches.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(batch) = batches.get(batch_id) else {
+                return Err(err(404, "Dictionary upload batch not found."));
+            };
+            (batch.dir.clone(), batch.files, batch.bytes)
+        };
+        if current_files + 1 > self.limits.max_entries {
+            return Err(err(413, "Too many files in this dictionary upload."));
         }
+        if current_bytes.saturating_add(size) > self.limits.max_bytes {
+            return Err(err(413, "Dictionary upload exceeds the 2 GB limit."));
+        }
+        self.check_free_space(size)?;
+        Ok((name, batch_dir, current_bytes))
+    }
+
+    /// `GET /api/dictionaries/check?name=…&size=…[&batch=…]`: `200` if a `PUT`
+    /// with these would be taken, or the refusal it would get.
+    pub fn check_upload(&self, request: &Request) -> Response {
+        let Some(size) = request.param("size").and_then(|s| s.parse::<u64>().ok()) else {
+            return err(400, "Missing size.");
+        };
+        let result = if let Some(batch_id) = request.param("batch") {
+            self.plan_batch_file_upload(&batch_id, request.param("name"), size).map(|_| ())
+        } else {
+            self.plan_archive_upload(request.param("name"), size).map(|_| ())
+        };
+        match result {
+            Ok(()) => Response::json(200, &json!({ "ok": true })),
+            Err(response) => response,
+        }
+    }
+
+    /// `PUT /api/dictionaries?name=…`
+    pub fn upload_archive(&self, request: &Request, body: &mut Body<'_>) -> Response {
+        let (name_param, kind) = match self.plan_archive_upload(request.param("name"), request.content_length) {
+            Ok(plan) => plan,
+            Err(resp) => return resp,
+        };
 
         let display_name = Path::new(&name_param)
             .file_name()
@@ -223,29 +280,11 @@ impl Dictionaries {
 
     /// `PUT /api/dictionaries/batch/<id>?name=…`
     pub fn upload_batch_file(&self, batch_id: &str, request: &Request, body: &mut Body<'_>) -> Response {
-        let Some(name_param) = request.param("name") else {
-            return err(400, "Missing file name.");
-        };
-        let name = match validate_loose_name(&name_param) {
-            Ok(name) => name,
-            Err(msg) => return err(400, msg),
-        };
-        let (batch_dir, current_files, current_bytes) = {
-            let batches = self.batches.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(batch) = batches.get(batch_id) else {
-                return err(404, "Dictionary upload batch not found.");
+        let (name, batch_dir, current_bytes) =
+            match self.plan_batch_file_upload(batch_id, request.param("name"), request.content_length) {
+                Ok(plan) => plan,
+                Err(resp) => return resp,
             };
-            (batch.dir.clone(), batch.files, batch.bytes)
-        };
-        if current_files + 1 > self.limits.max_entries {
-            return err(413, "Too many files in this dictionary upload.");
-        }
-        if current_bytes.saturating_add(request.content_length) > self.limits.max_bytes {
-            return err(413, "Dictionary upload exceeds the 2 GB limit.");
-        }
-        if let Err(resp) = self.check_free_space(request.content_length) {
-            return resp;
-        }
 
         let guard = UploadGuard::start(&*self.activity, name.clone());
         let mut part = match create_part(&batch_dir, &name) {

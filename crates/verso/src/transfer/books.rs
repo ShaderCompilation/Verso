@@ -135,36 +135,66 @@ impl Books {
         })
     }
 
-    /// `PUT /api/books?folder=…&name=…`
-    pub fn upload(&self, request: &Request, body: &mut Body<'_>) -> Response {
+    /// Checks a book upload before any of its body is read: lock state,
+    /// destination folder, filename and free space for `size` bytes. Shared
+    /// with `GET /api/books/check`, which the page asks first so a refusal
+    /// before a large body is read doesn't surface as a reset connection.
+    fn plan_upload(
+        &self,
+        folder_param: Option<String>,
+        name_param: Option<String>,
+        size: u64,
+    ) -> Result<(Vec<PathBuf>, PathBuf, String), Response> {
         if let Some(locked) = self.locked() {
-            return locked;
+            return Err(locked);
         }
-        let Some(folder_param) = request.param("folder") else {
-            return err(400, "Choose a destination folder.");
+        let Some(folder_param) = folder_param else {
+            return Err(err(400, "Choose a destination folder."));
         };
-        let Some(name_param) = request.param("name") else {
-            return err(400, "Missing file name.");
+        let Some(name_param) = name_param else {
+            return Err(err(400, "Missing file name."));
         };
         let roots = self.store.library_folders();
         let dest_dir = match validate_destination(&folder_param, &roots) {
             Ok(dir) => dir,
-            Err((status, msg)) => return err(status, &msg),
+            Err((status, msg)) => return Err(err(status, &msg)),
         };
         let name = match sanitize_epub_name(&name_param) {
             Ok(name) => name,
-            Err(msg) => return err(400, msg),
+            Err(msg) => return Err(err(400, msg)),
         };
         match (self.free_space)(&dest_dir) {
-            Ok(free) if free < request.content_length.saturating_add(FREE_SPACE_RESERVE) => {
-                return err(507, "Not enough free space on the Kindle (50 MB is kept in reserve).");
+            Ok(free) if free < size.saturating_add(FREE_SPACE_RESERVE) => {
+                return Err(err(507, "Not enough free space on the Kindle (50 MB is kept in reserve)."));
             }
             Ok(_) => {}
             Err(e) => {
                 log::warn!("web app: reading free space for {}: {e}", dest_dir.display());
-                return err(500, "Couldn't check free space on the Kindle.");
+                return Err(err(500, "Couldn't check free space on the Kindle."));
             }
         }
+        Ok((roots, dest_dir, name))
+    }
+
+    /// `GET /api/books/check?folder=…&name=…&size=…`: `200` if a `PUT` with
+    /// these would be taken, or the refusal it would get.
+    pub fn check_upload(&self, request: &Request) -> Response {
+        let Some(size) = request.param("size").and_then(|s| s.parse::<u64>().ok()) else {
+            return err(400, "Missing size.");
+        };
+        match self.plan_upload(request.param("folder"), request.param("name"), size) {
+            Ok(_) => Response::json(200, &json!({ "ok": true })),
+            Err(response) => response,
+        }
+    }
+
+    /// `PUT /api/books?folder=…&name=…`
+    pub fn upload(&self, request: &Request, body: &mut Body<'_>) -> Response {
+        let (roots, dest_dir, name) =
+            match self.plan_upload(request.param("folder"), request.param("name"), request.content_length) {
+                Ok(plan) => plan,
+                Err(response) => return response,
+            };
 
         // Check the zip header before touching storage or showing a Receiving row.
         let mut buf = vec![0u8; BUFFER];
@@ -1543,5 +1573,20 @@ mod tests {
         assert_eq!(sanitize_epub_name("Dune: Messiah?.epub").unwrap(), "Dune_ Messiah_.epub");
         assert_eq!(sanitize_epub_name("Граф Монте-Кристо.EPUB").unwrap(), "Граф Монте-Кристо.EPUB");
         let _ = auth::COOKIE;
+    }
+
+    #[test]
+    fn check_upload_matches_early_refusals() {
+        let env = Env::new();
+        env.free_bytes.store(FREE_SPACE_RESERVE + 1024, Ordering::SeqCst);
+        let folder = env.library_dir.to_str().unwrap();
+        let query = |name: &str, size: u64| format!("/api/books/check?folder={folder}&name={name}&size={size}");
+        assert_eq!(env.json("GET", &query("Book.epub", 512), b"").0, 200);
+        assert_eq!(env.json("GET", &query("Book.epub", 2048), b"").0, 507);
+        assert_eq!(env.json("GET", &query("Book.pdf", 512), b"").0, 400);
+        assert_eq!(env.json("GET", "/api/books/check?name=Book.epub", b"").0, 400);
+        env.store.note_live_data_edit();
+        let (status, body) = env.json("GET", &query("Book.epub", 512), b"");
+        assert_eq!((status, body["restart"].clone()), (409, json!(true)));
     }
 }

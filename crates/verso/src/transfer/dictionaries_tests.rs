@@ -598,3 +598,22 @@ fn archive_paths_are_cleaned_or_refused() {
     assert_eq!(safe_folder_name("..."), "Dictionary");
     assert_eq!(safe_folder_name("notes.sdr"), "notes.sdr_");
 }
+
+#[test]
+fn check_upload_matches_early_refusals() {
+    let env = Env::new();
+    env.free_first.store(FREE_SPACE_RESERVE + 1024, Ordering::SeqCst);
+    env.free_later.store(FREE_SPACE_RESERVE + 1024, Ordering::SeqCst);
+    assert_eq!(env.json("GET", "/api/dictionaries/check?name=d.zip&size=512", b"").0, 200);
+    assert_eq!(env.json("GET", "/api/dictionaries/check?name=d.zip&size=2048", b"").0, 507);
+    assert_eq!(env.json("GET", "/api/dictionaries/check?name=d.7z&size=512", b"").0, 400);
+    assert_eq!(env.json("GET", "/api/dictionaries/check?name=d.zip", b"").0, 400);
+
+    let (status, created) = env.json("POST", "/api/dictionaries/batch", b"");
+    assert_eq!(status, 201);
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(env.json("GET", &format!("/api/dictionaries/check?batch={id}&name=a.ifo&size=512"), b"").0, 200);
+    assert_eq!(env.json("GET", &format!("/api/dictionaries/check?batch={id}&name=a.ifo&size=2048"), b"").0, 507);
+    assert_eq!(env.json("GET", &format!("/api/dictionaries/check?batch={id}&name=a.txt&size=512"), b"").0, 400);
+    assert_eq!(env.json("GET", "/api/dictionaries/check?batch=missing&name=a.ifo&size=512", b"").0, 404);
+}

@@ -294,7 +294,16 @@ impl Reader {
                 self.pages = pages.max(1);
                 self.annotations.resolve(generation, &self.worker);
                 self.target = current.min(self.pages - 1);
-                if matches!(self.overlay, Overlay::Menu(_) | Overlay::Contents(_)) {
+                if matches!(self.overlay, Overlay::Contents(_)) {
+                    self.overlay = Overlay::Contents(Box::new(Contents::new(
+                        cx.theme,
+                        self.screen,
+                        &self.toc,
+                        self.target,
+                        false,
+                    )));
+                    cx.redraw();
+                } else if matches!(self.overlay, Overlay::Menu(_)) {
                     cx.redraw();
                 }
             }
@@ -1216,8 +1225,13 @@ impl Reader {
                 }
                 Some(MenuEvent::Close) => self.overlay = Overlay::None,
                 Some(MenuEvent::Contents) => {
-                    self.overlay =
-                        Overlay::Contents(Box::new(Contents::new(cx.theme, self.screen, &self.toc, self.target)))
+                    self.overlay = Overlay::Contents(Box::new(Contents::new(
+                        cx.theme,
+                        self.screen,
+                        &self.toc,
+                        self.target,
+                        self.pages == 0,
+                    )))
                 }
                 Some(MenuEvent::Search) => self.open_search(None, cx),
                 Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
@@ -2135,7 +2149,7 @@ mod tests {
         r.cache.insert(test_page(2, 1), 0);
         let old_toc =
             vec![TocEntry { title: "Chapter".into(), level: 1, page: 1, position: Position("chapter".into()) }];
-        r.overlay = Overlay::Contents(Box::new(Contents::new(&theme, r.screen, &old_toc, 0)));
+        r.overlay = Overlay::Contents(Box::new(Contents::new(&theme, r.screen, &old_toc, 0, false)));
         r.laying_out = false; // The new layout has finished since opening Contents.
         let p = crate::geom::Point::new(300, theme.top_bar + theme.mm(2.0) + theme.row / 2);
         test_cx(&theme, |cx| {
@@ -2146,6 +2160,37 @@ mod tests {
         assert_eq!(r.shown.as_ref().unwrap().number, 0, "old page 1 must not use the new cached page 1");
         assert!(
             matches!(commands.try_recv(), Ok(Command::Position { generation: 2, position: Position(p), .. }) if p == "chapter")
+        );
+    }
+
+    #[test]
+    fn contents_opened_while_book_is_opening_populates_when_opened_arrives() {
+        let (mut r, commands) = test_reader("early-contents");
+        let theme = Theme::for_dpi(150);
+        // Initial open hasn't finished yet: pages is 0 and toc is empty.
+        assert_eq!(r.pages, 0);
+        r.overlay = Overlay::Contents(Box::new(Contents::new(&theme, r.screen, &r.toc, r.target, r.pages == 0)));
+        let toc = vec![TocEntry { title: "Chapter 1".into(), level: 1, page: 2, position: Position("ch1".into()) }];
+        let p = crate::geom::Point::new(300, theme.top_bar + theme.mm(2.0) + theme.row / 2);
+        test_cx(&theme, |cx| {
+            r.receive(
+                Reply::Opened {
+                    generation: r.cache.generation,
+                    metadata: Metadata::default(),
+                    toc,
+                    pages: 10,
+                    current: 0,
+                },
+                cx,
+            );
+            r.laying_out = false;
+            r.on_gesture(Gesture::Down(p), cx);
+            r.on_gesture(Gesture::Tap(p), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::Position { position: Position(pos), .. }) if pos == "ch1"),
+            "tapping the populated row jumps to the chapter"
         );
     }
 

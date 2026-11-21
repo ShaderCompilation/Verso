@@ -858,7 +858,48 @@ function updateQueueUi() {
   $("upload-queued").textContent = uploadQueue.length > 0 ? uploadQueue.length + " more queued" : "";
 }
 
-function runNextUpload() {
+function stopBooksQueue(view) {
+  uploadQueue = [];
+  activeXhr = null;
+  updateQueueUi();
+  show(view);
+}
+
+// Pre-check before sending a book body: an early refusal (507, 409, 400, 404)
+// before a large body is read can reach the browser as a reset connection.
+async function checkBooksUpload(folder, file) {
+  const params = new URLSearchParams({ folder, name: file.name, size: String(file.size) });
+  const response = await call("/api/books/check?" + params.toString());
+  const data = await response.json().catch(() => ({}));
+  return { status: response.status, data };
+}
+
+function sendBookPut(url, file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    activeXhr = xhr;
+    xhr.open("PUT", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("X-Verso-Request", "1");
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable && ev.total > 0) {
+        const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+        $("upload-bar").value = pct;
+        $("upload-pct").textContent = " " + pct + "%";
+      }
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
+      resolve({ status: xhr.status, data });
+    };
+    xhr.onerror = () => reject(new Error("network"));
+    xhr.onabort = () => reject(new Error("aborted"));
+    xhr.send(file);
+  });
+}
+
+async function runNextUpload() {
   if (uploadQueue.length === 0) {
     activeXhr = null;
     updateQueueUi();
@@ -868,58 +909,52 @@ function runNextUpload() {
   $("upload-name").textContent = item.file.name;
   $("upload-pct").textContent = " 0%";
   $("upload-bar").value = 0;
+  activeXhr = true;
   updateQueueUi();
 
-  const xhr = new XMLHttpRequest();
-  activeXhr = xhr;
-  const params = new URLSearchParams({ folder: item.folder, name: item.file.name });
-  xhr.open("PUT", "/api/books?" + params.toString());
-  xhr.withCredentials = true;
-  xhr.setRequestHeader("X-Verso-Request", "1");
-
-  xhr.upload.onprogress = (ev) => {
-    if (ev.lengthComputable && ev.total > 0) {
-      const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
-      $("upload-bar").value = pct;
-      $("upload-pct").textContent = " " + pct + "%";
-    }
-  };
-  xhr.onload = async () => {
-    activeXhr = null;
-    if (xhr.status === 401) {
-      uploadQueue = [];
-      updateQueueUi();
-      show("signin");
+  let result;
+  try {
+    result = await checkBooksUpload(item.folder, item.file);
+  } catch (_) {
+    stopBooksQueue("gone");
+    return;
+  }
+  if (result.status === 200) {
+    const params = new URLSearchParams({ folder: item.folder, name: item.file.name });
+    try {
+      result = await sendBookPut("/api/books?" + params.toString(), item.file);
+    } catch (e) {
+      if (e && e.message === "aborted") {
+        addNotice("Cancelled " + item.file.name + ".", false);
+        runNextUpload();
+        return;
+      }
+      if (await kindleReachable()) {
+        addNotice(item.file.name + ": the upload didn't finish. Try it again.", true);
+        runNextUpload();
+        return;
+      }
+      stopBooksQueue("gone");
       return;
     }
-    let data = {};
-    try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
-    if (xhr.status >= 200 && xhr.status < 300) {
-      const saved = data.filename && data.filename !== item.file.name ? " (saved as " + data.filename + ")" : "";
-      addNotice("Added \"" + (data.title || item.file.name) + "\"" + saved + ".", false);
-      await Promise.all([loadBooks(), loadStatus()]).catch(() => {});
-    } else {
-      addNotice(item.file.name + ": " + (data.error || "Upload failed (" + xhr.status + ")."), true);
-      if (data.restart) loadStatus().catch(() => {});
-    }
-    runNextUpload();
-  };
-  xhr.onerror = () => {
-    activeXhr = null;
-    uploadQueue = [];
-    updateQueueUi();
-    show("gone");
-  };
-  xhr.onabort = () => {
-    activeXhr = null;
-    addNotice("Cancelled " + item.file.name + ".", false);
-    runNextUpload();
-  };
-  xhr.send(item.file);
+  }
+  if (result.status === 401) {
+    stopBooksQueue("signin");
+    return;
+  }
+  if (result.status >= 200 && result.status < 300) {
+    const saved = result.data.filename && result.data.filename !== item.file.name ? " (saved as " + result.data.filename + ")" : "";
+    addNotice("Added \"" + (result.data.title || item.file.name) + "\"" + saved + ".", false);
+    await Promise.all([loadBooks(), loadStatus()]).catch(() => {});
+  } else {
+    addNotice(item.file.name + ": " + (result.data.error || "Upload failed (" + result.status + ")."), true);
+    if (result.data.restart) loadStatus().catch(() => {});
+  }
+  runNextUpload();
 }
 
 $("upload-cancel").addEventListener("click", () => {
-  if (activeXhr) activeXhr.abort();
+  if (activeXhr && activeXhr.abort) activeXhr.abort();
 });
 
 $("book-pick").addEventListener("click", () => $("book-input").click());
@@ -1129,6 +1164,21 @@ function updateDictQueueUi() {
   $("dict-upload-queued").textContent = dictQueue.length > 0 ? dictQueue.length + " more queued" : "";
 }
 
+function stopDictQueue(view) {
+  dictQueue = [];
+  activeDictXhr = null;
+  updateDictQueueUi();
+  show(view);
+}
+
+async function checkDictUpload(file, batchId) {
+  const params = new URLSearchParams({ name: file.name, size: String(file.size) });
+  if (batchId) params.set("batch", batchId);
+  const response = await call("/api/dictionaries/check?" + params.toString());
+  const data = await response.json().catch(() => ({}));
+  return { status: response.status, data };
+}
+
 function sendXhrPut(url, file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -1138,19 +1188,12 @@ function sendXhrPut(url, file, onProgress) {
     xhr.setRequestHeader("X-Verso-Request", "1");
     xhr.upload.onprogress = onProgress;
     xhr.onload = () => {
-      activeDictXhr = null;
       let data = {};
       try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
       resolve({ status: xhr.status, data });
     };
-    xhr.onerror = () => {
-      activeDictXhr = null;
-      reject(new Error("network"));
-    };
-    xhr.onabort = () => {
-      activeDictXhr = null;
-      reject(new Error("aborted"));
-    };
+    xhr.onerror = () => reject(new Error("network"));
+    xhr.onabort = () => reject(new Error("aborted"));
     xhr.send(file);
   });
 }
@@ -1162,24 +1205,26 @@ async function runNextDictUpload() {
     return;
   }
   const job = dictQueue.shift();
+  activeDictXhr = true;
   try {
     if (job.kind === "archive") {
       $("dict-upload-name").textContent = job.file.name;
       $("dict-upload-pct").textContent = " 0%";
       $("dict-upload-bar").value = 0;
       updateDictQueueUi();
-      const params = new URLSearchParams({ name: job.file.name });
-      const res = await sendXhrPut("/api/dictionaries?" + params.toString(), job.file, (ev) => {
-        if (ev.lengthComputable && ev.total > 0) {
-          const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
-          $("dict-upload-bar").value = pct;
-          $("dict-upload-pct").textContent = pct >= 100 ? " unpacking…" : " " + pct + "%";
-        }
-      });
+      let res = await checkDictUpload(job.file, null);
+      if (res.status === 200) {
+        const params = new URLSearchParams({ name: job.file.name });
+        res = await sendXhrPut("/api/dictionaries?" + params.toString(), job.file, (ev) => {
+          if (ev.lengthComputable && ev.total > 0) {
+            const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+            $("dict-upload-bar").value = pct;
+            $("dict-upload-pct").textContent = pct >= 100 ? " unpacking…" : " " + pct + "%";
+          }
+        });
+      }
       if (res.status === 401) {
-        dictQueue = [];
-        updateDictQueueUi();
-        show("signin");
+        stopDictQueue("signin");
         return;
       }
       if (res.status >= 200 && res.status < 300) {
@@ -1190,11 +1235,10 @@ async function runNextDictUpload() {
         addDictNotice(job.file.name + ": " + (res.data.error || "Upload failed (" + res.status + ")."), true);
       }
     } else {
+      updateDictQueueUi();
       const batchResp = await call("/api/dictionaries/batch", { method: "POST" });
       if (batchResp.status === 401) {
-        dictQueue = [];
-        updateDictQueueUi();
-        show("signin");
+        stopDictQueue("signin");
         return;
       }
       const batchData = await batchResp.json();
@@ -1210,19 +1254,21 @@ async function runNextDictUpload() {
         $("dict-upload-name").textContent = file.name + " (" + (i + 1) + "/" + job.files.length + ")";
         $("dict-upload-pct").textContent = " 0%";
         $("dict-upload-bar").value = 0;
+        activeDictXhr = true;
         updateDictQueueUi();
-        const params = new URLSearchParams({ name: file.name });
-        const res = await sendXhrPut("/api/dictionaries/batch/" + encodeURIComponent(batchId) + "?" + params.toString(), file, (ev) => {
-          if (ev.lengthComputable && ev.total > 0) {
-            const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
-            $("dict-upload-bar").value = pct;
-            $("dict-upload-pct").textContent = " " + pct + "%";
-          }
-        });
+        let res = await checkDictUpload(file, batchId);
+        if (res.status === 200) {
+          const params = new URLSearchParams({ name: file.name });
+          res = await sendXhrPut("/api/dictionaries/batch/" + encodeURIComponent(batchId) + "?" + params.toString(), file, (ev) => {
+            if (ev.lengthComputable && ev.total > 0) {
+              const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+              $("dict-upload-bar").value = pct;
+              $("dict-upload-pct").textContent = " " + pct + "%";
+            }
+          });
+        }
         if (res.status === 401) {
-          dictQueue = [];
-          updateDictQueueUi();
-          show("signin");
+          stopDictQueue("signin");
           return;
         }
         if (res.status < 200 || res.status >= 300) {
@@ -1246,10 +1292,10 @@ async function runNextDictUpload() {
   } catch (e) {
     if (e && e.message === "aborted") {
       addDictNotice("Cancelled dictionary upload.", false);
+    } else if (e && e.message === "network" && await kindleReachable()) {
+      addDictNotice("The dictionary upload didn't finish. Try it again.", true);
     } else {
-      dictQueue = [];
-      updateDictQueueUi();
-      show("gone");
+      stopDictQueue("gone");
       return;
     }
   }
@@ -1257,7 +1303,7 @@ async function runNextDictUpload() {
 }
 
 $("dict-upload-cancel").addEventListener("click", () => {
-  if (activeDictXhr) activeDictXhr.abort();
+  if (activeDictXhr && activeDictXhr.abort) activeDictXhr.abort();
 });
 
 $("dict-pick").addEventListener("click", () => $("dict-input").click());
@@ -1334,6 +1380,7 @@ document.addEventListener("keydown", (ev) => {
 
 let filesPath = "";
 let filesData = null;
+let filesRequestId = 0;
 let filesQueue = [];
 let activeFilesXhr = null;
 
@@ -1346,14 +1393,17 @@ function quoted(name) {
 }
 
 async function loadFiles(path = filesPath) {
+  const reqId = ++filesRequestId;
   const params = new URLSearchParams({ path });
   if ($("files-hidden").checked) params.set("hidden", "1");
   const response = await call("/api/files?" + params.toString());
+  if (reqId !== filesRequestId) return;
   if (response.status === 401) {
     show("signin");
     return;
   }
   const data = await response.json().catch(() => ({}));
+  if (reqId !== filesRequestId) return;
   if (!response.ok) {
     addFilesNotice(data.error || "Couldn't open that folder.", true);
     if (path !== "") await loadFiles("");
@@ -1559,10 +1609,12 @@ function moveEntry(entry) {
   box.append(where, list);
   const from = entry.path.split("/").slice(0, -1).join("/");
   let destination = from;
+  let browseId = 0;
   async function browse(path) {
+    const reqId = ++browseId;
     const response = await call("/api/files?" + new URLSearchParams({ path }).toString());
     const data = await response.json().catch(() => ({}));
-    if (!response.ok || dialog === null) return;
+    if (reqId !== browseId || !response.ok || dialog === null) return;
     destination = data.path;
     crumbButtons(where, data.crumbs || [], (p) => browse(p).catch(() => {}));
     list.replaceChildren();

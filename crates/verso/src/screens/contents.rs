@@ -14,9 +14,10 @@ pub struct Contents {
     list: List,
     pager: Pager,
     entries: Vec<TocEntry>,
+    loading: bool,
 }
 impl Contents {
-    pub fn new(t: &Theme, screen: Rect, toc: &[TocEntry], current: usize) -> Self {
+    pub fn new(t: &Theme, screen: Rect, toc: &[TocEntry], current: usize, loading: bool) -> Self {
         let mut top = TopBar::new("Contents", true);
         top.place(screen, t);
         let mut pager = Pager::new(1);
@@ -41,7 +42,7 @@ impl Contents {
         let per = (area.h / t.row).max(1) as usize;
         pager.set(current.unwrap_or(0) / per, list.paging().pages());
         list.page = pager.page;
-        Self { top, list, pager, entries: toc.to_vec() }
+        Self { top, list, pager, entries: toc.to_vec(), loading }
     }
     pub fn draw(&mut self, cx: &mut DrawCx) {
         cx.canvas.fill(crate::ui::theme::PAPER);
@@ -50,7 +51,7 @@ impl Contents {
         self.pager.draw(cx);
         if self.entries.is_empty() {
             cx.line(
-                "This book has no table of contents",
+                if self.loading { "Loading contents…" } else { "This book has no table of contents" },
                 cx.theme.body,
                 Rect::new(
                     cx.theme.margin,
