@@ -52,6 +52,14 @@ impl Env {
     }
 
     fn with_developer(developer: bool) -> Self {
+        Self::build(developer, list_names)
+    }
+
+    fn with_listing(list: fn(&Path) -> io::Result<Vec<String>>) -> Self {
+        Self::build(false, list)
+    }
+
+    fn build(developer: bool, list: fn(&Path) -> io::Result<Vec<String>>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("us");
         for d in [
@@ -99,7 +107,8 @@ impl Env {
             developer,
             library_changed.clone(),
             dictionaries_changed.clone(),
-        );
+        )
+        .listing_with(list);
         let api = Arc::new(Api::new(
             Auth::with_code("4827".into()),
             Context {
@@ -426,6 +435,60 @@ fn mixed_case_paths_reach_the_same_class() {
     assert_eq!(env.list("Verso/Data/Covers").0, 404, "a cache, hidden");
     assert_eq!(env.entry("", "VERSO")["writable"], false);
     assert!(env.root.join("VERSO/data/settings.json").exists());
+}
+
+/// Lists a folder the way FAT storage would if the names ending in `.` or
+/// holding `~` were other spellings of listed entries (`verso.` of `verso`,
+/// `EXTENS~1` of `extensions`). The test storage can't make them the same
+/// folder, but they resolve without being listed, which is what the checks see.
+fn fat_listing(dir: &Path) -> io::Result<Vec<String>> {
+    Ok(list_names(dir)?.into_iter().filter(|n| !n.ends_with('.') && !n.contains('~')).collect())
+}
+
+#[test]
+fn other_fat_spellings_of_protected_folders_are_refused() {
+    let env = Env::with_listing(fat_listing);
+    for d in ["verso./data", "EXTENS~1/verso", "extensions/verso.", "LOST_F~1", "documents/Old~1"] {
+        fs::create_dir_all(env.root.join(d)).unwrap();
+    }
+    for f in ["verso./data/settings.json", "EXTENS~1/verso/menu.json", "voice."] {
+        fs::write(env.root.join(f), "{}").unwrap();
+    }
+    // Existing paths through those spellings.
+    assert_eq!(env.put("verso./data/settings.json", true, b"x").0, 400);
+    assert_eq!(env.put("EXTENS~1/verso/menu.json", true, b"x").0, 400);
+    assert_eq!(env.put("extensions/verso./verso.sh", false, b"x").0, 400);
+    assert_eq!(env.list("verso./data").0, 400);
+    assert_eq!(env.delete("EXTENS~1", true).0, 400);
+    assert_eq!(env.post("rename", json!({ "path": "verso.", "name": "mine" })).0, 400);
+    assert_eq!(env.post("mkdir", json!({ "path": "LOST_F~1", "name": "x" })).0, 400);
+    assert_eq!(env.post("move", json!({ "path": "documents/notes.txt", "to": "EXTENS~1/verso" })).0, 400);
+    // And where a link leads.
+    std::os::unix::fs::symlink(env.root.join("verso./data"), env.root.join("documents/data")).unwrap();
+    assert_eq!(env.list("documents/data").0, 400);
+    assert_eq!(env.put("documents/data/settings.json", true, b"x").0, 400);
+    // New names that would reach something already there.
+    assert_eq!(env.put("voice.", true, b"x").0, 409);
+    assert_eq!(env.post("mkdir", json!({ "path": "", "name": "verso." })).0, 409);
+    assert_eq!(env.post("rename", json!({ "path": "fonts", "name": "EXTENS~1" })).0, 409);
+    assert_eq!(env.post("move", json!({ "path": "documents/Old~1", "to": "" })).0, 200, "not there yet");
+    for f in ["verso./data/settings.json", "EXTENS~1/verso/menu.json", "voice."] {
+        assert_eq!(fs::read_to_string(env.root.join(f)).unwrap(), "{}", "{f}");
+    }
+    assert!(env.root.join("fonts").is_dir() && env.root.join("EXTENS~1").is_dir());
+    // Only the names classes depend on are checked.
+    assert_eq!(env.put("documents/notes~1.txt", false, b"x").0, 201);
+    assert_eq!(env.put("verso/data/exports/Book.", false, b"x").0, 201);
+}
+
+#[test]
+fn names_that_are_only_names_elsewhere_stay_user_content() {
+    // On storage that lists `verso.`, it is a folder of its own.
+    let env = Env::new();
+    fs::create_dir_all(env.root.join("verso.")).unwrap();
+    assert_eq!(env.put("verso./notes.txt", false, b"x").0, 201);
+    assert_eq!(env.post("rename", json!({ "path": "verso.", "name": "mine" })).0, 200);
+    assert!(env.root.join("mine/notes.txt").exists());
 }
 
 #[test]

@@ -1,7 +1,9 @@
 //! The Files tab API (docs/web-app.md, "Files: who may write where"): a plain
 //! browser of the Kindle's storage (`/mnt/us`) with guardrails. Every path is
 //! classified on the server, ignoring ASCII case, both as given and after
-//! following symlinks, and the stricter class wins. Inside `verso` everything
+//! following symlinks, and the stricter class wins. Names the classes depend
+//! on must be spelled the way their folder lists them (`check_spelling`), so
+//! FAT's other spellings of a folder can't pass as user content. Inside `verso` everything
 //! is read-only except the folders listed as user content, so a new app file or
 //! folder there is protected without changing the table.
 
@@ -148,6 +150,20 @@ fn holds_protected(rel: &[String]) -> bool {
         || PINNED.iter().any(|p| is(&rel, p))
 }
 
+/// How many leading parts of `rel` decide its class by their spelling: the
+/// storage root's names (`verso`, `extensions`, the system folders) and the
+/// names in `extensions`. Deeper in `verso`, a name spelled another way only
+/// makes a path stricter (`App`), and elsewhere names don't change classes.
+fn spelling_checked(rel: &[String]) -> usize {
+    let checked = if rel.first().is_some_and(|f| f.eq_ignore_ascii_case("extensions")) { 2 } else { 1 };
+    checked.min(rel.len())
+}
+
+/// The names a folder lists.
+fn list_names(dir: &Path) -> io::Result<Vec<String>> {
+    fs::read_dir(dir)?.map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned())).collect()
+}
+
 /// The shared name rules (`library::files::check_name`), plus no `.` or `..`.
 fn check_name(name: &str) -> Result<&str, Response> {
     let name = name.trim();
@@ -219,6 +235,8 @@ pub struct Files {
     library_changed: Arc<AtomicBool>,
     /// Set when a change may have touched a dictionary folder.
     dictionaries_changed: Arc<AtomicBool>,
+    /// `list_names`; tests list FAT-like folders.
+    list: fn(&Path) -> io::Result<Vec<String>>,
 }
 
 impl Files {
@@ -231,7 +249,66 @@ impl Files {
         library_changed: Arc<AtomicBool>,
         dictionaries_changed: Arc<AtomicBool>,
     ) -> Self {
-        Self { root, store, free_space, activity, developer, library_changed, dictionaries_changed }
+        Self { root, store, free_space, activity, developer, library_changed, dictionaries_changed, list: list_names }
+    }
+
+    /// Lists folders with `list` instead of reading them.
+    #[cfg(test)]
+    pub(super) fn listing_with(mut self, list: fn(&Path) -> io::Result<Vec<String>>) -> Self {
+        self.list = list;
+        self
+    }
+
+    /// Whether `name` in `dir` reaches an entry that `dir` lists under
+    /// another spelling (ASCII case aside). Linux's FAT driver drops trailing
+    /// dots (`verso.` is `verso`) and finds 8.3 short names (`EXTENS~1` is
+    /// `extensions`); exFAT also folds case beyond ASCII. A name that is
+    /// neither listed nor there is a new one.
+    fn alias(&self, dir: &Path, name: &str) -> Result<bool, Response> {
+        let names = (self.list)(dir).map_err(|e| {
+            log::warn!("web app: listing {}: {e}", dir.display());
+            err(500, "Couldn't read that.")
+        })?;
+        if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            return Ok(false);
+        }
+        match fs::symlink_metadata(dir.join(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            _ => Ok(true),
+        }
+    }
+
+    /// Refuses a path (`rel` under `base`) whose class-deciding parts
+    /// (`spelling_checked`) are spelled in a way their folder doesn't list.
+    /// Matched by name, `verso./data/settings.json` or `EXTENS~1/verso` on FAT
+    /// storage would pass as user content. The page only sends listed names.
+    /// Comparing protected folders by device and inode was the other way, but
+    /// a FUSE layer (the Kindle's `/mnt/us` is `fuse.fsp`) may give one file
+    /// a different inode number per name.
+    fn check_spelling(&self, base: &Path, rel: &[String]) -> Result<(), Response> {
+        let mut dir = base.to_path_buf();
+        for name in &rel[..spelling_checked(rel)] {
+            if self.alias(&dir, name)? {
+                log::info!("web app: refusing {name} in {}: not spelled as listed", dir.display());
+                return Err(err(400, "Use the name as the folder lists it."));
+            }
+            dir.push(name);
+        }
+        Ok(())
+    }
+
+    /// `check_spelling` for a new name in `folder`: an upload or rename to
+    /// `voice.` would otherwise reach `voice`.
+    fn check_new_name(&self, folder: &Target, name: &str) -> Result<(), Response> {
+        let checked = |rel: &[String]| {
+            let mut rel = rel.to_vec();
+            rel.push(name.to_owned());
+            spelling_checked(&rel) == rel.len()
+        };
+        if (checked(&folder.rel) || checked(&folder.canon_rel)) && self.alias(&folder.canon, name)? {
+            return Err(err(409, "Something with that name is already there."));
+        }
+        Ok(())
     }
 
     fn canon_root(&self) -> Result<PathBuf, Response> {
@@ -267,6 +344,10 @@ impl Files {
         };
         let canon_rel: Vec<String> =
             inside.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        self.check_spelling(&self.root, &rel)?;
+        if canon_rel != rel {
+            self.check_spelling(canon_root, &canon_rel)?;
+        }
         let class = classify(&rel).stricter(classify(&canon_rel));
         if !class.visible(self.developer) {
             return Err(err(404, "That no longer exists."));
@@ -574,6 +655,7 @@ impl Files {
         if !Self::child_class(&folder, &name).writable() {
             return Err(err(403, "This folder is read-only."));
         }
+        self.check_new_name(&folder, &name)?;
         let target = folder.canon.join(&name);
         match fs::symlink_metadata(&target) {
             Ok(meta) if meta.is_dir() => return Err(err(409, "A folder with that name is already there.")),
@@ -688,6 +770,9 @@ impl Files {
         if !Self::child_class(&folder, &name).writable() {
             return err(403, "This folder is read-only.");
         }
+        if let Err(response) = self.check_new_name(&folder, &name) {
+            return response;
+        }
         let target = folder.canon.join(&name);
         match fs::create_dir(&target) {
             Ok(()) => {}
@@ -749,6 +834,9 @@ impl Files {
         if !Self::child_class(&parent, &name).writable() {
             return err(403, "That name belongs to Verso or the Kindle.");
         }
+        if let Err(response) = self.check_new_name(&parent, &name) {
+            return response;
+        }
         let from = parent.canon.join(source.name());
         let to = parent.canon.join(&name);
         self.finish_move(&from, &to, &parent.rel, &name)
@@ -787,6 +875,9 @@ impl Files {
         let name = source.name().to_owned();
         if !Self::child_class(&destination, &name).writable() {
             return err(403, "That folder is read-only.");
+        }
+        if let Err(response) = self.check_new_name(&destination, &name) {
+            return response;
         }
         let from = parent.canon.join(&name);
         let to = destination.canon.join(&name);
