@@ -416,7 +416,11 @@ pub(super) fn fill(image: &image::GrayImage, w: u32, h: u32) -> image::GrayImage
     if (sw, sh) == image.dimensions() && (sw, sh) == (w, h) {
         return image.clone();
     }
-    let scaled = image::imageops::thumbnail(image, sw, sh);
+    let scaled = if sw > image.width() || sh > image.height() {
+        image::imageops::resize(image, sw, sh, image::imageops::FilterType::Triangle)
+    } else {
+        image::imageops::thumbnail(image, sw, sh)
+    };
     if (sw, sh) == (w, h) {
         return scaled;
     }

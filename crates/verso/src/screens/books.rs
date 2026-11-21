@@ -216,6 +216,7 @@ pub struct Books {
     continue_id: Option<String>,
     continue_rect: Rect,
     continue_press: Press,
+    home_divider_y: Option<i32>,
     library_card: Rect,
     library_card_press: Press,
     header: Rect,
@@ -388,6 +389,7 @@ impl Books {
             continue_id: None,
             continue_rect: Rect::default(),
             continue_press: Press::default(),
+            home_divider_y: None,
             library_card: Rect::default(),
             library_card_press: Press::default(),
             header: Rect::default(),
@@ -528,6 +530,7 @@ impl Books {
         // The resume card lives on Home only; Library and Search are plain grids.
         self.continue_id = None;
         self.continue_rect = Rect::default();
+        self.home_divider_y = None;
         self.library_card = Rect::default();
         let y = t.top_bar + t.mm(2.0);
         let landscape = self.screen.w > self.screen.h;
@@ -600,54 +603,83 @@ impl Books {
         log::debug!("startup stage: view books={} elapsed_us={}", self.books.len(), started.elapsed().as_micros());
     }
     fn refresh_home(&mut self, t: &Theme) {
-        let y = t.top_bar + t.mm(3.0);
         let width = self.screen.w - 2 * t.margin;
+        let landscape = self.screen.w > self.screen.h;
+        let narrow = self.screen.w < t.mm(100.0);
+        let short = self.screen.h < t.mm(100.0);
         let card_h = t.mm(13.2).min(self.screen.h / 8).max(t.target);
         self.library_card = Rect::new(t.margin, self.screen.bottom() - t.margin - card_h, width, card_h);
         self.status = Rect::default();
-        self.continue_id = self.home.resume().map(|e| e.book.id.clone());
-        // Landscape is too short to stack the resume card above the recent
-        // books, so they stand side by side.
-        let side = self.continue_id.is_some() && self.screen.w > self.screen.h;
-        // The update notice's spot stays free whether or not there is one,
-        // so a check finishing never moves anything: above the Library card,
-        // or (side by side) under the recent books.
-        let notice_h = t.target;
-        let card_top = self.library_card.y;
-        let grid_limit = card_top - notice_h - t.mm(if side { 4.0 } else { 3.0 });
-        self.continue_rect = if side {
-            Rect::new(t.margin, y, width / 2, (card_top - y - t.mm(6.0)).min(t.mm(45.0)))
-        } else if self.continue_id.is_some() {
-            // On short screens the card gives up some height so the recent
-            // covers keep about 30 mm next to the notice's spot.
-            let spare = grid_limit - y - t.mm(16.0) - t.mm(30.0);
-            Rect::new(t.margin, y, width, spare.clamp(t.mm(26.0), t.mm(37.0)))
-        } else {
-            Rect::default()
-        };
-        self.header = if side {
-            let x = self.continue_rect.right() + t.mm(6.0);
-            Rect::new(x, y, self.screen.w - t.margin - x, t.mm(6.0))
-        } else {
-            let y = if self.continue_id.is_some() { self.continue_rect.bottom() + t.mm(6.0) } else { y };
-            Rect::new(t.margin, y, width, t.mm(6.0))
-        };
         self.folders.clear();
-        let cols = (self.header.w / t.mm(if side { 19.0 } else { 22.0 })).clamp(1, 4) as usize;
-        self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
-        self.grid = Grid::new(self.books.len(), cols, 1);
-        let grid = Rect::new(
-            self.header.x,
-            self.header.bottom() + t.mm(2.0),
-            self.header.w,
-            (grid_limit - self.header.bottom() - t.mm(4.0)).min(t.mm(45.0)).max(t.target),
-        );
-        self.grid.place(grid, t.mm(3.5), 0);
-        self.notice_rect = if side {
-            Rect::new(self.header.x, grid.bottom() + t.mm(3.0), self.header.w, notice_h)
+        self.continue_id = self.home.resume().map(|e| e.book.id.clone());
+        self.home_divider_y = None;
+
+        // The update notice's spot stays reserved inside the gap above the
+        // Library card (or under Recent books in landscape), so a check
+        // finishing never moves anything.
+        let notice_h = t.mm(8.2);
+        let notice_y = self.library_card.y - t.mm(1.5) - notice_h;
+        let content_top = t.top_bar + t.mm(if narrow || short { 2.5 } else { 3.5 });
+        let content_bottom = notice_y - t.mm(1.4);
+        let header_h = t.mm(4.5);
+        let header_gap = t.mm(if narrow || short { 2.0 } else { 2.7 });
+        let recent_labels_h = t.mm(HOME_RECENT_LABELS_MM);
+
+        if landscape && self.continue_id.is_some() {
+            // Continue reading on the left, Recent books + reserved notice on
+            // the right, Library card full-width along the bottom.
+            let col_gap = t.mm(if short { 4.5 } else { 5.0 });
+            let left_w = (width - col_gap) / 2;
+            let right_x = t.margin + left_w + col_gap;
+            let right_w = width - left_w - col_gap;
+            let max_cover_w = left_w * 42 / 100;
+            let max_h_from_w = max_cover_w * 3 / 2;
+            let max_h_from_band = (self.library_card.y - t.mm(3.0) - content_top).max(t.target);
+            let continue_h = t.mm(39.6).min(max_h_from_w).min(max_h_from_band);
+            self.continue_rect = Rect::new(t.margin, content_top, left_w, continue_h);
+
+            self.header = Rect::new(right_x, content_top, right_w, header_h);
+            let cols = (right_w / t.mm(17.0)).clamp(1, 3) as usize;
+            let gap_x = t.mm(if right_w < t.mm(60.0) { 2.4 } else { 3.0 });
+            let cell_w = (right_w - gap_x * (cols as i32 - 1)).max(1) / cols as i32;
+            let ideal_grid_h = cell_w * 3 / 2 + recent_labels_h;
+            self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
+            self.grid = Grid::new(self.books.len(), cols, 1);
+            let grid_y = self.header.bottom() + header_gap;
+            let grid_h = (content_bottom - grid_y).min(ideal_grid_h).max(t.target);
+            self.grid.place(Rect::new(right_x, grid_y, right_w, grid_h), gap_x, 0);
+            self.notice_rect = Rect::new(right_x, notice_y, right_w, notice_h);
         } else {
-            Rect::new(t.margin, card_top - t.mm(2.0) - notice_h, width, notice_h)
-        };
+            let cols = if width >= t.mm(75.0) { 4 } else { (width / t.mm(19.0)).clamp(1, 4) as usize };
+            let gap_x = t.mm(if narrow { 2.6 } else { 3.4 });
+            let cell_w = (width - gap_x * (cols as i32 - 1)).max(1) / cols as i32;
+            let ideal_grid_h = cell_w * 3 / 2 + recent_labels_h;
+            self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
+            self.grid = Grid::new(self.books.len(), cols, 1);
+
+            if self.continue_id.is_some() {
+                let div_gap_top = t.mm(if narrow { 3.2 } else { 5.2 });
+                let div_gap_bot = t.mm(if narrow { 2.6 } else { 3.8 });
+                let overhead = div_gap_top + div_gap_bot + header_h + header_gap;
+                let max_continue_h = t.mm(39.6);
+                let spare = content_bottom - content_top - overhead - ideal_grid_h;
+                let continue_h =
+                    spare.clamp(t.mm(28.0), max_continue_h).min((content_bottom - content_top).max(t.target));
+                self.continue_rect = Rect::new(t.margin, content_top, width, continue_h);
+                let div_y = self.continue_rect.bottom() + div_gap_top;
+                if !self.books.is_empty() {
+                    self.home_divider_y = Some(div_y);
+                }
+                self.header = Rect::new(t.margin, div_y + div_gap_bot, width, header_h);
+            } else {
+                self.continue_rect = Rect::default();
+                self.header = Rect::new(t.margin, content_top, width, header_h);
+            }
+            let grid_y = self.header.bottom() + header_gap;
+            let grid_h = (content_bottom - grid_y).min(ideal_grid_h).max(t.target);
+            self.grid.place(Rect::new(t.margin, grid_y, width, grid_h), gap_x, 0);
+            self.notice_rect = Rect::new(t.margin, notice_y, width, notice_h);
+        }
         self.prioritize();
     }
     /// Covers of visible books come first, then those of visible previews.
@@ -745,7 +777,7 @@ impl Books {
     /// A book's cover in grid cell `cell`. Every cell's cover has the size
     /// of the narrowest cell's, so a page draws one tile thumbnail size.
     fn cover_rect(&self, cell: Rect, t: &Theme) -> Rect {
-        grid_cover_rect(&self.grid, cell, t)
+        if self.is_home() { home_recent_cover_rect(&self.grid, cell, t) } else { grid_cover_rect(&self.grid, cell, t) }
     }
     /// A folder tile's preview or icon area in `cell`, above its labels; the
     /// same size in every cell, like covers.
@@ -1678,8 +1710,24 @@ impl Books {
         );
     }
 }
+const HOME_RECENT_LABELS_MM: f32 = 8.0;
+
 fn continue_cover_rect(r: Rect) -> Rect {
     Rect::new(r.x, r.y, r.h * 2 / 3, r.h)
+}
+
+/// Crisp 2 px cover outline at 300 dpi (1 px at 167 dpi).
+fn cover_outline(t: &Theme) -> i32 {
+    t.mm(0.17).max(1)
+}
+
+/// Home's Recent books row fills each column flush with the margins (2:3 cover
+/// with 1-line title + 1-line author below).
+fn home_recent_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
+    let (w, h) = grid.base_cell_size();
+    let cover_h = (h - t.mm(HOME_RECENT_LABELS_MM)).min(w * 3 / 2).max(1);
+    let cover_w = (cover_h * 2 / 3).max(1);
+    Rect::new(cell.x, cell.y, cover_w, cover_h)
 }
 
 fn grid_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
@@ -1716,16 +1764,19 @@ fn draw_library_card(cx: &mut DrawCx, r: Rect, subtitle: &str, pressed: bool) {
     let icon_rect = Rect::new(r.x + pad, r.y + (r.h - icon_size) / 2, icon_size, icon_size);
     cx.icon(Icon::Folder, icon_rect, icon_size, fg);
     let chevron_size = t.mm(4.7).min(icon_size);
+    let chevron_pad = t.mm(2.8);
     let chevron_rect =
-        Rect::new(r.right() - pad - chevron_size, r.y + (r.h - chevron_size) / 2, chevron_size, chevron_size);
+        Rect::new(r.right() - chevron_pad - chevron_size, r.y + (r.h - chevron_size) / 2, chevron_size, chevron_size);
     cx.icon(Icon::ChevronRight, chevron_rect, chevron_size, fg);
     let text_x = icon_rect.right() + t.mm(2.9);
     let text_w = (chevron_rect.x - text_x - t.mm(2.0)).max(0);
-    let mid = r.center().y;
-    let title_h = t.mm(5.0);
-    let sub_h = t.mm(4.2);
-    cx.line("Library", t.heading.gray(fg), Rect::new(text_x, mid - title_h, text_w, title_h), HAlign::Left);
-    cx.line(subtitle, t.small.gray(sub_fg), Rect::new(text_x, mid + t.mm(0.5), text_w, sub_h), HAlign::Left);
+    let title_style = TextStyle::new(t.pt(10.5), Weight::SemiBold, Family::Sans).gray(fg);
+    let title_h = t.mm(4.8);
+    let sub_h = t.mm(3.8);
+    let gap = t.mm(0.4);
+    let block_y = r.y + (r.h - title_h - gap - sub_h) / 2;
+    cx.line("Library", title_style, Rect::new(text_x, block_y, text_w, title_h), HAlign::Left);
+    cx.line(subtitle, t.small.gray(sub_fg), Rect::new(text_x, block_y + title_h + gap, text_w, sub_h), HAlign::Left);
 }
 
 /// Smart folder/book count omitting zero parts:
@@ -1751,15 +1802,18 @@ fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
         cx.hint(r, RefreshMode::Ui);
         (INK2, INK)
     };
-    let inner = r.inset_xy(t.mm(3.0), 0);
+    let tight = r.w < t.mm(60.0);
+    let inner = r.inset_xy(t.mm(if tight { 2.0 } else { 3.0 }), 0);
+    let (msg_style, act_style) = if tight { (t.small, t.small.weight(Weight::SemiBold)) } else { (t.body, t.button) };
     let action = "Update";
-    let action_w = cx.text.width(action, t.button).ceil() as i32;
+    let action_w = cx.text.width(action, act_style).ceil() as i32;
     let chevron = Rect::new(inner.right() - t.icon_small, inner.y, t.icon_small, inner.h);
     let label = Rect::new(chevron.x - t.mm(1.0) - action_w, inner.y, action_w + 1, inner.h);
-    cx.line(action, t.button.gray(accent), label, HAlign::Left);
+    cx.line(action, act_style.gray(accent), label, HAlign::Left);
     cx.icon(Icon::ChevronRight, chevron, t.icon_small, accent);
-    let message = Rect { w: label.x - t.mm(3.0) - inner.x, ..inner };
-    cx.line(&format!("Verso {} is available", offer.version), t.body.gray(text), message, HAlign::Left);
+    let gap = t.mm(if tight { 1.5 } else { 3.0 });
+    let message = Rect { w: (label.x - gap - inner.x).max(0), ..inner };
+    cx.line(&format!("Verso {} is available", offer.version), msg_style.gray(text), message, HAlign::Left);
 }
 
 /// The dot on the Settings icon while an update is available.
@@ -1869,6 +1923,7 @@ fn path_tail(text: &mut crate::gfx::TextRenderer, path: &str, style: crate::gfx:
 fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &mut Thumbnails) {
     if let Some(cover) = cache.load(store, book, rect.w, rect.h, Fit::Cover) {
         cover.blit(cx.canvas, rect);
+        cx.canvas.stroke_rounded_rect(rect, 0.0, cover_outline(cx.theme) as f32, INK);
         return;
     }
     let t = cx.theme;
@@ -1966,27 +2021,53 @@ impl Screen for Books {
                 cx.canvas.stroke_rounded_rect(r, t.radius, t.border as f32, INK);
                 cx.hint(r, RefreshMode::Fast);
             }
-            let x = cover.right() + t.mm(4.0);
-            let w = r.right() - x;
-            cx.section_label("Continue reading", Rect::new(x, r.y, w, t.mm(4.0)));
-            cx.line(&book.metadata.title, t.title, Rect::new(x, r.y + t.mm(4.0), w, t.mm(7.0)), HAlign::Left);
-            cx.line(
-                &book.metadata.authors,
-                t.body.gray(INK2),
-                Rect::new(x, r.y + t.mm(11.0), w, t.mm(5.0)),
-                HAlign::Left,
-            );
+            let landscape = self.screen.w > self.screen.h;
+            let narrow = self.screen.w < t.mm(100.0);
+            let text_gap = t.mm(if narrow || landscape { 3.2 } else { 3.7 });
+            let x = cover.right() + text_gap;
+            let w = (r.right() - x).max(1);
+            let bar_h = t.mm(0.5).max(2);
+            let pct_style = t.small.gray(INK2);
             let progress = self.home.resume().map_or(0, |e| e.status.progress).min(10000);
-            let bar = Rect::new(x, r.bottom() - t.mm(3.0), (w - t.mm(14.0)).max(1), t.hairline);
+            let pct_text = format!("{}%", progress / 100);
+            let pct_w = cx.text.width(&pct_text, pct_style).ceil() as i32 + 2;
+            let pct_gap = t.mm(2.0);
+            let bar_cy = r.bottom() - t.mm(2.4);
+            let bar = Rect::new(x, bar_cy - bar_h / 2, (w - pct_w - pct_gap).max(1), bar_h);
             cx.fill(bar, LINE);
             cx.fill(Rect { w: (bar.w as i64 * progress as i64 / 10000) as i32, ..bar }, INK);
-            cx.line(
-                &format!("{}%", progress / 100),
-                t.caption.gray(INK2),
-                Rect::new(bar.right() + t.mm(2.0), bar.y - t.mm(2.0), t.mm(12.0), t.mm(4.0)),
-                HAlign::Right,
+            let pct_h = t.mm(3.6);
+            let progress_top = bar_cy - pct_h / 2;
+            cx.line(&pct_text, pct_style, Rect::new(r.right() - pct_w, progress_top, pct_w, pct_h), HAlign::Right);
+
+            let section_y = r.y + t.mm(0.9);
+            let section_h = t.mm(2.8);
+            cx.section_label("Continue reading", Rect::new(x, section_y, w, section_h));
+            let title_style =
+                if narrow || landscape { t.title } else { TextStyle::new(t.pt(14.4), Weight::SemiBold, Family::Serif) };
+            let title_y = section_y + section_h + t.mm(1.0);
+            let lh = title_style.line_height().round() as i32;
+            let author_style = if narrow || landscape { t.small.gray(INK2) } else { t.body.gray(INK2) };
+            let author_gap = t.mm(1.2);
+            let author_h = t.mm(3.8);
+            let (_, measured_h) = cx.text.measure(&book.metadata.title, title_style, Some(w as f32));
+            let needed_lines = ((measured_h / title_style.line_height()).round() as i32).clamp(1, 2);
+            let max_lines =
+                if title_y + 2 * lh + author_gap + author_h <= progress_top - t.mm(1.0) { needed_lines } else { 1 };
+            let title_rect = Rect::new(x, title_y, w, max_lines * lh);
+            cx.text.draw_lines(
+                cx.canvas,
+                &book.metadata.title,
+                title_style,
+                title_rect,
+                HAlign::Left,
+                max_lines as usize,
             );
-            cx.hline(r.bottom() + t.mm(2.0), r.x, r.right(), t.hairline, LINE);
+            let author_y = title_rect.bottom() + author_gap;
+            cx.line(&book.metadata.authors, author_style, Rect::new(x, author_y, w, author_h), HAlign::Left);
+            if let Some(div_y) = self.home_divider_y {
+                cx.hline(div_y, r.x, r.right(), t.hairline, INK);
+            }
         }
         cx.line(
             &if self.is_home() {
@@ -2065,31 +2146,50 @@ impl Screen for Books {
             let cover = self.cover_rect(cell, t);
             draw_cover(cx, book, cover, &self.store, &mut self.thumbnails);
             if self.grid.pressed() == Some(i) {
-                cx.canvas.stroke_rounded_rect(cover, t.radius, (2 * t.border) as f32, INK);
+                let radius = if self.is_home() { 0.0 } else { t.radius };
+                cx.canvas.stroke_rounded_rect(cover, radius, (2 * t.border) as f32, INK);
                 cx.hint(cover, RefreshMode::Fast);
             } else if self.selection.is_none() {
                 cx.hint(cover, RefreshMode::Ui);
             }
             // While selecting, the cover takes the default grayscale mode; a
             // Ui hint would override the fast tick box drawn over its corner.
-            let y = cover.bottom() + t.mm(1.0);
-            cx.line(&book.metadata.title, t.button, Rect::new(cell.x, y, cell.w, t.mm(4.0)), HAlign::Left);
-            let state = self.states.get(&book.id).cloned().unwrap_or_default();
-            let label = if self.is_home() { String::new() } else { status(&state) };
-            let status_w = (cx.text.width(&label, t.caption).ceil() as i32 + t.mm(1.0)).min(cell.w * 2 / 3);
-            cx.line(
-                &book.metadata.authors,
-                t.caption.gray(INK2),
-                Rect::new(cell.x, y + t.mm(4.0), cell.w - status_w - t.mm(1.0), t.mm(4.0)),
-                HAlign::Left,
-            );
-            cx.line(
-                &label,
-                t.caption.gray(INK2),
-                Rect::new(cell.right() - status_w, y + t.mm(4.0), status_w, t.mm(4.0)),
-                HAlign::Right,
-            );
-            self.draw_tick(cx, Target::Book(book.id.clone()), cell);
+            if self.is_home() {
+                let y = cover.bottom() + t.mm(1.4);
+                let title_h = t.mm(3.4);
+                let author_h = t.mm(3.2);
+                cx.line(
+                    &book.metadata.title,
+                    t.small.weight(Weight::SemiBold),
+                    Rect::new(cell.x, y, cell.w, title_h),
+                    HAlign::Left,
+                );
+                cx.line(
+                    &book.metadata.authors,
+                    t.caption.gray(INK2),
+                    Rect::new(cell.x, y + title_h, cell.w, author_h),
+                    HAlign::Left,
+                );
+            } else {
+                let y = cover.bottom() + t.mm(1.0);
+                cx.line(&book.metadata.title, t.button, Rect::new(cell.x, y, cell.w, t.mm(4.0)), HAlign::Left);
+                let state = self.states.get(&book.id).cloned().unwrap_or_default();
+                let label = status(&state);
+                let status_w = (cx.text.width(&label, t.caption).ceil() as i32 + t.mm(1.0)).min(cell.w * 2 / 3);
+                cx.line(
+                    &book.metadata.authors,
+                    t.caption.gray(INK2),
+                    Rect::new(cell.x, y + t.mm(4.0), cell.w - status_w - t.mm(1.0), t.mm(4.0)),
+                    HAlign::Left,
+                );
+                cx.line(
+                    &label,
+                    t.caption.gray(INK2),
+                    Rect::new(cell.right() - status_w, y + t.mm(4.0), status_w, t.mm(4.0)),
+                    HAlign::Right,
+                );
+                self.draw_tick(cx, Target::Book(book.id.clone()), cell);
+            }
         }
         if !self.is_home() && self.books.is_empty() && self.folders.is_empty() {
             let message = if let Some(search) = &self.search {
@@ -2119,6 +2219,12 @@ impl Screen for Books {
             );
         }
         if self.is_home() {
+            if self.continue_id.is_none() && self.books.is_empty() {
+                let top = t.top_bar + t.mm(4.0);
+                let area =
+                    Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (self.notice_rect.y - top).max(t.target));
+                cx.paragraph("Open a book from Library to start reading", t.body.gray(INK2), area, HAlign::Center);
+            }
             if self.selection.is_none()
                 && let Some(offer) = &self.notice
             {
@@ -5036,7 +5142,7 @@ mod tests {
 
     #[test]
     fn home_startup_prefetches_exact_first_draw_covers_and_draw_keeps_queue() -> anyhow::Result<()> {
-        for (w, h) in [(1272, 1696), (1696, 1272)] {
+        for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167)] {
             let root = std::env::temp_dir().join(format!("verso-home-prefetch-{w}x{h}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             let store = Store::at(root.clone());
@@ -5061,7 +5167,7 @@ mod tests {
                 index.books.push(b);
             }
             store.rebuild_home_summary(&index)?;
-            let t = Theme::for_dpi(300);
+            let t = Theme::for_dpi(dpi);
             let screen = Rect::new(0, 0, w, h);
             let mut books =
                 Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
@@ -5193,6 +5299,219 @@ mod tests {
         assert_eq!(toasted.as_deref(), Some("Library updated"));
         assert!(!books.manual_rescan);
         drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn home_portrait_layout_matches_mockup_dimensions_and_cover_outlines() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-portrait-spec")?;
+        std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
+        let mut index = store.library();
+        for (i, b) in index.books.iter_mut().take(5).enumerate() {
+            b.cover = Cover::Ready(b.id.clone());
+            b.metadata.title = if i == 0 {
+                "A Very Long Book Title That Should Wrap Cleanly Across Two Lines Without Overflowing".into()
+            } else {
+                format!("Recent Title {i}")
+            };
+            image::GrayImage::from_pixel(covers::WIDTH, covers::HEIGHT, image::Luma([200]))
+                .save(store.cover_path(&b.id))?;
+            store.save_book(
+                &b.id,
+                &BookState {
+                    position: if i == 0 { crate::document::Position("p1".into()) } else { Default::default() },
+                    progress: if i == 0 { 3400 } else { 0 },
+                    last_opened: 100 - i as u64,
+                    ..Default::default()
+                },
+            )?;
+        }
+        store.save_library(&index)?;
+        store.rebuild_home_summary(&index)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books =
+            Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
+        // Continue reading cover matches 312 × 468 at 300 dpi.
+        let continue_cover = continue_cover_rect(books.continue_rect);
+        assert_eq!((continue_cover.w, continue_cover.h), (312, 468));
+        assert_eq!(continue_cover.x, t.margin);
+        // Divider separates Continue reading from Recent books.
+        let div_y = books.home_divider_y.expect("divider between Continue and Recent");
+        assert!(div_y > books.continue_rect.bottom() && div_y < books.header.y);
+        // 4-column flush Recent books row with 258 × 387 covers.
+        let cells = books.grid.cells();
+        assert_eq!(cells.len(), 4);
+        assert_eq!(cells[0].1.x, t.margin);
+        assert_eq!(cells[3].1.right(), screen.right() - t.margin);
+        for (_, cell) in &cells {
+            let cover = books.cover_rect(*cell, &t);
+            assert_eq!((cover.w, cover.h), (258, 387));
+        }
+        // Reserved notice sits cleanly inside the gap between Recent books and the 156 px Library card.
+        assert_eq!(books.library_card.h, 156);
+        assert_eq!(books.library_card.bottom(), screen.bottom() - t.margin);
+        assert!(books.notice_rect.y > books.grid.rect().bottom());
+        assert!(books.notice_rect.bottom() < books.library_card.y);
+        // home_covers matches exact cover dimensions.
+        let specs = books.home_covers(&t);
+        assert_eq!(specs.len(), 5);
+        assert_eq!((specs[0].w, specs[0].h), (312, 468));
+        assert!(specs[1..].iter().all(|s| (s.w, s.h) == (258, 387)));
+        // Drawing paints 2 px INK outlines on loaded covers and 3 px black divider.
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        let mut hints = Vec::new();
+        books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+        let px = |canvas: &crate::gfx::Canvas, x: i32, y: i32| canvas.gray_data()[y as usize * 1272 + x as usize];
+        assert_eq!(px(&canvas, continue_cover.x, continue_cover.y), INK);
+        assert_eq!(px(&canvas, continue_cover.x + 1, continue_cover.y + 1), INK);
+        assert_eq!(px(&canvas, continue_cover.x + 5, continue_cover.y + 5), 200);
+        let recent_cover = books.cover_rect(cells[0].1, &t);
+        assert_eq!(px(&canvas, recent_cover.x, recent_cover.y), INK);
+        assert_eq!(px(&canvas, recent_cover.right() - 1, recent_cover.bottom() - 1), INK);
+        assert_eq!(px(&canvas, t.margin + 100, div_y), INK);
+        // Pressing the Library card inverts it with a Fast hint.
+        let card_pt = books.library_card.center();
+        with_cx(&t, screen, |cx| {
+            books.on_gesture(Gesture::Down(card_pt), cx);
+        });
+        hints.clear();
+        canvas.fill(PAPER);
+        books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+        assert!(hints.iter().any(|h| h.rect == books.library_card && h.mode == RefreshMode::Fast));
+        assert_eq!(px(&canvas, books.library_card.x + 20, books.library_card.y + 20), INK);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn home_empty_and_partial_states_anchor_library_card() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-states")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books =
+            Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
+        // 1. Fresh launch before scan completes: empty Home, "Scanning…" subtitle, card at bottom.
+        assert!(books.continue_id.is_none() && books.books.is_empty());
+        assert!(books.home_divider_y.is_none());
+        assert_eq!(books.library_card_subtitle(), "Scanning…");
+        assert_eq!(books.library_card.bottom(), screen.bottom() - t.margin);
+        let empty_card = books.library_card;
+        let empty_notice = books.notice_rect;
+        // Prompt draws inside the empty region above notice_rect.
+        let mut canvas = crate::gfx::Canvas::new(1272, 1696);
+        let mut text = crate::gfx::TextRenderer::new();
+        let mut icons = crate::gfx::IconRenderer::default();
+        books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+        let gray = canvas.gray_data();
+        let prompt_ink = (t.top_bar..books.notice_rect.y)
+            .flat_map(|y| (t.margin..screen.right() - t.margin).map(move |x| gray[y as usize * 1272 + x as usize]))
+            .any(|p| p < PAPER);
+        assert!(prompt_ink, "empty Home shows the muted prompt above the Library card");
+        // Scan finishes empty -> "Empty".
+        books.scanning = false;
+        assert_eq!(books.library_card_subtitle(), "Empty");
+
+        // 2. Recents-only (no Continue reading): Recent books starts near the top; card stays at bottom.
+        let index = store.library();
+        for (i, b) in index.books.iter().take(3).enumerate() {
+            store.save_book(
+                &b.id,
+                &BookState {
+                    position: crate::document::Position("done".into()),
+                    finished: true,
+                    last_opened: 10 + i as u64,
+                    ..Default::default()
+                },
+            )?;
+        }
+        store.rebuild_home_summary(&index)?;
+        books.home = store.home_summary().unwrap();
+        books.refresh(&t);
+        assert!(books.continue_id.is_none() && books.home_divider_y.is_none());
+        assert_eq!(books.books.len(), 3);
+        assert!(books.header.y < t.top_bar + t.mm(5.0), "Recent books starts near the top without Continue reading");
+        assert_eq!(books.library_card, empty_card);
+        assert_eq!(books.notice_rect, empty_notice);
+
+        // 3. Continue-only (no Recent books): Continue reading shown, no orphan divider, card stays at bottom.
+        books.home.books.truncate(1);
+        books.home.books[0].status.finished = false;
+        books.refresh(&t);
+        assert!(books.continue_id.is_some() && books.books.is_empty());
+        assert!(books.home_divider_y.is_none(), "no divider without Recent books below");
+        assert_eq!(books.library_card, empty_card);
+        assert_eq!(books.notice_rect, empty_notice);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn home_landscape_and_small_panels_keep_elements_in_bounds() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("home-sizes")?;
+        let index = store.library();
+        for (i, b) in index.books.iter().take(5).enumerate() {
+            store.save_book(
+                &b.id,
+                &BookState {
+                    position: if i == 0 { crate::document::Position("p1".into()) } else { Default::default() },
+                    progress: 4500,
+                    last_opened: 50 - i as u64,
+                    ..Default::default()
+                },
+            )?;
+        }
+        store.rebuild_home_summary(&index)?;
+        let offer = Offer {
+            version: "0.9.0".parse()?,
+            released: "2026-12-01".into(),
+            notes: "Update notes.".into(),
+            components: vec!["app".into()],
+            download: 1_000_000,
+            unpacked: 1_500_000,
+        };
+        for (w, h, dpi) in [
+            (1272, 1696, 300),
+            (1696, 1272, 300),
+            (1072, 1448, 300),
+            (1448, 1072, 300),
+            (600, 800, 167),
+            (800, 600, 167),
+        ] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut books =
+                Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
+            books.notice = Some(offer.clone());
+            let landscape = w > h;
+            assert!(books.continue_rect.y >= t.top_bar, "{w}x{h}");
+            assert!(books.continue_rect.bottom() <= books.library_card.y, "{w}x{h}");
+            assert!(books.library_card.x == t.margin && books.library_card.right() == w - t.margin, "{w}x{h}");
+            assert!(books.library_card.bottom() == h - t.margin, "{w}x{h}");
+            assert!(books.notice_rect.bottom() < books.library_card.y, "{w}x{h}");
+            assert!(books.grid.rect().bottom() < books.notice_rect.y, "{w}x{h}");
+            if landscape {
+                assert!(books.home_divider_y.is_none(), "{w}x{h}: no horizontal divider side-by-side");
+                assert!(books.continue_rect.right() < books.header.x, "{w}x{h}: Continue left, Recent right");
+                assert_eq!(books.notice_rect.x, books.header.x, "{w}x{h}: notice sits under Recent books");
+                assert_eq!(books.notice_rect.w, books.header.w, "{w}x{h}");
+                assert!((2..=3).contains(&books.books.len()), "{w}x{h}: 2-3 recent books in landscape");
+            } else {
+                assert!(books.home_divider_y.is_some(), "{w}x{h}");
+                assert!(books.continue_rect.bottom() < books.header.y, "{w}x{h}: Continue above Recent");
+                assert_eq!(books.books.len(), 4, "{w}x{h}: 4 recent books in portrait");
+            }
+            let mut canvas = crate::gfx::Canvas::new(w as u32, h as u32);
+            let mut text = crate::gfx::TextRenderer::new();
+            let mut icons = crate::gfx::IconRenderer::default();
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+            drop(books);
+        }
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
