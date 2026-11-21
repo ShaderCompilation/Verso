@@ -394,7 +394,7 @@ impl Inner {
                     if !probe.displayable() {
                         return Ok(None);
                     }
-                    probe.find(query).map(Some)
+                    probe.find(query, &progress).map(Some)
                 });
                 let outcome = match outcome {
                     Ok(Some(hits)) if hits.records.is_empty() => {

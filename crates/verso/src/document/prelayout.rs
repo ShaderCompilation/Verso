@@ -418,19 +418,27 @@ impl Runner {
         match spawn(job) {
             Ok(mut child) => {
                 let stdout = child.stdout.take().expect("piped");
-                let reader = std::thread::Builder::new()
-                    .name("verso-prelayout".into())
-                    .spawn(move || {
-                        for line in std::io::BufReader::new(stdout).lines() {
-                            let Ok(line) = line else { break };
-                            match serde_json::from_str(&line) {
-                                Ok(report) => events(Event::Report { run, report }),
-                                Err(e) => log::warn!("prelayout: unreadable report {line:?}: {e}"),
-                            }
+                let spawned = std::thread::Builder::new().name("verso-prelayout".into()).spawn(move || {
+                    for line in std::io::BufReader::new(stdout).lines() {
+                        let Ok(line) = line else { break };
+                        match serde_json::from_str(&line) {
+                            Ok(report) => events(Event::Report { run, report }),
+                            Err(e) => log::warn!("prelayout: unreadable report {line:?}: {e}"),
                         }
-                        events(Event::Ended { run });
-                    })
-                    .ok();
+                    }
+                    events(Event::Ended { run });
+                });
+                // Without its reader the run could never end or be read, and
+                // would block a restart at the same settings.
+                let reader = match spawned {
+                    Ok(reader) => Some(reader),
+                    Err(e) => {
+                        log::warn!("prelayout: couldn't start the report reader: {e}");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                };
                 log::info!("prelayout: run {run} started (pid {})", child.id());
                 self.cache_stale = true;
                 self.running = Some(Running { run, key, child, reader, current: None, started: Instant::now() });

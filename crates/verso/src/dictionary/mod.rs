@@ -191,8 +191,8 @@ impl Probe {
         let index = Index::open(path, cache, &info, || Ok(open_definitions(path)?.len), current, preparing)?;
         Ok(Self { index, types: info.types })
     }
-    fn find(&mut self, query: &str) -> Result<Hits> {
-        let mut records = self.index.find(query)?;
+    fn find(&mut self, query: &str, current: &impl Fn() -> bool) -> Result<Hits> {
+        let mut records = self.index.find(query, current)?;
         let mut seen = std::collections::HashSet::new();
         records.retain(|(_, offset, size)| seen.insert((*offset, *size)));
         Ok(Hits { records, forms: None })
@@ -230,7 +230,7 @@ impl Probe {
     /// dictionary has the word, even when every entry was already shown.
     fn add_form(&mut self, hits: &mut FormHits, word: &str, current: &impl Fn() -> bool) -> Result<bool> {
         ensure!(current(), "Lookup cancelled");
-        let found = self.index.find(word)?;
+        let found = self.index.find(word, current)?;
         let hit = !found.is_empty();
         let shown = hits.entries.len();
         for entry in found {
@@ -300,7 +300,7 @@ impl Backend {
         Ok(Self { probe: Probe { index, types: info.types }, definitions })
     }
     pub fn lookup(&mut self, query: &str) -> Result<Vec<Entry>> {
-        let entries = self.probe.index.find(query)?;
+        let entries = self.probe.index.find(query, &|| true)?;
         self.probe.render(&mut self.definitions, entries)
     }
     /// Returns the rendered entries and how many base forms they cover, at

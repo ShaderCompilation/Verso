@@ -343,6 +343,23 @@ fn lookups_match_across_yo_and_stress_marks_and_exact_spelling_comes_first() -> 
 }
 
 #[test]
+fn a_long_collision_chain_can_be_cancelled() -> Result<()> {
+    // The same FNV-1a bucket (4096 of them for a small dictionary) for every word.
+    let bucket =
+        |word: &str| word.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) % 4096;
+    let words: Vec<String> = (0..).map(|i| format!("w{i}")).filter(|w| bucket(w) == bucket("w0")).take(400).collect();
+    let pairs: Vec<_> = words.iter().map(|w| (w.as_str(), "x")).collect();
+    let f = Fixture::new();
+    f.install_words(false, false, &pairs)?;
+    let mut backend = f.backend()?;
+    let last = words.last().unwrap();
+    assert_eq!(backend.probe.index.find(last, &|| true)?.len(), 1);
+    let error = backend.probe.index.find(last, &|| false).unwrap_err();
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    Ok(())
+}
+
+#[test]
 fn large_dictionaries_get_more_buckets_and_still_find_every_word() -> Result<()> {
     let f = Fixture::new();
     let words: Vec<_> = (0..40_000).map(|i| (format!("word{i}"), format!("Meaning {i}."))).collect();

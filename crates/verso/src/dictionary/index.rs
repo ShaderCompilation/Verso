@@ -23,6 +23,12 @@ const RECORD: usize = 24;
 /// Part of the cache fingerprint: bump it whenever `fold` (in verso-wordforms)
 /// changes, so every cached index rebuilds once with the new keys.
 const KEY_VERSION: &[u8] = b"key-v2";
+/// A lookup that walks more records than this in one bucket is refused: a
+/// sound index holds a handful, so only crafted collisions get this long.
+const MAX_CHAIN: usize = 20_000;
+/// How long an index build's temp file must sit untouched before another
+/// process's leftovers are swept: a build keeps writing it.
+const STALE_BUILD: std::time::Duration = std::time::Duration::from_secs(600);
 static BUILD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 type Entry = (String, u64, u32);
 /// The bucket count for a dictionary's headwords and synonyms. Derived from
@@ -176,6 +182,30 @@ pub(crate) fn remove_cache(path: &Path, cache: &Path) {
         log::warn!("removing dictionary cache {}: {e}", dest.display());
     }
 }
+/// Removes the `<name>.<pid>-<n>.tmp` and `.refs` files of builds that a
+/// crash or power loss cut off. A build removes its own on return, and the
+/// shared worker runs one at a time, so files with this process's id are
+/// never touched; another process's are left while they are still changing.
+fn sweep_stale_builds(cache: &Path) {
+    let Ok(entries) = fs::read_dir(cache) else { return };
+    let ours = std::process::id().to_string();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let mut parts = name.to_string_lossy().split('.').map(str::to_owned).collect::<Vec<_>>();
+        let [_, run, extension] = parts.as_mut_slice() else { continue };
+        let Some((pid, build)) = run.split_once('-') else { continue };
+        let leftover = matches!(extension.as_str(), "tmp" | "refs")
+            && !pid.is_empty()
+            && !build.is_empty()
+            && pid.bytes().chain(build.bytes()).all(|b| b.is_ascii_digit() || b == b'-')
+            && pid != ours;
+        let idle =
+            entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= STALE_BUILD));
+        if leftover && idle && fs::remove_file(entry.path()).is_ok() {
+            log::info!("removed a stale dictionary index build file: {}", entry.path().display());
+        }
+    }
+}
 /// The cache file when it exists and carries this fingerprint; the one rule
 /// for whether a cache is valid. A cache that can't be opened is rebuilt.
 fn cached(dest: &Path, fingerprint: &str) -> Result<Option<File>> {
@@ -221,6 +251,7 @@ impl Index {
         preparing();
         let started = std::time::Instant::now();
         log::debug!("dictionary index build started: {}", path.display());
+        sweep_stale_builds(cache);
         let build_id = BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = format!("{}-{build_id}", std::process::id());
         let temp = dest.with_extension(format!("{suffix}.tmp"));
@@ -333,14 +364,20 @@ impl Index {
         );
         result
     }
-    pub fn find(&mut self, query: &str) -> Result<Vec<Entry>> {
+    pub fn find(&mut self, query: &str, current: &impl Fn() -> bool) -> Result<Vec<Entry>> {
         ensure!(query.len() <= MAX_WORD_BYTES, "Query is too long");
         let key = fold(query.trim());
         ensure!(key.len() <= MAX_WORD_BYTES, "Folded query is too long (limit 4096 bytes)");
         let header = header_len(self.buckets);
         let mut at = read_u64_at(&self.file, SIGNATURE + hash(&key, self.buckets) as u64 * 8)?;
         let mut entries = Vec::new();
+        let mut steps = 0usize;
         while at != 0 {
+            steps += 1;
+            ensure!(steps <= MAX_CHAIN, "Too many colliding words in the cached index");
+            if steps.is_multiple_of(128) {
+                ensure!(current(), "Lookup cancelled");
+            }
             let entry = record(&self.file, self.len, header, at)?;
             ensure!(entry.next == 0 || entry.next < at, "Cyclic cached index");
             at = entry.next;
@@ -367,6 +404,30 @@ mod tests {
 
     fn info(count: u32, syn_count: u32) -> Info {
         Info { name: String::new(), count, syn_count, index_size: 0, wide: false, types: String::new() }
+    }
+
+    #[test]
+    fn sweeping_removes_only_other_processes_idle_build_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::time::SystemTime::now() - STALE_BUILD * 2;
+        let ours = std::process::id();
+        let make = |name: String, age: Option<std::time::SystemTime>| {
+            let path = dir.path().join(name);
+            let file = File::create(&path).unwrap();
+            if let Some(time) = age {
+                file.set_modified(time).unwrap();
+            }
+            path
+        };
+        let stale_tmp = make("abc.1-0.tmp".into(), Some(old));
+        let stale_refs = make("abc.1-0.refs".into(), Some(old));
+        let running = make("abc.1-1.tmp".into(), None);
+        let own = make(format!("abc.{ours}-0.tmp"), Some(old));
+        let cache = make("abc.index".into(), Some(old));
+        let other = make("abc.x-0.tmp".into(), Some(old));
+        sweep_stale_builds(dir.path());
+        assert!(!stale_tmp.exists() && !stale_refs.exists());
+        assert!(running.exists() && own.exists() && cache.exists() && other.exists());
     }
 
     #[test]
