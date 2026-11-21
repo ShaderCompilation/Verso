@@ -152,6 +152,19 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// Changed books between index checkpoints, so an interrupted pass keeps progress.
 const SAVE_EVERY: usize = 64;
 
+fn cover_key(book: &Book) -> String {
+    match &book.cover {
+        Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
+        Cover::Pending => covers::key(book),
+    }
+}
+/// Cover keys the old index used that no book of the new one does: a changed
+/// file or a reassigned identity gets a new key and strands the old files.
+fn stale_cover_keys(old: &LibraryIndex, new: &LibraryIndex) -> Vec<String> {
+    let kept: HashSet<String> = new.books.iter().flat_map(|b| [cover_key(b), covers::key(b)]).collect();
+    let stale: HashSet<String> = old.books.iter().map(cover_key).filter(|k| !kept.contains(k)).collect();
+    stale.into_iter().collect()
+}
 fn push_error(errors: &mut Vec<String>, error: String) {
     if errors.len() < ERROR_LIMIT {
         errors.push(error);
@@ -411,7 +424,11 @@ impl Background {
         log::debug!("scan completed with {} metadata reads", scan.metadata_reads);
         errors.extend(scan.errors);
         if checkpointed || self.index != scan.index {
+            let stale = stale_cover_keys(&self.index, &scan.index);
             self.index = scan.index;
+            for key in stale {
+                covers::remove(&self.store, &key, &self.tile_sizes);
+            }
             self.unsaved = true;
             self.unpublished = true;
             self.home_stale = false;
@@ -608,11 +625,7 @@ impl Background {
                         if let Err(e) = self.store.remove_book(&book.id) {
                             log::warn!("removing deleted reading state: {e}");
                         }
-                        let key = match &book.cover {
-                            Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
-                            Cover::Pending => covers::key(book),
-                        };
-                        covers::remove(&self.store, &key, &self.tile_sizes);
+                        covers::remove(&self.store, &cover_key(book), &self.tile_sizes);
                     }
                 }
                 PathChange::Add(_) => {
@@ -627,7 +640,16 @@ impl Background {
         self.unpublished = true;
         let mut errors = Vec::new();
         self.save(&mut errors, "library");
-        errors.iter().for_each(|e| log::warn!("{e}"));
+        if !errors.is_empty() {
+            errors.iter().for_each(|e| log::warn!("{e}"));
+            let mut all = self.status.errors.clone();
+            for e in errors {
+                if !all.contains(&e) {
+                    push_error(&mut all, e);
+                }
+            }
+            self.set_status(self.status.scanning, self.status.working, &all);
+        }
         // This also runs during shutdown, after cancellation was requested.
         match self.store.rebuild_home_summary_until(&self.index, &|| false) {
             Ok(rebuilt) => self.channel.rebuilt(rebuilt, self.revision),

@@ -196,7 +196,9 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
     let mut claimed = HashSet::new();
     let mut assigned = vec![None; books.len()];
     for (slot, b) in assigned.iter_mut().zip(books.iter()) {
-        if let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
+        // A tombstone must not out-claim the available book of the same content.
+        if b.available
+            && let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
             && fingerprints.get(&b.fingerprint) == Some(&1)
             && claimed.insert(old.id.clone())
         {
@@ -249,7 +251,8 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
     let mut claimed = HashSet::new();
     let mut assigned: Vec<Option<String>> = vec![None; books.len()];
     for (slot, b) in assigned.iter_mut().zip(books.iter()) {
-        if fingerprints.get(&b.fingerprint) == Some(&1)
+        if b.available
+            && fingerprints.get(&b.fingerprint) == Some(&1)
             && let Some(Some(old)) = previous_fingerprints.get(&b.fingerprint)
             && claimed.insert(annotation_identity(old))
         {
@@ -486,6 +489,17 @@ mod identity_tests {
             available: true,
             metadata_pending: false,
         }
+    }
+    #[test]
+    fn received_book_beats_tombstone_of_same_content() {
+        let mut tomb = book("/a/old.epub", "one");
+        tomb.id = "x".into();
+        tomb.available = false;
+        let mut index = LibraryIndex { books: vec![tomb], ..Default::default() };
+        let added = index.add_book(book("/b/new.epub", "one"));
+        assert_eq!(added.id, "x");
+        assert_eq!(added.annotation_id, "x");
+        assert!(index.books.iter().all(|b| b.available));
     }
     #[test]
     fn unique_legacy_moves_edits_and_collisions() {

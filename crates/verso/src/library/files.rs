@@ -319,13 +319,28 @@ pub(crate) fn target_free(path: &Path, book: bool) -> Result<bool> {
     // must never become associated with the incoming book.
     Ok(!occupied(path)? && (!book || !occupied(&sidecar(path))?))
 }
+/// `stem` cut at a character boundary to at most `max` bytes.
+fn fit_stem(stem: &std::ffi::OsStr, max: usize) -> std::ffi::OsString {
+    if stem.len() <= max {
+        return stem.to_os_string();
+    }
+    let text = stem.to_string_lossy();
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].into()
+}
 pub fn next_free_name(parent: &Path, name: &std::ffi::OsStr, book: bool) -> Result<PathBuf> {
     let name = Path::new(name);
     let stem = if book { name.file_stem().unwrap_or(name.as_os_str()) } else { name.as_os_str() };
     for n in 2u64.. {
-        let mut numbered = stem.to_os_string();
-        numbered.push(format!(" ({n})"));
-        if book && let Some(extension) = name.extension() {
+        let number = format!(" ({n})");
+        let extension = if book { name.extension() } else { None };
+        let tail = number.len() + extension.map_or(0, |e| e.len() + 1);
+        let mut numbered = fit_stem(stem, MAX_NAME_BYTES.saturating_sub(tail));
+        numbered.push(&number);
+        if let Some(extension) = extension {
             numbered.push(".");
             numbered.push(extension);
         }
@@ -613,6 +628,16 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ))
+    }
+    #[test]
+    fn numbered_names_stay_within_the_name_limit() -> Result<()> {
+        let root = temp_root("verso-long-name");
+        std::fs::create_dir_all(&root)?;
+        let name = format!("{}.epub", "é".repeat(125));
+        let next = next_free_name(&root, std::ffi::OsStr::new(&name), true)?;
+        let next = next.file_name().unwrap().to_str().unwrap().to_owned();
+        assert!(next.len() <= MAX_NAME_BYTES && next.ends_with(" (2).epub"));
+        Ok(())
     }
     #[test]
     fn moves_sidecars_folders_and_refuses_cycles_and_clashes() -> Result<()> {
