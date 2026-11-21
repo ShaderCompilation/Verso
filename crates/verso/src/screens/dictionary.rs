@@ -119,8 +119,9 @@ pub enum LookupEvent {
     Close,
     /// Passage actions, retaining the independently edited lookup query.
     Actions(String),
-    /// Open dictionary management at this lookup's set.
-    Manage(String),
+    /// Open dictionary management at this lookup's set, or at the list of
+    /// sets while the worker hasn't yet said which set the lookup resolves to.
+    Manage(Option<String>),
     Set(String),
 }
 
@@ -140,6 +141,8 @@ pub struct Lookup {
     request: u64,
     selection: crate::dictionary::sets::Selection,
     active_set: String,
+    /// Whether `active_set` came from a worker reply rather than the placeholder.
+    set_known: bool,
     /// The last submitted query. The field may have been edited since.
     query: String,
     pending: bool,
@@ -242,6 +245,7 @@ impl Lookup {
             request,
             selection,
             active_set: crate::dictionary::sets::DEFAULT.into(),
+            set_known: false,
             query: query.into(),
             pending: true,
             complete: false,
@@ -360,6 +364,7 @@ impl Lookup {
             self.warnings = reply.warnings;
             self.warnings.extend(self.catalog.iter().filter(|d| !d.disabled).filter_map(|d| d.error.clone()));
             self.active_set = reply.active_set;
+            self.set_known = true;
             self.matches = reply.matches;
             self.sets = reply.sets;
             // A final count must never replace a dictionary selected since the
@@ -527,7 +532,7 @@ impl Lookup {
                 if !self.complete {
                     self.worker.cancel();
                 }
-                return Some(LookupEvent::Manage(self.active_set.clone()));
+                return Some(LookupEvent::Manage(self.set_known.then(|| self.active_set.clone())));
             }
             if p.back.on_gesture(g) {
                 if p.sets {
@@ -572,7 +577,7 @@ impl Lookup {
             if !self.complete {
                 self.worker.cancel();
             }
-            return Some(LookupEvent::Manage(self.active_set.clone()));
+            return Some(LookupEvent::Manage(self.set_known.then(|| self.active_set.clone())));
         }
         if self.field.on_gesture(g) {
             self.field.focused = true;

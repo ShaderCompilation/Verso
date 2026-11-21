@@ -257,6 +257,11 @@ impl UpdateScreen {
             self.start();
         }
         self.sync_buttons();
+        self.arm_finish();
+    }
+
+    /// Queues the exit (or close) the download's end calls for.
+    fn arm_finish(&mut self) {
         match &self.status.download {
             Some(DownloadState::Ready(_)) if self.started && !self.refused => {
                 self.finish = Some(Action::ExitWith(EXIT_INSTALL))
@@ -515,9 +520,54 @@ mod tests {
     }
 
     #[test]
-    fn refused_exit_is_not_rearmed_by_refresh() {
-        // The arming guard in refresh() must respect `refused`.
-        let src = include_str!("update.rs");
-        assert!(src.contains("if self.started && !self.refused => self.finish"));
+    fn a_refused_install_exit_offers_try_again_and_close() {
+        use crate::geom::Point;
+        use crate::update::Source;
+        use std::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        let updates = Arc::new(Updates::new(update::Paths { root: root.path().to_owned() }, Source::configured()));
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let version: Version = "0.3.0".parse().unwrap();
+        let mut cx = EventCx {
+            theme: &t,
+            screen,
+            now: Instant::now(),
+            frontlight: &mut None,
+            light_request: &mut None,
+            toast: &mut None,
+            forced: &mut vec![],
+            needs_redraw: &mut false,
+            battery: None,
+        };
+        let mut s = UpdateScreen::new(&t, screen, updates, Waker::new(|| {}), version.clone(), &cx);
+        let tap = |s: &mut UpdateScreen, r: Rect, cx: &mut EventCx| {
+            let p = Point::new(r.x + r.w / 2, r.y + r.h / 2);
+            s.on_gesture(Gesture::Down(p), cx);
+            s.on_gesture(Gesture::Tap(p), cx)
+        };
+
+        // The download finished: the screen asks to exit, once.
+        (s.started, s.status.download) = (true, Some(DownloadState::Ready(version)));
+        s.arm_finish();
+        assert!(matches!(s.run_pending_work(&mut cx), Action::ExitWith(EXIT_INSTALL)));
+        assert!(!s.has_pending_work());
+
+        // The exit is refused: nothing re-asks, and the way out is on screen.
+        s.exit_refused();
+        s.arm_finish();
+        assert!(!s.has_pending_work());
+        assert!(s.progress().0.contains("restart"));
+
+        // Try again asks for the exit once more.
+        let retry = s.retry.rect();
+        tap(&mut s, retry, &mut cx);
+        assert!(matches!(s.run_pending_work(&mut cx), Action::ExitWith(EXIT_INSTALL)));
+
+        // Refused again: Close leaves the screen.
+        s.exit_refused();
+        let close = s.close.rect();
+        assert!(matches!(tap(&mut s, close, &mut cx), Action::Pop));
     }
 }

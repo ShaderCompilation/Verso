@@ -1142,7 +1142,7 @@ impl Reader {
                             self.screen,
                             self.store.clone(),
                             self.worker.waker(),
-                            Some(set),
+                            set.as_deref(),
                         )));
                     }
                     if let Some(worker) = &self.dictionary {
