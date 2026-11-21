@@ -24,14 +24,15 @@
 #define ENABLE_ANTIWORD                      0
 #define USE_MD4C                             0
 
-/* Images. GIF uses crengine's own decoder. */
+/* Images. GIF uses crengine's own decoder. SVG uses LunaSVG, vendored in
+   ../lunasvg (docs/svg-covers.md). */
 #define ARBITRARY_IMAGE_SCALE_ENABLED        1
 #define MAX_IMAGE_SCALE_MUL                  2
 #define USE_GIF                              1
 #define USE_LIBJPEG                          1
 #define USE_LIBPNG                           1
 #define USE_LIBWEBP                          0
-#define USE_LUNASVG                          0
+#define USE_LUNASVG                          1
 #define USE_NANOSVG                          0
 #define USE_STB_IMAGE                        0
 

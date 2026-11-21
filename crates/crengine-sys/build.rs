@@ -3,7 +3,9 @@
 //! system libraries: the same sources build for the desktop and the Kindle.
 //!
 //! Which optional crengine features are on is decided in config/crsetup.h;
-//! every library enabled there must be compiled here.
+//! every library enabled there must be compiled here. LunaSVG is the one
+//! exception to "from the submodules": it is vendored in lunasvg/ (see its
+//! README).
 
 use std::env;
 use std::fs;
@@ -18,6 +20,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=config");
     println!("cargo:rerun-if-changed=shim");
+    println!("cargo:rerun-if-changed=lunasvg");
     for lib in LIBS {
         // Rebuild when a submodule moves to another commit.
         println!("cargo:rerun-if-changed={}", tp.join(lib).join(".git").display());
@@ -28,11 +31,12 @@ fn main() {
     fs::create_dir_all(&gen_inc).unwrap();
     fs::copy(tp.join("libpng/scripts/pnglibconf.h.prebuilt"), gen_inc.join("pnglibconf.h")).unwrap();
 
-    let ctx = Ctx { tp: tp.clone(), config: config.clone(), gen_inc, arm };
+    let ctx = Ctx { tp: tp.clone(), config: config.clone(), lunasvg: manifest.join("lunasvg"), gen_inc, arm };
 
     // Order matters for linking: a library must come before the ones it uses.
     let mut link_order = Vec::new();
     ctx.shim_and_crengine(&mut link_order);
+    ctx.lunasvg(&mut link_order);
     ctx.harfbuzz(&mut link_order);
     ctx.freetype(&mut link_order);
     ctx.libpng(&mut link_order);
@@ -56,6 +60,7 @@ const LIBS: &[&str] =
 struct Ctx {
     tp: PathBuf,
     config: PathBuf,
+    lunasvg: PathBuf,
     gen_inc: PathBuf,
     arm: bool,
 }
@@ -270,6 +275,8 @@ impl Ctx {
             .include(&self.gen_inc)
             .include(self.config.join("jpeg"))
             .include(self.p("libjpeg-turbo/src"))
+            .include(self.lunasvg.join("include"))
+            .include(self.lunasvg.join("xtended"))
             .define("UTF8PROC_STATIC", None)
             .define("XXH_INLINE_ALL", None) // xxhash is header-only this way
             .flag_if_supported("-ftabstop=4")
@@ -277,6 +284,37 @@ impl Ctx {
         b.compile("verso_crengine");
         link.push("verso_crengine");
     }
+
+    /// LunaSVG with KOReader's extensions (crengine's SVG decoder, lvimg.cpp)
+    /// and plutovg, the rasterizer it draws with.
+    fn lunasvg(&self, link: &mut Vec<&'static str>) {
+        let pv = self.lunasvg.join("3rdparty/plutovg");
+        let mut c = self.c();
+        c.files(sources(&pv, "c")).include(&pv).compile("verso_plutovg");
+
+        let mut b = self.cpp();
+        for dir in ["source", "xtended"] {
+            b.files(sources(&self.lunasvg.join(dir), "cpp"));
+        }
+        for dir in ["include", "source", "xtended", "3rdparty/plutovg"] {
+            b.include(self.lunasvg.join(dir));
+        }
+        b.compile("verso_lunasvg");
+        link.push("verso_lunasvg");
+        link.push("verso_plutovg");
+    }
+}
+
+/// Every file in `dir` with extension `ext`, sorted. Only for vendored trees
+/// that hold nothing but what we build.
+fn sources(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == ext))
+        .collect();
+    v.sort();
+    v
 }
 
 impl Ctx {
