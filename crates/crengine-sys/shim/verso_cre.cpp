@@ -117,13 +117,12 @@ static bool word_char(ldomXPointerEx p) {
         && (lGetCharProps(after.getChar()) & CH_PROP_ALPHA);
 }
 
-static bool word_at(LVDocView *v, lvPoint point, ldomXRange &range) {
-    ldomXPointerEx p = v->getNodeByPoint(point, true, false);
-    if (p.isNull() || !p.isText()) return false;
-    if (!word_char(p)) {
-        // Hit testing can return the boundary just after the touched character.
-        if (!p.prevVisibleChar(true) || !word_char(p)) return false;
-    }
+static bool space_char(lChar32 c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0xA0 || c == 0x2009 || c == 0x200B;
+}
+
+static bool expand_word(ldomXPointerEx p, ldomXRange &range) {
+    if (!word_char(p)) return false;
     ldomXPointerEx start = p, last = p, scan = p;
     while (scan.prevVisibleChar(true) && word_char(scan)) start = scan;
     scan = p;
@@ -134,6 +133,17 @@ static bool word_at(LVDocView *v, lvPoint point, ldomXRange &range) {
     }
     ldomXPointerEx end(last.getNode(), last.getOffset() + 1);
     range = ldomXRange(start, end);
+    return true;
+}
+
+static bool word_at(LVDocView *v, lvPoint point, ldomXRange &range) {
+    ldomXPointerEx p = v->getNodeByPoint(point, true, false);
+    if (p.isNull() || !p.isText()) return false;
+    if (!word_char(p)) {
+        // Hit testing can return the boundary just after the touched character.
+        if (!p.prevVisibleChar(true) || !word_char(p)) return false;
+    }
+    if (!expand_word(p, range)) return false;
     // Exact word rectangles reject margins, interline whitespace and images.
     LVArray<lvRect> rects;
     range.getSegmentRects(rects);
@@ -144,6 +154,37 @@ static bool word_at(LVDocView *v, lvPoint point, ldomXRange &range) {
             return true;
     }
     return false;
+}
+
+// Forgiving hit-test for dragging an active selection: crengine snaps points
+// in margins, interline gaps and the empty space past a short line to the
+// nearest visible text position on the page.
+static bool extend_at(LVDocView *v, lvPoint point, ldomXRange &range) {
+    ldomXPointerEx p = v->getNodeByPoint(point, false, true);
+    if (p.isNull() || !p.isText()) return false;
+    if (expand_word(p, range)) return true;
+    lChar32 c = p.getChar();
+    if (!c || space_char(c)) {
+        ldomXPointerEx scan = p;
+        while (scan.prevVisibleChar(true)) {
+            lChar32 sc = scan.getChar();
+            if (!sc || space_char(sc)) continue;
+            if (expand_word(scan, range)) return true;
+            range = ldomXRange(scan, ldomXPointerEx(scan.getNode(), scan.getOffset() + 1));
+            return true;
+        }
+        scan = p;
+        while (scan.nextVisibleChar(true)) {
+            lChar32 sc = scan.getChar();
+            if (!sc || space_char(sc)) continue;
+            if (expand_word(scan, range)) return true;
+            range = ldomXRange(scan, ldomXPointerEx(scan.getNode(), scan.getOffset() + 1));
+            return true;
+        }
+        return false;
+    }
+    range = ldomXRange(p, ldomXPointerEx(p.getNode(), p.getOffset() + 1));
+    return true;
 }
 
 
@@ -580,7 +621,8 @@ int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
         LVRef<ldomXRange> visible = v->getPageDocumentRange(page);
         if (visible.isNull()) return 0;
         ldomXRange range;
-        if (mode < 2 && !word_at(v, lvPoint(x, y), range)) return 0;
+        if (mode == 0 && !word_at(v, lvPoint(x, y), range)) return 0;
+        if (mode == 1 && !extend_at(v, lvPoint(x, y), range)) return 0;
         if (mode != 0) {
             if (!start || !end) return -1;
             ldomXPointerEx a = v->getDocument()->createXPointer(Utf8ToUnicode(start));

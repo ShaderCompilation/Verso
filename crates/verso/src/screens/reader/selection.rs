@@ -5,6 +5,7 @@ use crate::document::{
     thread::{Command, SelectionRequest, Worker},
 };
 use crate::geom::{Point, Rect};
+use crate::platform::RefreshMode;
 use crate::screens::EventCx;
 use crate::ui::{gesture::Gesture, widget::DrawCx};
 
@@ -135,6 +136,11 @@ impl SelectionState {
                 cx.fill(Rect::new(center.x - 1, target.y.min(center.y), 3, (center.y - target.y).abs()), 0);
                 cx.canvas.fill_circle(center.x as f32, center.y as f32, radius as f32, 0);
             }
+        }
+        if self.dragging {
+            // Fast (DU) updates keep drag feedback responsive; releasing the
+            // touch triggers App's grayscale cleanup over fast_debt.
+            cx.hint(cx.canvas.bounds(), RefreshMode::Fast);
         }
     }
 
@@ -452,6 +458,25 @@ mod tests {
             assert!(!state.extending);
             state.receive(request, Ok(Some(selected("late"))), Some(next_page), worker, cx);
             assert!(state.selected.is_none());
+        });
+    }
+
+    #[test]
+    fn dragging_hints_fast_refresh_and_release_clears_it() {
+        with_context(|state, worker, commands, cx| {
+            let mut canvas = crate::gfx::Canvas::new(600, 800);
+            let mut text = crate::gfx::TextRenderer::new();
+            let mut icons = crate::gfx::IconRenderer::default();
+            state.on_gesture(Gesture::LongPress(Point::new(120, 110)), CONTEXT, worker, cx);
+            let (word, _) = next(commands);
+            state.receive(word, Ok(Some(selected("word"))), Some(CONTEXT), worker, cx);
+            let mut hints = Vec::new();
+            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints));
+            assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast), "dragging should hint Fast refresh");
+            state.on_gesture(Gesture::End(Point::new(120, 110)), CONTEXT, worker, cx);
+            hints.clear();
+            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints));
+            assert!(hints.is_empty(), "releasing should stop hinting Fast refresh");
         });
     }
 }

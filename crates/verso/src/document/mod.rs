@@ -522,6 +522,20 @@ mod tests {
         let extended = doc.select(0, &SelectionQuery::Range(extended.range)).unwrap().unwrap();
         assert!(extended.text.starts_with("Hello") && extended.text.ends_with("Привет"), "{:?}", extended.text);
         assert!(extended.rects.len() > 1);
+        // Dragging into the empty right space of a short line still snaps to
+        // the end of that line, while an initial long-press there stays blank.
+        let short_line_right = Point::new(580, russian.rects[0].center().y);
+        assert!(doc.select(0, &SelectionQuery::Word(short_line_right)).unwrap().is_none());
+        let snapped = doc
+            .select(0, &SelectionQuery::Extend { anchor: hello.range.clone(), focus: short_line_right })
+            .unwrap()
+            .unwrap();
+        let snapped = doc.select(0, &SelectionQuery::Range(snapped.range)).unwrap().unwrap();
+        assert!(
+            snapped.text.starts_with("Hello") && snapped.text.contains("Привет"),
+            "drag past short line should include its text, got {:?}",
+            snapped.text
+        );
         let backwards = doc
             .select(0, &SelectionQuery::Extend { anchor: russian.range.clone(), focus: *hello_point })
             .unwrap()
