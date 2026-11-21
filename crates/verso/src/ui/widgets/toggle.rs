@@ -37,6 +37,7 @@ impl Toggle {
     /// Returns the new value when tapped.
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<bool> {
         if !self.enabled {
+            self.press = Press::default();
             return None;
         }
         match self.press.on_gesture(g, self.hit) {

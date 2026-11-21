@@ -75,7 +75,12 @@ impl Pager {
         if self.next.on_gesture(g) {
             return self.go(1).map(PagerEvent::Changed);
         }
-        if self.jump && self.pages > 1 && self.counter_press.on_gesture(g, self.counter) == Some(PressEvent::Tap) {
+        if !(self.jump && self.pages > 1) {
+            // Not tappable now: don't keep a press from when it was.
+            self.counter_press = Press::default();
+            return None;
+        }
+        if self.counter_press.on_gesture(g, self.counter) == Some(PressEvent::Tap) {
             return Some(PagerEvent::Jump);
         }
         None
@@ -165,5 +170,19 @@ mod tests {
         p.set(0, 1);
         p.on_gesture(&Gesture::Down(counter));
         assert_eq!(p.on_gesture(&Gesture::Tap(counter)), None, "nothing to jump to");
+    }
+
+    #[test]
+    fn counter_press_does_not_outlive_being_disabled() {
+        let theme = Theme::for_dpi(300);
+        let mut p = Pager::new(3);
+        p.place(Rect::new(0, 1500, 1272, 120), &theme);
+        p.jump = true;
+        let counter = Point::new(636, 1560);
+        p.on_gesture(&Gesture::Down(counter));
+        p.set(0, 1);
+        p.on_gesture(&Gesture::Down(Point::new(636, 100)));
+        p.set(0, 3);
+        assert_eq!(p.on_gesture(&Gesture::Tap(Point::new(636, 100))), None, "no ghost jump");
     }
 }

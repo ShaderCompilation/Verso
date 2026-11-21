@@ -65,6 +65,8 @@ impl Button {
     /// True when the button was tapped (or long-pressed and released).
     pub fn on_gesture(&mut self, g: &Gesture) -> bool {
         if !self.enabled {
+            // A press that was under way must not outlive being disabled.
+            self.press = Press::default();
             return false;
         }
         matches!(self.press.on_gesture(g, self.hit), Some(PressEvent::Tap | PressEvent::LongPressEnd))
@@ -149,6 +151,7 @@ impl IconButton {
 
     pub fn on_gesture(&mut self, g: &Gesture) -> bool {
         if !self.enabled {
+            self.press = Press::default();
             return false;
         }
         matches!(self.press.on_gesture(g, self.rect), Some(PressEvent::Tap | PressEvent::LongPressEnd))
@@ -204,6 +207,22 @@ mod tests {
         b.on_gesture(&Gesture::Down(Point::new(200, 50)));
         assert!(!b.is_pressed());
         assert!(!b.on_gesture(&Gesture::Tap(Point::new(200, 50))));
+    }
+
+    #[test]
+    fn disabling_mid_press_drops_the_press() {
+        let theme = Theme::for_dpi(300);
+        let mut b = Button::new("Go", ButtonKind::Primary);
+        b.place(Rect::new(0, 0, 400, 118), &theme);
+        let p = Point::new(200, 50);
+        b.on_gesture(&Gesture::Down(p));
+        assert!(b.is_pressed());
+        b.enabled = false;
+        // The next touch's Down arrives while disabled.
+        b.on_gesture(&Gesture::Down(Point::new(900, 50)));
+        assert!(!b.is_pressed());
+        b.enabled = true;
+        assert!(!b.on_gesture(&Gesture::Tap(Point::new(900, 50))), "no ghost tap");
     }
 
     #[test]
