@@ -323,7 +323,7 @@ details.group[open] summary::before { content: "▾"; }
         </div>
         <form id="files-mkdir-form" class="mkdir-row" hidden>
           <input type="text" id="files-mkdir-name" placeholder="Folder name" aria-label="New folder name" required>
-          <button type="submit" class="primary">Create</button>
+          <button type="submit" class="primary" id="files-mkdir-submit">Create</button>
           <button type="button" id="files-mkdir-cancel">Cancel</button>
         </form>
       </div>
@@ -410,6 +410,10 @@ details.group[open] summary::before { content: "▾"; }
 const $ = (id) => document.getElementById(id);
 const views = ["signin", "gone", "app"];
 function show(view) {
+  if (view !== "app") {
+    closeConfirm();
+    closeDialog(false);
+  }
   for (const v of views) $(v).hidden = v !== view;
 }
 
@@ -476,10 +480,10 @@ async function signIn(code, retries = 2) {
     if (response.status === 429 && retries > 0) {
       const wait = 1000 * (Number(response.headers.get("Retry-After")) || 1);
       await new Promise((resolve) => setTimeout(resolve, wait));
-      return signIn(code, retries - 1);
+      return await signIn(code, retries - 1);
     }
     let reason = "busy";
-    if (response.status === 401) reason = (await response.json()).error;
+    if (response.status === 401) reason = (await response.json().catch(() => ({}))).error;
     show("signin");
     $("error").textContent = messages[reason] || messages.wrong;
     $("code").select();
@@ -503,6 +507,9 @@ function select(name) {
     const on = tab.id === "tab-" + name;
     tab.setAttribute("aria-selected", on);
     $(tab.getAttribute("aria-controls")).hidden = !on;
+  }
+  if (!$("app").hidden && name === "books") {
+    loadStatus().catch(() => {});
   }
   if (!$("app").hidden && name === "dictionaries") {
     loadDictionaries().catch(() => {});
@@ -815,7 +822,11 @@ $("mkdir-form").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parent, name }),
     });
-    const data = await response.json();
+    if (response.status === 401) {
+      show("signin");
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
     if (response.ok) {
       chosenFolder = data.path;
       $("mkdir-form").hidden = true;
@@ -863,6 +874,16 @@ function stopBooksQueue(view) {
   activeXhr = null;
   updateQueueUi();
   show(view);
+}
+
+async function hasZipHeader(file) {
+  if (file.size < 4) return false;
+  try {
+    const bytes = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+  } catch (_) {
+    return true;
+  }
 }
 
 // Pre-check before sending a book body: an early refusal (507, 409, 400, 404)
@@ -920,6 +941,11 @@ async function runNextUpload() {
     return;
   }
   if (result.status === 200) {
+    if (!(await hasZipHeader(item.file))) {
+      addNotice(item.file.name + ": This file isn't a valid EPUB. Use the Files tab for other files.", true);
+      runNextUpload();
+      return;
+    }
     const params = new URLSearchParams({ folder: item.folder, name: item.file.name });
     try {
       result = await sendBookPut("/api/books?" + params.toString(), item.file);
@@ -929,7 +955,12 @@ async function runNextUpload() {
         runNextUpload();
         return;
       }
-      if (await kindleReachable()) {
+      const state = await probeKindle();
+      if (state === "signin") {
+        stopBooksQueue("signin");
+        return;
+      }
+      if (state === "ok") {
         addNotice(item.file.name + ": the upload didn't finish. Try it again.", true);
         runNextUpload();
         return;
@@ -970,7 +1001,9 @@ drop.addEventListener("dragover", (ev) => {
   ev.preventDefault();
   drop.classList.add("over");
 });
-drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("dragleave", (ev) => {
+  if (!drop.contains(ev.relatedTarget)) drop.classList.remove("over");
+});
 drop.addEventListener("drop", (ev) => {
   ev.preventDefault();
   drop.classList.remove("over");
@@ -1017,7 +1050,7 @@ $("confirm-ok").addEventListener("click", async () => {
       show("signin");
       return;
     }
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     closeConfirm();
     if (pending.kind === "book") {
       if (response.ok) {
@@ -1158,6 +1191,7 @@ function queueDictFiles(fileList) {
 function updateDictQueueUi() {
   if (!activeDictXhr && dictQueue.length === 0) {
     $("dict-upload-box").hidden = true;
+    $("dict-upload-cancel").disabled = false;
     return;
   }
   $("dict-upload-box").hidden = false;
@@ -1171,6 +1205,16 @@ function stopDictQueue(view) {
   show(view);
 }
 
+function cancelDictBatch(batchId) {
+  if (!batchId) return;
+  fetch("/api/dictionaries/batch/" + encodeURIComponent(batchId), {
+    method: "DELETE",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "X-Verso-Request": "1" },
+  }).catch(() => {});
+}
+
 async function checkDictUpload(file, batchId) {
   const params = new URLSearchParams({ name: file.name, size: String(file.size) });
   if (batchId) params.set("batch", batchId);
@@ -1179,7 +1223,7 @@ async function checkDictUpload(file, batchId) {
   return { status: response.status, data };
 }
 
-function sendXhrPut(url, file, onProgress) {
+function sendXhrPut(url, file, onProgress, onUploadDone) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     activeDictXhr = xhr;
@@ -1187,6 +1231,7 @@ function sendXhrPut(url, file, onProgress) {
     xhr.withCredentials = true;
     xhr.setRequestHeader("X-Verso-Request", "1");
     xhr.upload.onprogress = onProgress;
+    if (onUploadDone) xhr.upload.onload = onUploadDone;
     xhr.onload = () => {
       let data = {};
       try { data = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
@@ -1206,22 +1251,33 @@ async function runNextDictUpload() {
   }
   const job = dictQueue.shift();
   activeDictXhr = true;
+  let activeBatchId = null;
   try {
     if (job.kind === "archive") {
       $("dict-upload-name").textContent = job.file.name;
       $("dict-upload-pct").textContent = " 0%";
       $("dict-upload-bar").value = 0;
+      $("dict-upload-cancel").disabled = false;
       updateDictQueueUi();
       let res = await checkDictUpload(job.file, null);
       if (res.status === 200) {
         const params = new URLSearchParams({ name: job.file.name });
+        const markUnpacking = () => {
+          $("dict-upload-bar").value = 100;
+          $("dict-upload-pct").textContent = " unpacking…";
+          $("dict-upload-cancel").disabled = true;
+        };
         res = await sendXhrPut("/api/dictionaries?" + params.toString(), job.file, (ev) => {
           if (ev.lengthComputable && ev.total > 0) {
-            const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
-            $("dict-upload-bar").value = pct;
-            $("dict-upload-pct").textContent = pct >= 100 ? " unpacking…" : " " + pct + "%";
+            if (ev.loaded >= ev.total) {
+              markUnpacking();
+            } else {
+              const pct = Math.min(99, Math.round((ev.loaded / ev.total) * 100));
+              $("dict-upload-bar").value = pct;
+              $("dict-upload-pct").textContent = " " + pct + "%";
+            }
           }
-        });
+        }, markUnpacking);
       }
       if (res.status === 401) {
         stopDictQueue("signin");
@@ -1235,25 +1291,28 @@ async function runNextDictUpload() {
         addDictNotice(job.file.name + ": " + (res.data.error || "Upload failed (" + res.status + ")."), true);
       }
     } else {
+      $("dict-upload-cancel").disabled = false;
       updateDictQueueUi();
       const batchResp = await call("/api/dictionaries/batch", { method: "POST" });
       if (batchResp.status === 401) {
         stopDictQueue("signin");
         return;
       }
-      const batchData = await batchResp.json();
+      const batchData = await batchResp.json().catch(() => ({}));
       if (!batchResp.ok || !batchData.id) {
         addDictNotice(batchData.error || "Couldn't start dictionary upload.", true);
         runNextDictUpload();
         return;
       }
       const batchId = batchData.id;
+      activeBatchId = batchId;
       let failed = false;
       for (let i = 0; i < job.files.length; i++) {
         const file = job.files[i];
         $("dict-upload-name").textContent = file.name + " (" + (i + 1) + "/" + job.files.length + ")";
         $("dict-upload-pct").textContent = " 0%";
         $("dict-upload-bar").value = 0;
+        $("dict-upload-cancel").disabled = false;
         activeDictXhr = true;
         updateDictQueueUi();
         let res = await checkDictUpload(file, batchId);
@@ -1268,6 +1327,8 @@ async function runNextDictUpload() {
           });
         }
         if (res.status === 401) {
+          cancelDictBatch(activeBatchId);
+          activeBatchId = null;
           stopDictQueue("signin");
           return;
         }
@@ -1277,9 +1338,17 @@ async function runNextDictUpload() {
           break;
         }
       }
-      if (!failed) {
+      if (failed) {
+        cancelDictBatch(activeBatchId);
+        activeBatchId = null;
+      } else {
+        activeBatchId = null;
         const commitResp = await call("/api/dictionaries/batch/" + encodeURIComponent(batchId) + "/commit", { method: "POST" });
-        const commitData = await commitResp.json();
+        if (commitResp.status === 401) {
+          stopDictQueue("signin");
+          return;
+        }
+        const commitData = await commitResp.json().catch(() => ({}));
         if (commitResp.ok) {
           const names = (commitData.installed || []).map((d) => d.name).join(", ");
           addDictNotice("Installed " + (names || "dictionary") + ".", false);
@@ -1290,10 +1359,24 @@ async function runNextDictUpload() {
       }
     }
   } catch (e) {
+    if (activeBatchId) {
+      cancelDictBatch(activeBatchId);
+      activeBatchId = null;
+    }
     if (e && e.message === "aborted") {
       addDictNotice("Cancelled dictionary upload.", false);
-    } else if (e && e.message === "network" && await kindleReachable()) {
-      addDictNotice("The dictionary upload didn't finish. Try it again.", true);
+    } else if (e && e.message === "network") {
+      const state = await probeKindle();
+      if (state === "signin") {
+        stopDictQueue("signin");
+        return;
+      }
+      if (state === "ok") {
+        addDictNotice("The dictionary upload didn't finish. Try it again.", true);
+      } else {
+        stopDictQueue("gone");
+        return;
+      }
     } else {
       stopDictQueue("gone");
       return;
@@ -1319,7 +1402,9 @@ dictDrop.addEventListener("dragover", (ev) => {
   ev.preventDefault();
   dictDrop.classList.add("over");
 });
-dictDrop.addEventListener("dragleave", () => dictDrop.classList.remove("over"));
+dictDrop.addEventListener("dragleave", (ev) => {
+  if (!dictDrop.contains(ev.relatedTarget)) dictDrop.classList.remove("over");
+});
 dictDrop.addEventListener("drop", (ev) => {
   ev.preventDefault();
   dictDrop.classList.remove("over");
@@ -1338,7 +1423,7 @@ function openDialog(options) {
   $("dialog-error").textContent = "";
   $("dialog-ok").textContent = options.ok || "OK";
   $("dialog-ok").className = options.danger ? "danger" : "primary";
-  $("dialog-ok").disabled = false;
+  $("dialog-ok").disabled = !!options.disabled;
   $("dialog-backdrop").hidden = false;
   (options.focus || $("dialog-cancel")).focus();
 }
@@ -1592,7 +1677,7 @@ function renameEntry(entry) {
       const result = await postFiles("rename", { path: entry.path, name });
       if (!result) return null;
       if (!result.ok) return result.data.error || "Couldn't rename it.";
-      await loadFiles();
+      await Promise.all([loadFiles(), loadStatus()]);
       return null;
     },
   });
@@ -1612,9 +1697,22 @@ function moveEntry(entry) {
   let browseId = 0;
   async function browse(path) {
     const reqId = ++browseId;
-    const response = await call("/api/files?" + new URLSearchParams({ path }).toString());
+    $("dialog-ok").disabled = true;
+    $("dialog-error").textContent = "";
+    const params = new URLSearchParams({ path });
+    if ($("files-hidden").checked) params.set("hidden", "1");
+    const response = await call("/api/files?" + params.toString());
+    if (reqId !== browseId || dialog === null) return;
+    if (response.status === 401) {
+      show("signin");
+      return;
+    }
     const data = await response.json().catch(() => ({}));
-    if (reqId !== browseId || !response.ok || dialog === null) return;
+    if (reqId !== browseId || dialog === null) return;
+    if (!response.ok) {
+      $("dialog-error").textContent = data.error || "Couldn't open that folder.";
+      return;
+    }
     destination = data.path;
     crumbButtons(where, data.crumbs || [], (p) => browse(p).catch(() => {}));
     list.replaceChildren();
@@ -1642,11 +1740,12 @@ function moveEntry(entry) {
     title: "Move " + quoted(entry.name),
     body: box,
     ok: "Move here",
+    disabled: true,
     onOk: async () => {
       const result = await postFiles("move", { path: entry.path, to: destination });
       if (!result) return null;
       if (!result.ok) return result.data.error || "Couldn't move it.";
-      await loadFiles();
+      await Promise.all([loadFiles(), loadStatus()]);
       return null;
     },
   });
@@ -1662,10 +1761,17 @@ function describeContents(info) {
 }
 
 async function deleteEntry(entry) {
-  let text = "This removes the file from the Kindle.";
-  if (entry.dir) {
+  let text = entry.link
+    ? "This removes the link from the Kindle (the target isn't deleted)."
+    : "This removes the file from the Kindle.";
+  if (entry.dir && !entry.link) {
     const response = await call("/api/files/info?" + new URLSearchParams({ path: entry.path }).toString());
-    text = response.ok ? describeContents(await response.json()) : "This removes the folder and everything in it.";
+    if (response.status === 401) {
+      show("signin");
+      return;
+    }
+    const info = response.ok ? await response.json().catch(() => null) : null;
+    text = info ? describeContents(info) : "This removes the folder and everything in it.";
   }
   if (!(await ask("Delete " + quoted(entry.name) + "?", text, "Delete", true))) return;
   const params = new URLSearchParams({ path: entry.path });
@@ -1729,14 +1835,18 @@ async function checkFilesUpload(path, file, overwrite) {
   return { status: response.status, data };
 }
 
-// After a failed upload: is the Kindle still there? Not `call`, which
-// shows "gone" itself.
-async function kindleReachable() {
+// After a failed upload: is the Kindle still there, or did the session expire?
+// Not `call`, which shows "gone" itself.
+async function probeKindle() {
   try {
-    await fetch("/api/status", { credentials: "same-origin", cache: "no-store", headers: { "X-Verso-Request": "1" } });
-    return true;
+    const response = await fetch("/api/status", {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "X-Verso-Request": "1" },
+    });
+    return response.status === 401 ? "signin" : "ok";
   } catch (_) {
-    return false;
+    return "gone";
   }
 }
 
@@ -1786,7 +1896,12 @@ async function runNextFilesUpload() {
           break;
         }
         // Something changed after the check, or the connection dropped.
-        if (await kindleReachable()) {
+        const state = await probeKindle();
+        if (state === "signin") {
+          stopFilesQueue("signin");
+          return;
+        }
+        if (state === "ok") {
           addFilesNotice(item.file.name + ": the upload didn't finish. Try it again.", true);
           break;
         }
@@ -1833,7 +1948,9 @@ filesDrop.addEventListener("dragover", (ev) => {
   ev.preventDefault();
   filesDrop.classList.add("over");
 });
-filesDrop.addEventListener("dragleave", () => filesDrop.classList.remove("over"));
+filesDrop.addEventListener("dragleave", (ev) => {
+  if (!filesDrop.contains(ev.relatedTarget)) filesDrop.classList.remove("over");
+});
 filesDrop.addEventListener("drop", (ev) => {
   ev.preventDefault();
   filesDrop.classList.remove("over");
@@ -1852,15 +1969,20 @@ $("files-mkdir-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const name = $("files-mkdir-name").value.trim();
   if (!name) return;
-  const result = await postFiles("mkdir", { path: filesPath, name });
-  if (!result) return;
-  if (!result.ok) {
-    addFilesNotice(result.data.error || "Couldn't create the folder.", true);
-    return;
+  $("files-mkdir-submit").disabled = true;
+  try {
+    const result = await postFiles("mkdir", { path: filesPath, name });
+    if (!result) return;
+    if (!result.ok) {
+      addFilesNotice(result.data.error || "Couldn't create the folder.", true);
+      return;
+    }
+    $("files-mkdir-form").hidden = true;
+    $("files-mkdir-name").value = "";
+    await Promise.all([loadFiles(), loadStatus()]);
+  } finally {
+    $("files-mkdir-submit").disabled = false;
   }
-  $("files-mkdir-form").hidden = true;
-  $("files-mkdir-name").value = "";
-  await loadFiles();
 });
 
 document.addEventListener("visibilitychange", () => {

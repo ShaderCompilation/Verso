@@ -59,6 +59,8 @@ struct Shared {
     changed: Condvar,
     in_flight: AtomicUsize,
     last_activity: Mutex<Instant>,
+    /// Called when `in_flight` drops to 0 so the UI loop can re-arm its idle timer.
+    on_idle: Option<Box<dyn Fn() + Send + Sync>>,
     timeouts: Timeouts,
 }
 
@@ -93,13 +95,28 @@ impl<'a> Active<'a> {
 impl Drop for Active<'_> {
     fn drop(&mut self) {
         *self.0.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if self.0.in_flight.fetch_sub(1, Ordering::SeqCst) == 1
+            && let Some(on_idle) = &self.0.on_idle
+        {
+            on_idle();
+        }
     }
 }
 
 impl Server {
     /// Listens on `addr` and serves until stopped (or dropped).
+    #[cfg(test)]
     pub fn start(addr: SocketAddr, handler: Arc<dyn Handler>, timeouts: Timeouts) -> io::Result<Server> {
+        Self::start_with_idle_hook(addr, handler, timeouts, None)
+    }
+
+    /// Like `start`, calling `on_idle` whenever the last in-flight request finishes.
+    pub fn start_with_idle_hook(
+        addr: SocketAddr,
+        handler: Arc<dyn Handler>,
+        timeouts: Timeouts,
+        on_idle: Option<Box<dyn Fn() + Send + Sync>>,
+    ) -> io::Result<Server> {
         let listener = Arc::new(TcpListener::bind(addr)?);
         let addr = listener.local_addr()?;
         let shared = Arc::new(Shared {
@@ -108,6 +125,7 @@ impl Server {
             changed: Condvar::new(),
             in_flight: AtomicUsize::new(0),
             last_activity: Mutex::new(Instant::now()),
+            on_idle,
             timeouts,
         });
         let accept = {
@@ -547,5 +565,31 @@ mod tests {
             assert!(Instant::now() < deadline, "a finished request restarts the idle time");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn notifies_when_last_in_flight_request_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = Arc::new(Test { dir: dir.path().to_owned(), started: AtomicUsize::new(0) });
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = wakes.clone();
+        let server = Server::start_with_idle_hook(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            Timeouts::default(),
+            Some(Box::new(move || {
+                w.fetch_add(1, Ordering::SeqCst);
+            })),
+        )
+        .unwrap();
+        let mut c = connect(&server);
+        c.write_all(b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        assert_eq!(response(&mut c), (200, "ok /ping".into()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while wakes.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "on_idle was not called when request finished");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(server.idle_since().is_some());
     }
 }

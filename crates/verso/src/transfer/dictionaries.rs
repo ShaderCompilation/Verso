@@ -333,6 +333,16 @@ impl Dictionaries {
         Response::json(200, &json!({ "ok": true, "name": name }))
     }
 
+    /// `DELETE /api/dictionaries/batch/<id>`
+    pub fn cancel_batch(&self, batch_id: &str) -> Response {
+        let Some(batch) = self.batches.lock().unwrap_or_else(|e| e.into_inner()).remove(batch_id) else {
+            return err(404, "Dictionary upload batch not found.");
+        };
+        let _ = fs::remove_dir_all(&batch.dir);
+        let _ = fs::remove_dir(&self.staging_root);
+        Response::json(200, &json!({ "ok": true }))
+    }
+
     /// `POST /api/dictionaries/batch/<id>/commit`
     pub fn commit_batch(&self, batch_id: &str) -> Response {
         let Some(batch) = self.batches.lock().unwrap_or_else(|e| e.into_inner()).remove(batch_id) else {

@@ -132,6 +132,10 @@ impl Api {
                 let id = batch_id_segment(p).unwrap();
                 self.dictionaries().map_or_else(not_found, |d| d.upload_batch_file(id, request, body))
             }
+            (Method::Delete, p) if batch_id_segment(p).is_some() => {
+                let id = batch_id_segment(p).unwrap();
+                self.dictionaries().map_or_else(not_found, |d| d.cancel_batch(id))
+            }
             (Method::Post, p) if batch_commit_segment(p).is_some() => {
                 let id = batch_commit_segment(p).unwrap();
                 self.dictionaries().map_or_else(not_found, |d| d.commit_batch(id))

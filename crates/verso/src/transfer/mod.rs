@@ -604,7 +604,13 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
     let mut awake = Awake::new(device);
 
     let Some(api) = shared.lock().api.clone() else { return };
-    match Server::start(device.listen, api, Timeouts::default()) {
+    let idle_waker = waker.clone();
+    match Server::start_with_idle_hook(
+        device.listen,
+        api,
+        Timeouts::default(),
+        Some(Box::new(move || idle_waker.wake())),
+    ) {
         Ok(server) => shared.lock().running.server = Some(server),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             log::error!("Wi-Fi transfer: port {} is in use", device.listen.port());

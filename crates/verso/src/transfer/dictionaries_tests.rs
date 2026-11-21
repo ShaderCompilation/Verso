@@ -492,13 +492,23 @@ fn loose_files_install_through_a_batch_with_safe_names_and_clashes() {
 }
 
 #[test]
-fn abandoned_batches_are_deleted_on_stop_and_at_the_next_start() {
+fn abandoned_batches_are_deleted_on_cancel_stop_and_at_the_next_start() {
     let env = Env::new();
+    // Explicit cancellation removes staging immediately.
+    let (_, batch) = env.json("POST", "/api/dictionaries/batch", b"");
+    let cancelled = batch["id"].as_str().unwrap().to_owned();
+    let (name, bytes) = &dict_files("Left", "l", Syn::None)[0];
+    assert_eq!(env.json("PUT", &format!("/api/dictionaries/batch/{cancelled}?name={name}"), bytes).0, 200);
+    let staging = env.store.root().join("dictionary-staging");
+    assert!(staging.join(format!("batch-{cancelled}")).join(name).is_file());
+    assert_eq!(env.json("DELETE", &format!("/api/dictionaries/batch/{cancelled}"), b"").0, 200);
+    assert!(!staging.exists());
+    assert_eq!(env.json("DELETE", &format!("/api/dictionaries/batch/{cancelled}"), b"").0, 404);
+    assert_eq!(env.json("POST", &format!("/api/dictionaries/batch/{cancelled}/commit"), b"").0, 404);
+
     let (_, batch) = env.json("POST", "/api/dictionaries/batch", b"");
     let id = batch["id"].as_str().unwrap().to_owned();
-    let (name, bytes) = &dict_files("Left", "l", Syn::None)[0];
     assert_eq!(env.json("PUT", &format!("/api/dictionaries/batch/{id}?name={name}"), bytes).0, 200);
-    let staging = env.store.root().join("dictionary-staging");
     assert!(staging.join(format!("batch-{id}")).join(name).is_file());
     // The session's stop cleans up batches never committed.
     env.api.cleanup_batches();
