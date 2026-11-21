@@ -47,6 +47,9 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     pub content_length: u64,
     pub keep_alive: bool,
+    /// The client sent `Expect: 100-continue` and waits for `100 Continue`
+    /// before sending the body.
+    pub expect_continue: bool,
 }
 
 impl Request {
@@ -182,6 +185,15 @@ pub fn parse_head(head: &[u8]) -> Result<Request, HeadError> {
         }
         content_length = Some(length);
     }
+    // RFC 9110 §10.1.1: only 100-continue is known; HTTP/1.0 clients can't
+    // be sent an interim response, so the header is ignored for them.
+    let mut expect_continue = false;
+    for (_, value) in headers.iter().filter(|(n, _)| n == "expect") {
+        if !value.eq_ignore_ascii_case("100-continue") {
+            return Err(HeadError::Status(417, "Only Expect: 100-continue is supported."));
+        }
+        expect_continue = http11;
+    }
     let hosts = headers.iter().filter(|(n, _)| n == "host").count();
     if hosts > 1 || (http11 && hosts == 0) {
         return Err(bad("The request needs one Host header."));
@@ -201,6 +213,7 @@ pub fn parse_head(head: &[u8]) -> Result<Request, HeadError> {
         headers,
         content_length: content_length.unwrap_or(0),
         keep_alive,
+        expect_continue,
     })
 }
 
@@ -312,9 +325,11 @@ impl Conn {
         }
     }
 
-    /// The request body: exactly `length` bytes.
-    pub fn body(&mut self, length: u64) -> Body<'_> {
-        Body { conn: self, remaining: length, failed: false }
+    /// The request body: exactly `length` bytes. `expect_continue`: the
+    /// client waits for `100 Continue`, which is sent when the body is first
+    /// read, so a request refused without reading it never invites the body.
+    pub fn body(&mut self, length: u64, expect_continue: bool) -> Body<'_> {
+        Body { conn: self, remaining: length, failed: false, expect_continue: expect_continue && length > 0 }
     }
 
     /// Writes all of `data`, waiting through timeouts while the client
@@ -410,6 +425,8 @@ pub struct Body<'a> {
     remaining: u64,
     /// A read failed: the connection can't be used for another request.
     failed: bool,
+    /// The client waits for `100 Continue` before sending the body.
+    expect_continue: bool,
 }
 
 impl Body<'_> {
@@ -434,7 +451,9 @@ impl Body<'_> {
 
     /// Reads and drops what's left, if it's at most `limit` bytes.
     pub fn skip(&mut self, limit: u64) -> io::Result<bool> {
-        if self.remaining > limit {
+        // A client still waiting for `100 Continue` hasn't sent the body, and
+        // isn't invited to now: the connection closes after the answer.
+        if self.remaining > limit || self.expect_continue {
             return Ok(false);
         }
         io::copy(self, &mut io::sink())?;
@@ -448,6 +467,13 @@ impl Read for Body<'_> {
             return Ok(0);
         }
         let conn = &mut *self.conn;
+        if std::mem::take(&mut self.expect_continue)
+            && conn.start == conn.end
+            && let Err(e) = conn.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+        {
+            self.failed = true;
+            return Err(e);
+        }
         if conn.start == conn.end {
             (conn.start, conn.end) = (0, 0);
             let read = match conn.fill(Instant::now() + conn.stall) {
@@ -544,6 +570,7 @@ pub fn reason(status: u16) -> &'static str {
         409 => "Conflict",
         411 => "Length Required",
         413 => "Content Too Large",
+        417 => "Expectation Failed",
         421 => "Misdirected Request",
         428 => "Precondition Required",
         429 => "Too Many Requests",
@@ -656,6 +683,18 @@ mod tests {
         let same = parse("PUT / HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n").unwrap();
         assert_eq!(same.content_length, 2);
         assert_eq!(parse("GET / HTTP/1.1\r\nHost: a\r\n\r\n").unwrap().content_length, 0);
+    }
+
+    #[test]
+    fn reads_the_expect_header() {
+        let head =
+            |expect: &str, version: &str| format!("PUT / {version}\r\nHost: a\r\nContent-Length: 5\r\n{expect}\r\n");
+        assert!(!parse(&head("", "HTTP/1.1")).unwrap().expect_continue);
+        assert!(parse(&head("Expect: 100-continue\r\n", "HTTP/1.1")).unwrap().expect_continue);
+        assert!(parse(&head("Expect: 100-Continue\r\n", "HTTP/1.1")).unwrap().expect_continue);
+        assert!(!parse(&head("Expect: 100-continue\r\n", "HTTP/1.0")).unwrap().expect_continue);
+        assert_eq!(status(&head("Expect: something-else\r\n", "HTTP/1.1")), 417);
+        assert_eq!(status(&head("Expect: 100-continue, x\r\n", "HTTP/1.1")), 417);
     }
 
     #[test]

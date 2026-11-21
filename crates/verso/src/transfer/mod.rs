@@ -448,10 +448,10 @@ impl Session {
     /// Stops serving and gives everything back except Wi-Fi, which stays as
     /// it is until the screen closes (`close`).
     pub fn stop(&mut self, why: Stop) {
-        let was = self.shared.lock().phase;
         self.halt();
         let mut state = self.shared.lock();
-        if !matches!(was, Phase::Stopped(_) | Phase::Failed(_)) {
+        // Judged after `halt`: the session's thread may fail while it ends.
+        if !matches!(state.phase, Phase::Stopped(_) | Phase::Failed(_)) {
             log::info!("Wi-Fi transfer: stopped ({why:?})");
             state.phase = Phase::Stopped(why);
             state.revision += 1;

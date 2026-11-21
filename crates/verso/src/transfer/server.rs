@@ -243,7 +243,7 @@ fn serve(stream: TcpStream, shared: &Shared, handler: &dyn Handler) {
             }
         };
         let active = Active::begin(shared);
-        let mut body = conn.body(request.content_length);
+        let mut body = conn.body(request.content_length, request.expect_continue);
         let mut response = handler.handle(&request, &mut body);
         log::debug!("web app: {:?} {} → {}", request.method, request.path, response.status);
         // An unread body is dropped if it's small; a broken one ends the connection.
@@ -454,6 +454,28 @@ mod tests {
         assert!(closed(&mut c));
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(handler.started.load(Ordering::SeqCst), 1, "only the upload reached the handler");
+    }
+
+    #[test]
+    fn answers_expect_continue_when_the_body_is_first_read() {
+        let (server, handler, _dir) = server(Timeouts::default());
+        let mut c = connect(&server);
+        c.write_all(b"PUT /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n").unwrap();
+        // The client waits for the interim response before sending anything.
+        assert_eq!(response(&mut c).0, 100);
+        c.write_all(b"data").unwrap();
+        assert_eq!(response(&mut c), (201, "kept".into()));
+        assert_eq!(std::fs::read(handler.dir.join("upload")).unwrap(), b"data");
+
+        // A request answered without reading the body isn't invited to send it.
+        c.write_all(b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n").unwrap();
+        assert_eq!(response(&mut c), (200, "ok /x".into()));
+        assert!(closed(&mut c));
+
+        let mut c = connect(&server);
+        c.write_all(b"PUT /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 200-ok\r\n\r\n").unwrap();
+        assert_eq!(response(&mut c).0, 417);
+        assert!(closed(&mut c));
     }
 
     #[test]
