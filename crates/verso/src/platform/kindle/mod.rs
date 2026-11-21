@@ -162,15 +162,27 @@ impl Platform for Kindle {
             // Let any in-flight flash finish before Amazon's UI draws its sleep screen.
             self.display.wait_for_complete();
             self.touch.grab(false)?;
-            launcher_handoff(true)?;
-            self.native_sleep = true;
+            // A missed handoff (no launcher, or one too busy to ack) must not end
+            // the session: keep our last frame, stay in charge of the touchscreen
+            // and sleep like a cover would.
+            match launcher_handoff(true) {
+                Ok(()) => self.native_sleep = true,
+                Err(e) => {
+                    log::warn!("sleep handoff failed, sleeping on Verso's own screen: {e:#}");
+                    self.touch.grab(true)?;
+                }
+            }
         }
         Ok(())
     }
 
     fn resume(&mut self) -> Result<()> {
         if self.native_sleep {
-            launcher_handoff(false)?;
+            // Verso takes the screen back either way: a missed ack only means the
+            // next draw may race the launcher's resume, not worth quitting for.
+            if let Err(e) = launcher_handoff(false) {
+                log::warn!("wake handoff failed, resuming anyway: {e:#}");
+            }
             self.touch.grab(true)?;
             self.native_sleep = false;
         } else {
