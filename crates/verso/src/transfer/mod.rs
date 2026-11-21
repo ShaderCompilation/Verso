@@ -53,6 +53,8 @@ pub const POSTPONE_SLEEP: Duration = Duration::from_secs(60);
 const FIREWALL_MARKER: &str = "verso-transfer-firewall";
 /// How often the address and name are read again: often while waiting for
 /// Wi-Fi to connect, rarely once it has.
+/// How long to wait before starting the name responder again after it failed.
+const RESPONDER_RETRY: Duration = Duration::from_secs(30);
 const POLL_WAITING: Duration = Duration::from_secs(1);
 const POLL_READY: Duration = Duration::from_secs(5);
 
@@ -620,6 +622,8 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
     (device.firewall)(true);
 
     let mut waiting_since = Instant::now();
+    // A responder that won't start is retried now and then, not every loop.
+    let mut responder_retry_at = Instant::now();
     loop {
         awake.tick();
         let address = (device.address)();
@@ -628,11 +632,11 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
             state.running.responder.is_none() && !state.stop
         };
         // An SSH server's responder already advertises the name.
-        if responder_needed
-            && (device.hostname)().is_none()
-            && let Some(pid) = (device.start_responder)(label)
-        {
-            shared.lock().running.responder = Some(pid);
+        if responder_needed && Instant::now() >= responder_retry_at && (device.hostname)().is_none() {
+            match (device.start_responder)(label) {
+                Some(pid) => shared.lock().running.responder = Some(pid),
+                None => responder_retry_at = Instant::now() + RESPONDER_RETRY,
+            }
         }
         let hostname = (device.hostname)();
         let mut state = shared.lock();

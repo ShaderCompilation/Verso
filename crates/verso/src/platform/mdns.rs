@@ -6,7 +6,7 @@
 //! transfer, so it can't outlive a crash. See docs/device-tools.md and
 //! docs/web-app.md.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ pub fn ensure(label: &str, pid: i32, name: &str) {
         return;
     }
     let label = if verso_mdns::valid_label(label) { label } else { verso_mdns::DEFAULT_LABEL };
-    let log = File::create(LOG).map_or_else(|_| Stdio::null(), Stdio::from);
+    let log = open_log().map_or_else(Stdio::null, Stdio::from);
     let mut command = Command::new(BINARY);
     command
         .args(["--watch", &pid.to_string(), "--watch-name", name, "--firewall", INTERFACE, label])
@@ -50,21 +50,45 @@ pub fn ensure(label: &str, pid: i32, name: &str) {
     }
 }
 
+/// Opens the log for appending, so a respawn doesn't erase why the last
+/// run stopped; starts over once it grows past a few KiB.
+fn open_log() -> Option<File> {
+    const MAX: u64 = 16 * 1024;
+    let mut options = OpenOptions::new();
+    options.create(true);
+    if std::fs::metadata(LOG).is_ok_and(|m| m.len() > MAX) {
+        options.write(true).truncate(true);
+    } else {
+        options.append(true);
+    }
+    options.open(LOG).ok()
+}
+
+/// Whether the responder `pid` was started to watch the process `watched`
+/// (its `--watch` argument), so Verso only claims and stops its own.
+fn watches(pid: i32, watched: i32) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { return false };
+    let watched = watched.to_string();
+    let mut args = cmdline.split(|b| *b == 0);
+    args.any(|a| a == b"--watch") && args.next().is_some_and(|a| a == watched.as_bytes())
+}
+
 /// For Wi-Fi transfer: starts a responder that lasts as long as Verso,
 /// unless one runs already (the SSH server's). The PID of the one it
-/// started, once it's running.
+/// started, once it's running; `None` if another spawner's responder won
+/// the pidfile instead.
 pub fn start_for_verso(label: &str) -> Option<i32> {
     if verso_mdns::running_pid().is_some() {
         return None;
     }
     ensure(label, std::process::id() as i32, "verso");
     wait_until(PIDFILE_GRACE, || verso_mdns::running_pid().is_some());
-    verso_mdns::running_pid()
+    verso_mdns::running_pid().filter(|&pid| watches(pid, std::process::id() as i32))
 }
 
 /// Stops the responder `start_for_verso` started, if it still runs.
 pub fn stop(pid: i32) {
-    if verso_mdns::running_pid() == Some(pid) {
+    if verso_mdns::running_pid() == Some(pid) && watches(pid, std::process::id() as i32) {
         terminate(pid);
     }
 }
