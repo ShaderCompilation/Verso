@@ -144,12 +144,21 @@ impl Manifest {
             if c.files.is_empty() {
                 return bad(format!("component {:?} has no files", c.id));
             }
+            // FAT ignores letter case, so two paths differing only by case
+            // would collide when the update is unpacked on the Kindle.
+            let mut folded = HashSet::new();
             for (i, f) in c.files.iter().enumerate() {
                 if !is_safe_path(&f.path) {
                     return bad(format!("component {:?} has an unsafe path {:?}", c.id, f.path));
                 }
                 if i > 0 && c.files[i - 1].path >= f.path {
                     return bad(format!("component {:?}: files aren't sorted or repeat {:?}", c.id, f.path));
+                }
+                if !folded.insert(f.path.to_lowercase()) {
+                    return bad(format!(
+                        "component {:?}: {:?} differs from another file only by letter case",
+                        c.id, f.path
+                    ));
                 }
                 if !is_sha256(&f.sha256) {
                     return bad(format!("component {:?}: bad hash for {:?}", c.id, f.path));
@@ -387,6 +396,15 @@ mod tests {
             change(&mut m);
             assert!(m.validate().is_err(), "{what}");
         }
+    }
+
+    #[test]
+    fn rejects_case_only_collisions() {
+        let mut m = manifest();
+        let files =
+            vec![file("OFL.txt", b"a", MODE_FILE), file("a.txt", b"b", MODE_FILE), file("ofl.txt", b"c", MODE_FILE)];
+        m.components[2] = component("fonts", "verso/fonts", files);
+        assert!(m.validate().is_err());
     }
 
     #[test]

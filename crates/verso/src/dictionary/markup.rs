@@ -338,7 +338,14 @@ impl Builder {
 // normal stack. Scans stop at a 33rd nested opener, which keeps repeated
 // unclosed elements from rescanning a whole field each time.
 fn element_end<'a>(source: &'a str, name: &str, kind: u8) -> Option<(&'a str, &'a str)> {
-    let mut rest = source;
+    // The scan can't be cancelled, so bound it: an element longer than this is
+    // treated as unclosed (only its tag is dropped).
+    const SCAN_MAX: usize = 64 * 1024;
+    let mut cut = SCAN_MAX.min(source.len());
+    while !source.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut rest = &source[..cut];
     let mut depth = 1usize;
     while let Some(i) = rest.find('<') {
         let at = &rest[i..];
@@ -353,7 +360,7 @@ fn element_end<'a>(source: &'a str, name: &str, kind: u8) -> Option<(&'a str, &'
                     }
                 }
                 if depth == 0 {
-                    return Some((&source[..source.len() - at.len()], tag.rest));
+                    return Some((&source[..cut - at.len()], &source[cut - tag.rest.len()..]));
                 }
             }
             rest = tag.rest;
@@ -540,6 +547,14 @@ mod tests {
     const XDXF: &str = "<ar><k>sample</k><blockquote><b>sample<sup>1</sup></b><abr>noun</abr><blockquote><c c='blue'>1》</c> A <b>bold <i>nested</i></b> sense.<blockquote><ex>A <b>strong</b> example.</ex></blockquote><kref>other</kref></blockquote><tr>ˈsɑːmpəl</tr><abr>UK</abr> <rref>uk.wav</rref> <c c='red'>US</c> <a href='sound://us.wav'>listen</a><abr>rare</abr><k>later</k></blockquote></ar>";
     const HTML: &str = "<div><h4>Origins</h4><blockquote><span style='font-weight: 600; font-style: italic; color: #a00'>A styled quotation</span><br><font color='blue'>label</font> 10<sup>-18</sup> H<sub>2</sub>O <sup>Q?</sup><a href='entry'>reference</a></blockquote><hr><table><tr><td>one</td><td>two</td></tr></table></div>";
     const PANGO: &str = "<span weight='bold' style='italic' foreground='red'>Жёлтый</span> <span color='black'>black</span> <strong>firm</strong> <em>soft</em> <co>note</co> <small>small</small>";
+    #[test]
+    fn element_scan_is_bounded() {
+        let far = format!("<script>{}</script>tail", "x".repeat(70 * 1024));
+        let text = lines(&parse(&far, b'h'));
+        assert!(text.contains("tail"));
+        let near = lines(&parse("a<script>hidden</script>b", b'h'));
+        assert_eq!(near, "ab");
+    }
     fn lines(blocks: &[Block]) -> String {
         blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n")
     }
