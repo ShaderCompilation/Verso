@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Folder preview captures (docs/folder-previews.md, Phase 3): every mode in
+"""Folder preview captures (docs/folder-previews.md): every mode in
 portrait and landscape, plus selection, a pressed tile, missing art and an
 empty folder.
 
@@ -20,6 +20,64 @@ REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / 'screenshots/folder-previews'
 SIZE = (1272, 1696)
 DPI = 300
+
+
+def mm(v, dpi):
+    return round(v * dpi / 25.4)
+
+
+def library_card_center(size, dpi):
+    w, h = size
+    margin, target = mm(5.0, dpi), mm(9.0, dpi)
+    card_h = max(target, min(mm(13.2, dpi), h // 8))
+    return w // 2, h - margin - card_h // 2
+
+
+def grid_cell_center(size, dpi, col, row):
+    w, h = size
+    margin, top_bar, target = mm(5.0, dpi), mm(13.0, dpi), mm(9.0, dpi)
+    cols, rows = (6, 2) if w > h else ((3, 3) if w < mm(100.0, dpi) else (4, 3))
+    gap_x = mm(2.6 if cols == 6 else (2.8 if cols == 3 else 3.4), dpi)
+    gap_y = mm(2.0, dpi)
+    grid_top = top_bar + mm(2.2, dpi) + mm(11.0, dpi) + mm(2.9, dpi)
+    grid_w = w - 2 * margin
+    grid_h = max(target, h - margin - grid_top)
+    cell_w = (grid_w - gap_x * (cols - 1)) // cols
+    cell_h = (grid_h - gap_y * (rows - 1)) // rows
+    return margin + col * (cell_w + gap_x) + cell_w // 2, grid_top + row * (cell_h + gap_y) + cell_h // 2
+
+
+def settings_button_center(size, dpi):
+    w, _ = size
+    margin, top_bar, icon = mm(5.0, dpi), mm(13.0, dpi), mm(5.0, dpi)
+    narrow = w < mm(100.0, dpi)
+    exit_step = mm(10.0 if narrow else 10.5, dpi)
+    exit_cx = w - margin - icon // 2
+    return exit_cx - exit_step, top_bar // 2
+
+
+def menu_point(size, dpi, anchor, count, index):
+    w, h = size
+    margin, top = mm(5.0, dpi), mm(13.0, dpi)
+    available = h - top - 2 * margin - 2 * mm(1.0, dpi)
+    columns = 2 if available // count < mm(9.0, dpi) else 1
+    rows = (count + columns - 1) // columns
+    row = min(mm(12.0, dpi), available // rows)
+    height = row * rows + 2 * mm(1.0, dpi)
+    width = min(mm(70.0 * columns, dpi), w - 2 * margin)
+    x, y = anchor
+    centered = max(margin, min(x - width // 2, w - margin - width))
+    below, above = y + mm(2.0, dpi), y - mm(2.0, dpi) - height
+    if below + height <= h - margin:
+        mx, my = centered, below
+    elif above >= top + margin:
+        mx, my = centered, above
+    else:
+        right = x + mm(2.0, dpi)
+        mx = max(margin, min(right if right + width <= w - margin else x - mm(2.0, dpi) - width, w - margin - width))
+        my = max(top + margin, min(y - height // 2, max(top + margin, h - margin - height)))
+    col_w = (width - 2 * mm(0.35, dpi)) // columns
+    return mx + mm(0.35, dpi) + (index // rows) * col_w + col_w // 2, my + mm(1.0, dpi) + (index % rows) * row + row // 2
 
 
 def chunk(kind, data):
@@ -94,11 +152,7 @@ def library(root):
     epub(root / 'Loose.epub', 'Loose', next(n))
 
 
-first = True
-
-
-def capture(name, mode, orientation, steps=(), size=SIZE, dpi=DPI):
-    global first
+def capture(name, mode, orientation, steps=(), size=SIZE, dpi=DPI, open_library=True):
     case = OUT / 'state' / name
     if case.exists():
         shutil.rmtree(case)
@@ -107,39 +161,43 @@ def capture(name, mode, orientation, steps=(), size=SIZE, dpi=DPI):
     (case / 'settings.json').write_text(json.dumps({
         'library_folders': [str(root)], 'orientation': orientation, 'folder_preview': mode,
     }))
-    (case / 'library-navigation.json').write_text(json.dumps({'tab': 'collections', 'folder': str(root)}))
+    (case / 'library-navigation.json').write_text(json.dumps({'folder': str(root)}))
     env = dict(os.environ, VERSO_DATA=str(case), RUST_LOG='warn',
                VERSO_SIM_SIZE=f'{size[0]}x{size[1]}', VERSO_SIM_DPI=str(dpi))
     env.pop('VERSO_BOOKS', None)
-    command = ['cargo', 'run', '-p', 'verso', '--'] if first else [str(REPO / 'target/debug/verso')]
-    first = False
-    # Home opens first; this tap restores the saved Collections folder.
-    mm = lambda v: round(v * dpi / 25.4)
-    width = size[1] if orientation == 'landscape' else size[0]
-    tabs = f'{width // 2},{mm(13) + mm(2) + mm(9) // 2}'
-    subprocess.run([*command, '--screenshot', str(OUT / f'{name}.png'), '--tap', tabs, *steps],
+    eff = (size[1], size[0]) if orientation == 'landscape' else size
+    prefix = []
+    if open_library:
+        cx, cy = library_card_center(eff, dpi)
+        prefix = ['--tap', f'{cx},{cy}']
+    subprocess.run([str(REPO / 'target/debug/verso'), '--screenshot', str(OUT / f'{name}.png'),
+                    *prefix, *steps],
                    env=env, cwd=REPO, check=True, timeout=120)
 
 
 if __name__ == '__main__':
-    if (OUT / 'Library').exists():
-        shutil.rmtree(OUT / 'Library')
+    shutil.rmtree(OUT, ignore_errors=True)
+    OUT.mkdir(parents=True)
     library(OUT / 'Library')
-    # The Novels tile (fourth), and its long-press menu's "Select" row.
-    tile = {'portrait': '1080,750', 'landscape': '1450,750'}
-    select = {'portrait': '400,720', 'landscape': '768,650'}
-    for orientation in ['portrait', 'landscape']:
-        # Covers is disabled in the app (FolderPreview::OFFERED) and reads as
-        # Stack, so it isn't captured; add it back here when it returns.
+    for orientation, eff in [('portrait', SIZE), ('landscape', (SIZE[1], SIZE[0]))]:
+        # Novels is the fourth folder (col 3, row 0).
+        tile = grid_cell_center(eff, DPI, 3, 0)
+        sel = menu_point(eff, DPI, tile, 8, 3)
         for mode in ['stack', 'latest', 'icon']:
             capture(f'{orientation}-{mode}', mode, orientation)
-        capture(f'{orientation}-stack-pressed', 'stack', orientation, ['--press', tile[orientation]])
+        capture(f'{orientation}-stack-pressed', 'stack', orientation, ['--press', f'{tile[0]},{tile[1]}'])
         capture(f'{orientation}-stack-selected', 'stack', orientation,
-                ['--long-press', tile[orientation], '--tap', select[orientation]])
+                ['--long-press', f'{tile[0]},{tile[1]}', '--tap', f'{sel[0]},{sel[1]}'])
     # Settings → Display, where the choice lives.
-    capture('portrait-settings', 'stack', 'portrait', ['--tap', '652,77', '--tap', '405,272'])
-    capture('landscape-settings', 'stack', 'landscape', ['--tap', '1076,77', '--tap', '532,272'])
-    capture('small-settings', 'latest', 'portrait', ['--tap', '255,43', '--tap', '193,151'],
-            size=(600, 800), dpi=167)
+    gear_p = settings_button_center(SIZE, DPI)
+    gear_l = settings_button_center((SIZE[1], SIZE[0]), DPI)
+    gear_s = settings_button_center((600, 800), 167)
+    capture('portrait-settings', 'stack', 'portrait',
+            ['--tap', f'{gear_p[0]},{gear_p[1]}', '--tap', '405,272'], open_library=False)
+    capture('landscape-settings', 'stack', 'landscape',
+            ['--tap', f'{gear_l[0]},{gear_l[1]}', '--tap', '532,272'], open_library=False)
+    capture('small-settings', 'latest', 'portrait',
+            ['--tap', f'{gear_s[0]},{gear_s[1]}', '--tap', '193,151'],
+            size=(600, 800), dpi=167, open_library=False)
     capture('small-stack', 'stack', 'portrait', size=(600, 800), dpi=167)
-    print(OUT)
+    print('captured', sorted(p.name for p in OUT.glob('*.png')))
