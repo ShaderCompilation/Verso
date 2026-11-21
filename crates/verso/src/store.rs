@@ -222,7 +222,7 @@ impl Store {
         worker
     }
     pub fn settings(&self) -> Settings {
-        let mut s: Settings = read(&self.root.join("settings.json")).unwrap_or_default();
+        let mut s = read_settings(&self.root.join("settings.json"));
         s.normalize();
         if !verso_mdns::valid_label(&s.hostname) {
             s.hostname = verso_mdns::DEFAULT_LABEL.to_owned();
@@ -448,6 +448,27 @@ pub fn book_id(path: &Path) -> Result<String> {
     }
     Ok(format!("{hash:016x}"))
 }
+/// Reads settings field by field when the whole file doesn't parse, so one
+/// invalid value (a typo in a hand-edited enum) resets only that setting.
+fn read_settings(path: &Path) -> Settings {
+    if let Some(s) = read::<Settings>(path) {
+        return s;
+    }
+    let Some(serde_json::Value::Object(mut fields)) =
+        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    else {
+        return Settings::default();
+    };
+    fields.retain(|key, value| {
+        let single = serde_json::Map::from_iter([(key.clone(), value.clone())]);
+        let ok = serde_json::from_value::<Settings>(serde_json::Value::Object(single)).is_ok();
+        if !ok {
+            log::warn!("ignoring invalid setting {key} in {}", path.display());
+        }
+        ok
+    });
+    serde_json::from_value(serde_json::Value::Object(fields)).unwrap_or_default()
+}
 fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     match std::fs::read(path) {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -582,6 +603,21 @@ mod tests {
             assert_eq!(restored.folder_preview, mode);
         }
         assert!(!restored.page_layout.bottom.on);
+        Ok(())
+    }
+    #[test]
+    fn one_invalid_setting_resets_only_itself() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("verso-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"sleep_screen":"amazon ","page_flash":7,"developer":true}"#)?;
+        let s = read_settings(&path);
+        assert_eq!(s.sleep_screen, SleepScreen::Cover);
+        assert_eq!(s.page_flash, 7);
+        assert!(s.developer);
+        std::fs::write(&path, "not json")?;
+        assert_eq!(read_settings(&path).page_flash, DEFAULT_PAGE_FLASH);
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
     #[test]
