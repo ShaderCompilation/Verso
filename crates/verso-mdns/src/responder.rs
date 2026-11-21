@@ -233,10 +233,16 @@ impl Responder {
     fn check_conflict(&mut self, message: &Message, now: Instant) {
         let ours = self.records(TTL, true);
         let conflict = message.records().any(|r| {
-            // TTL 0 is someone withdrawing the name, which is no claim. An
-            // identical record is no conflict (§9): it could be our own
-            // packet looping back, or a proxy repeating it.
-            r.name == self.name && r.ttl > 0 && !ours.iter().any(|o| o.rtype == r.rtype && o.data == r.data)
+            // TTL 0 is someone withdrawing the name, which is no claim. A
+            // conflict is a record of the same name and type as one of ours
+            // with different data (§9): other types (a TXT or SRV for the
+            // name) don't contradict our address. An identical record is no
+            // conflict either: it could be our own packet looping back, or a
+            // proxy repeating it.
+            r.name == self.name
+                && r.ttl > 0
+                && ours.iter().any(|o| o.rtype == r.rtype)
+                && !ours.iter().any(|o| o.rtype == r.rtype && o.data == r.data)
         });
         if !conflict {
             return;
@@ -577,6 +583,28 @@ mod tests {
         r.set_link(Some(link(ME)), now);
         r.on_packet(from(PEER, 40000), &other.encode(), now);
         assert_eq!(r.label(), "verso");
+    }
+
+    #[test]
+    fn records_of_other_types_are_no_conflict() {
+        let mut now = Instant::now();
+        let mut r = announced(&mut now);
+        let txt = Message {
+            flags: FLAG_RESPONSE | FLAG_AUTHORITATIVE,
+            answers: vec![Record { rtype: 16, data: vec![0], ..a_record(PEER, TTL) }],
+            ..Message::default()
+        };
+        r.on_packet(from(PEER, PORT), &txt.encode(), now);
+        assert_eq!(r.phase, Phase::Announced);
+        assert_eq!(r.label(), "verso");
+        // A different address for the name still is one.
+        let other = Message {
+            flags: FLAG_RESPONSE | FLAG_AUTHORITATIVE,
+            answers: vec![a_record(PEER, TTL)],
+            ..Message::default()
+        };
+        r.on_packet(from(PEER, PORT), &other.encode(), now);
+        assert!(matches!(r.phase, Phase::Probing { .. }));
     }
 
     #[test]
