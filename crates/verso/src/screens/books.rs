@@ -481,6 +481,7 @@ impl Books {
         let started = std::time::Instant::now();
         self.tabs.selected = if self.navigation.tab == Tab::Collections { 1 } else { 2 };
         let in_collections = self.search.is_none() && self.navigation.tab == Tab::Collections;
+        self.new_folder.enabled = self.navigation.folder.as_deref().is_some_and(|p| self.folder_creatable(p));
         self.folders =
             if in_collections { self.collections.children(self.navigation.folder.as_deref()) } else { Vec::new() };
         let folder = self.navigation.folder.as_ref().and_then(|p| self.collections.folders.get(p));
@@ -1415,6 +1416,11 @@ impl Books {
     fn folder_protected(&self, path: &std::path::Path) -> bool {
         self.roots.iter().any(|r| r.starts_with(path))
     }
+    /// A new folder must land inside a library folder, or no scan would ever
+    /// show it. A folder that only contains a root lies outside every one.
+    fn folder_creatable(&self, path: &std::path::Path) -> bool {
+        self.roots.iter().any(|r| path.starts_with(r))
+    }
     fn open_folder_menu(&mut self, path: PathBuf, anchor: Point, t: &Theme) {
         let items = vec![
             (Some(Icon::Folder), "Open".into()),
@@ -1431,6 +1437,7 @@ impl Books {
         let protected = self.folder_protected(&path);
         menu.set_enabled(3, !protected);
         menu.set_enabled(4, !protected);
+        menu.set_enabled(5, self.folder_creatable(&path));
         menu.set_enabled(6, !protected);
         menu.set_enabled(7, !protected);
         self.menu = Some((Target::Folder(path), menu));
@@ -1458,7 +1465,12 @@ impl Books {
         let operation = sheet.operation.clone();
         let name = sheet.field.value().to_owned();
         let result = match &operation {
-            NameOperation::Create(parent) => files::create_folder(parent, &name),
+            NameOperation::Create(parent) => {
+                if !self.folder_creatable(parent) {
+                    return;
+                }
+                files::create_folder(parent, &name)
+            }
             NameOperation::Rename(path) => {
                 if self.folder_protected(path) {
                     return;
@@ -2195,8 +2207,9 @@ impl Screen for Books {
                     (Target::Book(id), event) => match event {
                         MenuEvent::Chosen(0) => self.open(id, cx),
                         MenuEvent::Chosen(1) => {
-                            if let Some(book) = self.book(&id) {
-                                self.details = Some(Details::new(cx.theme, self.screen, book, &self.store.book(&id)));
+                            // Home entries are stripped summaries; show the full record.
+                            if let Some(book) = self.reading_book(&id) {
+                                self.details = Some(Details::new(cx.theme, self.screen, &book, &self.store.book(&id)));
                             }
                         }
                         MenuEvent::Chosen(2) => self.mark(&id, true, cx),
@@ -4729,6 +4742,21 @@ mod tests {
             tap(&mut books, delete, cx);
             assert!(books.menu.is_some() && books.confirm.is_none(), "root delete is disabled");
             books.menu = None;
+            // A folder that only contains a library folder lies outside every
+            // root: nothing there could be created and ever shown.
+            let parent = root.clone();
+            assert!(!books.folder_creatable(&parent) && books.folder_creatable(&library));
+            books.open_folder_menu(parent.clone(), Point::new(200, 600), &t);
+            let rect = books.menu.as_ref().unwrap().1.rect();
+            let new_row = Point::new(rect.center().x, rect.y + t.mm(1.0) + 5 * t.row + t.row / 2);
+            tap(&mut books, new_row, cx);
+            assert!(books.menu.is_some() && books.name_sheet.is_none(), "New folder is disabled above a root");
+            books.menu = None;
+            books.start_name(NameOperation::Create(parent.clone()), &t);
+            books.on_text_input(&TextInput::Insert("Lost".into()), cx);
+            books.on_text_input(&TextInput::Submit, cx);
+            assert!(!parent.join("Lost").exists());
+            books.name_sheet = None;
             let create = books.new_folder.rect().center();
             tap(&mut books, create, cx);
             assert!(books.name_sheet.is_some());
