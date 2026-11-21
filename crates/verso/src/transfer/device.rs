@@ -31,6 +31,8 @@ pub struct Device {
     /// Starts a responder advertising `<label>.local` for as long as Verso
     /// runs, unless one runs already; the PID of the one it started.
     pub start_responder: StartResponder,
+    /// Whether the responder `start_responder` returned is still running.
+    pub responder_alive: Box<dyn Fn(i32) -> bool + Send + Sync>,
     pub stop_responder: Do<i32>,
     /// The name a running responder won, without `.local`.
     pub hostname: Hook<Option<String>>,
@@ -85,6 +87,7 @@ fn kindle() -> Device {
         address: Box::new(wifi::address),
         firewall: Box::new(|open| firewall::set(PORT, open)),
         start_responder: Box::new(mdns::start_for_verso),
+        responder_alive: Box::new(mdns::running),
         stop_responder: Box::new(mdns::stop),
         hostname: Box::new(mdns::hostname),
         listen: SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)),
@@ -145,6 +148,7 @@ pub fn simulator(storage: PathBuf, options: &str) -> Device {
         address: Box::new(move || Some(if kindle_like { Ipv4Addr::new(192, 168, 1, 42) } else { Ipv4Addr::LOCALHOST })),
         firewall: Box::new(|open| log::info!("simulator: port {} {}", 80, if open { "opened" } else { "closed" })),
         start_responder: Box::new(|_| None),
+        responder_alive: Box::new(|_| false),
         stop_responder: Box::new(|_| {}),
         hostname: Box::new(move || kindle_like.then(|| verso_mdns::DEFAULT_LABEL.to_owned())),
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -241,6 +245,10 @@ pub mod fake {
                     net.ours = Some(4242);
                     Some(4242)
                 }
+            }),
+            responder_alive: Box::new({
+                let n = n();
+                move |pid| n.lock().unwrap().ours == Some(pid)
             }),
             stop_responder: Box::new({
                 let n = n();

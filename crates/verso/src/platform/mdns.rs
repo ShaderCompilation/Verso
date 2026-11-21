@@ -86,9 +86,14 @@ pub fn start_for_verso(label: &str) -> Option<i32> {
     verso_mdns::running_pid().filter(|&pid| watches(pid, std::process::id() as i32))
 }
 
+/// Whether the responder `start_for_verso` started is still running.
+pub fn running(pid: i32) -> bool {
+    verso_mdns::running_pid() == Some(pid) && watches(pid, std::process::id() as i32)
+}
+
 /// Stops the responder `start_for_verso` started, if it still runs.
 pub fn stop(pid: i32) {
-    if verso_mdns::running_pid() == Some(pid) && watches(pid, std::process::id() as i32) {
+    if running(pid) {
         terminate(pid);
     }
 }

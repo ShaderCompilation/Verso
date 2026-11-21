@@ -827,7 +827,7 @@ impl Reader {
                     }
                     annotations::NoteTarget::Existing(i) => self.annotations.set_note(i, note).map(|_| {
                         if let Overlay::Highlights(view) = &mut self.overlay {
-                            view.refresh(&self.annotations, None, cx.theme);
+                            view.refresh_keep(&self.annotations, cx.theme);
                             view.close_note(cx.theme);
                         }
                     }),
@@ -839,7 +839,7 @@ impl Reader {
             Event::DeleteNote(i) => match self.annotations.set_note(i, None) {
                 Ok(_) => {
                     if let Overlay::Highlights(view) = &mut self.overlay {
-                        view.refresh(&self.annotations, None, cx.theme);
+                        view.refresh_keep(&self.annotations, cx.theme);
                         view.detail(i);
                     }
                 }

@@ -836,3 +836,26 @@ fn listings_remove_parts_left_by_unfinished_uploads() {
     assert!(env.root.join("verso/bin/.verso-upload.part").exists());
     assert!(env.root.join("documents/.verso-upload.txt").exists());
 }
+
+#[test]
+fn upload_part_names_are_refused() {
+    let env = Env::new();
+    for name in [".verso-upload.part", ".verso-upload.2.part", ".VERSO-UPLOAD.PART"] {
+        assert_eq!(env.put(&format!("documents/{name}"), false, b"x").0, 400, "{name}");
+        assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": name })).0, 400, "{name}");
+        assert_eq!(env.post("mkdir", json!({ "path": "documents", "name": name })).0, 400, "{name}");
+    }
+    // Non-part dotfiles remain allowed.
+    assert_eq!(env.put("documents/.verso-upload.txt", false, b"x").0, 201);
+}
+
+#[cfg(unix)]
+#[test]
+fn downloading_a_fifo_returns_400_without_blocking() {
+    let env = Env::new();
+    let fifo = env.root.join("documents/pipe.txt");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let (status, _, _) = env.req("GET", "/api/files/download?path=documents/pipe.txt", b"");
+    assert_eq!(status, 400);
+}

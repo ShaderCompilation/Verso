@@ -3,17 +3,17 @@
 
 Usage: scripts/audit-english-forms.py <repo> <dictionary-folder> > audit.tsv
 For each WordNet exception form, lists rule guesses (mirroring the rules in
-crates/verso/src/dictionary/forms.rs) that are real headwords but not curated
+crates/verso/src/dictionary/forms/english.rs) that are real headwords but not curated
 lemmas: since curated lemmas are authoritative, these are never shown. A real
 alternative belongs in assets/wordforms/english-overrides.txt. Only
 dictionaries whose folder names appear in ENGLISH are read; the `core` column
 counts hits in Concise Oxford, Macmillan and Cambridge. Keep RULES in sync
-with forms.rs. See docs/dictionary.md, "Authoritative exceptions".
+with forms/english.rs. See docs/dictionary.md, "Authoritative exceptions".
 """
 import os, re, sys
 
 repo, dicts = sys.argv[1], sys.argv[2]
-src = open(os.path.join(repo, "crates/verso/src/dictionary/forms.rs")).read()
+src = open(os.path.join(repo, "crates/verso/src/dictionary/forms/english.rs")).read()
 no_rules = set(re.findall(r'^\s+"([a-z]+)",$', src.split("const NO_RULES")[1].split("];")[0], re.M))
 RULES = [("ies","y"),("ied","y"),("ier","y"),("iest","y"),("s",""),("es",""),("ves","f"),("ves","fe"),
          ("men","man"),("d",""),("ed",""),("ing","e"),("ing",""),("r",""),("er",""),("st",""),("est","")]

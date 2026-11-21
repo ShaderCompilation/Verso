@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -305,19 +304,13 @@ impl Books {
         let Some(book) = index.books.iter().find(|b| b.available && b.id == id) else {
             return err(404, "Book not found.");
         };
-        let file = match File::open(&book.path) {
-            Ok(file) => file,
+        let (file, len) = match super::files::open_regular(&book.path) {
+            Ok(Some(opened)) => opened,
+            Ok(None) => return err(400, "Only regular files can be downloaded."),
             Err(e) if e.kind() == io::ErrorKind::NotFound => return err(404, "Book file no longer exists."),
             Err(e) => {
                 log::warn!("web app: opening {} for download: {e}", book.path.display());
                 return err(500, "Couldn't open the book.");
-            }
-        };
-        let len = match file.metadata() {
-            Ok(meta) => meta.len(),
-            Err(e) => {
-                log::warn!("web app: stat {} for download: {e}", book.path.display());
-                return err(500, "Couldn't read the book.");
             }
         };
         let name =
@@ -968,7 +961,7 @@ mod tests {
         // Valid zip header but invalid EPUB (missing container.xml): rejected by epub::read, part file deleted.
         let bad_zip = {
             let tmp = tempfile::NamedTempFile::new().unwrap();
-            let mut z = zip::ZipWriter::new(File::create(tmp.path()).unwrap());
+            let mut z = zip::ZipWriter::new(std::fs::File::create(tmp.path()).unwrap());
             z.start_file("hello.txt", zip::write::SimpleFileOptions::default()).unwrap();
             z.write_all(b"hi").unwrap();
             z.finish().unwrap();

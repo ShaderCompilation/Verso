@@ -181,13 +181,14 @@ fn list_names(dir: &Path) -> io::Result<Vec<String>> {
     fs::read_dir(dir)?.map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned())).collect()
 }
 
-/// The shared name rules (`library::files::check_name`), plus no `.` or `..`.
+/// The shared name rules (`library::files::check_name`), plus no `.`, `..`,
+/// or reserved internal upload-part names.
 fn check_name(name: &str) -> Result<&str, Response> {
     let name = name.trim();
     if name.is_empty() {
         return Err(err(400, "Enter a name."));
     }
-    if name == "." || name == ".." {
+    if name == "." || name == ".." || is_upload_part(name) {
         return Err(err(400, "That name isn't allowed."));
     }
     names::check_name(name).map_err(|e| err(400, &format!("{e:#}.")))?;
@@ -615,12 +616,10 @@ impl Files {
         if target.dir {
             return err(400, "Folders can't be downloaded.");
         }
-        match File::open(&target.canon) {
+        match open_regular(&target.canon) {
             // The length of the file that was opened, even if it was replaced since.
-            Ok(file) => {
-                let len = file.metadata().map_or(target.len, |m| m.len());
-                Response::file(file, len, target.name())
-            }
+            Ok(Some((file, len))) => Response::file(file, len, target.name()),
+            Ok(None) => err(400, "Only regular files can be downloaded."),
             Err(e) => {
                 log::warn!("web app: opening {} for download: {e}", target.path.display());
                 err(500, "Couldn't open the file.")
@@ -1000,9 +999,23 @@ pub(super) fn sweep_stale_parts(dir: &Path) {
     }
 }
 
+/// Opens `path` without blocking on FIFOs or other special files, and verifies
+/// the opened descriptor is a regular file. `Ok(None)` means it is not regular.
+pub(super) fn open_regular(path: &Path) -> io::Result<Option<(File, u64)>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    Ok(Some((file, meta.len())))
+}
+
 /// An upload's part file: `.verso-upload.part` or `.verso-upload.<n>.part`.
 fn is_upload_part(name: &str) -> bool {
-    name.strip_prefix(UPLOAD_PART)
+    let lower = name.to_ascii_lowercase();
+    lower
+        .strip_prefix(UPLOAD_PART)
         .and_then(|rest| rest.strip_suffix(".part"))
         .is_some_and(|n| n.is_empty() || n.strip_prefix('.').is_some_and(|n| n.parse::<u32>().is_ok()))
 }

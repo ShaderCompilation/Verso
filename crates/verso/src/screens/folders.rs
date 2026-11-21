@@ -56,13 +56,14 @@ fn display_relative(path: &Path, base: Option<(&Path, &str)>) -> String {
     }
 }
 
-/// Visible subfolders, sorted by name. Hidden folders are left out.
+/// Visible subfolders, sorted by name. Hidden folders and symlinked
+/// directories are left out, matching library and dictionary discovery.
 fn subfolders(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut folders: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
         .collect();
     folders.sort_by_cached_key(|p| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase());
     Ok(folders)
@@ -287,6 +288,8 @@ mod tests {
             std::fs::create_dir_all(root.join(dir))?;
         }
         std::fs::write(root.join("file.epub"), b"")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("books"), root.join("documents/linked"))?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let store = Store::at(root.join(".data"));
@@ -299,6 +302,10 @@ mod tests {
         let names: Vec<_> = picker.list.rows.iter().map(|r| r.label.clone()).collect();
         assert_eq!(names, ["books", "documents"], "sorted, folders only, no hidden ones");
         assert!(picker.add.enabled, "the root itself would absorb documents");
+        picker.open(root.join("documents"), &t);
+        let doc_names: Vec<_> = picker.list.rows.iter().map(|r| r.label.clone()).collect();
+        assert_eq!(doc_names.len(), 2, "up row and Tolkien only, no symlinked folder: {doc_names:?}");
+        assert_eq!(doc_names[1], "Tolkien");
         picker.open(root.join("documents/Tolkien"), &t);
         assert!(picker.up && !picker.add.enabled, "inside a library folder");
         picker.open(root.join("books"), &t);

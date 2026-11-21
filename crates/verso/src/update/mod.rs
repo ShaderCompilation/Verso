@@ -416,9 +416,8 @@ impl Updates {
         let this = self.clone();
         let waker = waker.clone();
         let spawned = std::thread::Builder::new().name("update-check".into()).spawn(move || {
-            if this.run() {
-                waker.wake();
-            }
+            this.run();
+            waker.wake();
         });
         if let Err(e) = spawned {
             log::error!("starting the update check: {e}");
@@ -428,7 +427,9 @@ impl Updates {
         }
     }
 
-    /// The worker's job. Returns whether anything Settings shows changed.
+    /// The worker's job. Returns whether a check actually ran. Every exit
+    /// bumps `revision` and wakes the loop, so a waiting update download can
+    /// start even when an automatic check was not due.
     fn run(&self) -> bool {
         let now = (self.device.clock)();
         {
@@ -436,6 +437,7 @@ impl Updates {
             let dev = inner.installed.as_ref().and_then(Option::as_ref).is_none_or(|i| i.dev);
             if !inner.manual && (dev || !check::auto_check_due(&inner.state, now)) {
                 inner.running = false;
+                inner.revision += 1;
                 log::debug!("update check: not due (dev install: {dev})");
                 return false;
             }

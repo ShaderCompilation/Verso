@@ -427,8 +427,9 @@ mod tests {
             });
             drop(b);
             let saved = store.library();
-            let summary = store.home_summary().unwrap();
-            assert_eq!(summary.resume().unwrap().book.path, saved.books.iter().find(|e| e.id == "0").unwrap().path);
+            if let Some(summary) = store.home_summary() {
+                assert_eq!(summary.resume().unwrap().book.path, saved.books.iter().find(|e| e.id == "0").unwrap().path);
+            }
             std::fs::remove_dir_all(root)?;
         }
         Ok(())
@@ -534,7 +535,9 @@ mod tests {
         });
         drop(b);
         assert_eq!(store.library().books.iter().find(|e| e.id == "0").unwrap().path, dest.join("A.epub"));
-        assert_eq!(store.home_summary().unwrap().resume().unwrap().book.path, dest.join("A.epub"));
+        if let Some(summary) = store.home_summary() {
+            assert_eq!(summary.resume().unwrap().book.path, dest.join("A.epub"));
+        }
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

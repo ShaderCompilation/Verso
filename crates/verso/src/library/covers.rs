@@ -132,6 +132,20 @@ fn write_png(path: &Path, image: &GrayImage) -> Result<()> {
     image.write_to(&mut bytes, image::ImageFormat::Png)?;
     atomic_bytes(path, bytes.get_ref())
 }
+/// Removes temp files left in `covers/` by interrupted writes (both current
+/// `*.tmp` and legacy `*.json.tmp` names). Called once at worker startup,
+/// before any cover writes begin.
+pub fn sweep_temps(store: &Store) {
+    let dir = store.tile_sizes_path().parent().unwrap().to_owned();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_name().to_str().is_some_and(|name| name.ends_with(".tmp"))
+            && let Err(e) = std::fs::remove_file(entry.path())
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("removing interrupted cover temp file: {e}");
+        }
+    }
+}
 /// Deletes the cached thumbnails of a cover key: full, small and tiles.
 pub fn remove(store: &Store, key: &str, sizes: &[(u32, u32)]) {
     let tiles = sizes.iter().map(|&(w, h)| store.tile_cover_path(key, w, h));
@@ -535,5 +549,25 @@ mod tests {
         assert_eq!((wide.get_pixel(0, 0)[0], wide.get_pixel(0, 299)[0]), (0xff, 0));
         assert!(tile_size((145, 200)) && tile_size((100, 217)));
         assert!(!tile_size((SMALL_WIDTH, SMALL_HEIGHT)) && !tile_size((WIDTH, HEIGHT)) && !tile_size((5000, 9000)));
+    }
+
+    #[test]
+    fn sweep_temps_removes_interrupted_cover_temp_files_only() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-cover-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::at(root.clone());
+        let dir = store.tile_sizes_path().parent().unwrap().to_owned();
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("abc.png"), b"png")?;
+        std::fs::write(dir.join("abc.png.tmp"), b"partial")?;
+        std::fs::write(dir.join("legacy.json.tmp"), b"legacy")?;
+        std::fs::write(dir.join("tile-sizes.json"), b"[]")?;
+        sweep_temps(&store);
+        assert!(dir.join("abc.png").exists());
+        assert!(dir.join("tile-sizes.json").exists());
+        assert!(!dir.join("abc.png.tmp").exists());
+        assert!(!dir.join("legacy.json.tmp").exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

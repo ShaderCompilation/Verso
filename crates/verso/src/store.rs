@@ -511,7 +511,9 @@ pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let parent = path.parent().context("record has no parent directory")?;
     std::fs::create_dir_all(parent)?;
-    let tmp = path.with_extension("json.tmp");
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;

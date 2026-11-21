@@ -13,6 +13,29 @@ from pathlib import Path
 LIMIT = 4096  # Headword and folded key bytes, excluding the NUL.
 
 
+def is_cyrillic(ch):
+    code = ord(ch)
+    return 0x0400 <= code <= 0x052F or 0x1C80 <= code <= 0x1C8F or 0xA640 <= code <= 0xA69F
+
+
+def fold(text):
+    """Matches verso_wordforms::fold: NFD, casefold, drop Cyrillic stress/ё marks, NFC."""
+    base = '\0'
+    out = []
+    for ch in unicodedata.normalize('NFD', text).casefold():
+        if ch in ('\u0301', '\u0300'):
+            drop = is_cyrillic(base)
+        elif ch == '\u0308':
+            drop = base == 'е'
+        else:
+            drop = False
+        if not unicodedata.category(ch).startswith('M'):
+            base = ch
+        if not drop:
+            out.append(ch)
+    return unicodedata.normalize('NFC', ''.join(out))
+
+
 def read(path):
     return gzip.open(path, 'rb').read() if path.suffix == '.gz' else path.read_bytes()
 
@@ -42,7 +65,7 @@ def records(path, tail, expected_count, expected_size=None, targets=None):
         else:
             try:
                 text = word.decode('utf-8')
-                key = unicodedata.normalize('NFC', unicodedata.normalize('NFD', text).casefold())
+                key = fold(text)
                 if len(key.encode('utf-8')) > LIMIT:
                     error('Folded headword too long (limit 4096 bytes)')
             except UnicodeDecodeError:

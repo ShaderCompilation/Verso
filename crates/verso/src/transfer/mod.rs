@@ -627,15 +627,26 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
     loop {
         awake.tick();
         let address = (device.address)();
+        let dead = {
+            let state = shared.lock();
+            state.running.responder.filter(|&pid| !(device.responder_alive)(pid))
+        };
+        if let Some(pid) = dead {
+            log::warn!("Wi-Fi transfer: mDNS responder (pid {pid}) exited; will restart");
+            let mut state = shared.lock();
+            if state.running.responder == Some(pid) {
+                state.running.responder = None;
+            }
+        }
         let responder_needed = address.is_some() && {
             let state = shared.lock();
             state.running.responder.is_none() && !state.stop
         };
         // An SSH server's responder already advertises the name.
         if responder_needed && Instant::now() >= responder_retry_at && (device.hostname)().is_none() {
-            match (device.start_responder)(label) {
-                Some(pid) => shared.lock().running.responder = Some(pid),
-                None => responder_retry_at = Instant::now() + RESPONDER_RETRY,
+            responder_retry_at = Instant::now() + RESPONDER_RETRY;
+            if let Some(pid) = (device.start_responder)(label) {
+                shared.lock().running.responder = Some(pid);
             }
         }
         let hostname = (device.hostname)();

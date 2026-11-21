@@ -47,7 +47,8 @@ impl Store {
     /// Reads existing records but never modifies any of them. The same reads
     /// rebuild the opened order; returns whether that file changed.
     /// Stops between records when `cancelled` returns true (shutdown). A
-    /// cancelled rebuild writes nothing.
+    /// cancelled rebuild removes the derived caches so the next launch
+    /// rebuilds them from authoritative state.
     pub fn rebuild_home_summary_until(
         &self,
         index: &LibraryIndex,
@@ -65,9 +66,15 @@ impl Store {
                 Entry::new(book, &state)
             })
         }));
-        ensure!(!stopped.get(), "Home rebuild cancelled");
+        if stopped.get() || cancelled() {
+            self.invalidate_home_locked();
+            anyhow::bail!("Home rebuild cancelled");
+        }
         summary.complete = true;
-        self.persist_home(&summary)?;
+        if let Err(error) = self.persist_home(&summary) {
+            self.invalidate_home_locked();
+            return Err(error);
+        }
         let mut opened = Opened::select(opened);
         opened.complete = true;
         let opened_changed = self.persist_opened(&opened);
@@ -78,6 +85,12 @@ impl Store {
             started.elapsed().as_micros()
         );
         Ok((summary, opened_changed))
+    }
+
+    fn invalidate_home_locked(&self) {
+        let _ = std::fs::remove_file(self.root.join("home.json"));
+        let _ = std::fs::remove_file(self.root.join("opened.json"));
+        *self.opened_leader.lock().unwrap() = None;
     }
     #[cfg(test)]
     pub fn rebuild_home_summary(&self, index: &LibraryIndex) -> Result<Summary> {
@@ -322,6 +335,23 @@ mod tests {
         assert_eq!(summary.resume().unwrap().status.progress, 3456);
         assert_eq!(store.book("11").position.0, "latest exact anchor");
         drop(writer);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_rebuild_invalidates_stale_home_caches() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-home-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::at(root.clone());
+        let index = LibraryIndex { books: vec![book(1)], ..Default::default() };
+        store.save_book("1", &BookState { position: Position("p".into()), last_opened: 10, ..Default::default() })?;
+        store.rebuild_home_summary(&index)?;
+        assert!(store.home_summary().is_some_and(|s| s.complete));
+        assert!(store.opened().is_some_and(|o| o.complete));
+        assert!(store.rebuild_home_summary_until(&index, &|| true).is_err());
+        assert!(store.home_summary().is_none(), "cancelled rebuild removes stale home.json");
+        assert!(store.opened().is_none(), "cancelled rebuild removes stale opened.json");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

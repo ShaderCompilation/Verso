@@ -309,6 +309,7 @@ impl Background {
         {
             self.rebuild_home();
         }
+        covers::sweep_temps(&self.store);
         self.tile_sizes = covers::tile_sizes(&self.store);
         loop {
             let (retry, scan, home, run_covers, repairs) = {
@@ -635,6 +636,10 @@ impl Background {
         if changes.is_empty() {
             return;
         }
+        let old_keys = changes
+            .iter()
+            .any(|(_, c, _)| matches!(c, PathChange::Add(_)))
+            .then(|| self.index.books.iter().map(cover_key).collect::<HashSet<_>>());
         for (revision, change, _) in changes {
             match change {
                 PathChange::Remove(path) => {
@@ -652,6 +657,12 @@ impl Background {
             }
             change.apply(&mut self.index);
             self.revision = *revision;
+        }
+        if let Some(old_keys) = old_keys {
+            let kept: HashSet<String> = self.index.books.iter().flat_map(|b| [cover_key(b), covers::key(b)]).collect();
+            for key in old_keys.into_iter().filter(|k| !kept.contains(k)) {
+                covers::remove(&self.store, &key, &self.tile_sizes);
+            }
         }
         self.unsaved = true;
         self.unpublished = true;
