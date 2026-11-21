@@ -286,12 +286,24 @@ mod tests {
     fn carrying_freezes_selection_but_allows_navigation_and_new_folder() -> anyhow::Result<()> {
         let (mut b, _, root, t, screen) = fixture("carrying")?;
         let library = root.join("Library");
+        b.scanning = false;
         with_cx(&t, screen, |cx| {
             b.start_selection(Target::Book("0".into()), cx);
+            assert!(!b.show_new_folder(), "New folder hides during multi-select");
             let p = b.selection.as_ref().unwrap().move_items.rect().center();
             tap(&mut b, p, cx);
             assert!(b.carrying());
+            assert!(b.show_new_folder(), "New folder stays visible while carrying");
             assert_eq!(b.paste_reason(), Some("Choose a different folder"));
+            assert_eq!(b.library_subtitle(), "Choose a different folder");
+            // Even while scanning, paste_reason() takes precedence in the folder subtitle slot.
+            b.scanning = true;
+            assert_eq!(b.library_subtitle(), "Choose a different folder");
+            b.scanning = false;
+            // Home icon position cannot leave Library while carrying.
+            let home_pt = b.home_action.rect().center();
+            tap(&mut b, home_pt, cx);
+            assert!(!b.is_home() && b.carrying());
             let frozen = b.selection.as_ref().unwrap().items.clone();
             let book_cell = b.grid.cells().into_iter().find(|(i, _)| b.grid_book(*i).is_some()).unwrap().1.center();
             tap(&mut b, book_cell, cx);
@@ -301,17 +313,22 @@ mod tests {
             tap(&mut b, back, cx);
             assert_eq!(b.navigation.folder, Some(library.clone()));
             assert_eq!(b.selection.as_ref().unwrap().items, frozen);
+            assert!(b.show_new_folder());
             let create = b.new_folder.rect().center();
             tap(&mut b, create, cx);
             b.on_text_input(&TextInput::Insert("New destination".into()), cx);
             b.on_text_input(&TextInput::Submit, cx);
             assert!(library.join("New destination").is_dir());
             assert!(b.carrying());
-            // Multi-root top level (`folder == None`) requires choosing a destination folder.
+            // Multi-root top level (`folder == None`) hides New folder and requires choosing a destination folder.
             b.navigation.folder = None;
+            assert!(!b.show_new_folder());
             assert_eq!(b.paste_reason(), Some("Choose a destination folder"));
+            assert_eq!(b.library_subtitle(), "Choose a destination folder");
             b.navigate(Some(library.join("New destination")), cx);
             assert!(b.paste_reason().is_none());
+            assert_eq!(b.library_subtitle(), "Empty", "valid destination restores folder counts");
+            assert!(b.show_new_folder());
             let cancel = b.selection.as_ref().unwrap().cancel.rect().center();
             tap(&mut b, cancel, cx);
             assert!(!b.carrying() && b.selection.is_none());
@@ -320,6 +337,7 @@ mod tests {
             b.start_move(vec![Target::Folder(library.join("Source/Tree"))], cx);
             b.navigate(Some(library.join("Source/Tree/Child")), cx);
             assert_eq!(b.paste_reason(), Some("Cannot paste inside a moving folder"));
+            assert_eq!(b.library_subtitle(), "Cannot paste inside a moving folder");
             b.start_paste(cx);
             assert!(library.join("Source/Tree").is_dir());
             b.end_selection(cx);

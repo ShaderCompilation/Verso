@@ -91,9 +91,17 @@ pub(super) fn layout(mode: FolderPreview, books: usize, r: Rect, t: &Theme) -> O
     })
 }
 
+/// Drawn preview geometry: `bounds` for the refresh hint, `front` for the
+/// top-left selection badge (matching the cover that holds the count badge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Drawn {
+    pub bounds: Rect,
+    pub front: Rect,
+}
+
 /// Draws a folder's preview of `books` in tile `r`, with a badge counting
-/// the folder's books. Returns the area drawn, or None when the tile should
-/// show the folder icon instead.
+/// the folder's books. Returns the drawn bounds and front cover, or None when
+/// the tile should show the folder icon instead.
 pub(super) fn draw(
     cx: &mut DrawCx,
     mode: FolderPreview,
@@ -102,7 +110,7 @@ pub(super) fn draw(
     r: Rect,
     store: &Store,
     cache: &mut Thumbnails,
-) -> Option<Rect> {
+) -> Option<Drawn> {
     let t = cx.theme;
     let layout = layout(mode, books.len(), r, t)?;
     let outline = cover_outline(t) as f32;
@@ -129,7 +137,15 @@ pub(super) fn draw(
         cx.canvas.fill_polygon(&[(x, bottom), (x, y), (right, y), (right + slope, bottom)], INK);
     }
     draw_badge(cx, count, layout.front);
-    Some(layout.bounds)
+    Some(Drawn { bounds: layout.bounds, front: layout.front })
+}
+
+/// Bottom-right count pill bounds inside `front`, given the rendered count width.
+pub(super) fn count_badge_rect(front: Rect, text_w: i32, t: &Theme) -> Rect {
+    let h = t.mm(4.5);
+    let w = (text_w + t.mm(2.5)).max(h).min(front.w);
+    let inset = t.mm(1.0);
+    Rect::new(front.right() - inset - w, front.bottom() - inset - h, w, h)
 }
 
 /// A small white pill with the folder's book count, in the bottom-right
@@ -138,11 +154,8 @@ fn draw_badge(cx: &mut DrawCx, count: usize, front: Rect) {
     let t = cx.theme;
     let text = count.to_string();
     let style = t.caption.weight(Weight::SemiBold).gray(INK);
-    let h = t.mm(4.5);
-    let w = (cx.text.width(&text, style).ceil() as i32 + t.mm(2.5)).max(h).min(front.w);
-    let inset = t.mm(1.0);
-    let badge = Rect::new(front.right() - inset - w, front.bottom() - inset - h, w, h);
-    let radius = h as f32 / 2.0;
+    let badge = count_badge_rect(front, cx.text.width(&text, style).ceil() as i32, t);
+    let radius = badge.h as f32 / 2.0;
     cx.canvas.fill_rounded_rect(badge, radius, PAPER);
     cx.canvas.stroke_rounded_rect(badge, radius, t.border as f32, INK);
     cx.line(&text, style, badge, HAlign::Center);

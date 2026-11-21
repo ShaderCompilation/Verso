@@ -452,6 +452,44 @@ impl Books {
             "Empty".into()
         }
     }
+    /// `New folder` is shown inside any folder during normal browsing and
+    /// Cut-and-paste carrying, hidden at the multi-root list and during multi-select.
+    pub(super) fn show_new_folder(&self) -> bool {
+        self.navigation.folder.is_some() && (self.selection.is_none() || self.carrying())
+    }
+    /// Updates the Library folder header title/subtitle bounds when controls
+    /// (Back, `New folder`, compact pager) appear or hide.
+    pub(super) fn update_library_header_rect(&mut self, t: &Theme) {
+        if self.is_home() || self.search.is_some() {
+            return;
+        }
+        let header_y = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM);
+        let header_h = t.mm(LIBRARY_HEADER_H_MM);
+        let left = if self.is_top_level() {
+            t.margin
+        } else {
+            (t.margin + t.icon + t.mm(2.0)).max(self.back.rect().right() + t.mm(0.5))
+        };
+        let right = if self.show_new_folder() {
+            self.new_folder.rect().x - t.mm(1.5)
+        } else if self.pager.visible() {
+            self.pager.rect().x - t.mm(3.0)
+        } else {
+            self.screen.right() - t.margin
+        };
+        self.path_rect = Rect::new(left, header_y, (right - left).max(0), header_h);
+    }
+    /// Library folder header subtitle: `paste_reason()` whenever Paste is
+    /// disabled, otherwise `"Scanning…"` or the smart folder/book count.
+    pub(super) fn library_subtitle(&self) -> String {
+        if let Some(reason) = self.paste_reason() {
+            reason.to_owned()
+        } else if self.scanning {
+            "Scanning…".into()
+        } else {
+            smart_counts(self.folders.len(), self.books.len())
+        }
+    }
     /// Loading the browsing model is explicitly deferred until the user asks for it.
     fn prepare_browsing(&mut self) {
         if self.browsing_ready {
@@ -575,7 +613,6 @@ impl Books {
             self.path_rect = Rect::default();
         } else {
             let header_y = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM);
-            let header_h = t.mm(LIBRARY_HEADER_H_MM);
             let back_cy = header_y + t.mm(3.6);
             let controls_cy = header_y + t.mm(5.7);
             self.grid = self.browsing_grid(self.folders.len() + self.books.len(), t);
@@ -585,26 +622,13 @@ impl Books {
                 Rect::new(self.screen.right() - t.margin - pager_w, controls_cy - pager_h / 2, pager_w, pager_h);
             self.pager.place(pager_rect, t);
             self.back.place_at(Point::new(t.margin + t.icon / 2, back_cy), t);
-            let show_new_folder = self.navigation.folder.is_some();
             let new_folder_cx = if self.pager.visible() {
                 pager_rect.x - t.mm(6.0) - t.icon / 2
             } else {
                 self.screen.right() - t.margin - t.icon / 2
             };
             self.new_folder.place_at(Point::new(new_folder_cx, controls_cy), t);
-            let left = if top_level {
-                t.margin
-            } else {
-                (t.margin + t.icon + t.mm(2.0)).max(self.back.rect().right() + t.mm(0.5))
-            };
-            let right = if show_new_folder {
-                self.new_folder.rect().x - t.mm(1.5)
-            } else if self.pager.visible() {
-                pager_rect.x - t.mm(3.0)
-            } else {
-                self.screen.right() - t.margin
-            };
-            self.path_rect = Rect::new(left, header_y, (right - left).max(0), header_h);
+            self.update_library_header_rect(t);
             self.header = Rect::default();
         }
         self.retain_selection();
@@ -2028,20 +2052,20 @@ impl Screen for Books {
                 Rect::new(self.path_rect.x, self.path_rect.y, self.path_rect.w, t.mm(6.4)),
                 HAlign::Left,
             );
-            let subtitle = if let Some(reason) = self.paste_reason() {
-                reason.to_owned()
-            } else if self.scanning {
-                "Scanning…".into()
-            } else {
-                smart_counts(self.folders.len(), self.books.len())
-            };
+            let subtitle = self.library_subtitle();
+            let sub_style =
+                if self.paste_reason().is_some() && cx.text.width(&subtitle, t.small) > self.path_rect.w as f32 {
+                    t.caption.gray(INK2)
+                } else {
+                    t.small.gray(INK2)
+                };
             cx.line(
                 &subtitle,
-                t.small.gray(INK2),
+                sub_style,
                 Rect::new(self.path_rect.x, self.path_rect.y + t.mm(7.1), self.path_rect.w, t.mm(3.8)),
                 HAlign::Left,
             );
-            if self.navigation.folder.is_some() {
+            if self.show_new_folder() {
                 self.new_folder.draw(cx);
             }
             self.pager.draw(cx);
@@ -2131,13 +2155,15 @@ impl Screen for Books {
                     &self.store,
                     &mut self.thumbnails,
                 );
-                match preview {
+                let front = match preview {
                     // Like book covers: no Ui hint while selecting, so the
-                    // fast tick box keeps its own mode.
-                    Some(preview) if self.grid.pressed() != Some(i) && self.selection.is_none() => {
-                        cx.hint(preview, RefreshMode::Ui)
+                    // fast circular badge keeps its own mode.
+                    Some(drawn) => {
+                        if self.grid.pressed() != Some(i) && self.selection.is_none() {
+                            cx.hint(drawn.bounds, RefreshMode::Ui);
+                        }
+                        drawn.front
                     }
-                    Some(_) => {}
                     None => {
                         let outline = Rect::new(r.x + t.mm(1.0), r.y + r.h / 5, r.w - t.mm(2.0), r.h / 2);
                         cx.icons.draw(cx.canvas, Icon::Folder, outline, INK);
@@ -2149,8 +2175,9 @@ impl Screen for Books {
                             Rect::new(r.x, sub_y, r.w, sub_h),
                             HAlign::Center,
                         );
+                        r
                     }
-                }
+                };
                 let name_y = r.bottom() + t.mm(1.1);
                 let name_h = t.mm(3.5);
                 cx.line(
@@ -2173,7 +2200,7 @@ impl Screen for Books {
                     cx.canvas.stroke_rounded_rect(r, t.radius, (2 * t.border) as f32, INK);
                     cx.hint(r, RefreshMode::Fast);
                 }
-                self.draw_tick(cx, Target::Folder(path.clone()), cell);
+                self.draw_tick(cx, Target::Folder(path.clone()), cell, front);
                 continue;
             }
             let book = &self.books[i - self.folders.len()];
@@ -2234,7 +2261,7 @@ impl Screen for Books {
                     Rect::new(cell.x, y + title_h, cell.w, author_h),
                     HAlign::Left,
                 );
-                self.draw_tick(cx, Target::Book(book.id.clone()), cell);
+                self.draw_tick(cx, Target::Book(book.id.clone()), cell, cover);
             }
         }
         if !self.is_home() && self.books.is_empty() && self.folders.is_empty() {
@@ -2543,7 +2570,8 @@ impl Screen for Books {
                 return Action::None;
             }
             if !self.is_home() && self.search.is_none() {
-                if let Some(path) = self.navigation.folder.clone()
+                if self.show_new_folder()
+                    && let Some(path) = self.navigation.folder.clone()
                     && self.new_folder.on_gesture(&g)
                 {
                     self.start_name(NameOperation::Create(path), cx.theme);
@@ -3279,19 +3307,170 @@ mod tests {
         let mut icons = crate::gfx::IconRenderer::default();
         books.navigation.folder = Some("/books/Fiction/Nested".into());
         books.refresh(&t);
-        let cell = books.grid.cells()[0].1;
-        let cover = books.cover_rect(cell, &t).center();
-        let tick = Point::new(cell.right() - t.mm(3.0), cell.y + t.mm(3.0));
+        let cell0 = books.grid.cells()[0].1;
+        let cell1 = books.grid.cells()[1].1;
+        let cover0 = books.cover_rect(cell0, &t);
+        let cover1 = books.cover_rect(cell1, &t);
+        let badge0 = selection::badge_rect(cover0, &t);
+        let badge1 = selection::badge_rect(cover1, &t);
+        assert_eq!((badge0.w, badge0.h), (52, 52), "52 × 52 px circular badge at 300 dpi");
+        assert_eq!((badge0.x - cover0.x, badge0.y - cover0.y), (12, 12), "12 px inset from cover top-left");
         let mut draw = |books: &mut Books| {
             let mut hints = Vec::new();
+            canvas.fill(PAPER);
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
             let mode = |p: Point| hints.iter().filter(|h| h.rect.contains(p)).map(|h| h.mode).max();
-            (mode(cover), mode(tick))
+            (mode(cover0.center()), mode(badge0.center()))
         };
         assert_eq!(draw(&mut books).0, Some(RefreshMode::Ui));
         with_cx(&t, screen, |cx| books.start_selection(Target::Book(books.books[0].id.clone()), cx));
-        // A cover that loads while selecting gets the default grayscale mode.
+        // A cover that loads while selecting gets the default grayscale mode;
+        // Fast hint stays limited to the circular badge area.
         assert_eq!(draw(&mut books), (None, Some(RefreshMode::Fast)));
+        let px = |x: i32, y: i32| canvas.gray_data()[y as usize * 1272 + x as usize];
+        // Selected badge: solid INK circle with white checkmark inside.
+        assert_eq!(px(badge0.x + 12, badge0.y + 12), INK, "selected badge fills solid INK");
+        let check_white = (badge0.y + 10..badge0.bottom() - 10)
+            .flat_map(|y| (badge0.x + 10..badge0.right() - 10).map(move |x| px(x, y)))
+            .any(|g| g > 200);
+        assert!(check_white, "selected badge draws a white checkmark");
+        // Unselected badge: white interior with 4 px INK ring.
+        assert_eq!(px(badge1.center().x, badge1.center().y), PAPER, "unselected badge has white interior");
+        assert_eq!(px(badge1.center().x, badge1.y + 2), INK, "unselected badge has 4 px INK border");
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn circular_selection_badge_placement_across_modes_and_panels() {
+        let mut text = crate::gfx::TextRenderer::new();
+        for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (1072, 1448, 300), (600, 800, 167), (800, 600, 167)] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let top = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM) + t.mm(LIBRARY_HEADER_H_MM) + t.mm(LIBRARY_HEADER_GAP_MM);
+            let bottom = screen.bottom() - t.margin;
+            let (cols, rows) = library_grid_dims(screen, &t);
+            let (gap_x, gap_y) = library_grid_gaps(cols, &t);
+            let mut grid = Grid::new(12, cols, rows);
+            grid.place(Rect::new(t.margin, top, screen.w - 2 * t.margin, (bottom - top).max(t.target)), gap_x, gap_y);
+            let cell = grid.cells()[0].1;
+            let r = grid_folder_rect(&grid, cell, false, &t);
+            let count_style = t.caption.weight(Weight::SemiBold).gray(INK);
+            let count_w = text.width("999", count_style).ceil() as i32;
+
+            // Stack 1-, 2-, and 3-book previews pin front cover to bottom-left, so all
+            // share the exact same selection badge rect and clear the bottom-right count badge.
+            let stack3 = folder_tile::layout(FolderPreview::Stack, 3, r, &t).unwrap();
+            let b3 = selection::badge_rect(stack3.front, &t);
+            for books in [1, 2] {
+                let l = folder_tile::layout(FolderPreview::Stack, books, r, &t).unwrap();
+                assert_eq!(selection::badge_rect(l.front, &t), b3, "{w}x{h} Stack({books})");
+            }
+            for mode in [FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Covers] {
+                let l = folder_tile::layout(mode, 4, r, &t).unwrap();
+                let sel = selection::badge_rect(l.front, &t);
+                let count = folder_tile::count_badge_rect(l.front, count_w, &t);
+                assert!(
+                    sel.x >= l.front.x
+                        && sel.y >= l.front.y
+                        && sel.right() <= l.front.right()
+                        && sel.bottom() <= l.front.bottom(),
+                    "{w}x{h} {mode:?}: badge {sel:?} inside front {:?}",
+                    l.front
+                );
+                assert!(
+                    sel.intersect(&count).is_none(),
+                    "{w}x{h} {mode:?}: selection {sel:?} must not collide with count {count:?}"
+                );
+            }
+            // Icon mode places the selection badge in the top-left of `r`, clear of the cell edges.
+            let icon_badge = selection::badge_rect(r, &t);
+            assert!(
+                icon_badge.x >= r.x
+                    && icon_badge.y >= r.y
+                    && icon_badge.right() <= r.right()
+                    && icon_badge.bottom() <= r.bottom(),
+                "{w}x{h} Icon: {icon_badge:?} inside {r:?}"
+            );
+            // Book tiles anchor the selection badge to the top-left of the book cover.
+            let cover = grid_cover_rect(&grid, cell, &t);
+            let book_badge = selection::badge_rect(cover, &t);
+            assert!(
+                book_badge.x >= cover.x
+                    && book_badge.y >= cover.y
+                    && book_badge.right() <= cover.right()
+                    && book_badge.bottom() <= cover.bottom(),
+                "{w}x{h} Book: {book_badge:?} inside {cover:?}"
+            );
+            // Selection bar buttons fit their full labels without clipping on every panel.
+            let sel = Selection::new_for_test(&t, screen);
+            let pad = 2 * t.mm(2.0);
+            for btn in [&sel.all, &sel.move_items, &sel.delete, &sel.paste, &sel.cancel] {
+                let label_w = text.width(&btn.label, t.button).ceil() as i32;
+                assert!(
+                    label_w <= btn.rect().w - pad,
+                    "{w}x{h}: button {:?} label ({label_w} px) overflows inner width ({} px)",
+                    btn.label,
+                    btn.rect().w - pad
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multi_select_hides_new_folder_and_keeps_header_and_pager() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("multi-select-header")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        books.scanning = false;
+        with_cx(&t, screen, |cx| {
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            assert!(books.show_new_folder() && books.pager.visible());
+            let normal_path = books.path_rect;
+            let new_folder_pt = books.new_folder.rect().center();
+            let home_pt = books.home_action.rect().center();
+
+            // Entering multi-select hides New folder and expands the folder title slot.
+            books.start_selection(Target::Book(books.books[0].id.clone()), cx);
+            assert!(!books.show_new_folder());
+            assert!(books.path_rect.w > normal_path.w, "hiding New folder expands title width");
+            assert!(books.path_rect.right() <= books.pager.rect().x);
+            assert_eq!(books.library_subtitle(), "20 books");
+
+            // Tapping where New folder used to be does not open NameSheet.
+            tap(&mut books, new_folder_pt, cx);
+            assert!(books.name_sheet.is_none());
+
+            // Tapping the top-left Home icon position does not leave Library while selecting.
+            tap(&mut books, home_pt, cx);
+            assert!(!books.is_home() && books.selection.is_some());
+
+            // Compact pager stays active for cross-page selection.
+            let next = books.pager.rect().split_right(t.target).0.center();
+            tap(&mut books, next, cx);
+            assert_eq!(books.pager.page, 1);
+            let p = books.grid.cells()[0].1.center();
+            tap(&mut books, p, cx);
+            assert_eq!(books.selection.as_ref().unwrap().items.len(), 2);
+
+            // Back arrow cancels multi-select first without leaving the folder, restoring New folder.
+            let back = books.back.rect().center();
+            tap(&mut books, back, cx);
+            assert!(books.selection.is_none());
+            assert_eq!(books.navigation.folder, Some("/books/Fiction/Nested".into()));
+            assert!(books.show_new_folder());
+            assert_eq!(books.path_rect, normal_path);
+
+            // Second Back tap navigates up to the parent folder.
+            tap(&mut books, back, cx);
+            assert_eq!(books.navigation.folder, Some("/books/Fiction".into()));
+
+            // Home icon works again once selection has ended.
+            tap(&mut books, home_pt, cx);
+            assert!(books.is_home());
+        });
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
