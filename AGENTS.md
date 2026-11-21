@@ -14,6 +14,7 @@ Verso is a calm, lightweight e-reader app for jailbroken Kindles, written in Rus
 ## Commits
 
 - **Commit once per implementation phase.** A commit is one finished phase from `docs/plan.md` (with its status markers updated), not each checklist item or small step along the way. Keep working through the steps of the phase and commit when the phase is done. If a phase is genuinely large, split it into a few substantial, self-contained commits rather than a stream of small ones.
+- **Bug fixes get their own commit.** When asked to fix a bug or a set of bugs (e.g. findings from `docs/bugs-*.md`), commit right after fixing and validating, without waiting to be asked. Don't commit if any requested fix wasn't done or needs the user's attention or decision: report what's open and wait.
 - **Don't wait to be asked to commit**, but don't commit mid-phase just because some steps are finished. A standalone docs update requested on its own is its own commit; docs written as part of a phase belong in that phase's commit.
 - **Keep unrelated changes out of a commit.** If other work is already in the workspace, leave it for its own commit rather than bundling it in.
 - **Documentation-only changes need no code checks.** If you did not change code, do not run builds, tests, linters or formatters. Unrelated code changes already in the workspace do not count as your changes.
