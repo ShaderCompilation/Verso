@@ -259,8 +259,9 @@ before any platform/engine initialization. It measures lazy cache construction,
 state, folded-text bytes and process RSS. Timings exclude UI drawing and panel I/O.
 
 Keep the real library index and private framebuffer evidence on the Kindle; copy
-only aggregate numbers. `search-results.csv` contains the 2026-11-11 device
-results. Match queries include empty, broad Latin, Cyrillic and absent strings.
+only aggregate numbers. The 2026-11-11 device results live in
+`docs/research/performance-2026-11-11/search-results.csv`. Match queries include
+empty, broad Latin, Cyrillic and absent strings.
 The diagnostic RSS is not normal app RSS. For app startup compare the same copied
 index, covers and per-book state between builds, through the normal launcher.
 For keyboard timing use the probe's release markers and successful SEND_UPDATE
@@ -403,7 +404,7 @@ with the Kindle awake and no reader open. They restore the Kindle UI at the end.
   reader.epub`: page-turn request latency with N short highlights.
 
 `annotation_fixture.py` builds the synthetic records from `reader.epub`; numeric
-results are in `highlights-results.csv`.
+results are in `docs/research/highlights-2026-11-15/`.
 
 ## Dictionary indexing, sets and counters
 
