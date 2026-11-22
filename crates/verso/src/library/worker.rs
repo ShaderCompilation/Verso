@@ -147,17 +147,17 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 /// Changed books between index checkpoints, so an interrupted pass keeps progress.
 const SAVE_EVERY: usize = 64;
 
-fn cover_key(book: &Book) -> String {
+fn cover_key(book: &Book, color: crate::gfx::ColorMode) -> String {
     match &book.cover {
         Cover::Ready(key) | Cover::Unavailable(key) => key.clone(),
-        Cover::Pending => covers::key(book),
+        Cover::Pending => covers::key(book, color),
     }
 }
 /// Cover keys the old index used that no book of the new one does: a changed
 /// file or a reassigned identity gets a new key and strands the old files.
-fn stale_cover_keys(old: &LibraryIndex, new: &LibraryIndex) -> Vec<String> {
-    let kept: HashSet<String> = new.books.iter().flat_map(|b| [cover_key(b), covers::key(b)]).collect();
-    let stale: HashSet<String> = old.books.iter().map(cover_key).filter(|k| !kept.contains(k)).collect();
+fn stale_cover_keys(old: &LibraryIndex, new: &LibraryIndex, color: crate::gfx::ColorMode) -> Vec<String> {
+    let kept: HashSet<String> = new.books.iter().flat_map(|b| [cover_key(b, color), covers::key(b, color)]).collect();
+    let stale: HashSet<String> = old.books.iter().map(|b| cover_key(b, color)).filter(|k| !kept.contains(k)).collect();
     stale.into_iter().collect()
 }
 fn push_error(errors: &mut Vec<String>, error: String) {
@@ -431,7 +431,7 @@ impl Background {
         errors.extend(scan.errors);
         if checkpointed || self.index != scan.index || std::mem::take(&mut self.roots_changed) {
             if checkpointed || self.index != scan.index {
-                let stale = stale_cover_keys(&self.index, &scan.index);
+                let stale = stale_cover_keys(&self.index, &scan.index, self.store.color_mode());
                 self.index = scan.index;
                 for key in stale {
                     covers::remove(&self.store, &key, &self.tile_sizes);
@@ -639,10 +639,11 @@ impl Background {
         if changes.is_empty() {
             return;
         }
+        let color = self.store.color_mode();
         let old_keys = changes
             .iter()
             .any(|(_, c, _)| matches!(c, PathChange::Add(_)))
-            .then(|| self.index.books.iter().map(cover_key).collect::<HashSet<_>>());
+            .then(|| self.index.books.iter().map(|b| cover_key(b, color)).collect::<HashSet<_>>());
         for (revision, change, _) in changes {
             match change {
                 PathChange::Remove(path) => {
@@ -650,7 +651,7 @@ impl Background {
                         if let Err(e) = self.store.remove_book(&book.id) {
                             log::warn!("removing deleted reading state: {e}");
                         }
-                        covers::remove(&self.store, &cover_key(book), &self.tile_sizes);
+                        covers::remove(&self.store, &cover_key(book, self.store.color_mode()), &self.tile_sizes);
                     }
                 }
                 PathChange::Add(_) => {
@@ -662,7 +663,9 @@ impl Background {
             self.revision = *revision;
         }
         if let Some(old_keys) = old_keys {
-            let kept: HashSet<String> = self.index.books.iter().flat_map(|b| [cover_key(b), covers::key(b)]).collect();
+            let color = self.store.color_mode();
+            let kept: HashSet<String> =
+                self.index.books.iter().flat_map(|b| [cover_key(b, color), covers::key(b, color)]).collect();
             for key in old_keys.into_iter().filter(|k| !kept.contains(k)) {
                 covers::remove(&self.store, &key, &self.tile_sizes);
             }
@@ -1209,7 +1212,7 @@ fn repair_covers(
     let mut changed = false;
     for id in ids {
         let Some(i) = index.books.iter().position(|b| &b.id == id && b.available) else { continue };
-        if !attempted.insert(covers::key(&index.books[i])) {
+        if !attempted.insert(covers::key(&index.books[i], store.color_mode())) {
             continue;
         }
         match covers::repair(&index.books[i], store, tile_sizes) {
@@ -1784,11 +1787,11 @@ mod tests {
         assert!(!status.scanning && status.errors.iter().any(|e| e.contains("missing")));
         assert_eq!(std::fs::metadata(&library_file)?.modified()?, written, "an unchanged pass saves nothing");
         assert_eq!(store.library().books[0].cover, Cover::Ready(key.clone()));
-        assert!(covers::load(&store.cover_path(&key)).is_err());
+        assert!(covers::load(&store.cover_path(&key), crate::gfx::ColorMode::Gray8).is_err());
         // A visible-load failure regenerates it once, outside a pass.
         worker.repair(["unknown".to_owned(), book.id.clone()]);
         wait(|| !worker.take_repaired().is_empty());
-        assert!(covers::load(&store.cover_path(&key)).is_ok());
+        assert!(covers::load(&store.cover_path(&key), crate::gfx::ColorMode::Gray8).is_ok());
         assert!(covers::load_small(&store, &key).is_ok(), "the same repair redoes the small thumbnail");
         std::fs::write(store.cover_path(&key), b"corrupt")?;
         worker.repair([book.id.clone()]);
@@ -1805,7 +1808,7 @@ mod tests {
         let changed = finished(&worker).0.expect("a changed book publishes the index").index;
         let Cover::Ready(new_key) = changed.books[0].cover.clone() else { panic!("changed cover missing") };
         assert_ne!(new_key, key);
-        assert!(covers::load(&store.cover_path(&new_key)).is_ok());
+        assert!(covers::load(&store.cover_path(&new_key), crate::gfx::ColorMode::Gray8).is_ok());
         assert!(store.small_cover_path(&new_key).exists());
         assert_eq!(store.book(&book.id).position, reading.position, "changed files keep reading state");
         drop(worker);

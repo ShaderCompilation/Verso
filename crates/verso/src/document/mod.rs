@@ -204,6 +204,8 @@ pub trait Document {
     fn go_to_page(&mut self, page: usize);
     /// Draws the current page as 8-bit gray (0 = black), `stride` bytes per row.
     fn draw(&mut self, out: &mut [u8], stride: usize) -> Result<()>;
+    /// Draws the current page as 32-bit opaque RGBA (`[R, G, B, 255]`), `stride` bytes per row.
+    fn draw_rgba(&mut self, out: &mut [u8], stride: usize) -> Result<()>;
 }
 
 /// Where the engine finds its data and the books, per device.
@@ -337,6 +339,63 @@ mod tests {
         search_checks(&engine, &layout);
         footnote_checks(&engine, &layout);
         missing_mimetype_checks(&engine, &layout, &book, pages);
+        color_draw_checks(&engine, &layout);
+    }
+
+    /// Renders an EPUB with colored headings, links and an embedded RGB image
+    /// via `draw_rgba` and verifies full color reaches the output buffer.
+    fn color_draw_checks(engine: &CreEngine, layout: &Layout) {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("verso-color-cre-{}.epub", std::process::id()));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(120, 80, image::Rgb([20, 180, 40]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let mut out = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        out.start_file(
+            "mimetype",
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        out.write_all(b"application/epub+zip").unwrap();
+        out.start_file("META-INF/container.xml", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        out.start_file("content.opf", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Color Fixture</dc:title></metadata><manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="green.png" media-type="image/png"/></manifest><spine><itemref idref="ch1"/></spine></package>"#,
+        )
+        .unwrap();
+        out.start_file("green.png", opts).unwrap();
+        out.write_all(png.get_ref()).unwrap();
+        out.start_file("ch1.xhtml", opts).unwrap();
+        out.write_all(
+            br##"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Color</title><style>h1 { color: #d02020; } a { color: #1840d8; }</style></head><body><h1>Red Heading</h1><p>A paragraph with a <a href="#end">blue link</a>.</p><p><img src="green.png" alt="green"/></p><p id="end">End.</p></body></html>"##,
+        )
+        .unwrap();
+        out.finish().unwrap();
+
+        let mut doc = engine.open(&path, layout, None).unwrap();
+        let mut rgba = vec![0u8; layout.width as usize * layout.height as usize * 4];
+        doc.draw_rgba(&mut rgba, layout.width as usize * 4).unwrap();
+        let pixels = rgba.as_chunks::<4>().0;
+        assert!(pixels.iter().all(|p| p[3] == 255), "all pixels must be opaque");
+        let reds = pixels.iter().filter(|p| p[0] > 160 && p[1] < 80 && p[2] < 80).count();
+        let blues = pixels.iter().filter(|p| p[2] > 160 && p[0] < 80 && p[1] < 100).count();
+        let greens = pixels.iter().filter(|p| p[1] > 150 && p[0] < 60 && p[2] < 80).count();
+        assert!(reds > 20, "expected red heading pixels, got {reds}");
+        assert!(blues > 20, "expected blue link pixels, got {blues}");
+        assert!(greens > 2000, "expected green image pixels, got {greens}");
+
+        // Compare against the 8-bit gray path: same page still draws cleanly.
+        let mut gray = vec![255u8; layout.width as usize * layout.height as usize];
+        doc.draw(&mut gray, layout.width as usize).unwrap();
+        assert!(gray.iter().filter(|&&v| v < 200).count() > 2000);
+        drop(doc);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Some repackaged EPUBs have no `mimetype` entry. They must still open as

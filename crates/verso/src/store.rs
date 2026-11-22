@@ -169,6 +169,8 @@ pub struct Store {
     /// (developer mode): Verso still holds the old values and would save
     /// over the edits, so they wait for Restart to apply.
     live_data_edited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Display color mode for cover cache keys, thumbnails and sleep covers.
+    color: crate::gfx::ColorMode,
 }
 impl Store {
     pub fn new() -> Self {
@@ -208,7 +210,15 @@ impl Store {
             library_worker: Default::default(),
             updates: Default::default(),
             live_data_edited: Default::default(),
+            color: crate::gfx::ColorMode::Gray8,
         }
+    }
+    pub fn with_color(mut self, color: crate::gfx::ColorMode) -> Self {
+        self.color = color;
+        self
+    }
+    pub fn color_mode(&self) -> crate::gfx::ColorMode {
+        self.color
     }
     /// A worker keeps the data paths and counters, without owning its service registry.
     pub(crate) fn dictionary_context(&self) -> Self {
@@ -473,6 +483,7 @@ impl Store {
             library_worker: Default::default(),
             updates: Default::default(),
             live_data_edited: Default::default(),
+            color: crate::gfx::ColorMode::Gray8,
         }
     }
     fn book_path(&self, id: &str) -> PathBuf {

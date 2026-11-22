@@ -83,10 +83,11 @@ impl Kindle {
             ),
             None => format!("model: not in the profile table, {} (untested), light: {}", model.name, lights.describe()),
         };
-        // Gray until the display writes true color (device-support.md
-        // Phase 6): a color canvas would only be turned back to gray on
-        // the way to the panel, at four times the memory.
-        let color = crate::gfx::ColorMode::Gray8;
+        let color = if display.session.has_color_panel && display.session.bpp == 32 {
+            crate::gfx::ColorMode::Color32
+        } else {
+            crate::gfx::ColorMode::Gray8
+        };
         let info = DeviceInfo {
             name: display.name.clone(),
             width: display.width,

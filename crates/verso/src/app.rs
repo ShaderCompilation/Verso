@@ -795,10 +795,11 @@ impl App {
         let cover = match self.orientation {
             Orientation::Portrait => cover,
             // Panel pixel (y, w - 1 - x) shows canvas pixel (x, y).
-            Orientation::Landscape => image::imageops::rotate90(&cover),
+            Orientation::Landscape => cover.rotate90(),
         };
         self.canvas.fill(PAPER);
-        self.canvas.blit_gray(self.canvas.bounds(), cover.as_raw(), cover.width() as usize);
+        let bounds = self.canvas.bounds();
+        cover.blit(&mut self.canvas, bounds);
         true
     }
 
@@ -989,8 +990,14 @@ mod tests {
         fn after_present(&mut self) {
             self.saves.set(self.saves.get() + 1);
         }
-        fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
-            self.cover.then(|| image::GrayImage::from_pixel(width, height, image::Luma([119])))
+        fn sleep_cover(&self, width: u32, height: u32) -> Option<crate::library::covers::CoverImage> {
+            self.cover.then(|| {
+                crate::library::covers::CoverImage::Gray(image::GrayImage::from_pixel(
+                    width,
+                    height,
+                    image::Luma([119]),
+                ))
+            })
         }
     }
     fn book_app(cover: bool) -> App {
@@ -1231,11 +1238,11 @@ mod tests {
             fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
                 Action::None
             }
-            fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
+            fn sleep_cover(&self, width: u32, height: u32) -> Option<crate::library::covers::CoverImage> {
                 assert_eq!((width, height), (600, 800), "covers are made for the portrait panel");
                 let mut cover = image::GrayImage::from_pixel(width, height, image::Luma([119]));
                 cover.put_pixel(0, 0, image::Luma([0]));
-                Some(cover)
+                Some(crate::library::covers::CoverImage::Gray(cover))
             }
         }
         let info =

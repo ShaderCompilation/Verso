@@ -3191,7 +3191,7 @@ impl Screen for Books {
         // Waking is usually for reading: wait for the idle delay again.
         self.last_input = now;
     }
-    fn sleep_cover(&self, width: u32, height: u32) -> Option<image::GrayImage> {
+    fn sleep_cover(&self, width: u32, height: u32) -> Option<covers::CoverImage> {
         let book = if let Some(reader) = &self.reader {
             if self.browsing_ready {
                 self.index.books.iter().find(|b| b.id == reader.book_id() && b.available)?
@@ -3221,7 +3221,7 @@ impl Screen for Books {
         if book.metadata.cover.is_none() {
             book.metadata = library::epub::read(&book.path).ok()?;
         }
-        match covers::sleep_cover(&book, width, height, 0) {
+        match covers::sleep_cover(&book, width, height, 0, self.store.color_mode()) {
             Ok(image) => Some(image),
             Err(e) => {
                 log::debug!("sleep cover unavailable: {e:#}");
@@ -4868,7 +4868,7 @@ mod tests {
         let mut index = store.library();
         index.books[0].path = file.clone();
         index.books[0].stamp = library::worker::stamp(&std::fs::metadata(&file)?)?;
-        let cover = library::covers::key(&index.books[0]);
+        let cover = library::covers::key(&index.books[0], crate::gfx::ColorMode::Gray8);
         index.books[0].cover = Cover::Ready(cover.clone());
         store.save_library(&index)?;
         std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
@@ -5321,7 +5321,7 @@ mod tests {
             .collect();
         for (i, b) in books.iter_mut().enumerate() {
             if !(32..36).contains(&i) {
-                let key = covers::key(b);
+                let key = covers::key(b, crate::gfx::ColorMode::Gray8);
                 image::GrayImage::from_pixel(288, 432, image::Luma([128])).save(store.cover_path(&key))?;
                 image::GrayImage::from_pixel(144, 216, image::Luma([50])).save(store.small_cover_path(&key))?;
                 b.cover = Cover::Ready(key);

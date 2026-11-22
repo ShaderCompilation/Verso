@@ -83,6 +83,13 @@ unsafe extern "C" {
     pub fn verso_cre_go_to_page(doc: *mut VersoCreDoc, page: c_int) -> c_int;
 
     pub fn verso_cre_draw(doc: *mut VersoCreDoc, buf: *mut u8, width: c_int, height: c_int, stride: c_int) -> c_int;
+    pub fn verso_cre_draw_rgba(
+        doc: *mut VersoCreDoc,
+        buf: *mut u8,
+        width: c_int,
+        height: c_int,
+        stride: c_int,
+    ) -> c_int;
     pub fn verso_cre_get_prop(doc: *mut VersoCreDoc, key: *const c_char, buf: *mut c_char, buf_len: c_int) -> c_int;
 }
 

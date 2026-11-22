@@ -153,7 +153,6 @@ impl Canvas {
 
     /// Replaces the whole canvas with an RGBA image (alpha ignored: pages
     /// are opaque). A gray canvas keeps each pixel's brightness.
-    #[cfg_attr(not(test), allow(dead_code))] // color pages arrive with crengine's color draw path
     pub fn set_rgba(&mut self, pixels: &[u8]) {
         match &mut self.pixels {
             Pixels::Gray(p) => {
@@ -525,6 +524,32 @@ impl Canvas {
         }
     }
 
+    /// Copies a 24-bit RGB image (`stride` pixels per row) onto the canvas,
+    /// with its top-left corner at the top-left of `rect`. A gray canvas
+    /// keeps each pixel's brightness.
+    pub fn blit_rgb(&mut self, rect: Rect, src: &[u8], stride: usize) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        for y in r.y..r.bottom() {
+            let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
+            let src = &src[s * 3..(s + r.w as usize) * 3];
+            let d = y as usize * self.width as usize + r.x as usize;
+            match &mut self.pixels {
+                Pixels::Gray(p) => {
+                    for (out, px) in p[d..d + r.w as usize].iter_mut().zip(src.as_chunks::<3>().0) {
+                        *out = luma(px[0], px[1], px[2]);
+                    }
+                }
+                Pixels::Rgba(p) => {
+                    for (out, px) in
+                        p[d * 4..(d + r.w as usize) * 4].as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<3>().0)
+                    {
+                        *out = [px[0], px[1], px[2], 255];
+                    }
+                }
+            }
+        }
+    }
+
     /// Copies an RGBA image (`stride` pixels per row, alpha ignored) onto
     /// the canvas, with its top-left corner at the top-left of `rect`. A
     /// gray canvas keeps each pixel's brightness.
@@ -572,7 +597,6 @@ impl Canvas {
 
     /// Copies `rect` into a screen-layout RGBA buffer (`stride` pixels per
     /// row), preserving padding. Gray pixels become `[g, g, g, 255]`.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // the Kindle draws color from Phase 6
     pub fn copy_rgba(&self, rect: Rect, dst: &mut [u8], stride: usize) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         for y in r.y..r.bottom() {

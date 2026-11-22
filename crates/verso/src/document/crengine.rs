@@ -499,6 +499,18 @@ impl Document for CreDocument {
         }
         Ok(())
     }
+
+    fn draw_rgba(&mut self, out: &mut [u8], stride: usize) -> Result<()> {
+        anyhow::ensure!(
+            stride >= 4 && stride.is_multiple_of(4) && !out.is_empty() && out.len().is_multiple_of(stride),
+            "invalid color page buffer"
+        );
+        let (w, h) = (c_int::try_from(stride / 4)?, c_int::try_from(out.len() / stride)?);
+        if unsafe { sys::verso_cre_draw_rgba(self.raw, out.as_mut_ptr(), w, h, stride as c_int) } != 0 {
+            bail!("crengine failed to draw the color page");
+        }
+        Ok(())
+    }
 }
 
 impl Drop for CreDocument {

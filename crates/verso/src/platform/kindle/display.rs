@@ -215,11 +215,21 @@ impl Display {
             // The refresh region is in framebuffer coordinates: FBInk's
             // refresh doesn't add the viewport origin itself.
             let Some(r) = self.writer.write(canvas, u.rect, self.orientation, pixels) else { continue };
-            let (wfm, flash) = match u.mode {
-                RefreshMode::Fast => (fb::WFM_MODE_INDEX_E_WFM_DU, false),
-                RefreshMode::Ui => (fb::WFM_MODE_INDEX_E_WFM_GL16, false),
-                RefreshMode::Page => (fb::WFM_MODE_INDEX_E_WFM_REAGL, false),
-                RefreshMode::Full => (fb::WFM_MODE_INDEX_E_WFM_GC16, true),
+            let (wfm, flash) = if self.session.has_color_panel {
+                self.cfg.cfa_mode = fb::CFA_MODE_INDEX_E_CFA_DEFAULT;
+                match u.mode {
+                    RefreshMode::Fast => (fb::WFM_MODE_INDEX_E_WFM_DU, false),
+                    RefreshMode::Ui => (fb::WFM_MODE_INDEX_E_WFM_GL16, false),
+                    RefreshMode::Page => (fb::WFM_MODE_INDEX_E_WFM_GLRC16, false),
+                    RefreshMode::Full => (fb::WFM_MODE_INDEX_E_WFM_GCC16, true),
+                }
+            } else {
+                match u.mode {
+                    RefreshMode::Fast => (fb::WFM_MODE_INDEX_E_WFM_DU, false),
+                    RefreshMode::Ui => (fb::WFM_MODE_INDEX_E_WFM_GL16, false),
+                    RefreshMode::Page => (fb::WFM_MODE_INDEX_E_WFM_REAGL, false),
+                    RefreshMode::Full => (fb::WFM_MODE_INDEX_E_WFM_GC16, true),
+                }
             };
             self.cfg.wfm_mode = wfm;
             self.cfg.is_flashing = flash;

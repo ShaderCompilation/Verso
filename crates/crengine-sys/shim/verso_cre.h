@@ -106,6 +106,9 @@ int verso_cre_go_to_page(VersoCreDoc *doc, int page);
 /* Draws the current page as 8-bit gray (0 = black), `stride` bytes per row,
  * into a buffer of at least stride * height bytes. Returns 0 on success. */
 int verso_cre_draw(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride);
+/* Draws the current page as 32-bit opaque RGBA (`[R, G, B, 255]`), `stride`
+ * bytes per row, into a buffer of at least stride * height bytes. */
+int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride);
 
 /* Book metadata as UTF-8, written into `buf` (always NUL-terminated).
  * `key`: "title", "authors" or "language". Returns the full length. */

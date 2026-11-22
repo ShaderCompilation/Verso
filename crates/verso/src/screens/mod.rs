@@ -194,7 +194,7 @@ pub trait Screen {
     /// The device woke up.
     fn on_wake(&mut self, _now: Instant) {}
     /// Bounded cover decoding; no art means the native screensaver is used.
-    fn sleep_cover(&self, _width: u32, _height: u32) -> Option<image::GrayImage> {
+    fn sleep_cover(&self, _width: u32, _height: u32) -> Option<crate::library::covers::CoverImage> {
         None
     }
 }

@@ -1551,7 +1551,10 @@ impl Screen for Reader {
             return;
         }
         if let Some(page) = &self.shown {
-            cx.canvas.set_gray(&page.pixels);
+            match page.color {
+                crate::gfx::ColorMode::Gray8 => cx.canvas.set_gray(&page.pixels),
+                crate::gfx::ColorMode::Color32 => cx.canvas.set_rgba(&page.pixels),
+            }
             let layout = &self.settings.page_layout;
             if layout.top.on || layout.bottom.on {
                 let started = Instant::now();
@@ -1932,6 +1935,7 @@ mod tests {
         Arc::new(Page {
             generation,
             number,
+            color: crate::gfx::ColorMode::Gray8,
             pixels: vec![255; 600 * 800],
             position: Position(format!("page-{number}")),
             progress: 0,
@@ -2999,6 +3003,7 @@ mod tests {
             let page = Arc::new(Page {
                 generation: 1,
                 number: 0,
+                color: crate::gfx::ColorMode::Gray8,
                 pixels: pixels.clone(),
                 position: Position("page0".into()),
                 progress: 0,
@@ -3077,6 +3082,7 @@ mod tests {
             Arc::new(Page {
                 generation: 1,
                 number,
+                color: crate::gfx::ColorMode::Gray8,
                 pixels: vec![255; 600 * 800],
                 position: Position(format!("page-{number}")),
                 progress: 0,
@@ -3220,6 +3226,7 @@ mod tests {
                 Arc::new(Page {
                     generation: 1,
                     number,
+                    color: crate::gfx::ColorMode::Gray8,
                     pixels: (0..600 * 800).map(|i| ((i + number * 31) % 256) as u8).collect(),
                     position: Position(format!("page-{number}")),
                     progress: 2500,
@@ -3312,6 +3319,7 @@ mod tests {
             Reply::Page(Arc::new(Page {
                 generation,
                 number,
+                color: crate::gfx::ColorMode::Gray8,
                 pixels: Vec::new(),
                 position: Position(format!("page-{number}")),
                 progress: 2500,
@@ -3448,6 +3456,7 @@ mod tests {
             Arc::new(Page {
                 generation: 1,
                 number,
+                color: crate::gfx::ColorMode::Gray8,
                 pixels: vec![255; 400],
                 position: Position(format!("page-{number}")),
                 progress: 2500,

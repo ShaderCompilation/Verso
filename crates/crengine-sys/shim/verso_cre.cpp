@@ -967,6 +967,42 @@ int verso_cre_draw(VersoCreDoc *doc, uint8_t *buf, int width, int height, int st
     })
 }
 
+static void cre32_to_rgba_row(const lUInt32 *src, uint8_t *dst, int width) {
+    for (int x = 0; x < width; x++) {
+        lUInt32 px = src[x];
+        uint8_t *p = dst + (size_t)x * 4;
+        p[0] = (uint8_t)((px >> 16) & 0xFF);
+        p[1] = (uint8_t)((px >> 8) & 0xFF);
+        p[2] = (uint8_t)(px & 0xFF);
+        p[3] = 0xFF;
+    }
+}
+
+int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride) {
+    GUARD(-1, {
+        if (!buf || width <= 0 || height <= 0 || stride < width * 4)
+            return -1;
+        doc->view->Resize(width, height);
+        doc->view->Render();
+        if (stride == width * 4 && (((uintptr_t)buf) & 3) == 0) {
+            LVColorDrawBuf draw(width, height, buf, 32);
+            doc->view->Draw(draw, false);
+            for (int y = 0; y < height; y++) {
+                uint8_t *row = buf + (size_t)y * stride;
+                cre32_to_rgba_row((const lUInt32 *)row, row, width);
+            }
+        } else {
+            LVColorDrawBuf draw(width, height, 32);
+            doc->view->Draw(draw, false);
+            for (int y = 0; y < height; y++) {
+                const lUInt32 *src = (const lUInt32 *)draw.GetScanLine(y);
+                cre32_to_rgba_row(src, buf + (size_t)y * stride, width);
+            }
+        }
+        return 0;
+    })
+}
+
 int verso_cre_get_prop(VersoCreDoc *doc, const char *key, char *buf, int buf_len) {
     GUARD(0, {
         lString32 value;

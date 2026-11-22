@@ -2,8 +2,11 @@
 //! the current one, a background decoder that prepares them, and the visible
 //! strips of Stack covers behind the front one (docs/library.md#cover-drawing).
 use crate::geom::Rect;
-use crate::gfx::Canvas;
-use crate::library::{Book, Cover, covers};
+use crate::gfx::{Canvas, ColorMode};
+use crate::library::{
+    Book, Cover,
+    covers::{self, CoverImage},
+};
 use crate::store::Store;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -34,9 +37,9 @@ pub(super) struct CoverSpec {
     pub fit: Fit,
 }
 
-/// Decoded grayscale pixels ready to blit onto the canvas.
+/// Decoded cover pixels (grayscale or RGB) ready to blit onto the canvas.
 pub(super) enum CachedCover {
-    Full(image::GrayImage),
+    Full(CoverImage),
     /// Only the visible top (`w × d`) and right (`d × (h - d)`) strips of a
     /// behind cover in Stack mode.
     Behind {
@@ -45,25 +48,33 @@ pub(super) enum CachedCover {
         w: u32,
         h: u32,
         d: u32,
+        rgb: bool,
     },
 }
 
 impl CachedCover {
     pub(super) fn bytes(&self) -> usize {
         match self {
-            Self::Full(image) => image.as_raw().len(),
+            Self::Full(image) => image.bytes(),
             Self::Behind { top, right, .. } => top.len() + right.len(),
         }
     }
 
     pub(super) fn blit(&self, canvas: &mut Canvas, rect: Rect) {
         match self {
-            Self::Full(image) => canvas.blit_gray(rect, image.as_raw(), image.width() as usize),
-            Self::Behind { top, right, w, h, d } => {
+            Self::Full(image) => image.blit(canvas, rect),
+            Self::Behind { top, right, w, h, d, rgb } => {
                 // Cached per slot size, so the strips match `rect`.
                 let (w, h, d) = (*w as i32, *h as i32, *d as i32);
-                canvas.blit_gray(Rect::new(rect.x, rect.y, w, d), top, w as usize);
-                canvas.blit_gray(Rect::new(rect.x + w - d, rect.y + d, d, h - d), right, d as usize);
+                let top_rect = Rect::new(rect.x, rect.y, w, d);
+                let right_rect = Rect::new(rect.x + w - d, rect.y + d, d, h - d);
+                if *rgb {
+                    canvas.blit_rgb(top_rect, top, w as usize);
+                    canvas.blit_rgb(right_rect, right, d as usize);
+                } else {
+                    canvas.blit_gray(top_rect, top, w as usize);
+                    canvas.blit_gray(right_rect, right, d as usize);
+                }
             }
         }
     }
@@ -71,14 +82,22 @@ impl CachedCover {
     #[cfg(test)]
     pub(super) fn sample_pixel(&self, x: u32, y: u32) -> u8 {
         match self {
-            Self::Full(image) => image.get_pixel(x, y)[0],
-            Self::Behind { top, right, w, d, .. } => {
-                if y < *d {
-                    top[(y * *w + x) as usize]
+            Self::Full(CoverImage::Gray(image)) => image.get_pixel(x, y)[0],
+            Self::Full(CoverImage::Rgb(image)) => {
+                let p = image.get_pixel(x, y).0;
+                crate::gfx::luma(p[0], p[1], p[2])
+            }
+            Self::Behind { top, right, w, d, rgb, .. } => {
+                let bpp = if *rgb { 3 } else { 1 };
+                let slice = if y < *d {
+                    let i = (y * *w + x) as usize * bpp;
+                    &top[i..i + bpp]
                 } else {
                     let rx = x.saturating_sub(*w - *d);
-                    right[((y - *d) * *d + rx) as usize]
-                }
+                    let i = ((y - *d) * *d + rx) as usize * bpp;
+                    &right[i..i + bpp]
+                };
+                if *rgb { crate::gfx::luma(slice[0], slice[1], slice[2]) } else { slice[0] }
             }
         }
     }
@@ -230,6 +249,7 @@ impl Drop for Prefetcher {
 pub(super) struct Thumbnails {
     pub(super) images: HashMap<ThumbnailKey, Entry>,
     bytes: usize,
+    max_bytes: usize,
     clock: u64,
     /// (book id, cover key) pairs that failed to load.
     pub(super) failed: HashSet<(String, String)>,
@@ -251,23 +271,39 @@ impl Thumbnails {
     /// the current page, both neighbours and the page a folder was opened
     /// from, small next to the 60 MiB app target. Opening a book frees them.
     pub(super) const MAX_BYTES: usize = 6 * 1024 * 1024;
+    /// Same ~5-page coverage for 24-bit RGB covers on color devices (1 GiB RAM).
+    pub(super) const MAX_BYTES_COLOR: usize = 18 * 1024 * 1024;
 
     /// Unit tests decode on the calling thread only, so what is cached after
     /// a draw doesn't depend on timing; [`Self::prefetching`] opts in.
     pub(super) fn new(store: Store) -> Self {
-        if cfg!(test) { Self::default() } else { Self::prefetching(store) }
+        let max_bytes = Self::budget(store.color_mode());
+        if cfg!(test) { Self { max_bytes, ..Self::default() } } else { Self::prefetching(store) }
     }
 
     pub(super) fn prefetching(store: Store) -> Self {
-        Self { prefetcher: Some(Prefetcher::new(store)), ..Self::default() }
+        let max_bytes = Self::budget(store.color_mode());
+        Self { max_bytes, prefetcher: Some(Prefetcher::new(store)), ..Self::default() }
+    }
+
+    fn budget(color: ColorMode) -> usize {
+        match color {
+            ColorMode::Gray8 => Self::MAX_BYTES,
+            ColorMode::Color32 => Self::MAX_BYTES_COLOR,
+        }
+    }
+
+    fn limit(&self) -> usize {
+        if self.max_bytes == 0 { Self::MAX_BYTES } else { self.max_bytes }
     }
 
     fn insert(&mut self, key: ThumbnailKey, cover: CachedCover) {
         let added = cover.bytes();
+        let limit = self.limit();
         if let Some(old) = self.images.remove(&key) {
             self.bytes -= old.cover.bytes();
         }
-        while self.bytes + added > Self::MAX_BYTES {
+        while self.bytes + added > limit {
             let Some(oldest) = self.images.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else {
                 break;
             };
@@ -403,7 +439,7 @@ pub(super) fn decode_cover(store: &Store, key: &str, w: i32, h: i32, fit: Fit) -
     let image = if w <= covers::SMALL_WIDTH && h <= covers::SMALL_HEIGHT {
         covers::load_small(store, key)?
     } else {
-        covers::load(&store.cover_path(key))?
+        covers::load(&store.cover_path(key), store.color_mode())?
     };
     Ok(CachedCover::Full(fill(&image, w, h)))
 }
@@ -411,26 +447,45 @@ pub(super) fn decode_cover(store: &Store, key: &str, w: i32, h: i32, fit: Fit) -
 /// Scales a cover with area averaging until it covers a `w` × `h` slot and
 /// crops what's left over: centred across, kept from the top down, where
 /// titles usually sit. Cover-shaped slots lose at most a rounding pixel.
-pub(super) fn fill(image: &image::GrayImage, w: u32, h: u32) -> image::GrayImage {
+pub(super) fn fill(image: &CoverImage, w: u32, h: u32) -> CoverImage {
     let (sw, sh) = covers::fill_size(image.width(), image.height(), w, h);
     if (sw, sh) == image.dimensions() && (sw, sh) == (w, h) {
         return image.clone();
     }
-    let scaled = if sw > image.width() || sh > image.height() {
-        image::imageops::resize(image, sw, sh, image::imageops::FilterType::Triangle)
-    } else {
-        image::imageops::thumbnail(image, sw, sh)
-    };
-    if (sw, sh) == (w, h) {
-        return scaled;
+    match image {
+        CoverImage::Gray(img) => {
+            let scaled = if sw > img.width() || sh > img.height() {
+                image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle)
+            } else {
+                image::imageops::thumbnail(img, sw, sh)
+            };
+            let out = if (sw, sh) == (w, h) {
+                scaled
+            } else {
+                image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
+            };
+            CoverImage::Gray(out)
+        }
+        CoverImage::Rgb(img) => {
+            let scaled = if sw > img.width() || sh > img.height() {
+                image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle)
+            } else {
+                image::imageops::thumbnail(img, sw, sh)
+            };
+            let out = if (sw, sh) == (w, h) {
+                scaled
+            } else {
+                image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
+            };
+            CoverImage::Rgb(out)
+        }
     }
-    image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
 }
 
 /// Bilinearly samples only the visible top (`w × d`) and right (`d × (h - d)`)
 /// strips of a Stack behind cover directly from its small thumbnail, skipping
 /// the ~82% hidden behind the cover in front.
-pub(super) fn sample_behind_strip(src: &image::GrayImage, w: u32, h: u32, d: u32) -> CachedCover {
+pub(super) fn sample_behind_strip(src: &CoverImage, w: u32, h: u32, d: u32) -> CachedCover {
     let d = d.clamp(1, w.min(h));
     let (iw, ih) = (src.width().max(1) as u64, src.height().max(1) as u64);
     let (w64, h64) = (w as u64, h as u64);
@@ -449,35 +504,40 @@ pub(super) fn sample_behind_strip(src: &image::GrayImage, w: u32, h: u32, d: u32
     };
 
     let x_lut: Vec<(usize, usize, u32)> = (0..w64).map(|dx| map_fp(dx + crop_x, sw, iw)).collect();
-    let raw = src.as_raw();
     let stride = src.width() as usize;
+    let (raw, rgb, bpp): (&[u8], bool, usize) = match src {
+        CoverImage::Gray(img) => (img.as_raw(), false, 1),
+        CoverImage::Rgb(img) => (img.as_raw(), true, 3),
+    };
 
     let sample_row = |dst: &mut Vec<u8>, dy: u64, x_range: std::ops::Range<usize>| {
         let (y0, y1, fy) = map_fp(dy, sh, ih);
-        let row0 = y0 * stride;
-        let row1 = y1 * stride;
+        let row0 = y0 * stride * bpp;
+        let row1 = y1 * stride * bpp;
         let inv_fy = 256 - fy;
         for &(x0, x1, fx) in &x_lut[x_range] {
             let inv_fx = 256 - fx;
-            let top_v = raw[row0 + x0] as u32 * inv_fx + raw[row0 + x1] as u32 * fx;
-            let bot_v = raw[row1 + x0] as u32 * inv_fx + raw[row1 + x1] as u32 * fx;
-            dst.push(((top_v * inv_fy + bot_v * fy + 32768) >> 16) as u8);
+            for c in 0..bpp {
+                let top_v = raw[row0 + x0 * bpp + c] as u32 * inv_fx + raw[row0 + x1 * bpp + c] as u32 * fx;
+                let bot_v = raw[row1 + x0 * bpp + c] as u32 * inv_fx + raw[row1 + x1 * bpp + c] as u32 * fx;
+                dst.push(((top_v * inv_fy + bot_v * fy + 32768) >> 16) as u8);
+            }
         }
     };
 
-    let mut top = Vec::with_capacity((w * d) as usize);
+    let mut top = Vec::with_capacity((w * d) as usize * bpp);
     for dy in 0..d as u64 {
         sample_row(&mut top, dy, 0..w as usize);
     }
 
     let rem_h = h - d;
-    let mut right = Vec::with_capacity((d * rem_h) as usize);
+    let mut right = Vec::with_capacity((d * rem_h) as usize * bpp);
     let rx0 = (w - d) as usize;
     for dy in d as u64..h as u64 {
         sample_row(&mut right, dy, rx0..w as usize);
     }
 
-    CachedCover::Behind { top, right, w, h, d }
+    CachedCover::Behind { top, right, w, h, d, rgb }
 }
 
 #[cfg(test)]
@@ -488,7 +548,7 @@ mod tests {
     fn preview_fill_crops_the_overflow_keeping_the_top_and_centre() {
         // A 2:3 cover: the top third white, the rest black, with a gray
         // middle column.
-        let cover = image::GrayImage::from_fn(144, 216, |x, y| {
+        let cover = CoverImage::Gray(image::GrayImage::from_fn(144, 216, |x, y| {
             image::Luma([if (66..78).contains(&x) {
                 0x80
             } else if y < 72 {
@@ -496,33 +556,34 @@ mod tests {
             } else {
                 0x00
             }])
-        });
+        }));
         // A wide slot crops the bottom and keeps the top whole.
-        let wide = fill(&cover, 120, 150);
+        let CoverImage::Gray(wide) = fill(&cover, 120, 150) else { panic!("expected gray") };
         assert_eq!(wide.dimensions(), (120, 150));
         assert_eq!(wide.get_pixel(0, 0).0[0], 0xff);
         assert_eq!(wide.get_pixel(0, 59).0[0], 0xff, "a third of the scaled height, 180, is white");
         assert_eq!(wide.get_pixel(0, 149).0[0], 0x00);
         // A tall slot crops both sides evenly.
-        let tall = fill(&cover, 60, 216);
+        let CoverImage::Gray(tall) = fill(&cover, 60, 216) else { panic!("expected gray") };
         assert_eq!(tall.dimensions(), (60, 216));
         assert_eq!(tall.get_pixel(30, 100).0[0], 0x80, "the middle column stays in the middle");
         assert_eq!(tall.get_pixel(0, 100).0[0], 0x00);
         // A cover-shaped slot is scaled, not cropped.
-        assert_eq!(fill(&cover, 96, 144), image::imageops::thumbnail(&cover, 96, 144));
+        let CoverImage::Gray(ref src_gray) = cover else { unreachable!() };
+        assert_eq!(fill(&cover, 96, 144), CoverImage::Gray(image::imageops::thumbnail(src_gray, 96, 144)));
     }
 
     #[test]
     fn behind_covers_sample_only_their_visible_strips() {
         // A horizontal gradient small thumbnail, scaled up to a Stack slot.
-        let small = image::GrayImage::from_fn(covers::SMALL_WIDTH, covers::SMALL_HEIGHT, |x, y| {
+        let small = CoverImage::Gray(image::GrayImage::from_fn(covers::SMALL_WIDTH, covers::SMALL_HEIGHT, |x, y| {
             image::Luma([(x + y / 4) as u8])
-        });
+        }));
         let (w, h, d) = (209, 313, 24);
         let strip = sample_behind_strip(&small, w, h, d);
         assert_eq!(strip.bytes() as u32, w * d + d * (h - d), "about a fifth of the cover");
         // Close to the whole cover scaled the old way, where it shows.
-        let whole = fill(&small, w, h);
+        let CoverImage::Gray(whole) = fill(&small, w, h) else { panic!("expected gray") };
         for (x, y) in [(0, 0), (w / 2, d - 1), (w - 1, 0), (w - d, d), (w - 1, h - 1), (w - d / 2, h / 2)] {
             let (a, b) = (strip.sample_pixel(x, y), whole.get_pixel(x, y)[0]);
             assert!(a.abs_diff(b) <= 2, "({x}, {y}): {a} vs {b}");
@@ -537,6 +598,24 @@ mod tests {
         assert_eq!(at(&canvas, rect.right() - 1, rect.bottom() - 1), strip.sample_pixel(w - 1, h - 1));
         assert_eq!(at(&canvas, 10, 20 + d as i32), 0xee, "below the top strip, left of the right one");
         assert_eq!(at(&canvas, rect.right() - d as i32 - 1, rect.bottom() - 1), 0xee);
+
+        // Color behind strip blits true RGB channels onto a Color32 canvas.
+        let color_small = CoverImage::Rgb(image::RgbImage::from_pixel(
+            covers::SMALL_WIDTH,
+            covers::SMALL_HEIGHT,
+            image::Rgb([220, 40, 30]),
+        ));
+        let color_strip = sample_behind_strip(&color_small, w, h, d);
+        assert_eq!(color_strip.bytes() as u32, (w * d + d * (h - d)) * 3);
+        let mut color_canvas = Canvas::with_mode(300, 400, ColorMode::Color32);
+        color_canvas.fill(0xee);
+        color_strip.blit(&mut color_canvas, rect);
+        let raw = color_canvas.raw();
+        let top_px = &raw[((20 * 300 + 10) * 4) as usize..((20 * 300 + 10) * 4 + 4) as usize];
+        assert_eq!(top_px, &[220, 40, 30, 255]);
+        let hidden_px =
+            &raw[(((20 + d as i32) * 300 + 10) * 4) as usize..(((20 + d as i32) * 300 + 10) * 4 + 4) as usize];
+        assert_eq!(hidden_px, &[0xee, 0xee, 0xee, 255]);
     }
 
     fn fixture(label: &str) -> (Store, std::path::PathBuf) {

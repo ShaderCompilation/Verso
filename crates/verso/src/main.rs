@@ -243,6 +243,7 @@ fn run() -> Result<i32> {
         platform.set_orientation(orientation)?;
     }
     let info = platform.info().clone();
+    let store = store.with_color(info.color);
     let mut session = format!(
         "=== Verso session ===\nversion: {} ({})\norientation: {:?}\nscreen: {} {}x{} @ {} dpi",
         env!("CARGO_PKG_VERSION"),
@@ -262,8 +263,12 @@ fn run() -> Result<i32> {
 
     let theme = ui::theme::Theme::for_dpi(info.dpi);
     let bounds = geom::Rect::new(0, 0, info.width as i32, info.height as i32);
-    let worker =
-        std::rc::Rc::new(document::thread::Worker::new(document::Paths::for_device(), info.dpi, platform.waker()));
+    let worker = std::rc::Rc::new(document::thread::Worker::new(
+        document::Paths::for_device(),
+        info.dpi,
+        info.color,
+        platform.waker(),
+    ));
     let mut app = App::new(
         &info,
         theme.clone(),

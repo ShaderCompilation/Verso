@@ -6,6 +6,7 @@ use super::{
 };
 use crate::annotations::Annotation;
 use crate::geom::Rect;
+use crate::gfx::ColorMode;
 use crate::page_layout::PageLayout;
 use crate::platform::Waker;
 use anyhow::Result;
@@ -24,6 +25,8 @@ const SEARCH_PROGRESS: Duration = Duration::from_millis(300);
 pub struct Page {
     pub generation: u64,
     pub number: usize,
+    /// `Gray8` (1 byte/px) or `Color32` (4 bytes/px, opaque RGBA).
+    pub color: ColorMode,
     pub pixels: Vec<u8>,
     pub position: Position,
     pub progress: u32,
@@ -219,7 +222,7 @@ pub struct Worker {
     fonts: RefCell<Vec<FontFace>>,
 }
 impl Worker {
-    pub fn new(paths: Paths, dpi: u32, waker: Waker) -> Self {
+    pub fn new(paths: Paths, dpi: u32, color: ColorMode, waker: Waker) -> Self {
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
         let thread_waker = waker.clone();
@@ -452,7 +455,7 @@ impl Worker {
                                 if g == generation
                                     && let Some(d) = &mut doc
                                 {
-                                    match render(d, g, number, dimensions, annotation_revision, &annotations) {
+                                    match render(d, g, number, dimensions, color, annotation_revision, &annotations) {
                                         Ok(page) => send(Reply::Page(page)),
                                         Err(e) => {
                                             send(Reply::PageFailed { generation: g, number, message: format!("{e:#}") })
@@ -469,7 +472,15 @@ impl Worker {
                                     let number = d.current_page();
                                     send(Reply::Jumped {
                                         jump,
-                                        page: render(d, g, number, dimensions, annotation_revision, &annotations)?,
+                                        page: render(
+                                            d,
+                                            g,
+                                            number,
+                                            dimensions,
+                                            color,
+                                            annotation_revision,
+                                            &annotations,
+                                        )?,
                                     });
                                 }
                                 return Ok(());
@@ -520,6 +531,7 @@ impl Worker {
                                 generation,
                                 current,
                                 dimensions,
+                                color,
                                 annotation_revision,
                                 &annotations,
                             )?));
@@ -614,14 +626,25 @@ fn render(
     generation: u64,
     number: usize,
     (w, h): (u32, u32),
+    color: ColorMode,
     revision: u64,
     annotations: &[Annotation],
 ) -> Result<Arc<Page>> {
     let started = std::time::Instant::now();
     let last = d.page_count().saturating_sub(1);
     d.go_to_page(number.min(last));
-    let mut pixels = vec![255; w as usize * h as usize];
-    d.draw(&mut pixels, w as usize)?;
+    let pixels = match color {
+        ColorMode::Gray8 => {
+            let mut pixels = vec![255; w as usize * h as usize];
+            d.draw(&mut pixels, w as usize)?;
+            pixels
+        }
+        ColorMode::Color32 => {
+            let mut pixels = vec![255; w as usize * h as usize * 4];
+            d.draw_rgba(&mut pixels, w as usize * 4)?;
+            pixels
+        }
+    };
     let current = d.current_page();
     let mut geometry = Vec::new();
     let mut geometry_cache = std::collections::HashMap::<(&str, &str), Vec<Rect>>::new();
@@ -639,12 +662,20 @@ fn render(
         };
         geometry.push((index, rects));
     }
-    let painted = Paint::prepare(
-        crate::annotations::paint_union(geometry.iter().flat_map(|(_, rects)| rects.iter().copied())),
-        &pixels,
-        w,
-        h,
-    );
+    let union = crate::annotations::paint_union(geometry.iter().flat_map(|(_, rects)| rects.iter().copied()));
+    let painted = match color {
+        ColorMode::Gray8 => Paint::prepare(union, &pixels, w, h),
+        // Color canvases tint highlights directly via `Canvas::highlight_rect`,
+        // so skip preparing gray patches.
+        ColorMode::Color32 => {
+            let bounds = Rect::new(0, 0, w as i32, h as i32);
+            union
+                .into_iter()
+                .filter_map(|r| r.intersect(&bounds))
+                .map(|rect| Paint { rect, pixels: Vec::new() })
+                .collect()
+        }
+    };
     log::debug!(
         "annotation geometry: page={} revision={} ranges={} rects={}",
         current,
@@ -656,6 +687,7 @@ fn render(
     let page = Page {
         generation,
         number: d.current_page(),
+        color,
         pixels,
         position,
         progress: d.progress(),
