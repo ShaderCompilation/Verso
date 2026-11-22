@@ -2,6 +2,7 @@
 use crate::{
     dictionary::{
         Dictionary, Source, WordFormsSource, WordFormsStatus,
+        languages::{all_languages, language_name},
         sets::{DEFAULT, Edit, Preferences, Set},
         worker::Worker,
     },
@@ -499,8 +500,14 @@ impl Dictionaries {
         }
     }
     fn language_choices(&self) -> Vec<(String, String)> {
-        let mut choices: Vec<_> =
-            LANGUAGES.iter().map(|(code, name)| ((*code).to_owned(), (*name).to_owned())).collect();
+        // English and Russian first, the languages Verso has its own word forms for.
+        let first = ["en", "ru"];
+        let mut choices: Vec<_> = first
+            .iter()
+            .map(|code| (*code, language_name(code)))
+            .chain(all_languages().filter(|(code, _)| !first.contains(code)))
+            .map(|(code, name)| (code.to_owned(), name.to_owned()))
+            .collect();
         if let Some(set) = self.current_set() {
             for code in &set.languages {
                 if !choices.iter().any(|(c, _)| c == code) {
@@ -584,46 +591,6 @@ impl Dictionaries {
             }
         }
     }
-}
-const LANGUAGES: &[(&str, &str)] = &[
-    ("en", "English"),
-    ("ru", "Russian"),
-    ("hy", "Armenian"),
-    ("ar", "Arabic"),
-    ("be", "Belarusian"),
-    ("bg", "Bulgarian"),
-    ("zh", "Chinese"),
-    ("cs", "Czech"),
-    ("da", "Danish"),
-    ("nl", "Dutch"),
-    ("fi", "Finnish"),
-    ("fr", "French"),
-    ("de", "German"),
-    ("el", "Greek"),
-    ("he", "Hebrew"),
-    ("hu", "Hungarian"),
-    ("it", "Italian"),
-    ("ja", "Japanese"),
-    ("ko", "Korean"),
-    ("la", "Latin"),
-    ("mk", "Macedonian"),
-    ("no", "Norwegian"),
-    ("fa", "Persian"),
-    ("pl", "Polish"),
-    ("pt", "Portuguese"),
-    ("ro", "Romanian"),
-    ("sr", "Serbian"),
-    ("sk", "Slovak"),
-    ("es", "Spanish"),
-    ("sv", "Swedish"),
-    ("tr", "Turkish"),
-    ("uk", "Ukrainian"),
-    ("ur", "Urdu"),
-    ("vi", "Vietnamese"),
-    ("yi", "Yiddish"),
-];
-fn language_name(code: &str) -> &str {
-    LANGUAGES.iter().find(|(c, _)| *c == code).map_or(code, |(_, name)| name)
 }
 fn languages(set: &Set) -> String {
     if set.id == DEFAULT {

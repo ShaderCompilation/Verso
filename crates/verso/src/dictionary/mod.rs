@@ -5,6 +5,7 @@ mod discovery;
 mod entities;
 mod forms;
 mod index;
+pub mod languages;
 mod markup;
 mod model;
 pub mod sets;

@@ -20,20 +20,20 @@ pub fn entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) ->
 }
 
 #[derive(Default, Debug)]
-struct Node {
-    name: String,
+pub(super) struct Node {
+    pub(super) name: String,
     attrs: BTreeMap<String, String>,
     text: String,
     children: Vec<Node>,
 }
 impl Node {
-    fn attr(&self, name: &str) -> &str {
+    pub(super) fn attr(&self, name: &str) -> &str {
         self.attrs.get(name).map(String::as_str).unwrap_or_default()
     }
-    fn find(&self, name: &str) -> Option<&Node> {
+    pub(super) fn find(&self, name: &str) -> Option<&Node> {
         self.children.iter().find(|n| n.name == name)
     }
-    fn all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Node> {
+    pub(super) fn all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Node> {
         self.children.iter().filter(move |n| n.name == name)
     }
 }
@@ -143,13 +143,16 @@ fn cover_page<R: Read + Seek>(zip: &mut ZipArchive<R>, path: &str) -> Option<Str
     resolve(path, image(&page)?).ok()
 }
 
-/// Reads package metadata from an EPUB archive without filling an empty title
-/// from the filename. Callers reading a temporary `.part` file fill the title
-/// from the final filename after renaming.
-pub fn read_metadata(path: &Path) -> Result<Metadata> {
-    let mut zip = ZipArchive::new(std::fs::File::open(path)?)?;
+/// Opens an EPUB archive, refusing ones with an unreasonable number of entries.
+pub(super) fn open(path: &Path) -> Result<ZipArchive<std::fs::File>> {
+    let zip = ZipArchive::new(std::fs::File::open(path)?)?;
     ensure!(zip.len() <= 50_000, "too many EPUB entries");
-    let container = xml(&entry(&mut zip, "META-INF/container.xml", XML_LIMIT)?)?;
+    Ok(zip)
+}
+
+/// The package document (OPF): its path in the archive and its parsed XML.
+pub(super) fn package<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(String, Node)> {
+    let container = xml(&entry(zip, "META-INF/container.xml", XML_LIMIT)?)?;
     let rootfiles = container.find("rootfiles").context("EPUB has no rootfiles")?;
     let rootfile = rootfiles
         .all("rootfile")
@@ -157,7 +160,16 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
         .or_else(|| rootfiles.find("rootfile"))
         .context("EPUB has no package")?;
     let package_path = resolve("", rootfile.attr("full-path"))?;
-    let package = xml(&entry(&mut zip, &package_path, XML_LIMIT)?)?;
+    let package = xml(&entry(zip, &package_path, XML_LIMIT)?)?;
+    Ok((package_path, package))
+}
+
+/// Reads package metadata from an EPUB archive without filling an empty title
+/// from the filename. Callers reading a temporary `.part` file fill the title
+/// from the final filename after renaming.
+pub fn read_metadata(path: &Path) -> Result<Metadata> {
+    let mut zip = open(path)?;
+    let (package_path, package) = package(&mut zip)?;
     let mut result = Metadata::default();
     let mut cover_id = "";
     if let Some(meta) = package.find("metadata") {

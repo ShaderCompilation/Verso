@@ -1257,6 +1257,7 @@ impl Books {
         ));
         self.reader.as_mut().unwrap().annotations(annotation_book);
         self.reader.as_mut().unwrap().reading_speed(saved.reading_speed, self.store.reading_speed());
+        self.reader.as_mut().unwrap().detected_language(saved.language);
         self.worker.send(Command::Open {
             generation: self.generation,
             path,
@@ -2935,7 +2936,7 @@ impl Details {
             "{}\n\nAuthor: {}\n\nLanguage: {}\n\nStatus: {}{}\n\nFile: {}{}",
             book.metadata.title,
             if book.metadata.authors.is_empty() { "Unknown" } else { &book.metadata.authors },
-            if book.metadata.language.is_empty() { "Unknown" } else { &book.metadata.language },
+            library::language::describe(&book.metadata.language, state.language.as_ref()),
             status(state),
             if state.hidden_from_continue { " (removed from continue reading)" } else { "" },
             book.path.display(),

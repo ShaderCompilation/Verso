@@ -1,7 +1,7 @@
 //! One FIFO for presented positions. Barriers retry the latest failed save and
 //! acknowledge only after the durable write; speculative pages never enter it.
 use super::Store;
-use crate::{document::Position, platform::Waker, reader::speed::ReadingSpeed};
+use crate::{document::Position, library::language::DetectedLanguage, platform::Waker, reader::speed::ReadingSpeed};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -19,6 +19,9 @@ enum Command {
     Save(Presented),
     /// The global reading speed that seeds books opened for the first time.
     Seed(ReadingSpeed),
+    /// The book's detected language, saved in order with its positions so
+    /// neither write loses the other.
+    Language(DetectedLanguage),
     Flush(mpsc::Sender<Result<()>>),
     Stop,
 }
@@ -31,7 +34,9 @@ impl Writer {
     pub fn new(store: Store, id: String, waker: Waker) -> Self {
         let mut fresh_open = true;
         let seeds = store.clone();
-        Self::start_with_seed(
+        let languages = store.clone();
+        let language_id = id.clone();
+        Self::start_with(
             waker,
             move |p| {
                 // Keep library flags, including records written before this open.
@@ -42,16 +47,22 @@ impl Writer {
                 Ok(())
             },
             move |speed| seeds.save_reading_speed(speed),
+            move |language| {
+                let mut state = languages.book(&language_id);
+                state.language = Some(language.clone());
+                languages.save_book(&language_id, &state)
+            },
         )
     }
     #[cfg(test)]
     fn start(waker: Waker, write: impl FnMut(&Presented) -> Result<()> + Send + 'static) -> Self {
-        Self::start_with_seed(waker, write, |_| Ok(()))
+        Self::start_with(waker, write, |_| Ok(()), |_| Ok(()))
     }
-    fn start_with_seed(
+    fn start_with(
         waker: Waker,
         mut write: impl FnMut(&Presented) -> Result<()> + Send + 'static,
         mut seed: impl FnMut(&ReadingSpeed) -> Result<()> + Send + 'static,
+        mut language: impl FnMut(&DetectedLanguage) -> Result<()> + Send + 'static,
     ) -> Self {
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
@@ -91,6 +102,12 @@ impl Writer {
                                 log::warn!("saving reading speed: {e:#}");
                             }
                         }
+                        // Best effort: without it the book is detected again on its next open.
+                        Command::Language(detected) => {
+                            if let Err(e) = language(&detected) {
+                                log::warn!("saving book language: {e:#}");
+                            }
+                        }
                         Command::Stop => break,
                     }
                 }
@@ -104,6 +121,10 @@ impl Writer {
     /// Queues the global reading speed; nothing waits for it.
     pub fn seed(&self, speed: ReadingSpeed) {
         let _ = self.tx.send(Command::Seed(speed));
+    }
+    /// Queues the book's detected language; nothing waits for it.
+    pub fn save_language(&self, detected: DetectedLanguage) {
+        let _ = self.tx.send(Command::Language(detected));
     }
     pub fn drain(&self) -> impl Iterator<Item = Result<()>> + '_ {
         self.results.try_iter()

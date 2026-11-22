@@ -137,6 +137,9 @@ pub struct BookState {
     /// Characters per second read in this book, for the time-left items.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_speed: Option<crate::reader::speed::ReadingSpeed>,
+    /// The language detected from the book's text on its first open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<crate::library::language::DetectedLanguage>,
 }
 #[derive(Clone)]
 pub struct Store {

@@ -5,6 +5,7 @@ pub mod covers;
 pub mod epub;
 pub mod files;
 pub mod home;
+pub mod language;
 pub mod previews;
 pub mod search;
 pub mod worker;

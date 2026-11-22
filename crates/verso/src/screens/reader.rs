@@ -10,6 +10,7 @@ use crate::document::{
 };
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
+use crate::library::language::{self, DetectedLanguage};
 use crate::page_layout::PageLayout;
 use crate::platform::RefreshMode;
 use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
@@ -66,7 +67,17 @@ pub struct Reader {
     opened_at: Option<Instant>,
     selection: SelectionState,
     dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
-    dictionary_language: String,
+    /// The EPUB language tag from the library metadata.
+    language_tag: String,
+    /// The book file, for language detection.
+    book_path: Option<std::path::PathBuf>,
+    /// The language detected from the book's text, saved or just detected.
+    detected_language: Option<DetectedLanguage>,
+    /// When to detect the language in the background: with the dictionary
+    /// warm-up, once per open book that has no current detection.
+    language_detect_at: Option<Instant>,
+    /// The running detection's result.
+    language_detection: Option<std::sync::mpsc::Receiver<anyhow::Result<DetectedLanguage>>>,
     /// When to open the dictionaries' indexes in the background: a moment
     /// after the first page is on screen, once per open book.
     dictionary_prepare_at: Option<Instant>,
@@ -183,7 +194,11 @@ impl Reader {
             opened_at: Some(Instant::now()),
             selection: SelectionState::default(),
             dictionary: None,
-            dictionary_language: String::new(),
+            language_tag: String::new(),
+            book_path: None,
+            detected_language: None,
+            language_detect_at: None,
+            language_detection: None,
             dictionary_prepare_at: None,
             search: Session::default(),
             search_bar: None,
@@ -212,12 +227,66 @@ impl Reader {
         self.bars.speed = ReadingSpeed::start(book, global);
     }
     pub fn annotations(&mut self, mut book: crate::library::Book) {
-        self.dictionary_language = book.metadata.language.clone();
+        self.language_tag = book.metadata.language.clone();
+        self.book_path = Some(book.path.clone());
         if book.annotation_id.is_empty() {
             book.annotation_id = book.id.clone();
         }
         self.annotations.service =
             Some(crate::annotations::worker::Worker::new(self.store.clone(), book, self.worker.waker()));
+    }
+    /// The language saved in the book's state, if any.
+    pub fn detected_language(&mut self, detected: Option<DetectedLanguage>) {
+        self.detected_language = detected;
+    }
+    /// The book language for dictionary sets and word forms: a reliable
+    /// detection, else the tag.
+    fn book_language(&self) -> String {
+        language::resolve(&self.language_tag, self.detected_language.as_ref())
+    }
+    /// Detects the book's language on a background thread; the result
+    /// arrives in `on_background` and is saved with the reading state.
+    fn start_language_detection(&mut self) {
+        let Some(path) = self.book_path.clone() else { return };
+        if self.language_detection.is_some() || !language::needs_detection(self.detected_language.as_ref()) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waker = self.worker.waker();
+        let spawned = std::thread::Builder::new().name("verso-language".into()).spawn(move || {
+            let started = Instant::now();
+            let result = language::detect_book(&path);
+            match &result {
+                Ok(d) => log::info!(
+                    "language detection: {:?} reliable={} elapsed_us={}",
+                    d.code,
+                    d.reliable,
+                    started.elapsed().as_micros()
+                ),
+                Err(e) => log::warn!("language detection: {e:#}"),
+            }
+            let _ = tx.send(result);
+            waker.wake();
+        });
+        match spawned {
+            Ok(_) => self.language_detection = Some(rx),
+            Err(e) => log::warn!("starting language detection: {e}"),
+        }
+    }
+    fn receive_language(&mut self) {
+        let Some(rx) = &self.language_detection else { return };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.language_detection = None;
+                // An unreadable book stores nothing and keeps its tag.
+                if let Ok(detected) = result {
+                    self.persistence.save_language(detected.clone());
+                    self.detected_language = Some(detected);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.language_detection = None,
+        }
     }
     pub fn failed_open(&self) -> bool {
         self.error.is_some() && self.shown.is_none()
@@ -377,7 +446,7 @@ impl Reader {
         let word = self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)));
         let selection = crate::dictionary::sets::Selection {
             book_set: self.store.book(&self.id).dictionary_set,
-            language: self.dictionary_language.clone(),
+            language: self.book_language(),
         };
         self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service, cx.theme, self.screen, word, selection)));
         cx.redraw();
@@ -1495,7 +1564,7 @@ impl Screen for Reader {
             Overlay::Layout(view) => view.deadline(),
             _ => None,
         };
-        [self.layout_at, step, self.dictionary_prepare_at].into_iter().flatten().min()
+        [self.layout_at, step, self.dictionary_prepare_at, self.language_detect_at].into_iter().flatten().min()
     }
     fn has_idle_work(&self) -> bool {
         matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.paginating())
@@ -1517,6 +1586,10 @@ impl Screen for Reader {
         if self.dictionary_prepare_at.is_some_and(|t| cx.now >= t) {
             self.dictionary_prepare_at = None;
             self.dictionary_service().prepare();
+        }
+        if self.language_detect_at.is_some_and(|t| cx.now >= t) {
+            self.language_detect_at = None;
+            self.start_language_detection();
         }
         if self.layout_at.is_some_and(|t| cx.now >= t) {
             self.layout_at = None;
@@ -1548,6 +1621,7 @@ impl Screen for Reader {
             }
             cx.redraw();
         }
+        self.receive_language();
         let had_error = self.save_error.is_some();
         for result in self.persistence.drain() {
             self.save_error = result.err().map(|e| format!("{e:#}"));
@@ -1595,6 +1669,9 @@ impl Screen for Reader {
         {
             log::info!("startup stage: book first page requested elapsed_us={}", started.elapsed().as_micros());
             self.dictionary_prepare_at = Some(Instant::now() + DICTIONARY_PREPARE_DELAY);
+            if language::needs_detection(self.detected_language.as_ref()) {
+                self.language_detect_at = self.dictionary_prepare_at;
+            }
         }
         self.save();
     }
@@ -1664,6 +1741,61 @@ mod tests {
             Position::default(),
         );
         (reader, commands)
+    }
+    #[test]
+    fn the_detected_language_is_saved_and_used_for_lookups() {
+        use crate::library::language::{DETECTOR_VERSION, DetectedLanguage};
+        let theme = Theme::for_dpi(150);
+        let (mut r, _commands) = test_reader("language-detection");
+        let dir = tempfile::tempdir().unwrap();
+        let wait = |r: &mut Reader| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while r.language_detection.is_some() {
+                assert!(Instant::now() < deadline, "detection didn't finish");
+                std::thread::sleep(Duration::from_millis(2));
+                test_cx(&theme, |cx| r.on_background(cx));
+            }
+        };
+        // A German book tagged English.
+        let path = dir.path().join("german.epub");
+        crate::library::epub::tests::fixture(
+            &path,
+            r#"<package><metadata/><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>"#,
+            &[("OPS/a.xhtml", format!("<html><body><p>{}</p></body></html>", crate::library::language::tests::GERMAN.repeat(3)).as_bytes())],
+        )
+        .unwrap();
+        r.language_tag = "en".into();
+        r.book_path = Some(path.clone());
+        assert_eq!(r.book_language(), "en");
+        r.start_language_detection();
+        wait(&mut r);
+        assert_eq!(r.book_language(), "de");
+        r.persistence.flush().unwrap();
+        let saved = r.store.book("book").language.unwrap();
+        assert_eq!(saved, DetectedLanguage { code: "de".into(), reliable: true, version: DETECTOR_VERSION });
+        // A current result isn't detected again; an older detector's is.
+        r.start_language_detection();
+        assert!(r.language_detection.is_none());
+        r.detected_language(Some(DetectedLanguage { version: DETECTOR_VERSION - 1, ..saved }));
+        assert_eq!(r.book_language(), "en");
+        r.start_language_detection();
+        assert!(r.language_detection.is_some());
+        wait(&mut r);
+        assert_eq!(r.book_language(), "de");
+        // An unreadable book keeps its tag and stores nothing.
+        let (mut r, _commands) = test_reader("language-unreadable");
+        let broken = dir.path().join("broken.epub");
+        std::fs::write(&broken, b"not an EPUB").unwrap();
+        r.language_tag = "fr".into();
+        r.book_path = Some(broken);
+        r.start_language_detection();
+        wait(&mut r);
+        assert_eq!(r.book_language(), "fr");
+        r.persistence.flush().unwrap();
+        assert!(r.store.book("book").language.is_none());
+        for name in ["language-detection", "language-unreadable"] {
+            let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("verso-{name}-{}", std::process::id())));
+        }
     }
     fn test_page(generation: u64, number: usize) -> Arc<Page> {
         Arc::new(Page {
@@ -2546,7 +2678,7 @@ mod tests {
         // The engine tag disagrees: use library metadata, as supplied when the
         // book is handed to Reader::annotations, and then the persisted override.
         r.metadata.language = "ru".into();
-        r.dictionary_language = "en-US".into();
+        r.language_tag = "en-US".into();
         let lookup = |r: &mut Reader, cx: &mut EventCx| {
             r.lookup("Hello", cx);
             let worker = r.dictionary.as_ref().unwrap();

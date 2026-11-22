@@ -3,6 +3,7 @@
 //! Each set keeps its enabled dictionaries first, in lookup order, and the
 //! disabled ones after them: turning one on adds it at the end of the enabled
 //! ones, and turning one off moves it to the top of the disabled ones.
+use super::languages::{Script, language_scripts, normalize_language, word_script};
 use super::{Dictionary, Preference};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -151,13 +152,13 @@ impl Preferences {
         let Some(script) = word_script(query) else { return chosen };
         // Unknown languages must not cause a fallback based on a partial table.
         if chosen.languages.is_empty()
-            || chosen.languages.iter().any(|l| language_script(l).is_none_or(|s| s == script))
+            || chosen.languages.iter().any(|l| language_scripts(l).is_empty() || language_scripts(l).contains(&script))
         {
             return chosen;
         }
         self.sets
             .iter()
-            .find(|s| s.languages.iter().any(|l| language_script(l) == Some(script)))
+            .find(|s| s.languages.iter().any(|l| language_scripts(l).contains(&script)))
             .unwrap_or_else(|| self.set(DEFAULT))
     }
     pub fn edit(&mut self, edit: Edit) -> Result<()> {
@@ -258,7 +259,7 @@ impl Set {
         };
         let mut languages = Vec::new();
         for language in candidates {
-            if language_script(&language) == Some(script) && !languages.contains(&language) {
+            if language_scripts(&language).contains(&script) && !languages.contains(&language) {
                 languages.push(language);
             }
         }
@@ -285,93 +286,6 @@ fn clean_languages(languages: &[String]) -> Result<Vec<String>> {
     }
     Ok(result)
 }
-pub fn normalize_language(tag: &str) -> String {
-    let tag = tag.trim().split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
-    match tag.as_str() {
-        "eng" => "en",
-        "rus" => "ru",
-        "fra" | "fre" => "fr",
-        "deu" | "ger" => "de",
-        "spa" => "es",
-        "ita" => "it",
-        "por" => "pt",
-        "ukr" => "uk",
-        "bel" => "be",
-        "bul" => "bg",
-        "srp" => "sr",
-        "mkd" | "mac" => "mk",
-        "ell" | "gre" => "el",
-        "hye" | "arm" => "hy",
-        "ara" => "ar",
-        "heb" => "he",
-        "zho" | "chi" => "zh",
-        "jpn" => "ja",
-        "kor" => "ko",
-        "nld" | "dut" => "nl",
-        "pol" => "pl",
-        "ces" | "cze" => "cs",
-        "slk" | "slo" => "sk",
-        "ron" | "rum" => "ro",
-        "hun" => "hu",
-        "tur" => "tr",
-        "fin" => "fi",
-        "swe" => "sv",
-        "dan" => "da",
-        "nor" => "no",
-        "vie" => "vi",
-        _ => &tag,
-    }
-    .into()
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Script {
-    Latin,
-    Cyrillic,
-    Greek,
-    Armenian,
-    Arabic,
-    Hebrew,
-    Cjk,
-    Hangul,
-}
-fn language_script(language: &str) -> Option<Script> {
-    Some(match language {
-        "en" | "fr" | "de" | "es" | "it" | "pt" | "nl" | "pl" | "cs" | "sk" | "ro" | "hu" | "tr" | "fi" | "sv"
-        | "da" | "no" | "vi" | "la" => Script::Latin,
-        "ru" | "uk" | "be" | "bg" | "mk" => Script::Cyrillic,
-        "el" => Script::Greek,
-        "hy" => Script::Armenian,
-        "ar" | "fa" | "ur" => Script::Arabic,
-        "he" | "yi" => Script::Hebrew,
-        "zh" | "ja" => Script::Cjk,
-        "ko" => Script::Hangul,
-        _ => return None,
-    })
-}
-fn word_script(query: &str) -> Option<Script> {
-    // Punctuation and combining marks carry no script. Mixed-script words are
-    // ambiguous and keep their chosen set, rather than guessing from one letter.
-    let mut found = None;
-    for c in query.chars().filter(|c| c.is_alphabetic()) {
-        let script = match c as u32 {
-            0x0041..=0x024f | 0x1e00..=0x1eff => Script::Latin,
-            0x0400..=0x052f | 0x2de0..=0x2dff | 0xa640..=0xa69f => Script::Cyrillic,
-            0x0370..=0x03ff | 0x1f00..=0x1fff => Script::Greek,
-            0x0530..=0x058f => Script::Armenian,
-            0x0600..=0x06ff | 0x0750..=0x077f | 0x08a0..=0x08ff => Script::Arabic,
-            0x0590..=0x05ff => Script::Hebrew,
-            0x3040..=0x30ff | 0x3400..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f => Script::Cjk,
-            0x1100..=0x11ff | 0x3130..=0x318f | 0xac00..=0xd7af => Script::Hangul,
-            _ => return None,
-        };
-        if found.is_some_and(|previous| previous != script) {
-            return None;
-        }
-        found = Some(script);
-    }
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,7 +343,10 @@ mod tests {
             (Some("unknown"), "en", "слово", "unknown"),
             (Some("english"), "en", "123?!", "english"),
             (Some("english"), "en", "aя", "english"),
-            (Some("english"), "en", "शब्द", "english"),
+            // Devanagari is a known script now: no Devanagari set, so Default.
+            (Some("english"), "en", "शब्द", DEFAULT),
+            // A script outside the table keeps the chosen set.
+            (Some("english"), "en", "བོད", "english"),
         ] {
             let selection = Selection { book_set: book.map(str::to_owned), language: language.into() };
             assert_eq!(p.choose(&selection, word).id, expected, "{selection:?} {word}");
