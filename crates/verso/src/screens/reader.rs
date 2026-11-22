@@ -1626,7 +1626,7 @@ impl Screen for Reader {
         if let Some(page) = &self.shown {
             match page.color {
                 crate::gfx::ColorMode::Gray8 => cx.canvas.set_gray(&page.pixels),
-                crate::gfx::ColorMode::Color32 => cx.canvas.set_rgba(&page.pixels),
+                crate::gfx::ColorMode::Color32 => cx.canvas.set_rgba_opaque(&page.pixels),
             }
             let layout = &self.settings.page_layout;
             if layout.top.on || layout.bottom.on {

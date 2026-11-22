@@ -153,6 +153,7 @@ impl Canvas {
 
     /// Replaces the whole canvas with an RGBA image (alpha ignored: pages
     /// are opaque). A gray canvas keeps each pixel's brightness.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_rgba(&mut self, pixels: &[u8]) {
         match &mut self.pixels {
             Pixels::Gray(p) => {
@@ -166,6 +167,27 @@ impl Canvas {
                 for px in p.as_chunks_mut::<4>().0 {
                     px[3] = 255;
                 }
+            }
+        }
+    }
+
+    /// Replaces the whole canvas with an already-opaque RGBA image (every alpha
+    /// byte is `255`, as written by `crengine`'s `verso_cre_draw_rgba`),
+    /// avoiding a second full-buffer alpha pass on `Color32` canvases.
+    pub fn set_rgba_opaque(&mut self, pixels: &[u8]) {
+        match &mut self.pixels {
+            Pixels::Gray(p) => {
+                assert_eq!(p.len() * 4, pixels.len(), "page size");
+                for (out, px) in p.iter_mut().zip(pixels.as_chunks::<4>().0) {
+                    *out = luma(px[0], px[1], px[2]);
+                }
+            }
+            Pixels::Rgba(p) => {
+                debug_assert!(
+                    pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
+                    "set_rgba_opaque requires opaque RGBA pixels (alpha == 255)"
+                );
+                p.copy_from_slice(pixels);
             }
         }
     }
@@ -675,59 +697,16 @@ impl Canvas {
             }
         };
         let cw = self.width as usize;
+        let ch = self.height as usize;
         let (x0, x1, y0, y1) = (r.x as usize, r.right() as usize, r.y as usize, r.bottom() as usize);
         // Panel rows for canvas columns x1 - 1 down to x0, each reaching y1.
-        assert!(stride >= self.height as usize && dst.len() >= (cw - 1 - x0) * stride + y1, "panel too small");
-        // Turn a band of 64 columns (one cache line of each canvas row) at a
-        // time in an ordinary buffer, in 4×4 blocks of 32-bit words, then copy
-        // each finished panel row in one go. Walking down a band crosses a
-        // 4 KiB page every two or three rows, which the hardware prefetcher
-        // doesn't follow, so the rows a few blocks ahead are requested
-        // explicitly: on the Kindle a full page takes ~5 ms this way and
-        // ~13 ms without (the arithmetic is not the cost: NEON 8×16 blocks
-        // measured no faster). Byte-by-byte turning took ~30 ms.
+        assert!(stride >= ch && dst.len() >= (cw - 1 - x0) * stride + y1, "panel too small");
         const BAND: usize = 64;
-        const AHEAD: usize = 8;
         let h = y1 - y0;
         let mut band = vec![0u8; BAND * h];
         for bx in (x0..x1).step_by(BAND) {
             let bw = (bx + BAND).min(x1) - bx;
-            let whole = bw / 4 * 4;
-            let mut y = y0;
-            // The canvas rows y..y + 4 and band rows 0..whole are in bounds
-            // for every block below: y + 4 <= y1 <= height, bx + whole <= x1
-            // <= width, and band is BAND * h long.
-            assert!(y1 <= self.height as usize && bx + whole <= cw && whole * h <= band.len());
-            let (src, out) = (gray.as_ptr(), band.as_mut_ptr());
-            while y + 4 <= y1 {
-                for k in y + AHEAD..y + AHEAD + 4 {
-                    // A row's 64 bytes may straddle two cache lines.
-                    let row = src.wrapping_add(k * cw + bx);
-                    prefetch(row);
-                    prefetch(row.wrapping_add(BAND - 1));
-                }
-                let at = y * cw + bx;
-                for i in (0..whole).step_by(4) {
-                    // SAFETY: in bounds as asserted above; unaligned 32-bit
-                    // access is allowed on every target we build for.
-                    unsafe {
-                        let word = |k: usize| u32::from_le(src.add(at + k * cw + i).cast::<u32>().read_unaligned());
-                        let t = transpose4([word(0), word(1), word(2), word(3)]);
-                        for (j, column) in t.iter().enumerate() {
-                            out.add((i + j) * h + (y - y0)).cast::<u32>().write_unaligned(column.to_le());
-                        }
-                    }
-                }
-                y += 4;
-            }
-            // Columns past the last whole block, and rows past the last whole
-            // block, one pixel at a time.
-            for yy in y0..y1 {
-                let first = if yy < y { whole } else { 0 };
-                for i in first..bw {
-                    band[i * h + (yy - y0)] = gray[yy * cw + bx + i];
-                }
-            }
+            transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, &mut band);
             for i in 0..bw {
                 let row = (cw - 1 - (bx + i)) * stride;
                 dst[row + y0..row + y1].copy_from_slice(&band[i * h..(i + 1) * h]);
@@ -741,20 +720,151 @@ impl Canvas {
     pub fn copy_rgba_rotated(&self, rect: Rect, dst: &mut [u8], stride: usize) -> Option<Rect> {
         let r = rect.intersect(&self.bounds())?;
         let cw = self.width as usize;
-        for x in r.x as usize..r.right() as usize {
-            let row = (cw - 1 - x) * stride;
-            for y in r.y as usize..r.bottom() as usize {
-                let px = match &self.pixels {
-                    Pixels::Gray(p) => {
-                        let g = p[y * cw + x];
-                        [g, g, g, 255]
+        let ch = self.height as usize;
+        let (x0, x1, y0, y1) = (r.x as usize, r.right() as usize, r.y as usize, r.bottom() as usize);
+        // Panel rows for canvas columns x1 - 1 down to x0, each reaching y1.
+        assert!(stride >= ch && dst.len() >= ((cw - 1 - x0) * stride + y1) * 4, "panel too small");
+        let h = y1 - y0;
+        match &self.pixels {
+            Pixels::Gray(gray) => {
+                const BAND: usize = 64;
+                let mut band = vec![0u8; BAND * h];
+                for bx in (x0..x1).step_by(BAND) {
+                    let bw = (bx + BAND).min(x1) - bx;
+                    transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, &mut band);
+                    for i in 0..bw {
+                        let row = (cw - 1 - (bx + i)) * stride;
+                        for (px, &g) in dst[(row + y0) * 4..(row + y1) * 4]
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(&band[i * h..(i + 1) * h])
+                        {
+                            *px = [g, g, g, 255];
+                        }
                     }
-                    Pixels::Rgba(p) => p[(y * cw + x) * 4..(y * cw + x) * 4 + 4].try_into().unwrap(),
-                };
-                dst[(row + y) * 4..(row + y) * 4 + 4].copy_from_slice(&px);
+                }
+            }
+            Pixels::Rgba(rgba) => {
+                // Turn a band of 16 RGBA columns (64 bytes = one cache line of
+                // each canvas row) in 4×4 blocks of u32 pixels into a local
+                // band buffer, prefetching rows ahead as we cross 4 KiB pages,
+                // then copy each finished panel row sequentially into `dst`.
+                const BAND: usize = 16;
+                const AHEAD: usize = 8;
+                let mut band = vec![0u32; BAND * h];
+                for bx in (x0..x1).step_by(BAND) {
+                    let bw = (bx + BAND).min(x1) - bx;
+                    let whole = bw / 4 * 4;
+                    let mut y = y0;
+                    // The canvas rows y..y + 4 and band rows 0..whole are in
+                    // bounds for every block below: y + 4 <= y1 <= ch,
+                    // bx + whole <= cw, and whole * h <= band.len().
+                    assert!(y1 <= ch && bx + whole <= cw && whole * h <= band.len() && rgba.len() >= ch * cw * 4);
+                    let (src, out) = (rgba.as_ptr(), band.as_mut_ptr());
+                    while y + 4 <= y1 {
+                        for k in y + AHEAD..y + AHEAD + 4 {
+                            // A row's 64 bytes may straddle two cache lines.
+                            let row = src.wrapping_add((k * cw + bx) * 4);
+                            prefetch(row);
+                            prefetch(row.wrapping_add(BAND * 4 - 1));
+                        }
+                        let at = y * cw + bx;
+                        for i in (0..whole).step_by(4) {
+                            // SAFETY: in bounds as asserted above; unaligned
+                            // 32-bit access is allowed on every target we build for.
+                            unsafe {
+                                let row = |k: usize| src.add((at + k * cw + i) * 4).cast::<[u32; 4]>().read_unaligned();
+                                let r0 = row(0);
+                                let r1 = row(1);
+                                let r2 = row(2);
+                                let r3 = row(3);
+                                let dy = y - y0;
+                                out.add(i * h + dy).cast::<[u32; 4]>().write_unaligned([r0[0], r1[0], r2[0], r3[0]]);
+                                out.add((i + 1) * h + dy)
+                                    .cast::<[u32; 4]>()
+                                    .write_unaligned([r0[1], r1[1], r2[1], r3[1]]);
+                                out.add((i + 2) * h + dy)
+                                    .cast::<[u32; 4]>()
+                                    .write_unaligned([r0[2], r1[2], r2[2], r3[2]]);
+                                out.add((i + 3) * h + dy)
+                                    .cast::<[u32; 4]>()
+                                    .write_unaligned([r0[3], r1[3], r2[3], r3[3]]);
+                            }
+                        }
+                        y += 4;
+                    }
+                    // Columns past the last whole block, and rows past the last
+                    // whole block, one pixel at a time.
+                    for yy in y0..y1 {
+                        let first = if yy < y { whole } else { 0 };
+                        for i in first..bw {
+                            let p = (yy * cw + bx + i) * 4;
+                            band[i * h + (yy - y0)] = u32::from_ne_bytes(rgba[p..p + 4].try_into().unwrap());
+                        }
+                    }
+                    for i in 0..bw {
+                        let row = (cw - 1 - (bx + i)) * stride;
+                        // SAFETY: `i < bw <= BAND` and `band.len() == BAND * h`,
+                        // so `band[i * h..]` covers `h` initialized `u32`s (`h * 4` bytes).
+                        let src_bytes =
+                            unsafe { std::slice::from_raw_parts(band.as_ptr().add(i * h).cast::<u8>(), h * 4) };
+                        dst[(row + y0) * 4..(row + y1) * 4].copy_from_slice(src_bytes);
+                    }
+                }
             }
         }
         Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w))
+    }
+}
+
+/// Transposes a band of up to 64 gray columns (`bx..bx + bw`, rows `y0..y1`)
+/// into `band` (column `i` lands in `band[i * h..(i + 1) * h]`).
+///
+/// Walking down a band crosses a 4 KiB page every two or three rows, which the
+/// hardware prefetcher doesn't follow, so rows a few blocks ahead are requested
+/// explicitly: on the Kindle a full page takes ~5 ms this way and ~13 ms
+/// without (the arithmetic is not the cost: NEON 8×16 blocks measured no
+/// faster). Byte-by-byte turning took ~30 ms.
+#[allow(clippy::too_many_arguments)]
+fn transpose_gray_band(gray: &[u8], cw: usize, ch: usize, bx: usize, bw: usize, y0: usize, y1: usize, band: &mut [u8]) {
+    const BAND: usize = 64;
+    const AHEAD: usize = 8;
+    let h = y1 - y0;
+    let whole = bw / 4 * 4;
+    let mut y = y0;
+    // The canvas rows y..y + 4 and band rows 0..whole are in bounds for every
+    // block below: y + 4 <= y1 <= ch, bx + whole <= cw, and whole * h <= band.len().
+    assert!(y1 <= ch && bx + whole <= cw && whole * h <= band.len() && gray.len() >= ch * cw);
+    let (src, out) = (gray.as_ptr(), band.as_mut_ptr());
+    while y + 4 <= y1 {
+        for k in y + AHEAD..y + AHEAD + 4 {
+            // A row's 64 bytes may straddle two cache lines.
+            let row = src.wrapping_add(k * cw + bx);
+            prefetch(row);
+            prefetch(row.wrapping_add(BAND - 1));
+        }
+        let at = y * cw + bx;
+        for i in (0..whole).step_by(4) {
+            // SAFETY: in bounds as asserted above; unaligned 32-bit access is
+            // allowed on every target we build for.
+            unsafe {
+                let word = |k: usize| u32::from_le(src.add(at + k * cw + i).cast::<u32>().read_unaligned());
+                let t = transpose4([word(0), word(1), word(2), word(3)]);
+                for (j, column) in t.iter().enumerate() {
+                    out.add((i + j) * h + (y - y0)).cast::<u32>().write_unaligned(column.to_le());
+                }
+            }
+        }
+        y += 4;
+    }
+    // Columns past the last whole block, and rows past the last whole block,
+    // one pixel at a time.
+    for yy in y0..y1 {
+        let first = if yy < y { whole } else { 0 };
+        for i in first..bw {
+            band[i * h + (yy - y0)] = gray[yy * cw + bx + i];
+        }
     }
 }
 
@@ -1338,5 +1448,142 @@ mod tests {
         c.copy_raw(Rect::new(2, 0, 5, 5), &mut out);
         assert_eq!(&out[8..16], &[1, 2, 3, 255, 255, 255, 255, 255]);
         assert!(out[..8].iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn set_rgba_opaque_preserves_color_and_converts_gray() {
+        let page: Vec<u8> =
+            (0..4 * 3).flat_map(|i| [(i as u8).wrapping_mul(29), 255 - i as u8 * 7, i as u8 * 3, 255]).collect();
+        let mut color = Canvas::with_mode(4, 3, ColorMode::Color32);
+        color.set_rgba_opaque(&page);
+        assert_eq!(color.raw(), page);
+        let mut gray = Canvas::new(4, 3);
+        gray.set_rgba_opaque(&page);
+        let mut via_set_rgba = Canvas::new(4, 3);
+        via_set_rgba.set_rgba(&page);
+        assert_eq!(gray.gray_data(), via_set_rgba.gray_data());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "opaque RGBA")]
+    fn set_rgba_opaque_debug_asserts_full_alpha() {
+        let mut color = Canvas::with_mode(2, 1, ColorMode::Color32);
+        color.set_rgba_opaque(&[10, 20, 30, 255, 40, 50, 60, 128]);
+    }
+
+    #[test]
+    fn copy_rgba_rotated_matches_pixel_rule_across_bands_for_gray_and_rgba() {
+        // Odd dimensions, ragged/unaligned rects covering every 4×4 and band
+        // remainder, clipped rects, and a padded destination stride.
+        for &(w, h, pad) in &[(171usize, 67usize, 0usize), (171, 67, 7), (17, 5, 3), (3, 5, 0), (1, 1, 2)] {
+            let stride = h + pad;
+            let rgba_pixels: Vec<u8> = (0..w * h)
+                .flat_map(|i| [((i * 7) % 251) as u8, ((i * 13 + 3) % 251) as u8, ((i * 29 + 5) % 251) as u8, 255])
+                .collect();
+            let gray_pixels: Vec<u8> = (0..w * h).map(|i| ((i * 11 + 1) % 251) as u8).collect();
+            let mut color = Canvas::with_mode(w as u32, h as u32, ColorMode::Color32);
+            color.set_rgba_opaque(&rgba_pixels);
+            let mut gray = Canvas::new(w as u32, h as u32);
+            gray.set_gray(&gray_pixels);
+
+            let rects = [
+                color.bounds(),
+                Rect::new(0, 0, 16, 4),
+                Rect::new(1, 2, 17, 9),
+                Rect::new(5, 3, 160, 60),
+                Rect::new(17, 7, 129, 23),
+                Rect::new(3, 0, 15, h as i32),
+                Rect::new(100, 40, 7, 3),
+                Rect::new(w as i32 - 1, h as i32 - 1, 1, 1),
+                Rect::new(-3, -2, 25, 11),
+                Rect::new(w as i32 - 5, h as i32 - 3, 20, 20),
+                Rect::new(w as i32 + 5, 0, 10, 10),
+            ];
+            for rect in rects {
+                let expected_changed =
+                    rect.intersect(&color.bounds()).map(|r| Rect::new(r.y, w as i32 - r.right(), r.h, r.w));
+
+                let mut out_rgba = vec![9u8; w * stride * 4];
+                assert_eq!(color.copy_rgba_rotated(rect, &mut out_rgba, stride), expected_changed);
+                let mut out_gray = vec![9u8; w * stride * 4];
+                assert_eq!(gray.copy_rgba_rotated(rect, &mut out_gray, stride), expected_changed);
+
+                for row in 0..w {
+                    let x = w - 1 - row;
+                    for col in 0..stride {
+                        let dst_i = (row * stride + col) * 4;
+                        let inside = col < h && rect.contains(crate::geom::Point::new(x as i32, col as i32));
+                        let want_rgba: [u8; 4] = if inside {
+                            let s = (col * w + x) * 4;
+                            rgba_pixels[s..s + 4].try_into().unwrap()
+                        } else {
+                            [9; 4]
+                        };
+                        let want_gray: [u8; 4] = if inside {
+                            let g = gray_pixels[col * w + x];
+                            [g, g, g, 255]
+                        } else {
+                            [9; 4]
+                        };
+                        assert_eq!(
+                            &out_rgba[dst_i..dst_i + 4],
+                            &want_rgba,
+                            "rgba ({w}x{h}, pad={pad}) {rect:?}: canvas ({x}, {col})"
+                        );
+                        assert_eq!(
+                            &out_gray[dst_i..dst_i + 4],
+                            &want_gray,
+                            "gray ({w}x{h}, pad={pad}) {rect:?}: canvas ({x}, {col})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark comparing naive vs tiled Color32 1272x1696 rotation"]
+    fn bench_copy_rgba_rotated_color32_1272x1696() {
+        // Landscape Color32 canvas (1696 × 1272) rotating onto a 1272 × 1696 portrait panel.
+        let (w, h) = (1696usize, 1272usize);
+        let page: Vec<u8> = (0..w * h).flat_map(|i| [(i as u8), (i >> 4) as u8, (i >> 8) as u8, 255]).collect();
+        let mut c = Canvas::with_mode(w as u32, h as u32, ColorMode::Color32);
+        c.set_rgba_opaque(&page);
+        let mut dst_old = vec![0u8; w * h * 4];
+        let mut dst_new = vec![0u8; w * h * 4];
+
+        let naive = |src: &[u8], dst: &mut [u8]| {
+            for x in 0..w {
+                let row = (w - 1 - x) * h;
+                for y in 0..h {
+                    let s = (y * w + x) * 4;
+                    let d = (row + y) * 4;
+                    dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
+                }
+            }
+        };
+
+        const ITERS: usize = 20;
+        naive(c.raw(), &mut dst_old);
+        c.copy_rgba_rotated(c.bounds(), &mut dst_new, h);
+        assert_eq!(dst_old, dst_new, "tiled rotation must match naive pixel-for-pixel");
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            naive(std::hint::black_box(c.raw()), std::hint::black_box(&mut dst_old));
+        }
+        let old_ms = t0.elapsed().as_secs_f64() * 1000.0 / ITERS as f64;
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(c.copy_rgba_rotated(c.bounds(), std::hint::black_box(&mut dst_new), h));
+        }
+        let new_ms = t1.elapsed().as_secs_f64() * 1000.0 / ITERS as f64;
+
+        println!(
+            "Color32 1696x1272 rotation ({ITERS} iters): naive={old_ms:.2} ms, tiled={new_ms:.2} ms, speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 }
