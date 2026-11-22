@@ -12,7 +12,7 @@ use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::library::language::{self, DetectedLanguage};
 use crate::page_layout::PageLayout;
-use crate::platform::RefreshMode;
+use crate::platform::{KeyAction, RefreshMode};
 use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
 use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
 use crate::screens::contents::{Contents, ContentsEvent};
@@ -1632,6 +1632,18 @@ impl Screen for Reader {
             cx.fill(r, PAPER);
             cx.line(message, t.small, r, HAlign::Center);
         }
+    }
+    /// Page buttons turn pages in plain reading, like a tap on a page-turn
+    /// zone; over a menu, sheet, card or selection they do nothing.
+    fn on_key(&mut self, key: KeyAction, cx: &mut EventCx) -> Action {
+        if matches!(self.overlay, Overlay::None)
+            && self.selection.selected.is_none()
+            && !self.selection.extending
+            && self.extension.is_none()
+        {
+            self.go(self.target.saturating_add_signed(key.step()), cx);
+        }
+        Action::None
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         let action = self.gesture(g, cx);
@@ -3605,6 +3617,45 @@ mod tests {
             assert!(matches!(r.overlay, Overlay::Menu(_)));
         });
 
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn page_buttons_turn_pages_in_plain_reading_only() {
+        let (mut r, commands) = test_reader("page-buttons");
+        let theme = Theme::for_dpi(150);
+        r.pages = 20;
+        r.laying_out = false;
+        r.target = 5;
+        r.shown = Some(test_page(1, 5));
+        r.cache.insert(test_page(1, 5), 5);
+        r.cache.insert(test_page(1, 6), 5);
+        r.cache.insert(test_page(1, 4), 5);
+        test_cx(&theme, |cx| {
+            r.on_key(KeyAction::PageNext, cx);
+            assert_eq!(r.target, 6);
+            assert_eq!(r.shown.as_ref().unwrap().number, 6, "a cached page shows at once");
+            r.cache.insert(test_page(1, 5), 6);
+            r.on_key(KeyAction::PagePrev, cx);
+            r.on_key(KeyAction::PagePrev, cx);
+            assert_eq!(r.target, 4);
+        });
+        // The first page stays put going back.
+        r.target = 0;
+        r.shown = Some(test_page(1, 0));
+        test_cx(&theme, |cx| {
+            r.on_key(KeyAction::PagePrev, cx);
+            assert_eq!(r.target, 0);
+        });
+        // Over the Reader Menu a button does nothing.
+        test_cx(&theme, |cx| {
+            r.menu(cx);
+            assert!(matches!(r.overlay, Overlay::Menu(_)));
+            r.on_key(KeyAction::PageNext, cx);
+            assert_eq!(r.target, 0);
+            assert!(matches!(r.overlay, Overlay::Menu(_)));
+        });
+        let _ = commands.try_iter().count();
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 

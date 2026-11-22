@@ -2959,6 +2959,12 @@ impl Screen for Books {
             reader.finish_batch(cx);
         }
     }
+    /// Page buttons only mean something in an open book.
+    fn on_key(&mut self, key: crate::platform::KeyAction, cx: &mut EventCx) -> Action {
+        let Some(reader) = &mut self.reader else { return Action::None };
+        self.last_input = cx.now;
+        reader.on_key(key, cx)
+    }
     fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
         if let Some(reader) = &mut self.reader {
             return reader.on_text_input(input, cx);

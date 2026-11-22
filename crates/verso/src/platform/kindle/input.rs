@@ -3,6 +3,8 @@
 //! The Kindle's touchscreen speaks the multi-touch "protocol B": each finger
 //! lives in a numbered slot and has a tracking id (-1 when lifted), and a
 //! SYN_REPORT marks the end of each batch of changes.
+//!
+//! Page-turn buttons (Oasis) are a separate key device, read alongside.
 
 use std::collections::VecDeque;
 use std::ffi::CStr;
@@ -15,11 +17,16 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use crate::geom::Point;
-use crate::platform::{Event, Orientation, Touch, TouchPhase, Unsupported};
+use crate::platform::{Event, KeyAction, Orientation, Touch, TouchPhase, Unsupported};
 
 // Event types and codes from <linux/input-event-codes.h>.
 const EV_SYN: u16 = 0x00;
+const EV_KEY: u16 = 0x01;
 const EV_ABS: u16 = 0x03;
+const KEY_POWER: u16 = 116;
+/// The page keys FBInk's input scan looks for on a Kindle: PAGEUP, PAGEDOWN,
+/// YEN and F23 (see `KeyAction::from_evdev`).
+const PAGE_KEYS: [u16; 4] = [104, 109, 124, 193];
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
 const ABS_MT_SLOT: u16 = 0x2f;
@@ -63,6 +70,9 @@ const fn eviocgname(len: u32) -> u32 {
 }
 const fn eviocgbit_abs(len: u32) -> u32 {
     ioc(IOC_READ, 0x20 + EV_ABS as u32, len)
+}
+const fn eviocgbit_key(len: u32) -> u32 {
+    ioc(IOC_READ, 0x20 + EV_KEY as u32, len)
 }
 const fn eviocgabs(axis: u16) -> u32 {
     ioc(IOC_READ, 0x40 + axis as u32, size_of::<AbsInfo>() as u32)
@@ -337,6 +347,148 @@ impl TouchInput {
         }
         self.map.rotate(Point::new(x, y))
     }
+}
+
+/// The page-turn buttons: an evdev key device with page keys.
+pub struct Buttons {
+    file: File,
+    path: String,
+    device_name: String,
+    /// Grabbed only when the device has no power key, which powerd must
+    /// keep seeing (if a Kindle ever puts both on one device).
+    can_grab: bool,
+    grabbed: bool,
+    buf: Vec<InputEvent>,
+}
+
+impl Buttons {
+    /// The first input device (other than a touchscreen) with a page key,
+    /// grabbed so the paused Kindle UI doesn't turn its own pages on
+    /// resume. `None` on Kindles without buttons.
+    pub fn open() -> Option<Self> {
+        let mut paths: Vec<_> = std::fs::read_dir("/dev/input")
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path)
+            else {
+                continue;
+            };
+            let fd = file.as_raw_fd();
+            if has_mt_position(fd) {
+                continue;
+            }
+            let Some(keys) = key_bits(fd) else { continue };
+            if !PAGE_KEYS.iter().any(|&k| keys.has(k)) {
+                continue;
+            }
+            let mut buttons = Self {
+                file,
+                path: path.display().to_string(),
+                device_name: device_name(fd),
+                can_grab: !keys.has(KEY_POWER),
+                grabbed: false,
+                buf: vec![InputEvent::default(); 16],
+            };
+            if let Err(e) = buttons.grab(true) {
+                log::warn!("{e:#}");
+            }
+            return Some(buttons);
+        }
+        None
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "{} ({}), {}",
+            self.path,
+            self.device_name,
+            if self.grabbed {
+                "grabbed"
+            } else if self.can_grab {
+                "not grabbed"
+            } else {
+                "shared with the power key, not grabbed"
+            }
+        )
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    /// Takes or releases the buttons; presses made meanwhile are dropped.
+    pub fn grab(&mut self, grab: bool) -> Result<()> {
+        self.read(Orientation::Portrait, &mut VecDeque::new())?;
+        let grab = grab && self.can_grab;
+        if self.grabbed == grab {
+            return Ok(());
+        }
+        // SAFETY: EVIOCGRAB takes an int argument by value.
+        if unsafe { libc::ioctl(self.fd(), EVIOCGRAB as _, i32::from(grab)) } < 0 {
+            bail!("can't change the page buttons' grab: {}", std::io::Error::last_os_error());
+        }
+        self.grabbed = grab;
+        Ok(())
+    }
+
+    /// Reads everything available (without blocking) and queues a key
+    /// event for each page-key press. Releases and auto-repeat are ignored.
+    pub fn read(&mut self, orientation: Orientation, out: &mut VecDeque<Event>) -> Result<()> {
+        loop {
+            let event_size = size_of::<InputEvent>();
+            // SAFETY: InputEvent is plain old data; any bytes are a valid value.
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut u8, self.buf.len() * event_size)
+            };
+            let n = match self.file.read(bytes) {
+                Ok(n) => n,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e).with_context(|| format!("reading {}", self.path)),
+            };
+            if n == 0 {
+                bail!("{} closed", self.path);
+            }
+            for ev in &self.buf[..n / event_size] {
+                if ev.kind == EV_KEY
+                    && ev.value == 1
+                    && let Some(action) = KeyAction::from_evdev(ev.code, orientation)
+                {
+                    out.push_back(Event::Key(action));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Buttons {
+    fn drop(&mut self) {
+        if self.grabbed {
+            // SAFETY: EVIOCGRAB takes an int argument by value.
+            unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, 0 as libc::c_int) };
+        }
+    }
+}
+
+/// A device's EV_KEY capability bits (KEY_MAX is 0x2ff).
+struct KeyBits([u8; 96]);
+
+impl KeyBits {
+    fn has(&self, code: u16) -> bool {
+        self.0.get(code as usize / 8).is_some_and(|b| b & (1 << (code % 8)) != 0)
+    }
+}
+
+fn key_bits(fd: RawFd) -> Option<KeyBits> {
+    let mut bits = KeyBits([0; 96]);
+    // SAFETY: the buffer is as long as the size encoded in the request.
+    let rc = unsafe { libc::ioctl(fd, eviocgbit_key(bits.0.len() as u32) as _, bits.0.as_mut_ptr()) };
+    (rc >= 0).then_some(bits)
 }
 
 impl Drop for TouchInput {

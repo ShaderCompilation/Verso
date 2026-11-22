@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
 use crate::platform::{
-    Battery, DeviceInfo, Frontlight, LightRange, Orientation, RefreshMode, TextInput, Update, Waker,
+    Battery, DeviceInfo, Frontlight, KeyAction, LightRange, Orientation, RefreshMode, TextInput, Update, Waker,
 };
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
@@ -589,6 +589,21 @@ impl App {
             drawer.set_net(&self.theme, state, now);
             self.needs_redraw = true;
         }
+    }
+
+    /// A page-turn button. Prompts, notices and the Top Drawer ignore it;
+    /// the screen below them decides what it means.
+    pub fn on_key(&mut self, key: KeyAction) {
+        if self.asleep
+            || self.exit_prompt.is_some()
+            || self.usb_prompt.is_some()
+            || !self.notices.is_empty()
+            || self.drawer.is_some()
+            || self.touch_down
+        {
+            return;
+        }
+        self.with_screen(|screen, cx| screen.on_key(key, cx));
     }
 
     pub fn on_text_input(&mut self, input: &TextInput) -> bool {

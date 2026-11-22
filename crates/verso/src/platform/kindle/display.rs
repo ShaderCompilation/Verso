@@ -8,9 +8,9 @@ use std::ffi::{CStr, CString};
 use anyhow::{Result, bail};
 use fbink_sys as fb;
 
-use crate::geom::Rect;
 use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
+use crate::platform::framebuffer::{Format, Layout, Writer};
 use crate::platform::{Orientation, RefreshMode, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
@@ -57,7 +57,9 @@ pub struct Display {
     cfg: fb::FBInkConfig,
     fb: *mut u8,
     fb_len: usize,
-    stride: usize,
+    /// Pixel size, stride, viewport and inversion: how canvas pixels land
+    /// in the mapping.
+    writer: Writer,
     /// The panel's native (portrait) size.
     pub width: u32,
     pub height: u32,
@@ -66,7 +68,6 @@ pub struct Display {
     pub dpi: u32,
     pub name: String,
     pub session: DisplaySession,
-    inverted: bool,
     /// How to turn raw touch coordinates into screen coordinates.
     pub touch_swap_axes: bool,
     pub touch_mirror_x: bool,
@@ -144,16 +145,30 @@ impl Display {
                 fb::fbink_close(fd);
                 Err(Unsupported(msg).into())
             };
-            if st.bpp != 8 {
-                return fail(format!("only 8-bit grayscale screens are supported, this one is {} bpp", st.bpp));
-            }
-            if st.view_hori_origin != 0 || st.view_vert_origin != 0 || st.view_width != st.screen_width {
-                return fail("screens with an offset viewport aren't supported yet".into());
-            }
+            let Some(format) = Format::from_fbink(st.bpp, &session.pixel_format) else {
+                return fail(format!(
+                    "only 8-bit and 32-bit screens are supported, this one is {} bpp ({})",
+                    st.bpp, session.pixel_format
+                ));
+            };
+            let (width, height) = (st.view_width, st.view_height);
+            let layout = Layout {
+                format,
+                stride: st.scanline_stride as usize,
+                origin: (st.view_hori_origin as u32, st.view_vert_origin as u32),
+                width,
+                height,
+                inverted: st.inverted_grayscale,
+            };
+            let Some(needed) = layout.required_len() else {
+                return fail(format!(
+                    "the screen's viewport ({width}x{height}+{}+{}) doesn't fit its {}-byte rows",
+                    layout.origin.0, layout.origin.1, layout.stride
+                ));
+            };
             let mut fb_len = 0usize;
             let ptr = fb::fbink_get_fb_pointer(fd, &mut fb_len);
-            let (width, height, stride) = (st.view_width, st.view_height, st.scanline_stride as usize);
-            if ptr.is_null() || fb_len < stride * height as usize {
+            if ptr.is_null() || fb_len < needed {
                 return fail(format!("framebuffer mapping is missing or too small ({fb_len} bytes)"));
             }
 
@@ -162,14 +177,13 @@ impl Display {
                 cfg,
                 fb: ptr,
                 fb_len,
-                stride,
+                writer: Writer::new(layout),
                 width,
                 height,
                 orientation: Orientation::Portrait,
                 dpi: st.screen_dpi as u32,
                 name,
                 session,
-                inverted: st.inverted_grayscale,
                 touch_swap_axes: st.touch_swap_axes,
                 touch_mirror_x: st.touch_mirror_x,
                 touch_mirror_y: st.touch_mirror_y,
@@ -184,7 +198,6 @@ impl Display {
     }
 
     pub fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
-        let screen = Rect::new(0, 0, self.width as i32, self.height as i32);
         let (cw, ch) = self.orientation.screen_size(self.width, self.height);
         if (canvas.width(), canvas.height()) != (cw, ch) {
             bail!("canvas is {}x{}, expected {cw}x{ch}", canvas.width(), canvas.height());
@@ -199,23 +212,9 @@ impl Display {
             // SAFETY: the mapping is valid and at least `fb_len` bytes for as long
             // as the FBInk session is open (checked in `open`), and only we use it.
             let pixels = unsafe { std::slice::from_raw_parts_mut(self.fb, self.fb_len) };
-            let r = match self.orientation {
-                Orientation::Portrait => {
-                    let Some(r) = u.rect.intersect(&screen) else { continue };
-                    canvas.copy_gray(r, pixels, self.stride);
-                    r
-                }
-                Orientation::Landscape => {
-                    let Some(r) = canvas.copy_gray_rotated(u.rect, pixels, self.stride) else { continue };
-                    r
-                }
-            };
-            if self.inverted {
-                for y in r.y..r.bottom() {
-                    let row = y as usize * self.stride;
-                    pixels[row + r.x as usize..row + r.right() as usize].iter_mut().for_each(|v| *v = !*v);
-                }
-            }
+            // The refresh region is in framebuffer coordinates: FBInk's
+            // refresh doesn't add the viewport origin itself.
+            let Some(r) = self.writer.write(canvas, u.rect, self.orientation, pixels) else { continue };
             let (wfm, flash) = match u.mode {
                 RefreshMode::Fast => (fb::WFM_MODE_INDEX_E_WFM_DU, false),
                 RefreshMode::Ui => (fb::WFM_MODE_INDEX_E_WFM_GL16, false),

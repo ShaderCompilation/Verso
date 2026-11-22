@@ -3,7 +3,8 @@
 //! Simulator only: `--screenshot out.png` renders without a window, saves a
 //! grayscale PNG at device size and exits. `--screen books|settings|transfer|gallery` picks the
 //! start screen; `--tap x,y`, `--press x,y` (finger down, not lifted) and
-//! `--swipe x1,y1,x2,y2` (all repeatable, played in order) run first.
+//! `--swipe x1,y1,x2,y2` and `--key next|prev` (a page-turn button; all
+//! repeatable, played in order) run first.
 //! `--device basic-167|basic-300|pw5|pw6|oasis3|colorsoft|scribe` picks the
 //! simulated Kindle, with or without a window (platform/sim_device.rs).
 
@@ -112,6 +113,14 @@ fn parse_args() -> Result<Options> {
                     _ => bail!("unknown edit command {key:?}"),
                 };
                 opts.script.push(ScriptStep::Text(input));
+            }
+            "--key" => {
+                let key = args.next().context("--key needs next or prev")?;
+                opts.script.push(ScriptStep::Key(match key.as_str() {
+                    "next" => platform::KeyAction::PageNext,
+                    "prev" => platform::KeyAction::PagePrev,
+                    _ => bail!("unknown key {key:?}: expected next or prev"),
+                }));
             }
             "--tap" => {
                 let v = numbers(args.next(), 2, "--tap")?;
@@ -380,6 +389,12 @@ fn run() -> Result<i32> {
                     if !app.on_text_input(&input) {
                         platform.unhandled_text_input(&input, repeat);
                     }
+                }
+                Some(Event::Key(key)) => {
+                    log::debug!("{key:?}");
+                    // A button press is timed like a lifted finger.
+                    last_release = Some(Instant::now());
+                    app.on_key(key);
                 }
                 Some(Event::Touch(t)) => {
                     log::trace!("{t:?}");

@@ -50,6 +50,7 @@ impl Headless {
             t += Duration::from_secs(1);
             match step {
                 ScriptStep::Text(input) => events.push_back(Some(Event::TextInput { input, repeat: false })),
+                ScriptStep::Key(key) => events.push_back(Some(Event::Key(key))),
                 ScriptStep::Tap(p) => {
                     touch(&mut events, TouchPhase::Down, p, t);
                     touch(&mut events, TouchPhase::Up, p, t + Duration::from_millis(60));

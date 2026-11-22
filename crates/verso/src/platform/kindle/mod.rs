@@ -14,7 +14,7 @@ use super::kindle_profiles::{self, Lights};
 use super::{Battery, DeviceInfo, DeviceModel, Event, Frontlight, Orientation, Platform, Unsupported, Update, Waker};
 use crate::gfx::Canvas;
 use display::Display;
-use input::{Mapping, TouchInput};
+use input::{Buttons, Mapping, TouchInput};
 
 /// Set by SIGINT/SIGTERM/SIGHUP, so we can shut down cleanly.
 static QUIT: AtomicBool = AtomicBool::new(false);
@@ -32,6 +32,8 @@ pub struct Kindle {
     profile_line: String,
     display: Display,
     touch: TouchInput,
+    /// Page-turn buttons; `None` (and never polled) on touch-only Kindles.
+    buttons: Option<Buttons>,
     queue: VecDeque<Event>,
     wake_fd: std::sync::Arc<std::os::fd::OwnedFd>,
     _power: PowerEvents,
@@ -65,6 +67,7 @@ impl Kindle {
                 return Err(e);
             }
         };
+        let buttons = Buttons::open();
         let id = display.session.device_id;
         let profile = kindle_profiles::lookup(id);
         let model = kindle_profiles::model(profile, id, &display.name);
@@ -98,6 +101,7 @@ impl Kindle {
             profile_line,
             display,
             touch,
+            buttons,
             queue: VecDeque::new(),
             wake_fd,
             _power: power,
@@ -136,6 +140,16 @@ impl Kindle {
             self.status = None;
         }
         event
+    }
+
+    /// Page buttons follow the touchscreen's grab; a failure only costs the
+    /// buttons' exclusivity, so it's logged rather than fatal.
+    fn grab_buttons(&mut self, grab: bool) {
+        if let Some(buttons) = &mut self.buttons
+            && let Err(e) = buttons.grab(grab)
+        {
+            log::warn!("{e:#}");
+        }
     }
 
     fn take_frontlight(&mut self) -> Option<Option<Frontlight>> {
@@ -190,6 +204,7 @@ impl Platform for Kindle {
             // Let any in-flight flash finish before Amazon's UI draws its sleep screen.
             self.display.wait_for_complete();
             self.touch.grab(false)?;
+            self.grab_buttons(false);
             // A missed handoff (no launcher, or one too busy to ack) must not end
             // the session: keep our last frame, stay in charge of the touchscreen
             // and sleep like a cover would.
@@ -198,6 +213,7 @@ impl Platform for Kindle {
                 Err(e) => {
                     log::warn!("sleep handoff failed, sleeping on Verso's own screen: {e:#}");
                     self.touch.grab(true)?;
+                    self.grab_buttons(true);
                 }
             }
         }
@@ -216,6 +232,7 @@ impl Platform for Kindle {
         } else {
             self.touch.grab(true)?;
         }
+        self.grab_buttons(true);
         self.queue.clear();
         self.sleeping = false;
         self.battery_due = Instant::now() + Duration::from_secs(60);
@@ -270,6 +287,7 @@ impl Platform for Kindle {
                 s.inverted,
             ),
             format!("touch: {}", self.touch.summary()),
+            format!("page buttons: {}", self.buttons.as_ref().map_or("none".into(), Buttons::summary)),
             format!("battery: {}", if self.power_files.is_some() { "sysfs" } else { "powerd" }),
         ]
     }
@@ -278,8 +296,9 @@ impl Platform for Kindle {
         self.display.orientation = orientation;
         self.touch.set_orientation(orientation);
         (self.info.width, self.info.height) = orientation.screen_size(self.display.width, self.display.height);
-        // Touches already queued were mapped for the old orientation.
-        self.queue.retain(|e| !matches!(e, Event::Touch(_)));
+        // Touches and button presses already queued were mapped for the old
+        // orientation.
+        self.queue.retain(|e| !matches!(e, Event::Touch(_) | Event::Key(_)));
         Ok(())
     }
 
@@ -323,9 +342,12 @@ impl Platform for Kindle {
             let mut pfds = [
                 libc::pollfd { fd: self.touch.fd(), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: self.wake_fd.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: self.buttons.as_ref().map_or(-1, Buttons::fd), events: libc::POLLIN, revents: 0 },
             ];
-            // SAFETY: two initialized pollfds backed by live file descriptors.
-            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, wait_ms) };
+            // Touch-only Kindles poll just the first two.
+            let count = if self.buttons.is_some() { 3 } else { 2 };
+            // SAFETY: `count` initialized pollfds backed by live file descriptors.
+            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), count, wait_ms) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -356,6 +378,22 @@ impl Platform for Kindle {
                     bail!("the touchscreen stopped working (poll flags {:#x})", pfd.revents);
                 }
                 self.touch.read(&mut self.queue)?;
+                if pfds[2].revents != 0
+                    && let Some(buttons) = &mut self.buttons
+                {
+                    // Losing the buttons isn't worth ending the session over:
+                    // the touchscreen still turns pages.
+                    let failed = pfds[2].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0;
+                    let read = if failed {
+                        Err(anyhow::anyhow!("poll flags {:#x}", pfds[2].revents))
+                    } else {
+                        buttons.read(self.display.orientation, &mut self.queue)
+                    };
+                    if let Err(e) = read {
+                        log::warn!("page buttons stopped working, touch only from now: {e:#}");
+                        self.buttons = None;
+                    }
+                }
             }
             if self.queue.is_empty() && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Ok(None);

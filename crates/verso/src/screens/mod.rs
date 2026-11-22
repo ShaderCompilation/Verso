@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{Battery, Orientation, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, KeyAction, Orientation, RefreshMode, TextInput, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -126,6 +126,11 @@ pub trait Screen {
     fn begin_batch(&mut self) {}
     /// Called after draining a batch of already-queued events, before drawing.
     fn finish_batch(&mut self, _cx: &mut EventCx) {}
+
+    /// A page-turn button was pressed. Only the reader turns pages.
+    fn on_key(&mut self, _key: KeyAction, _cx: &mut EventCx) -> Action {
+        Action::None
+    }
 
     /// True if a focused field or its text-entry overlay consumed the input.
     fn on_text_input(&mut self, _input: &TextInput, _cx: &mut EventCx) -> bool {

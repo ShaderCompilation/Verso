@@ -16,6 +16,9 @@ pub mod firewall;
 #[cfg(any(feature = "kindle", test))]
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod flash;
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+mod framebuffer;
 #[cfg(feature = "desktop")]
 mod headless;
 #[cfg(feature = "kindle")]
@@ -166,8 +169,61 @@ pub enum Event {
     Usb(bool),
     /// Asynchronous startup frontlight reading from hardware.
     Frontlight(Option<Frontlight>),
+    /// A hardware page-turn button was pressed (Oasis, or PgUp/PgDn in the
+    /// simulator), already turned to the way the device is held.
+    Key(KeyAction),
     /// Leave the app (window closed, or a signal on the device).
     Quit,
+}
+
+/// What a hardware button asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAction {
+    PageNext,
+    PagePrev,
+}
+
+impl KeyAction {
+    /// The page-turn meaning of an evdev key code, held in `orientation`.
+    /// Kindle codes as FBInk's input scan reads them: `KEY_PAGEUP` and
+    /// `KEY_F23` go back, `KEY_PAGEDOWN` and `KEY_YEN` forward. The
+    /// Oasis's buttons sit on the panel's right edge in portrait, the
+    /// "back" one above; a quarter turn clockwise (`Landscape`) puts that
+    /// one on the right of the bottom edge, where forward belongs, so the
+    /// two swap (to verify on an Oasis 3).
+    #[cfg(any(feature = "kindle", test))]
+    #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+    pub fn from_evdev(code: u16, orientation: Orientation) -> Option<Self> {
+        const KEY_PAGEUP: u16 = 104;
+        const KEY_PAGEDOWN: u16 = 109;
+        const KEY_YEN: u16 = 124;
+        const KEY_F23: u16 = 193;
+        let portrait = match code {
+            KEY_PAGEUP | KEY_F23 => Self::PagePrev,
+            KEY_PAGEDOWN | KEY_YEN => Self::PageNext,
+            _ => return None,
+        };
+        Some(match orientation {
+            Orientation::Portrait => portrait,
+            Orientation::Landscape => portrait.reversed(),
+        })
+    }
+
+    #[cfg(any(feature = "kindle", test))]
+    fn reversed(self) -> Self {
+        match self {
+            Self::PageNext => Self::PagePrev,
+            Self::PagePrev => Self::PageNext,
+        }
+    }
+
+    /// Pages to move: +1 or -1.
+    pub fn step(self) -> isize {
+        match self {
+            Self::PageNext => 1,
+            Self::PagePrev => -1,
+        }
+    }
 }
 
 /// Single-line entry commands shared by hardware and touch keyboards.
@@ -274,6 +330,8 @@ pub trait Platform {
 #[cfg_attr(feature = "kindle", allow(dead_code))] // screenshots are simulator-only
 pub enum ScriptStep {
     Text(TextInput),
+    /// A page-turn button press.
+    Key(KeyAction),
     Tap(Point),
     LongPress(Point),
     HoldDrag(Point, Point),
@@ -308,5 +366,25 @@ pub fn open(device: Option<&str>) -> Result<Box<dyn Platform>> {
     {
         let _ = device;
         Ok(Box::new(kindle::Kindle::open()?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_keys_follow_the_way_the_kindle_is_held() {
+        use KeyAction::*;
+        for (code, portrait) in [(104, PagePrev), (193, PagePrev), (109, PageNext), (124, PageNext)] {
+            assert_eq!(KeyAction::from_evdev(code, Orientation::Portrait), Some(portrait), "code {code}");
+            let landscape = if portrait == PageNext { PagePrev } else { PageNext };
+            assert_eq!(KeyAction::from_evdev(code, Orientation::Landscape), Some(landscape), "code {code}");
+        }
+        // Power, Home and anything else aren't page keys.
+        for code in [116, 102, 1, 0] {
+            assert_eq!(KeyAction::from_evdev(code, Orientation::Portrait), None);
+        }
+        assert_eq!((PageNext.step(), PagePrev.step()), (1, -1));
     }
 }

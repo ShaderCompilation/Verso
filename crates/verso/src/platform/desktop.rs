@@ -8,7 +8,8 @@
 //! - `VERSO_SIM_BATTERY=82` shows a battery at 82%; `82+` is charging.
 //! - The left mouse button acts as a finger.
 //! - Keys: Q / Esc quit · S sleep/wake · V toggle refresh visualisation ·
-//!   P save a screenshot to `screenshots/`.
+//!   P save a screenshot to `screenshots/` · PgDn / PgUp the page-turn
+//!   buttons (on every preset, so the Oasis's buttons can be tried anywhere).
 //! - Like the real panel, `Fast` refreshes show only black and white.
 //! - With visualisation on, refreshed areas flash a colour for a moment:
 //!   red = Fast, blue = Ui, green = Page, orange = Full.
@@ -29,7 +30,8 @@ use winit::window::{Window, WindowId};
 
 use super::sim_device::SimDevice;
 use super::{
-    DeviceInfo, Event, Frontlight, Orientation, Platform, RefreshMode, TextInput, Touch, TouchPhase, Update, Waker,
+    DeviceInfo, Event, Frontlight, KeyAction, Orientation, Platform, RefreshMode, TextInput, Touch, TouchPhase, Update,
+    Waker,
 };
 use crate::geom::{Point, Rect};
 use crate::gfx::{Canvas, save_gray_png};
@@ -68,7 +70,9 @@ impl Desktop {
                 return Err(anyhow!("window closed during startup"));
             }
         }
-        log::info!("simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot");
+        log::info!(
+            "simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot · PgDn/PgUp page buttons"
+        );
         Ok(Self { info, native: (width, height), event_loop, sim, device })
     }
 }
@@ -433,6 +437,19 @@ impl ApplicationHandler for Sim {
                 self.events.push_back(Event::TextInput { input: TextInput::Insert(text), repeat: false });
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // No text field uses these, so they're always the buttons.
+                // Held keys don't repeat, like the Kindle's buttons.
+                let page = match event.logical_key {
+                    Key::Named(NamedKey::PageDown) => Some(KeyAction::PageNext),
+                    Key::Named(NamedKey::PageUp) => Some(KeyAction::PagePrev),
+                    _ => None,
+                };
+                if let Some(key) = page {
+                    if !event.repeat {
+                        self.events.push_back(Event::Key(key));
+                    }
+                    return;
+                }
                 let input = match event.logical_key {
                     Key::Named(NamedKey::Backspace) => Some(TextInput::Backspace),
                     Key::Named(NamedKey::Delete) => Some(TextInput::Delete),
