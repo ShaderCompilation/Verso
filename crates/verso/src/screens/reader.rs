@@ -553,7 +553,7 @@ impl Reader {
             RefreshMode::Full
         } else if self.turn_pending {
             self.turned = true;
-            self.refresh.turn(page.images, chapter_start)
+            self.refresh.turn(page.images, chapter_start, cx.now)
         } else {
             RefreshMode::Ui
         };
@@ -3823,7 +3823,9 @@ mod tests {
         assert!(r.settings.developer);
         assert_eq!(r.settings.typography.size_pt, size, "the reader keeps its own typography");
         // The new refresh interval applies to the next turns.
-        let modes: Vec<_> = (0..3).map(|_| r.refresh.turn(false, false)).collect();
+        let start = Instant::now();
+        let modes: Vec<_> =
+            (0..3u32).map(|i| r.refresh.turn(false, false, start + i * Duration::from_secs(1))).collect();
         assert_eq!(modes, [RefreshMode::Page, RefreshMode::Page, RefreshMode::Full]);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
         Ok(())

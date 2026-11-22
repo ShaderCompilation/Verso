@@ -399,7 +399,9 @@ with the Kindle awake and no reader open. They restore the Kindle UI at the end.
 - `highlights_load.py --binary … --probe … --output DIR`: opening, live relayout,
   swipe page turns and memory with 0, 100 and 1,000 short highlights and 1,000
   dense long ranges (21 paragraphs each, ~100 overlapping per page). Timings
-  come from the app's log timestamps and `elapsed_us` fields.
+  come from the app's log timestamps and `elapsed_us` fields. Relayout opens
+  the reader menu with a swipe up from the bottom edge (the top edge belongs to
+  the Top Drawer), taps **Text** and steps the size in the Text sheet.
 - `redraw.py --experiment annotations --annotation-count N --annotation-fixture
   reader.epub`: page-turn request latency with N short highlights.
 
@@ -444,7 +446,8 @@ bench language --name book-choice --language en --choose-default \
 Cold times every index build, observes preparation and verifies byte-identical
 book dismissal. It does not flush Linux's page cache. Warm copies only dictionary
 caches, then runs five queries in one session: the first by long press, then four
-**Look up** taps. It is not five independent launches. English enables eight
+repeats (`Run.look_up_again`: tap the compact card's heading to open the field,
+then **Look up**). It is not five independent launches. English enables eight
 English/bilingual dictionaries, Russian the five monolingual Russian ones, and
 Default all 13. Concise Oxford leads the timed English/Default preferences.
 These fixture choices never replace the user's own preferences.
@@ -515,7 +518,7 @@ state, one-word books, launcher copy and dictionary sets, so the same rules
 apply: install the latest build first (`scripts/deploy.sh --no-run`), build
 both probes, and choose a word that no installed dictionary has as an exact
 entry. Each call is one session: a long press (the first miss, which opens the
-pack), then **Look up** taps (warm misses). It records the pack-open,
+pack), then repeats through the card's heading and **Look up** (warm misses). It records the pack-open,
 candidate and per-dictionary base-form debug lines and the pack's `Size`,
 `Rss` and `Pss` from `/proc/<pid>/smaps` after every search.
 
