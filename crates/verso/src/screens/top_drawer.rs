@@ -13,14 +13,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::geom::Rect;
+use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon, Weight};
 use crate::platform::{Frontlight, Orientation, RefreshMode, Waker, ssh, wifi};
+use crate::screens::TopDrawerBook;
 use crate::store::Store;
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{FILL, INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
-use crate::ui::widgets::Slider;
+use crate::ui::widgets::{IconButton, Slider};
 
 /// While the server runs and Wi-Fi is on but the SSH address or name isn't
 /// there yet (Wi-Fi still connecting), the status is read again this often,
@@ -60,6 +61,10 @@ pub enum TileState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawerEvent {
     Close,
+    /// Close the open book and return to Home/Library.
+    CloseBook,
+    /// Open in-book search.
+    Search,
     /// Light or warmth moved: set the frontlight.
     Light(Frontlight),
     /// Turn Wi-Fi on or off.
@@ -83,8 +88,10 @@ pub enum DrawerEvent {
 pub struct DrawerLayout {
     /// The visible panel, flush with the top, left and right edges.
     pub panel: Rect,
-    /// Clock and SSH address on the left, battery on the right.
+    /// Status strip (Home/Library) or book header (in a book).
     pub status: Rect,
+    /// Compact SSH address line below the book header while SSH runs.
+    pub ssh_note: Option<Rect>,
     /// Top edges of the hairlines below the status strip and the sliders.
     pub dividers: Vec<i32>,
     /// Whole slider rows (icon, label, slider, value): Light, then Warmth.
@@ -96,15 +103,29 @@ pub struct DrawerLayout {
 
 impl DrawerLayout {
     /// `sliders`: 0 (no frontlight reading), 1 (light) or 2 (light and
-    /// warmth). `tiles`: 5, or 6 with SSH.
-    pub fn new(t: &Theme, screen: Rect, sliders: usize, tiles: usize) -> Self {
+    /// warmth). `tiles`: 5, or 6 with SSH. `book`: in-book header instead of
+    /// the Home/Library status strip.
+    pub fn new(t: &Theme, screen: Rect, sliders: usize, tiles: usize, book: bool, ssh_note: bool) -> Self {
         let wide = screen.w > screen.h;
         let m = t.margin;
         let content_w = screen.w - 2 * m;
-        let pad = t.mm(if wide { 1.5 } else { 1.7 });
-        let status = Rect::new(screen.x + m, screen.y + pad, content_w, t.mm(6.4));
-        let mut dividers = vec![status.bottom() + t.mm(0.35)];
-        let mut y = dividers[0] + t.hairline + t.mm(if wide { 1.5 } else { 1.9 });
+        let (status, ssh_rect, div0, after_div0) = if book {
+            let pad = t.mm(0.35);
+            let head_h = t.mm(if wide { 9.5 } else { 11.2 });
+            let status = Rect::new(screen.x + m, screen.y + pad, content_w, head_h);
+            if ssh_note {
+                let note = Rect::new(screen.x + m, status.bottom(), content_w, t.mm(4.2));
+                (status, Some(note), note.bottom() + t.mm(0.6), t.mm(if wide { 1.4 } else { 1.7 }))
+            } else {
+                (status, None, status.bottom(), t.mm(if wide { 1.4 } else { 1.7 }))
+            }
+        } else {
+            let pad = t.mm(if wide { 1.5 } else { 1.7 });
+            let status = Rect::new(screen.x + m, screen.y + pad, content_w, t.mm(6.4));
+            (status, None, status.bottom() + t.mm(0.35), t.mm(if wide { 1.5 } else { 1.9 }))
+        };
+        let mut dividers = vec![div0];
+        let mut y = dividers[0] + t.hairline + after_div0;
         let row_h = t.mm(if wide { 6.6 } else { 7.1 });
         let mut rows = Vec::new();
         if sliders > 0 {
@@ -156,6 +177,7 @@ impl DrawerLayout {
         Self {
             panel: Rect::new(screen.x, screen.y, screen.w, (bottom - screen.y).min(screen.h)),
             status,
+            ssh_note: ssh_rect,
             dividers,
             sliders: rows,
             tiles: rects,
@@ -476,6 +498,10 @@ pub struct TopDrawer {
     screen: Rect,
     orientation: Orientation,
     developer: bool,
+    /// Open book context when pulled down inside a book; None on Home/Library.
+    book: Option<TopDrawerBook>,
+    back: Option<IconButton>,
+    search: Option<IconButton>,
     /// SSH ran at some point while the drawer was open (or when it opened):
     /// the tile stays, so turning the server off doesn't make it vanish.
     ssh_shown: bool,
@@ -493,6 +519,7 @@ pub struct TopDrawer {
 }
 
 impl TopDrawer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         t: &Theme,
         screen: Rect,
@@ -500,14 +527,18 @@ impl TopDrawer {
         developer: bool,
         light: Option<Frontlight>,
         net: NetState,
+        book: Option<TopDrawerBook>,
         now: Instant,
     ) -> Self {
         let mut drawer = Self {
             screen,
             orientation,
             developer,
+            book,
+            back: None,
+            search: None,
             ssh_shown: net.ssh.running,
-            layout: DrawerLayout::new(t, screen, 0, 5),
+            layout: DrawerLayout::new(t, screen, 0, 5, false, false),
             light: None,
             warmth: None,
             tiles: Vec::new(),
@@ -541,6 +572,16 @@ impl TopDrawer {
         &self.layout
     }
 
+    #[cfg(test)]
+    pub fn back_rect(&self) -> Option<Rect> {
+        self.back.as_ref().map(IconButton::rect)
+    }
+
+    #[cfg(test)]
+    pub fn search_rect(&self) -> Option<Rect> {
+        self.search.as_ref().map(IconButton::rect)
+    }
+
     fn show_ssh(&self) -> bool {
         self.developer || self.ssh_shown || self.net.ssh.running || self.net.ssh_pending.is_some()
     }
@@ -559,10 +600,34 @@ impl TopDrawer {
         self.warmth = light.warmth.map(|w| Slider::new(0.0, LIGHT_MAX, 1.0, w as f32));
     }
 
+    fn book_narrow(&self, t: &Theme) -> bool {
+        self.screen.w < t.mm(100.0)
+    }
+
     fn place(&mut self, t: &Theme) {
         let kinds = self.tile_kinds();
         let sliders = usize::from(self.light.is_some()) + usize::from(self.warmth.is_some());
-        self.layout = DrawerLayout::new(t, self.screen, sliders, kinds.len());
+        let in_book = self.book.is_some();
+        let ssh_note = in_book && self.net_note().is_some();
+        self.layout = DrawerLayout::new(t, self.screen, sliders, kinds.len(), in_book, ssh_note);
+        if in_book {
+            let s = self.layout.status;
+            let mut back = IconButton::new(Icon::ArrowLeft);
+            back.place_at(Point::new(self.screen.x + t.margin + t.target / 2 - t.mm(2.0), s.center().y), t);
+            let bat_w = t.mm(13.0);
+            let search_right = if self.book_narrow(t) {
+                s.right() - bat_w - t.mm(1.0)
+            } else {
+                s.right() - bat_w - t.mm(2.2) - t.mm(8.5) - t.mm(0.5)
+            };
+            let mut search = IconButton::new(Icon::Search);
+            search.place_at(Point::new(search_right - t.target / 2, s.center().y), t);
+            self.back = Some(back);
+            self.search = Some(search);
+        } else {
+            self.back = None;
+            self.search = None;
+        }
         self.tiles = kinds.into_iter().map(|k| (k, Press::default())).collect();
         let wide = self.screen.w > self.screen.h;
         let rows = self.layout.sliders.clone();
@@ -588,9 +653,11 @@ impl TopDrawer {
     pub fn set_net(&mut self, t: &Theme, net: NetState, now: Instant) {
         let finished = net.finished != self.net.finished;
         let before = self.tile_kinds();
+        let had_note = self.layout.ssh_note.is_some();
         self.ssh_shown |= net.ssh.running;
         self.net = net;
-        if self.tile_kinds() != before {
+        let wants_note = self.book.is_some() && self.net_note().is_some();
+        if self.tile_kinds() != before || wants_note != had_note {
             self.place(t);
         }
         if finished {
@@ -713,6 +780,16 @@ impl TopDrawer {
         if matches!(g, Gesture::Swipe { dir: Direction::Up, .. }) {
             return Some(DrawerEvent::Close);
         }
+        if let Some(back) = &mut self.back
+            && back.on_gesture(g)
+        {
+            return Some(DrawerEvent::CloseBook);
+        }
+        if let Some(search) = &mut self.search
+            && search.on_gesture(g)
+        {
+            return Some(DrawerEvent::Search);
+        }
         let mut tapped = None;
         for (i, (tile, press)) in self.tiles.iter_mut().enumerate() {
             let area = self.layout.tiles.get(i).copied().unwrap_or_default();
@@ -770,6 +847,40 @@ impl TopDrawer {
     fn draw_status(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         let s = self.layout.status;
+        if let Some(book) = &self.book {
+            if let Some(back) = &self.back {
+                back.draw(cx);
+            }
+            if let Some(search) = &self.search {
+                search.draw(cx);
+            }
+            let mut right = s.right();
+            if let Some(battery) = cx.battery {
+                let label = format!("{}%", battery.percent.min(100));
+                let w = t.mm(5.4) + t.mm(0.8) + cx.text.width(&label, t.small).ceil() as i32 + 2;
+                let rect = Rect::new(s.right() - w, s.y, w, s.h);
+                cx.battery_indicator(rect);
+                right = rect.x - t.mm(2.2);
+            }
+            let search_right = self.search.as_ref().map_or(s.right(), |b| b.rect().right());
+            if !self.book_narrow(t)
+                && let Some(clock) = &self.clock
+            {
+                let clock_x = search_right + t.mm(0.5);
+                if right > clock_x {
+                    cx.line(clock, t.small.gray(INK2), Rect::new(clock_x, s.y, right - clock_x, s.h), HAlign::Right);
+                }
+            }
+            let title_x = self.screen.x + t.margin + t.target - t.mm(1.0);
+            let title_right = self.search.as_ref().map_or(right, |b| b.rect().x - t.mm(1.0));
+            if title_right > title_x {
+                cx.line(&book.title, t.button, Rect::new(title_x, s.y, title_right - title_x, s.h), HAlign::Left);
+            }
+            if let (Some(note_rect), Some(note)) = (self.layout.ssh_note, self.net_note()) {
+                cx.line(&format!("SSH · {note}"), t.caption.gray(INK2), note_rect, HAlign::Left);
+            }
+            return;
+        }
         let mut right = s.right();
         if let Some(battery) = cx.battery {
             let label = format!("{}%", battery.percent.min(100));

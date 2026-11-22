@@ -20,7 +20,7 @@ def main():
     shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
     opening = ['--tap', '636,1560', '--tap', '165,500']
     menu = [*opening, '--tap', '636,848']
-    search = [*menu, '--tap', '948,77']
+    search = [*menu, '--tap', '895,77']
     results = [*search, '--text', 'ada', '--edit', 'submit']
     opened = [*results, '--swipe', '900,1000,300,1000', '--tap', '600,1000']
     passage = [*opening, '--hold-drag', '190,297,500,297']

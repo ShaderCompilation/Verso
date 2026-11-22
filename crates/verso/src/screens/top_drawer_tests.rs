@@ -48,8 +48,8 @@ fn check_layout(t: &Theme, l: &DrawerLayout, screen: Rect) {
 fn paperwhite_portrait_grids_have_the_same_height() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    let five = DrawerLayout::new(&t, screen, 2, 5);
-    let six = DrawerLayout::new(&t, screen, 2, 6);
+    let five = DrawerLayout::new(&t, screen, 2, 5, false, false);
+    let six = DrawerLayout::new(&t, screen, 2, 6, false, false);
     check_layout(&t, &five, screen);
     check_layout(&t, &six, screen);
     assert_eq!(five.panel, six.panel, "SSH doesn't change the drawer's height");
@@ -76,7 +76,7 @@ fn paperwhite_landscape_puts_sliders_side_by_side_and_tiles_in_one_row() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1696, 1272);
     for tiles in [5, 6] {
-        let l = DrawerLayout::new(&t, screen, 2, tiles);
+        let l = DrawerLayout::new(&t, screen, 2, tiles, false, false);
         check_layout(&t, &l, screen);
         assert_eq!(rows(&l).len(), 1, "{tiles} tiles in one row");
         assert!(mm(&t, l.tiles[0].w) >= MIN_ROW_TILE_MM);
@@ -86,7 +86,7 @@ fn paperwhite_landscape_puts_sliders_side_by_side_and_tiles_in_one_row() {
         assert!((36.0..=41.0).contains(&h), "about 40 mm, not {h}");
     }
     // Without warmth, light takes the whole row.
-    let l = DrawerLayout::new(&t, screen, 1, 6);
+    let l = DrawerLayout::new(&t, screen, 1, 6, false, false);
     assert_eq!(l.sliders.len(), 1);
     assert_eq!(l.sliders[0].w, l.status.w);
 }
@@ -96,16 +96,16 @@ fn small_screens_scale_and_narrow_landscape_rows_wrap() {
     let t = Theme::for_dpi(167);
     let portrait = Rect::new(0, 0, 600, 800);
     for (tiles, shape) in [(5, vec![3, 2]), (6, vec![3, 3])] {
-        let l = DrawerLayout::new(&t, portrait, 2, tiles);
+        let l = DrawerLayout::new(&t, portrait, 2, tiles, false, false);
         check_layout(&t, &l, portrait);
         assert_eq!(rows(&l).iter().map(Vec::len).collect::<Vec<_>>(), shape);
         assert!(l.panel.h * 100 / portrait.h < 60, "{}", l.panel.h);
     }
     let landscape = Rect::new(0, 0, 800, 600);
-    let six = DrawerLayout::new(&t, landscape, 2, 6);
+    let six = DrawerLayout::new(&t, landscape, 2, 6, false, false);
     check_layout(&t, &six, landscape);
     assert_eq!(rows(&six).len(), 2, "six tiles would be under 19 mm wide: wrap to 3 × 2");
-    let five = DrawerLayout::new(&t, landscape, 2, 5);
+    let five = DrawerLayout::new(&t, landscape, 2, 5, false, false);
     check_layout(&t, &five, landscape);
     assert_eq!(rows(&five).len(), 1, "five tiles still fit one row");
     assert!(mm(&t, five.tiles[0].w) >= MIN_ROW_TILE_MM);
@@ -113,18 +113,18 @@ fn small_screens_scale_and_narrow_landscape_rows_wrap() {
     // 6" at 300 dpi.
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1072, 1448);
-    check_layout(&t, &DrawerLayout::new(&t, screen, 1, 6), screen);
+    check_layout(&t, &DrawerLayout::new(&t, screen, 1, 6, false, false), screen);
 }
 
 #[test]
 fn no_frontlight_reading_leaves_out_the_slider_rows() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    let none = DrawerLayout::new(&t, screen, 0, 5);
+    let none = DrawerLayout::new(&t, screen, 0, 5, false, false);
     check_layout(&t, &none, screen);
     assert!(none.sliders.is_empty());
     assert_eq!(none.dividers.len(), 1);
-    assert!(none.panel.h < DrawerLayout::new(&t, screen, 1, 5).panel.h);
+    assert!(none.panel.h < DrawerLayout::new(&t, screen, 1, 5, false, false).panel.h);
 }
 
 pub(crate) fn status(running: bool, wifi: bool) -> ssh::Status {
@@ -158,6 +158,7 @@ fn drawer(developer: bool, net: NetState) -> (Theme, TopDrawer) {
         developer,
         Some(LIGHT),
         net,
+        None,
         Instant::now(),
     );
     (t, d)
@@ -323,7 +324,8 @@ fn light_sliders_drag_and_report_the_frontlight() {
 fn late_frontlight_reading_adds_the_sliders_once() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    let mut d = TopDrawer::new(&t, screen, Orientation::Portrait, false, None, net(Some(true), false), Instant::now());
+    let mut d =
+        TopDrawer::new(&t, screen, Orientation::Portrait, false, None, net(Some(true), false), None, Instant::now());
     assert!(d.layout().sliders.is_empty());
     let short = d.rect().h;
     assert!(d.set_frontlight(&t, LIGHT));
@@ -573,4 +575,48 @@ fn claimed_hostname_is_remembered() -> anyhow::Result<()> {
     remember_hostname(&store, &status(true, true));
     assert_eq!(store.settings().hostname, "verso-2");
     Ok(())
+}
+
+#[test]
+fn in_book_drawer_header_geometry_and_actions_in_portrait_landscape_and_small() {
+    let book = || Some(TopDrawerBook { title: "Ender's Game".into() });
+    for (dpi, screen, orientation, head_range) in [
+        (300, Rect::new(0, 0, 1272, 1696), Orientation::Portrait, 11.0..=12.0),
+        (300, Rect::new(0, 0, 1696, 1272), Orientation::Landscape, 9.3..=10.0),
+        (167, Rect::new(0, 0, 600, 800), Orientation::Portrait, 11.0..=12.0),
+    ] {
+        let t = Theme::for_dpi(dpi);
+        let mut d =
+            TopDrawer::new(&t, screen, orientation, false, Some(LIGHT), net(Some(true), false), book(), Instant::now());
+        check_layout(&t, d.layout(), screen);
+        let head_mm = mm(&t, d.layout().status.h);
+        assert!(head_range.contains(&head_mm), "{screen:?}: head {head_mm} mm");
+        assert!(d.layout().ssh_note.is_none());
+        let back = d.back_rect().expect("back button");
+        let search = d.search_rect().expect("search button");
+        assert!(back.right() < search.x && search.right() < d.layout().status.right());
+        assert!(back.y >= 0 && back.bottom() <= d.layout().dividers[0]);
+        assert!(search.y >= 0 && search.bottom() <= d.layout().dividers[0]);
+        assert_eq!(tap(&mut d, back.center()), Some(DrawerEvent::CloseBook));
+        assert_eq!(tap(&mut d, search.center()), Some(DrawerEvent::Search));
+        // Over half the page stays visible in Paperwhite portrait and landscape.
+        if dpi == 300 {
+            assert!(d.rect().h * 2 < screen.h, "{screen:?}: panel {}", d.rect().h);
+        }
+        // Enabling SSH in developer mode adds the compact subline below the header.
+        let before_h = d.rect().h;
+        d.set_net(&t, net(Some(true), true), Instant::now());
+        let note = d.layout().ssh_note.expect("SSH subline appears while running");
+        assert!(note.y >= d.layout().status.bottom() && note.bottom() <= d.layout().dividers[0]);
+        assert!(d.rect().h > before_h);
+        // Drawing succeeds cleanly with book header, battery, clock, and SSH subline.
+        let mut canvas = Canvas::new(screen.w as u32, screen.h as u32);
+        let (mut text, mut icons, mut hints) = (TextRenderer::new(), IconRenderer::default(), Vec::new());
+        let mut cx = DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints);
+        cx.battery = Some(crate::platform::Battery { percent: 82, charging: false });
+        d.draw(&mut cx);
+    }
+    // Home/Library drawer has no back/search buttons.
+    let (_, home) = drawer(false, net(Some(true), false));
+    assert!(home.back_rect().is_none() && home.search_rect().is_none());
 }

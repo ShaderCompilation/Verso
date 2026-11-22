@@ -1,8 +1,8 @@
 //! The centre-tap menu. Controls use the shared toolkit.
 use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon};
-use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, PAPER, Theme};
+use crate::ui::gesture::{Direction, Gesture};
+use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{Button, ButtonKind, IconButton, Slider, SliderEvent, TopBar};
 
@@ -15,17 +15,20 @@ pub enum MenuEvent {
     Text,
     /// Page layout: margins and reader bars.
     Layout,
-    /// The `Battery + ⌄` control: open the Top Drawer.
+    /// The `☀` button, battery indicator, or pulling down the bar: open the Top Drawer.
     QuickSettings,
     Page(usize),
     Chapter(isize),
 }
 pub struct ReaderMenu {
+    top_panel: Rect,
+    handle: Rect,
     top: TopBar,
     search: IconButton,
-    /// The `Battery + ⌄` control in the top bar.
-    quick: Rect,
-    quick_press: Press,
+    light: IconButton,
+    /// The battery indicator in the top bar (also opens the Top Drawer).
+    battery: Rect,
+    battery_press: Press,
     panel: Rect,
     info: Rect,
     pub progress: Slider,
@@ -41,15 +44,26 @@ impl ReaderMenu {
     pub fn new(t: &Theme, screen: Rect, title: &str, page: usize, pages: usize) -> Self {
         let m = t.margin;
         let wide = screen.w > screen.h;
+        let top_panel = screen.split_top(t.mm(14.8)).0;
+        let handle_w = t.mm(12.2);
+        let handle_h = t.mm(0.8).max(2);
+        let handle = Rect::new(
+            screen.x + (screen.w - handle_w) / 2,
+            top_panel.bottom() - t.mm(1.7) - handle_h,
+            handle_w,
+            handle_h,
+        );
         let mut top = TopBar::new(title, true);
         top.serif = false;
+        top.border = false;
         top.place(screen, t);
         let bar = top.rect();
-        let quick_w = t.mm(19.5);
-        let quick =
-            Rect::new(screen.right() - m + t.mm(1.5) - quick_w, bar.center().y - t.target / 2, quick_w, t.target);
+        let battery_w = t.mm(13.5);
+        let battery = Rect::new(screen.right() - m - battery_w, bar.center().y - t.target / 2, battery_w, t.target);
+        let mut light = IconButton::new(Icon::Sun);
+        light.place_at(Point::new(battery.x - t.target / 2, bar.center().y), t);
         let mut search = IconButton::new(Icon::Search);
-        search.place_at(Point::new(quick.x - t.target / 2, bar.center().y), t);
+        search.place_at(Point::new(light.rect().x - t.target / 2, bar.center().y), t);
         top.trailing = bar.right() - search.rect().x + t.mm(1.0);
         let panel = screen.split_bottom(t.mm(if wide { 35.0 } else { 36.5 })).0;
         let info = Rect::new(m, panel.y + t.mm(if wide { 2.4 } else { 2.7 }), screen.w - 2 * m, t.mm(7.0));
@@ -71,10 +85,13 @@ impl ReaderMenu {
         });
         let [contents, highlights, text, layout] = std::array::from_fn(|_| buttons.next().unwrap());
         Self {
+            top_panel,
+            handle,
             top,
             search,
-            quick,
-            quick_press: Press::default(),
+            light,
+            battery,
+            battery_press: Press::default(),
             panel,
             info,
             progress,
@@ -88,8 +105,20 @@ impl ReaderMenu {
         }
     }
     #[cfg(test)]
-    pub fn quick_rect(&self) -> Rect {
-        self.quick
+    pub fn top_panel(&self) -> Rect {
+        self.top_panel
+    }
+    #[cfg(test)]
+    pub fn handle_rect(&self) -> Rect {
+        self.handle
+    }
+    #[cfg(test)]
+    pub fn light_rect(&self) -> Rect {
+        self.light.rect()
+    }
+    #[cfg(test)]
+    pub fn battery_rect(&self) -> Rect {
+        self.battery
     }
     #[cfg(test)]
     pub fn search_rect(&self) -> Rect {
@@ -107,21 +136,25 @@ impl ReaderMenu {
     /// is on screen (while scrubbing elsewhere, only the page number shows).
     pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize, percent: Option<u32>, pages_ready: bool) {
         let t = cx.theme;
-        cx.fill(self.top.rect(), PAPER);
+        // Same pull-down visual language as TopDrawer: rounded bottom corners,
+        // side borders just off-screen, and a centered handle pill.
+        let r = self.top_panel;
+        let extra = t.radius_sheet as i32 * 2;
+        let shape = Rect::new(r.x - t.border, r.y - extra, r.w + 2 * t.border, r.h + extra);
+        cx.canvas.fill_rounded_rect(shape, t.radius_sheet, PAPER);
+        cx.canvas.stroke_rounded_rect(shape, t.radius_sheet, t.border as f32, INK);
         self.top.draw(cx);
         self.search.draw(cx);
-        // Battery + ⌄: like the Home battery slot, no pressed state (the
-        // drawer appears at once).
-        let chevron =
-            Rect::new(self.quick.right() - t.mm(1.5) - t.icon_small, self.quick.y, t.icon_small, self.quick.h);
-        let battery = Rect::new(
-            self.quick.x + t.mm(1.5),
-            self.top.rect().y,
-            chevron.x - t.mm(0.8) - self.quick.x - t.mm(1.5),
-            t.top_bar,
-        );
-        cx.battery_indicator(battery);
-        cx.icon(Icon::ChevronDown, chevron, t.icon_small, INK2);
+        self.light.draw(cx);
+        if let Some(battery) = cx.battery {
+            let label = format!("{}%", battery.percent.min(100));
+            let w = t.mm(5.4) + t.mm(0.8) + cx.text.width(&label, t.small).ceil() as i32 + 2;
+            let bar = self.top.rect();
+            let rect = Rect::new(self.battery.right() - w, bar.y, w, bar.h);
+            cx.battery_indicator(rect);
+        }
+        let h = self.handle;
+        cx.canvas.fill_rounded_rect(h, h.h as f32 / 2.0, LINE);
         cx.fill(self.panel, PAPER);
         cx.hline(self.panel.y, 0, self.panel.right(), t.border, INK);
         let progress = progress_label(self.progress.value as usize, pages, percent);
@@ -141,15 +174,23 @@ impl ReaderMenu {
     }
     pub fn on_gesture(&mut self, g: &Gesture, pages_ready: bool) -> Option<MenuEvent> {
         if let Gesture::Down(p) = g {
-            self.outside = !self.panel.contains(*p) && !self.top.rect().contains(*p);
+            self.outside = !self.panel.contains(*p) && !self.top_panel.contains(*p);
         }
         if self.outside {
             return matches!(g, Gesture::Tap(_)).then_some(MenuEvent::Close);
         }
+        if let Gesture::Swipe { dir: Direction::Down, from, .. } = g
+            && self.top_panel.contains(*from)
+        {
+            return Some(MenuEvent::QuickSettings);
+        }
         if self.top.on_gesture(g) {
             return Some(MenuEvent::Books);
         }
-        if self.quick_press.on_gesture(g, self.quick) == Some(PressEvent::Tap) {
+        if self.light.on_gesture(g) {
+            return Some(MenuEvent::QuickSettings);
+        }
+        if self.battery_press.on_gesture(g, self.battery) == Some(PressEvent::Tap) {
             return Some(MenuEvent::QuickSettings);
         }
         if self.search.on_gesture(g) {
@@ -218,10 +259,15 @@ mod tests {
             }
             let slider = menu.progress.rect();
             assert!(slider.y > panel.y + t.mm(9.0) && slider.bottom() < buttons[0].y, "{screen:?}: {slider:?}");
-            // Search and Battery + ⌄ sit in the top bar, apart, inside the screen.
-            let (search, quick) = (menu.search_rect(), menu.quick_rect());
-            assert!(search.right() <= quick.x && quick.right() <= screen.right());
-            assert!(quick.y >= 0 && quick.bottom() <= t.top_bar);
+            // Search, Sun, and Battery sit in the top bar, apart, inside the screen.
+            let (search, light, battery) = (menu.search_rect(), menu.light_rect(), menu.battery_rect());
+            assert!(search.right() <= light.x && light.right() <= battery.x && battery.right() <= screen.right());
+            assert!(battery.y >= 0 && battery.bottom() <= t.top_bar);
+            let top_panel = menu.top_panel();
+            let handle = menu.handle_rect();
+            assert!(top_panel.h > t.top_bar);
+            assert!(handle.y > battery.bottom() && handle.bottom() < top_panel.bottom());
+            assert_eq!(handle.center().x, screen.center().x);
         }
     }
 
@@ -230,9 +276,18 @@ mod tests {
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut menu = ReaderMenu::new(&t, screen, "Book", 10, 100);
-        let (quick, search) = (menu.quick_rect().center(), menu.search_rect().center());
-        assert!(matches!(tap(&mut menu, quick), Some(MenuEvent::QuickSettings)));
+        let (light, battery, search) =
+            (menu.light_rect().center(), menu.battery_rect().center(), menu.search_rect().center());
+        assert!(matches!(tap(&mut menu, light), Some(MenuEvent::QuickSettings)));
+        assert!(matches!(tap(&mut menu, battery), Some(MenuEvent::QuickSettings)));
         assert!(matches!(tap(&mut menu, search), Some(MenuEvent::Search)));
+        // Swiping down on the pull-handle area opens the Top Drawer.
+        let handle = menu.handle_rect().center();
+        menu.on_gesture(&Gesture::Down(handle), true);
+        let swipe = Gesture::Swipe { dir: Direction::Down, from: handle, to: Point::new(handle.x, 500) };
+        assert!(matches!(menu.on_gesture(&swipe, true), Some(MenuEvent::QuickSettings)));
+        // Tapping the handle area doesn't count as outside.
+        assert!(tap(&mut menu, handle).is_none());
         let [contents, highlights, text, layout] = menu.button_rects();
         assert!(matches!(tap(&mut menu, contents.center()), Some(MenuEvent::Contents)));
         assert!(matches!(tap(&mut menu, highlights.center()), Some(MenuEvent::Highlights)));

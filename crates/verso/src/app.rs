@@ -10,7 +10,7 @@ use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode,
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
 use crate::screens::update::RollbackSheet;
-use crate::screens::{Action, EventCx, RelayoutState, Screen};
+use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBookAction};
 use crate::store::Store;
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::{Direction, Gesture};
@@ -430,6 +430,7 @@ impl App {
         net.read_ssh();
         net.probe();
         let developer = services.store.settings().developer;
+        let book = self.stack.last().and_then(|s| s.top_drawer_book());
         if let Some(screen) = self.stack.last_mut() {
             screen.top_drawer_opened();
         }
@@ -441,6 +442,7 @@ impl App {
             developer,
             self.frontlight,
             net.state(),
+            book,
             now,
         ));
         self.needs_redraw = true;
@@ -461,6 +463,14 @@ impl App {
         let bounds = self.canvas.bounds();
         match event {
             DrawerEvent::Close => self.close_drawer(),
+            DrawerEvent::CloseBook => {
+                self.close_drawer();
+                self.with_screen(|screen, cx| screen.on_top_drawer_book(TopDrawerBookAction::CloseBook, cx));
+            }
+            DrawerEvent::Search => {
+                self.close_drawer();
+                self.with_screen(|screen, cx| screen.on_top_drawer_book(TopDrawerBookAction::Search, cx));
+            }
             DrawerEvent::Light(light) => {
                 self.frontlight = Some(light);
                 self.light_request = Some(light);
@@ -1685,5 +1695,52 @@ mod tests {
         swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
         assert!(app.drawer.is_some());
         assert_eq!(covered.get(), 1);
+    }
+
+    #[test]
+    fn in_book_drawer_header_closes_the_book_and_opens_search() {
+        use crate::screens::TopDrawerBook;
+        struct InBook {
+            closed: Rc<Cell<usize>>,
+            searched: Rc<Cell<usize>>,
+        }
+        impl Screen for InBook {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn allows_top_drawer(&self) -> bool {
+                true
+            }
+            fn top_drawer_book(&self) -> Option<TopDrawerBook> {
+                Some(TopDrawerBook { title: "Ender's Game".into() })
+            }
+            fn on_top_drawer_book(&mut self, action: TopDrawerBookAction, _: &mut EventCx) -> Action {
+                match action {
+                    TopDrawerBookAction::CloseBook => self.closed.set(self.closed.get() + 1),
+                    TopDrawerBookAction::Search => self.searched.set(self.searched.get() + 1),
+                }
+                Action::None
+            }
+        }
+        let (closed, searched) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let info = DeviceInfo { name: "test".into(), width: 1272, height: 1696, dpi: 300 };
+        let screen = InBook { closed: closed.clone(), searched: searched.clone() };
+        let mut app = App::new(&info, Theme::for_dpi(300), Box::new(screen));
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(top_drawer::tests::FakeNet::new(false, false));
+        app.set_services(Services { store: Store::at(dir.path().to_path_buf()), waker: Waker::new(|| {}), net: ops });
+        // Swipe down opens the in-book drawer; Search closes it and triggers Search.
+        swipe(&mut app, Point::new(636, 20), Point::new(636, 900));
+        let search = app.drawer.as_ref().unwrap().search_rect().expect("in-book search button").center();
+        tap(&mut app, search);
+        assert!(app.drawer.is_none());
+        assert_eq!((closed.get(), searched.get()), (0, 1));
+        // Swipe down again; Back closes it and triggers CloseBook.
+        swipe(&mut app, Point::new(636, 20), Point::new(636, 900));
+        let back = app.drawer.as_ref().unwrap().back_rect().expect("in-book back button").center();
+        tap(&mut app, back);
+        assert!(app.drawer.is_none());
+        assert_eq!((closed.get(), searched.get()), (1, 1));
     }
 }

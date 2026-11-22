@@ -20,7 +20,7 @@ use crate::screens::dictionary::{Lookup, LookupEvent, SelectionAction, Selection
 use crate::screens::footnote::{Footnote, FootnoteEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
-use crate::screens::{Action, EventCx, Screen};
+use crate::screens::{Action, EventCx, Screen, TopDrawerBook, TopDrawerBookAction};
 use crate::store::{
     Settings, Store,
     position::{Presented, Writer},
@@ -1499,6 +1499,26 @@ impl Screen for Reader {
                     && self.search_bar.is_none()
             }
             _ => false,
+        }
+    }
+
+    fn top_drawer_book(&self) -> Option<TopDrawerBook> {
+        Some(TopDrawerBook { title: self.metadata.title.clone() })
+    }
+
+    fn on_top_drawer_book(&mut self, action: TopDrawerBookAction, cx: &mut EventCx) -> Action {
+        match action {
+            TopDrawerBookAction::CloseBook => match self.close() {
+                Ok(()) => Action::Pop,
+                Err(e) => {
+                    cx.toast(e.to_string(), None);
+                    Action::None
+                }
+            },
+            TopDrawerBookAction::Search => {
+                self.open_search(None, cx);
+                Action::None
+            }
         }
     }
 
@@ -3587,16 +3607,25 @@ mod tests {
         let (mut r, _) = test_reader("menu-quick-settings");
         r.pages = 10;
         r.laying_out = false;
+        r.metadata.title = "Ender's Game".into();
         assert!(r.allows_top_drawer(), "plain reading");
+        assert_eq!(r.top_drawer_book(), Some(TopDrawerBook { title: "Ender's Game".into() }));
         test_cx(&theme, |cx| {
-            r.menu(cx);
-            assert!(r.allows_top_drawer(), "the drawer replaces the menu");
-            // Battery + ⌄ closes the menu and asks the app for the drawer.
-            let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
-            let quick = menu.quick_rect().center();
-            r.on_gesture(Gesture::Down(quick), cx);
-            assert!(matches!(r.on_gesture(Gesture::Tap(quick), cx), Action::OpenTopDrawer));
-            assert!(matches!(r.overlay, Overlay::None));
+            // Both the Sun button and the Battery indicator close the menu and ask for the drawer.
+            for target in [true, false] {
+                r.menu(cx);
+                assert!(r.allows_top_drawer(), "the drawer replaces the menu");
+                let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
+                let p = if target { menu.light_rect().center() } else { menu.battery_rect().center() };
+                r.on_gesture(Gesture::Down(p), cx);
+                assert!(matches!(r.on_gesture(Gesture::Tap(p), cx), Action::OpenTopDrawer));
+                assert!(matches!(r.overlay, Overlay::None));
+            }
+            // In-book drawer actions open search and close the book.
+            assert!(matches!(r.on_top_drawer_book(TopDrawerBookAction::Search, cx), Action::None));
+            assert!(matches!(r.overlay, Overlay::Search(_)));
+            r.overlay = Overlay::None;
+            assert!(matches!(r.on_top_drawer_book(TopDrawerBookAction::CloseBook, cx), Action::Pop));
             // A swipe opening the drawer over the menu closes it too.
             r.menu(cx);
         });

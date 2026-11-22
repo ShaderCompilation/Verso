@@ -18,7 +18,7 @@ use crate::page_layout::PageLayout;
 use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
 use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
-use crate::screens::{Action, EventCx, RelayoutState, Screen};
+use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBook, TopDrawerBookAction};
 use crate::store::{BookState, FolderPreview, Store, navigation::Writer as NavigationWriter};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
@@ -2945,6 +2945,18 @@ impl Screen for Books {
         }
         Action::None
     }
+    fn top_drawer_book(&self) -> Option<TopDrawerBook> {
+        self.reader.as_ref().and_then(Screen::top_drawer_book)
+    }
+    fn on_top_drawer_book(&mut self, action: TopDrawerBookAction, cx: &mut EventCx) -> Action {
+        if let Some(reader) = &mut self.reader {
+            match reader.on_top_drawer_book(action, cx) {
+                Action::Pop => self.returned(cx),
+                action => return action,
+            }
+        }
+        Action::None
+    }
     fn top_drawer_opened(&mut self) {
         if let Some(reader) = &mut self.reader {
             reader.top_drawer_opened();
@@ -3551,9 +3563,18 @@ mod tests {
                 needs_redraw: &mut false,
                 battery: None,
             };
+            assert!(books.top_drawer_book().is_none(), "Home has no open book");
             books.open(book.id.clone(), &mut cx);
             assert!(books.reader.is_some());
             assert!(books.allows_top_drawer(), "plain reading allows the drawer");
+            assert!(books.top_drawer_book().is_some(), "open book exposes its header context");
+            // In-book drawer Search opens search; CloseBook closes the book back to Home.
+            assert!(matches!(books.on_top_drawer_book(TopDrawerBookAction::Search, &mut cx), Action::None));
+            assert!(!books.allows_top_drawer(), "in-book search is open");
+            assert!(matches!(books.on_top_drawer_book(TopDrawerBookAction::CloseBook, &mut cx), Action::None));
+            assert!(books.reader.is_none() && books.is_home());
+            assert!(books.top_drawer_book().is_none());
+            books.open(book.id.clone(), &mut cx);
             books.on_return(&mut cx);
             assert!(books.reader.is_some(), "the book is still there");
             std::fs::remove_file(&file)?;

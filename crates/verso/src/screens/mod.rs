@@ -65,6 +65,21 @@ pub struct RelayoutState {
     pub book_generation: u64,
 }
 
+/// The open book shown in the Top Drawer's header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopDrawerBook {
+    pub title: String,
+}
+
+/// Actions triggered from the Top Drawer's in-book header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopDrawerBookAction {
+    /// Close the book and return to Home/Library (saving position).
+    CloseBook,
+    /// Open in-book search.
+    Search,
+}
+
 pub trait Screen {
     /// True when drawing replaces every pixel, so the app can skip its clear.
     fn fills_canvas(&self) -> bool {
@@ -76,6 +91,16 @@ pub trait Screen {
     /// cancels the touch this screen saw start.
     fn allows_top_drawer(&self) -> bool {
         false
+    }
+
+    /// The open book to show in the Top Drawer's header, if a book is open.
+    fn top_drawer_book(&self) -> Option<TopDrawerBook> {
+        None
+    }
+
+    /// Runs an action from the Top Drawer's in-book header.
+    fn on_top_drawer_book(&mut self, _action: TopDrawerBookAction, _cx: &mut EventCx) -> Action {
+        Action::None
     }
 
     /// The Top Drawer opened over this screen: close what it replaces (the
