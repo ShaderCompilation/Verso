@@ -49,11 +49,16 @@ pub enum Icon {
     Collapse,
     Highlighter,
     Extend,
+    Bookmark,
+    BookmarkFilled,
+    /// The mark on a bookmarked page: a filled ribbon about 3.4 × 5.5 mm,
+    /// flat at the top so it hangs from the screen edge.
+    BookmarkRibbon,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 37] = [
+    pub const ALL: [Icon; 40] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -91,6 +96,9 @@ impl Icon {
         Icon::Collapse,
         Icon::Highlighter,
         Icon::Extend,
+        Icon::Bookmark,
+        Icon::BookmarkFilled,
+        Icon::BookmarkRibbon,
     ];
 
     fn svg(self) -> &'static str {
@@ -132,6 +140,9 @@ impl Icon {
             Icon::Collapse => include_str!("../../../../assets/icons/minimize-2.svg"),
             Icon::Highlighter => include_str!("../../../../assets/icons/highlighter.svg"),
             Icon::Extend => include_str!("../../../../assets/icons/move-horizontal.svg"),
+            Icon::Bookmark => include_str!("../../../../assets/icons/bookmark.svg"),
+            Icon::BookmarkFilled => include_str!("../../../../assets/icons/bookmark-filled.svg"),
+            Icon::BookmarkRibbon => include_str!("../../../../assets/icons/bookmark-ribbon.svg"),
         }
     }
 }

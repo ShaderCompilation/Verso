@@ -2,7 +2,10 @@ Icons in this folder come from Lucide 1.71.0 (https://lucide.dev), lightly adapt
 (stroke colour set to black, whitespace removed). `battery.svg` uses the same
 terminal as `battery-charging.svg`, so the two line up. `portrait.svg` is
 Lucide's `smartphone`, and `landscape.svg` is the same icon turned a quarter
-turn. They are used under the ISC License:
+turn. `bookmark-filled.svg` is `bookmark` filled, and `bookmark-ribbon.svg`, the
+mark on a bookmarked page, is `bookmark` filled with a flat top and a longer
+body, so it hangs from the top edge of the screen. They are used under the ISC
+License:
 
 ISC License
 

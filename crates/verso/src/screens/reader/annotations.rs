@@ -50,6 +50,9 @@ pub(super) struct State {
     pub bookmark_request: Option<(OpeningRequest, u64)>,
     /// The last opening-words request ID; IDs are never reused.
     bookmark_id: u64,
+    /// The running save toggled a bookmark: its success shows no "Saved"
+    /// (the mark or the ribbon is the confirmation). Failures still show.
+    quiet: bool,
 }
 /// What toggling the bookmark on a page did or needs.
 #[derive(Debug, PartialEq, Eq)]
@@ -116,9 +119,13 @@ impl State {
             .collect()
     }
     /// Whether `page` shows the bookmark mark.
-    #[allow(dead_code)] // Drawn from Phase 2 (docs/bookmarks.md).
     pub fn bookmarked(&self, page: usize) -> bool {
         !self.bookmarks_on(page).is_empty()
+    }
+    /// The saved entries are still loading or being checked for this layout
+    /// (the bookmark button is dimmed meanwhile).
+    pub fn checking(&self) -> bool {
+        !self.ready || self.resolving
     }
     /// True when a page's bookmark can be toggled now: the saved entries are
     /// loaded and resolved for this layout, and nothing is being saved.
@@ -129,7 +136,6 @@ impl State {
     /// them, so one toggle clears what the page shows; when any has a note,
     /// that waits for `confirmed`. A page without one asks for its opening
     /// words. Toggling never re-renders a page: the mark is drawn over it.
-    #[allow(dead_code)] // The corner tap and the menu button call it from Phase 2.
     pub fn toggle_bookmark(
         &mut self,
         generation: u64,
@@ -162,6 +168,7 @@ impl State {
         }
         self.remove_resolved(&marks);
         self.save();
+        self.quiet = true;
         Ok(Toggle::Removed)
     }
     /// Removes saved entries without a new resolution, keeping the resolved
@@ -227,6 +234,7 @@ impl State {
         if let Err(message) = self.add(bookmark) {
             return Some(message.into());
         }
+        self.quiet = true;
         // In reading order: the page start comes before anything starting on
         // the page, and unresolved entries stay last.
         let index = self.collection.records.len() - 1;
@@ -294,6 +302,7 @@ impl State {
     }
     pub fn save(&mut self) {
         self.pending = true;
+        self.quiet = false;
         if let Some(w) = &self.service {
             w.send(worker::Command::Save(self.collection.clone()));
         }
@@ -335,10 +344,11 @@ impl State {
             }
             worker::Reply::Saved(result) => {
                 self.pending = false;
+                let quiet = std::mem::take(&mut self.quiet);
                 match result {
                     Ok(()) => {
                         let retried = self.save_error.take().is_some();
-                        Some(if retried { "Saved after retry" } else { "Saved" }.into())
+                        (retried || !quiet).then(|| if retried { "Saved after retry" } else { "Saved" }.into())
                     }
                     Err(e) => {
                         self.save_error = Some(e.clone());
@@ -1144,6 +1154,19 @@ mod tests {
         assert_eq!(added.range.start.0, "/p[9]");
         assert!(state.pending && state.bookmarked(6));
         assert_eq!(state.ordered(), vec![0, 2, 1], "the page start comes before a highlight on that page");
+        // Bookmark saves are quiet: the mark is the confirmation. A failure
+        // still says so, and a highlight's save still says "Saved".
+        assert_eq!(state.apply(worker::Reply::Saved(Ok(())), 1, &mut |c| sent.push(c)), None);
+        assert_eq!(state.toggle_with(1, 6, false, &mut |c| sent.push(c)), Ok(Toggle::Removed));
+        let failed = state.apply(worker::Reply::Saved(Err("disk full".into())), 1, &mut |c| sent.push(c));
+        assert!(failed.unwrap().contains("disk full"));
+        state.save();
+        assert_eq!(
+            state.apply(worker::Reply::Saved(Ok(())), 1, &mut |c| sent.push(c)).as_deref(),
+            Some("Saved after retry")
+        );
+        state.save();
+        assert_eq!(state.apply(worker::Reply::Saved(Ok(())), 1, &mut |c| sent.push(c)).as_deref(), Some("Saved"));
         assert_eq!(state.highlight(1), Some(1));
     }
     #[test]

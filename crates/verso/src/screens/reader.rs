@@ -15,6 +15,7 @@ use crate::page_layout::PageLayout;
 use crate::platform::{KeyAction, RefreshMode};
 use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
 use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
+use crate::screens::books::ConfirmDelete;
 use crate::screens::contents::{Contents, ContentsEvent};
 use crate::screens::dictionary::{Lookup, LookupEvent, SelectionAction, SelectionActions};
 use crate::screens::footnote::{Footnote, FootnoteEvent};
@@ -26,7 +27,7 @@ use crate::store::{
     position::{Presented, Writer},
 };
 use crate::ui::gesture::{Direction, Gesture};
-use crate::ui::theme::{PAPER, Theme};
+use crate::ui::theme::{INK, PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::Toast;
 use layout::{LayoutEvent, LayoutView};
@@ -114,6 +115,9 @@ pub struct Reader {
     /// A tapped link waiting for the book thread, and where it is on the page.
     link_pending: Option<(LinkRequest, Rect)>,
     next_link: u64,
+    /// The bookmark mark changed over the bare page: the next draw updates
+    /// just its corner, with the fast black-and-white waveform.
+    mark_fast: bool,
 }
 /// What the bars show beyond the page itself: chapter offsets, reading
 /// speed, and the clock and battery as of the last reader redraw.
@@ -155,6 +159,9 @@ enum Overlay {
     Search(Box<SearchView>),
     Highlights(Box<annotations::View>),
     Footnote(Box<Footnote>),
+    /// "Remove bookmark and its note?", for a toggle on a page whose
+    /// bookmark has a note; true when it came from the menu, which returns.
+    RemoveBookmark(Box<ConfirmDelete<bool>>),
 }
 impl Reader {
     pub fn book_id(&self) -> &str {
@@ -230,6 +237,7 @@ impl Reader {
             back_touch: false,
             link_pending: None,
             next_link: 0,
+            mark_fast: false,
         }
     }
     /// The book's saved reading speed and the average carried over from
@@ -371,9 +379,13 @@ impl Reader {
             Reply::Opening { request, result } => {
                 let chapter =
                     reader::chapter(&self.toc, request.page).map(|i| self.toc[i].title.clone()).unwrap_or_default();
+                let before = self.annotations.bookmarked(request.page);
                 if let Some(message) = self.annotations.receive_opening(request, result, self.cache.generation, chapter)
                 {
                     cx.toast(message, None);
+                }
+                if self.annotations.bookmarked(request.page) != before {
+                    self.mark_changed();
                 }
                 cx.redraw();
             }
@@ -981,6 +993,64 @@ impl Reader {
         }
         cx.redraw();
     }
+    /// The displayed page, when its bookmark can be toggled: laid out in the
+    /// current layout.
+    fn bookmark_page(&self) -> Option<usize> {
+        let laid_out = !self.laying_out && self.layout_at.is_none();
+        self.shown.as_ref().filter(|p| laid_out && p.generation == self.cache.generation).map(|p| p.number)
+    }
+    /// The displayed page shows the bookmark mark.
+    fn page_bookmarked(&self) -> bool {
+        self.shown.as_ref().is_some_and(|p| self.annotations.bookmarked(p.number))
+    }
+    /// Toggles the bookmark on the displayed page (the corner tap, the menu's
+    /// ribbon or a confirmed removal). Bookmarks with a note are removed only
+    /// after asking; `from_menu` returns there after the question.
+    fn toggle_bookmark(&mut self, confirmed: bool, from_menu: bool, cx: &mut EventCx) {
+        let Some(page) = self.bookmark_page() else {
+            cx.toast(annotations::NOT_READY, None);
+            return;
+        };
+        match self.annotations.toggle_bookmark(self.cache.generation, page, confirmed, &self.worker) {
+            Err(message) => cx.toast(message, None),
+            // Added when the page's opening words arrive (`Reply::Opening`).
+            Ok(annotations::Toggle::Requested) => {}
+            Ok(annotations::Toggle::Removed) => self.mark_changed(),
+            Ok(annotations::Toggle::Confirm) => {
+                let several = self.annotations.bookmarks_on(page).len() > 1;
+                let message = if several {
+                    "This page has several bookmarks, and one has a note. Removing them deletes the note too."
+                } else {
+                    "This bookmark has a note. Removing the bookmark deletes the note too."
+                };
+                self.overlay = Overlay::RemoveBookmark(Box::new(ConfirmDelete::with_action(
+                    cx.theme,
+                    self.screen,
+                    from_menu,
+                    "Remove bookmark and its note?",
+                    message.into(),
+                    "Remove",
+                    Icon::Trash,
+                )));
+            }
+        }
+        cx.redraw();
+    }
+    /// The mark appeared or went: over the bare page only its corner is
+    /// updated, fast. Under an overlay the page is drawn again when it closes.
+    fn mark_changed(&mut self) {
+        self.mark_fast = matches!(self.overlay, Overlay::None);
+    }
+    /// Where the bookmark mark hangs, for the current margins.
+    fn mark_rect(&self, t: &Theme) -> Rect {
+        let font_px = self.settings.typography.font_px(t.dpi);
+        let side = self.settings.page_layout.geometry(self.screen.w, self.screen.h, t.dpi, font_px).side;
+        reader::bookmark_mark(self.screen, side, |mm| t.mm(mm))
+    }
+    /// The bookmark corner's side in pixels, when the corner tap is on.
+    fn bookmark_corner(&self, t: &Theme) -> Option<i32> {
+        self.settings.bookmark_corner.then(|| t.mm(reader::BOOKMARK_CORNER_MM))
+    }
     fn menu(&mut self, cx: &EventCx) {
         self.overlay = Overlay::Menu(Box::new(ReaderMenu::new(
             cx.theme,
@@ -1060,6 +1130,7 @@ impl Reader {
     fn sync_settings(&mut self, saved: &Settings) {
         self.settings_seen = self.store.settings_saves();
         self.settings.tap_zones = saved.tap_zones;
+        self.settings.bookmark_corner = saved.bookmark_corner;
         self.settings.developer = saved.developer;
         if self.settings.page_flash != saved.page_flash {
             self.settings.page_flash = saved.page_flash;
@@ -1209,6 +1280,16 @@ impl Reader {
             }
             _ => None,
         };
+        // The bookmark corner comes before links and highlights under it.
+        if let Some(p) = page_tap
+            && !self.selection.extending
+            && self.extension.is_none()
+            && reader::tap_zone(self.screen, p, self.settings.tap_zones, self.bookmark_corner(cx.theme))
+                == Zone::Bookmark
+        {
+            self.toggle_bookmark(false, false, cx);
+            return Action::None;
+        }
         if let Some(p) = page_tap
             && self.follow_link(p, 0)
         {
@@ -1408,6 +1489,7 @@ impl Reader {
                         )))
                     }
                     Some(MenuEvent::Search) => self.open_search(None, cx),
+                    Some(MenuEvent::Bookmark) => self.toggle_bookmark(false, true, cx),
                     Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
                     Some(MenuEvent::Text) => self.text(cx.theme),
                     Some(MenuEvent::Layout) => {
@@ -1506,6 +1588,20 @@ impl Reader {
                     None => {}
                 }
             }
+            Overlay::RemoveBookmark(confirm) => {
+                cx.redraw();
+                if let Some(remove) = confirm.on_gesture(&g) {
+                    let from_menu = confirm.target;
+                    if from_menu {
+                        self.menu(cx);
+                    } else {
+                        self.overlay = Overlay::None;
+                    }
+                    if remove {
+                        self.toggle_bookmark(true, from_menu, cx);
+                    }
+                }
+            }
             Overlay::Contents(contents) => {
                 let before = contents.visual_state();
                 let event = contents.on_gesture(&g);
@@ -1523,18 +1619,29 @@ impl Reader {
             }
             Overlay::None => {
                 let step = match g {
-                    Gesture::Tap(p) => match reader::tap_zone(self.screen, p, self.settings.tap_zones) {
-                        Zone::Menu => {
-                            if self.pending_turn {
-                                self.commit_turn(cx);
+                    Gesture::Tap(p) => {
+                        match reader::tap_zone(self.screen, p, self.settings.tap_zones, self.bookmark_corner(cx.theme))
+                        {
+                            // A tap right after a turn bookmarks the page it turned to.
+                            Zone::Bookmark => {
+                                if self.pending_turn {
+                                    self.commit_turn(cx);
+                                }
+                                self.toggle_bookmark(false, false, cx);
+                                return Action::None;
                             }
-                            self.menu(cx);
-                            cx.redraw();
-                            return Action::None;
+                            Zone::Menu => {
+                                if self.pending_turn {
+                                    self.commit_turn(cx);
+                                }
+                                self.menu(cx);
+                                cx.redraw();
+                                return Action::None;
+                            }
+                            Zone::Back => -1,
+                            Zone::Forward => 1,
                         }
-                        Zone::Back => -1,
-                        Zone::Forward => 1,
-                    },
+                    }
                     Gesture::Swipe { dir: Direction::Left, .. } => 1,
                     Gesture::Swipe { dir: Direction::Right, .. } => -1,
                     // The top edge belongs to the Top Drawer (`App`).
@@ -1667,6 +1774,14 @@ impl Screen for Reader {
                 cx.canvas.invert_rect(*rect);
             }
         }
+        // Looked up at draw time, so toggling never renders the page again.
+        let mark = self.mark_rect(t);
+        if self.page_bookmarked() {
+            cx.icons.draw(cx.canvas, Icon::BookmarkRibbon, mark, INK);
+        }
+        if std::mem::take(&mut self.mark_fast) && bare {
+            cx.hint(mark, RefreshMode::Fast);
+        }
         if let Some(bar) = &mut self.extension {
             bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
         }
@@ -1692,7 +1807,10 @@ impl Screen for Reader {
                 let percent = (self.shown.as_ref())
                     .filter(|p| p.number == page)
                     .map(|p| reader::bars::book_percent(p.number, self.pages, p.progress));
-                menu.draw(cx, title, self.pages, percent, !self.laying_out && self.layout_at.is_none());
+                let laid_out = !self.laying_out && self.layout_at.is_none();
+                let on = self.shown.as_ref().is_some_and(|p| self.annotations.bookmarked(p.number));
+                menu.set_bookmark(on, laid_out && !self.annotations.checking());
+                menu.draw(cx, title, self.pages, percent, laid_out);
             }
             Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
             Overlay::Layout(_) => {}
@@ -1703,6 +1821,7 @@ impl Screen for Reader {
             Overlay::Search(view) => view.draw(cx, &self.search, &self.toc, self.cache.generation),
             Overlay::Highlights(view) => view.draw(cx, &self.annotations),
             Overlay::Footnote(note) => note.draw(cx),
+            Overlay::RemoveBookmark(confirm) => confirm.draw(cx),
         }
         if self.laying_out
             || self.layout_at.is_some()
@@ -3768,6 +3887,125 @@ mod tests {
             assert!(matches!(r.overlay, Overlay::Menu(_)));
         });
         let _ = commands.try_iter().count();
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn the_corner_and_the_menu_ribbon_toggle_the_bookmark_without_rendering_the_page() {
+        use crate::document::{Opening, TextRange};
+        use crate::geom::Point;
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("bookmarks");
+        r.pages = 10;
+        r.laying_out = false;
+        r.target = 3;
+        r.shown = Some(test_page(1, 3));
+        r.cache.insert(test_page(1, 3), 3);
+        r.cache.insert(test_page(1, 4), 3);
+        r.annotations.ready = true;
+        let corner = Point::new(598, 2);
+        let tap = |r: &mut Reader, p: Point, cx: &mut EventCx| {
+            r.on_gesture(Gesture::Down(p), cx);
+            r.on_gesture(Gesture::Tap(p), cx);
+        };
+        let opening = |commands: &std::sync::mpsc::Receiver<Command>| {
+            commands.try_iter().find_map(|c| match c {
+                Command::Opening(request) => Some(request),
+                _ => None,
+            })
+        };
+        let reply = |request| Reply::Opening {
+            request,
+            result: Ok(Opening {
+                range: TextRange { start: Position("/p[3]".into()), end: Position("/p[3]/text().20".into()) },
+                text: "It was a bright cold".into(),
+            }),
+        };
+        let draw = |r: &mut Reader| {
+            let (mut canvas, mut text, mut icons) = (
+                crate::gfx::Canvas::new(600, 800),
+                crate::gfx::TextRenderer::new(),
+                crate::gfx::IconRenderer::default(),
+            );
+            let mut hints = vec![];
+            r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+            let mark = r.mark_rect(&theme);
+            let inked = canvas.gray_data()[(mark.center().y * 600 + mark.center().x) as usize] == INK;
+            (inked, hints.iter().any(|h| h.rect == mark && h.mode == RefreshMode::Fast))
+        };
+        assert_eq!(draw(&mut r), (false, false));
+        // The corner tap asks for the page's opening words, then shows the mark,
+        // updating just the corner, fast. The page stays the cached one.
+        test_cx(&theme, |cx| tap(&mut r, corner, cx));
+        let request = opening(&commands).expect("asks for the opening words");
+        assert_eq!((request.page, r.target), (3, 3), "a corner tap never turns the page");
+        test_cx(&theme, |cx| r.receive(reply(request), cx));
+        assert!(r.annotations.bookmarked(3));
+        assert_eq!(draw(&mut r), (true, true));
+        assert_eq!(draw(&mut r), (true, false), "the fast update happens once");
+        assert!(!commands.try_iter().any(|c| matches!(c, Command::Page { .. } | Command::Resolve { .. })));
+        r.annotations.pending = false;
+        // The menu's ribbon shows the state and removes it; the menu stays.
+        test_cx(&theme, |cx| {
+            r.menu(cx);
+            let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
+            let ribbon = menu.bookmark_rect().center();
+            tap(&mut r, ribbon, cx);
+        });
+        assert!(matches!(r.overlay, Overlay::Menu(_)) && !r.annotations.bookmarked(3));
+        assert!(!r.mark_fast, "under the menu the page is drawn again when it closes");
+        // Tapping again while the removal saves says it isn't ready yet.
+        let mut toast = None;
+        let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
+        let ribbon = menu.bookmark_rect().center();
+        r.on_gesture(
+            Gesture::Down(ribbon),
+            &mut EventCx {
+                theme: &theme,
+                screen: r.screen,
+                now: Instant::now(),
+                toast: &mut toast,
+                forced: &mut vec![],
+                needs_redraw: &mut false,
+                battery: None,
+            },
+        );
+        r.on_gesture(
+            Gesture::Tap(ribbon),
+            &mut EventCx {
+                theme: &theme,
+                screen: r.screen,
+                now: Instant::now(),
+                toast: &mut toast,
+                forced: &mut vec![],
+                needs_redraw: &mut false,
+                battery: None,
+            },
+        );
+        assert_eq!(toast.map(|t| t.text).as_deref(), Some(annotations::NOT_READY));
+        r.annotations.pending = false;
+        r.overlay = Overlay::None;
+        // A bookmark with a note is removed only after asking.
+        test_cx(&theme, |cx| tap(&mut r, corner, cx));
+        let request = opening(&commands).unwrap();
+        test_cx(&theme, |cx| r.receive(reply(request), cx));
+        r.annotations.pending = false;
+        r.annotations.collection.records[0].note = Some("Opening image".into());
+        for remove in [false, true] {
+            test_cx(&theme, |cx| tap(&mut r, corner, cx));
+            let Overlay::RemoveBookmark(confirm) = &r.overlay else { panic!("asks first") };
+            let button = if remove { confirm.delete.rect() } else { confirm.cancel.rect() };
+            test_cx(&theme, |cx| tap(&mut r, button.center(), cx));
+            assert!(matches!(r.overlay, Overlay::None));
+            assert_eq!(r.annotations.bookmarked(3), !remove);
+        }
+        // With the corner tap off, the corner turns the page like the rest of
+        // the forward zone.
+        r.annotations.pending = false;
+        r.settings.bookmark_corner = false;
+        test_cx(&theme, |cx| tap(&mut r, corner, cx));
+        assert_eq!(r.target, 4);
+        assert!(opening(&commands).is_none());
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 

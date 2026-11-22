@@ -64,6 +64,8 @@ def scenes(s):
     book = [*library, *s.tap(margin + s.mm(9), s.mm(42))]
     page2 = [*book, *s.swipe(s.w * 0.8, cy, s.w * 0.2, cy)]
     menu = [*page2, *s.tap(cx, cy)]
+    # The top-right corner bookmarks the page; the menu's ribbon is then filled.
+    bookmark = [*page2, *s.tap(s.w - s.mm(4), s.mm(4))]
     # The menu's bottom row: Contents, Highlights, Text, Layout.
     column = (s.w - 2 * margin) / 4
     hello_x = (max(s.mm(7), (s.w - s.mm(107)) / 2) if s.w > s.h else s.mm(7)) + s.mm(8)
@@ -74,6 +76,8 @@ def scenes(s):
         'keyboard': ('all', {}, [*library, *search]),
         'reader': ('one', {}, page2),
         'menu': ('one', {}, menu),
+        'bookmark': ('one', {}, bookmark),
+        'bookmark-menu': ('one', {}, [*bookmark, *s.tap(cx, cy)]),
         'text': ('one', {}, [*menu, *menu_button(2)]),
         'layout': ('one', {}, [*menu, *menu_button(3)]),
         'drawer': ('one', {}, [*page2, *s.swipe(cx, 2, cx, s.h * 0.55)]),

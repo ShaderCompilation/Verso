@@ -24,6 +24,24 @@ pub enum Zone {
     Back,
     Forward,
     Menu,
+    /// The top-right corner, when tapping it bookmarks the page.
+    Bookmark,
+}
+/// The side of the top-right square that toggles the page bookmark.
+pub const BOOKMARK_CORNER_MM: f32 = 12.0;
+/// The square in the top-right corner of `screen`, `size` pixels a side,
+/// that toggles the page bookmark. It comes out of the forward (or, for the
+/// left hand, the back) zone.
+pub fn bookmark_corner(screen: Rect, size: i32) -> Rect {
+    Rect::new(screen.right() - size, screen.y, size, size)
+}
+/// Where the bookmark mark hangs from the top edge: centred in the right
+/// margin `side` pixels wide when that is at least 5 mm, otherwise 1.5 mm
+/// from the edge (docs/bookmarks.md §2). `mm` converts millimetres to pixels.
+pub fn bookmark_mark(screen: Rect, side: i32, mm: impl Fn(f32) -> i32) -> Rect {
+    let (w, h) = (mm(3.4), mm(5.5));
+    let x = if side >= mm(5.0) { screen.right() - side / 2 - w / 2 } else { screen.right() - mm(1.5) - w };
+    Rect::new(x, screen.y, w, h)
 }
 /// Where taps turn pages. Every layout keeps the centre box for the menu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,8 +70,12 @@ impl TapZones {
         }
     }
 }
-pub fn tap_zone(screen: Rect, p: Point, zones: TapZones) -> Zone {
-    if TapZones::menu(screen).contains(p) {
+/// The zone a tap at `p` falls in. `corner` is the bookmark square's side in
+/// pixels, when the corner tap is on.
+pub fn tap_zone(screen: Rect, p: Point, zones: TapZones, corner: Option<i32>) -> Zone {
+    if corner.is_some_and(|size| bookmark_corner(screen, size).contains(p)) {
+        Zone::Bookmark
+    } else if TapZones::menu(screen).contains(p) {
         Zone::Menu
     } else if zones.back(screen).contains(p) {
         Zone::Back
@@ -205,25 +227,56 @@ mod tests {
     fn zones_prioritise_menu_and_leave_forward_accessible_on_both_edges() {
         let s = Rect::new(0, 0, 1000, 1400);
         let z = TapZones::Standard;
-        assert_eq!(tap_zone(s, Point::new(500, 700), z), Zone::Menu);
-        assert_eq!(tap_zone(s, Point::new(200, 700), z), Zone::Back);
-        assert_eq!(tap_zone(s, Point::new(500, 50), z), Zone::Forward);
-        assert_eq!(tap_zone(s, Point::new(990, 700), z), Zone::Forward);
+        assert_eq!(tap_zone(s, Point::new(500, 700), z, None), Zone::Menu);
+        assert_eq!(tap_zone(s, Point::new(200, 700), z, None), Zone::Back);
+        assert_eq!(tap_zone(s, Point::new(500, 50), z, None), Zone::Forward);
+        assert_eq!(tap_zone(s, Point::new(990, 700), z, None), Zone::Forward);
     }
     #[test]
     fn mirrored_and_halves_keep_the_menu_in_the_middle() {
         let s = Rect::new(0, 0, 1000, 1400);
         for z in TapZones::ALL {
-            assert_eq!(tap_zone(s, Point::new(500, 700), z), Zone::Menu, "{z:?}");
+            assert_eq!(tap_zone(s, Point::new(500, 700), z, None), Zone::Menu, "{z:?}");
         }
         let m = TapZones::Mirrored;
-        assert_eq!(tap_zone(s, Point::new(200, 700), m), Zone::Forward);
-        assert_eq!(tap_zone(s, Point::new(800, 700), m), Zone::Back);
-        assert_eq!(tap_zone(s, Point::new(500, 50), m), Zone::Forward);
+        assert_eq!(tap_zone(s, Point::new(200, 700), m, None), Zone::Forward);
+        assert_eq!(tap_zone(s, Point::new(800, 700), m, None), Zone::Back);
+        assert_eq!(tap_zone(s, Point::new(500, 50), m, None), Zone::Forward);
         let h = TapZones::Halves;
-        assert_eq!(tap_zone(s, Point::new(450, 50), h), Zone::Back);
-        assert_eq!(tap_zone(s, Point::new(550, 50), h), Zone::Forward);
-        assert_eq!(tap_zone(s, Point::new(200, 1300), h), Zone::Back);
+        assert_eq!(tap_zone(s, Point::new(450, 50), h, None), Zone::Back);
+        assert_eq!(tap_zone(s, Point::new(550, 50), h, None), Zone::Forward);
+        assert_eq!(tap_zone(s, Point::new(200, 1300), h, None), Zone::Back);
+    }
+    #[test]
+    fn the_bookmark_corner_takes_the_top_right_square_of_either_page_turn_zone() {
+        let s = Rect::new(0, 0, 1000, 1400);
+        for z in TapZones::ALL {
+            assert_eq!(tap_zone(s, Point::new(950, 50), z, Some(140)), Zone::Bookmark, "{z:?}");
+            assert_eq!(tap_zone(s, Point::new(950, 50), z, None), tap_zone(s, Point::new(950, 700), z, None));
+            // Just outside the square, the page-turn zone is as before.
+            assert_ne!(tap_zone(s, Point::new(850, 50), z, Some(140)), Zone::Bookmark);
+            assert_ne!(tap_zone(s, Point::new(950, 150), z, Some(140)), Zone::Bookmark);
+            assert_eq!(tap_zone(s, Point::new(500, 700), z, Some(140)), Zone::Menu);
+        }
+    }
+    #[test]
+    fn the_bookmark_mark_sits_in_the_right_margin_or_near_the_edge() {
+        // 300 dpi: 1 mm is about 11.8 px.
+        let mm = |v: f32| (v * 300.0 / 25.4).round() as i32;
+        for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272), Rect::new(0, 0, 600, 800)] {
+            for sides in [0, 3, 5, 7, 15, 40] {
+                let side = mm(sides as f32);
+                let mark = bookmark_mark(screen, side, mm);
+                assert_eq!((mark.y, mark.w, mark.h), (0, mm(3.4), mm(5.5)), "hangs from the top edge");
+                assert!(mark.right() <= screen.right() && mark.x >= screen.right() - side.max(mm(5.0)));
+                if sides >= 5 {
+                    assert!((mark.center().x - (screen.right() - side / 2)).abs() <= 1, "centred in the margin");
+                    assert!(mark.x >= screen.right() - side, "inside the margin, clear of the text");
+                } else {
+                    assert_eq!(mark.right(), screen.right() - mm(1.5));
+                }
+            }
+        }
     }
     #[test]
     fn stale_pages_never_enter_cache_and_only_three_are_kept() {

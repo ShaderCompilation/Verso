@@ -68,6 +68,9 @@ pub struct SystemSettings {
     // Reading
     zones: Segmented,
     zones_preview: Rect,
+    /// "Tap the top-right corner to bookmark", below the preview.
+    corner: Toggle,
+    corner_top: i32,
     // Display: one column, or (landscape) folder previews on the right.
     orientation: Segmented,
     flash: Segmented,
@@ -153,10 +156,15 @@ impl SystemSettings {
         let mut zones = Segmented::texts(&["Standard", "Left-handed", "Halves"], selected);
         zones.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
         // A small page with the zones drawn on it, shaped like the screen.
+        // Below it, the corner-tap switch: a label line and a note.
+        let corner_row = t.mm(16.0);
         let preview_top = zones.rect().bottom() + t.mm(5.0);
-        let preview_h = (content.bottom() - preview_top).clamp(t.mm(20.0), t.mm(36.0));
+        let preview_h = (content.bottom() - preview_top - corner_row).clamp(t.mm(20.0), t.mm(36.0));
         let preview_w = preview_h * screen.w / screen.h.max(1);
         let zones_preview = Rect::new(content.x, preview_top, preview_w, preview_h);
+        let corner_top = zones_preview.bottom() + t.mm(5.0);
+        let mut corner = Toggle::new(settings.bookmark_corner);
+        corner.place(content.right(), corner_top + t.mm(4.0), t);
 
         // Landscape is too short for everything in one column.
         let (device_left, device_right) = if screen.w > screen.h {
@@ -280,6 +288,8 @@ impl SystemSettings {
             body,
             zones,
             zones_preview,
+            corner,
+            corner_top,
             orientation,
             flash,
             previews,
@@ -364,7 +374,10 @@ impl SystemSettings {
         cx.section_label("Tap zones", Rect::new(c.x, zones_label, c.w, t.mm(8.0)));
         self.zones.draw(cx);
         let zones = TapZones::ALL[self.zones.selected];
-        draw_zones(cx, self.zones_preview, zones);
+        // The corner square at the preview's scale.
+        let corner =
+            self.corner.on.then(|| t.mm(crate::reader::BOOKMARK_CORNER_MM) * self.zones_preview.w / self.screen.w);
+        draw_zones(cx, self.zones_preview, zones, corner);
         let note = match zones {
             TapZones::Standard => "Tap the left side to go back and anywhere else to go forward.",
             TapZones::Mirrored => "Tap the right side to go back and anywhere else to go forward.",
@@ -378,9 +391,23 @@ impl SystemSettings {
             text,
             HAlign::Left,
         );
+        let label = Rect::new(c.x, self.corner_top, c.w - t.mm(12.0), t.mm(8.0));
+        cx.line("Tap the top-right corner to bookmark", t.body, label, HAlign::Left);
+        self.corner.draw(cx);
+        cx.paragraph(
+            "Tap it again to remove the bookmark.",
+            t.small.gray(INK2),
+            Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(7.0)),
+            HAlign::Left,
+        );
     }
 
     fn reading_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+        if let Some(on) = self.corner.on_gesture(g)
+            && !self.save(cx, "the corner tap", |s| s.bookmark_corner = on)
+        {
+            self.corner.on = !on;
+        }
         if let Some(i) = self.zones.on_gesture(g)
             && !self.save(cx, "tap zones", |s| s.tap_zones = TapZones::ALL[i])
         {
@@ -892,8 +919,9 @@ impl SystemSettings {
     }
 }
 
-/// A miniature page: the back zone shaded, the menu box outlined.
-fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones) {
+/// A miniature page: the back zone shaded, the menu box outlined, and the
+/// bookmark corner (`corner` pixels a side, when on) outlined with a ribbon.
+fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones, corner: Option<i32>) {
     let t = cx.theme;
     // Zones inside the outline, so the shading keeps its rounded corners.
     let inner = page.inset(t.border);
@@ -906,6 +934,12 @@ fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones) {
     cx.fill(if back.x == inner.x { back.split_right(half).0 } else { back.split_left(half).0 }, FILL_ZONE);
     cx.canvas.fill_rounded_rect(menu, t.radius, PAPER);
     cx.canvas.stroke_rounded_rect(menu, t.radius, t.hairline as f32, INK2);
+    if let Some(size) = corner {
+        let square = crate::reader::bookmark_corner(inner, size);
+        cx.canvas.fill_rounded_rect(square, t.radius, PAPER);
+        cx.canvas.stroke_rounded_rect(square, t.radius, t.hairline as f32, INK2);
+        cx.icon(Icon::BookmarkFilled, square, size * 3 / 5, INK);
+    }
     cx.canvas.stroke_rounded_rect(page, t.radius, t.border as f32, INK);
     // Labels sit below the menu box so they never overlap it.
     let band = Rect::new(page.x, menu.bottom(), page.w, page.bottom() - menu.bottom());

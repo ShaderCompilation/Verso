@@ -147,6 +147,9 @@ impl Button {
 pub struct IconButton {
     pub icon: Icon,
     pub enabled: bool,
+    /// Drawn gray like a disabled button but still tappable, for a control
+    /// that explains why it can't act yet.
+    pub dimmed: bool,
     /// Icon size in pixels (defaults to the theme's icon size).
     pub size: Option<i32>,
     rect: Rect,
@@ -155,7 +158,7 @@ pub struct IconButton {
 
 impl IconButton {
     pub fn new(icon: Icon) -> Self {
-        Self { icon, enabled: true, size: None, rect: Rect::default(), press: Press::default() }
+        Self { icon, enabled: true, dimmed: false, size: None, rect: Rect::default(), press: Press::default() }
     }
 
     /// `rect` is the touch target; the icon is centred in it.
@@ -186,7 +189,7 @@ impl IconButton {
 
     pub fn draw(&self, cx: &mut DrawCx) {
         let size = self.size.unwrap_or(cx.theme.icon);
-        let fg = if !self.enabled {
+        let fg = if !self.enabled || self.dimmed && !self.press.is_down() {
             INK3
         } else if self.press.is_down() {
             cx.canvas.fill_rounded_rect(self.rect, cx.theme.radius, INK);

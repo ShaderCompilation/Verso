@@ -36,6 +36,9 @@ pub struct Settings {
     /// periodically (chapter starts and pictures still do).
     pub page_flash: u32,
     pub tap_zones: TapZones,
+    /// A tap in the top-right corner of a page toggles its bookmark.
+    /// Settings → Reading.
+    pub bookmark_corner: bool,
     pub orientation: Orientation,
     /// Developer options in Settings (tap the version five times).
     pub developer: bool,
@@ -64,6 +67,7 @@ impl Default for Settings {
             library_folders: None,
             page_flash: DEFAULT_PAGE_FLASH,
             tap_zones: TapZones::Standard,
+            bookmark_corner: true,
             orientation: Orientation::Portrait,
             developer: false,
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
@@ -751,13 +755,14 @@ mod tests {
     #[test]
     fn reader_settings_default_and_round_trip() -> Result<()> {
         let mut settings: Settings = serde_json::from_str(r#"{"footer":true}"#)?;
-        assert_eq!((settings.page_flash, settings.tap_zones), (6, TapZones::Standard));
+        assert_eq!((settings.page_flash, settings.tap_zones, settings.bookmark_corner), (6, TapZones::Standard, true));
         settings.page_flash = 0;
         settings.tap_zones = TapZones::Mirrored;
+        settings.bookmark_corner = false;
         let json = serde_json::to_string(&settings)?;
         assert!(json.contains(r#""tap_zones":"mirrored""#), "{json}");
         let restored: Settings = serde_json::from_str(&json)?;
-        assert_eq!((restored.page_flash, restored.tap_zones), (0, TapZones::Mirrored));
+        assert_eq!((restored.page_flash, restored.tap_zones, restored.bookmark_corner), (0, TapZones::Mirrored, false));
         Ok(())
     }
     #[test]

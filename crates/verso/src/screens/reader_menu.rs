@@ -11,6 +11,8 @@ pub enum MenuEvent {
     Close,
     Contents,
     Search,
+    /// The ribbon: toggle the bookmark on the page. The menu stays open.
+    Bookmark,
     Highlights,
     Text,
     /// Page layout: margins and reader bars.
@@ -24,6 +26,7 @@ pub struct ReaderMenu {
     top_panel: Rect,
     handle: Rect,
     top: TopBar,
+    bookmark: IconButton,
     search: IconButton,
     light: IconButton,
     /// The battery indicator in the top bar (also opens the Top Drawer).
@@ -64,7 +67,9 @@ impl ReaderMenu {
         light.place_at(Point::new(battery.x - t.target / 2, bar.center().y), t);
         let mut search = IconButton::new(Icon::Search);
         search.place_at(Point::new(light.rect().x - t.target / 2, bar.center().y), t);
-        top.trailing = bar.right() - search.rect().x + t.mm(1.0);
+        let mut bookmark = IconButton::new(Icon::Bookmark);
+        bookmark.place_at(Point::new(search.rect().x - t.target / 2, bar.center().y), t);
+        top.trailing = bar.right() - bookmark.rect().x + t.mm(1.0);
         let panel = screen.split_bottom(t.mm(if wide { 35.0 } else { 36.5 })).0;
         let info = Rect::new(m, panel.y + t.mm(if wide { 2.4 } else { 2.7 }), screen.w - 2 * m, t.mm(7.0));
         let buttons_y = screen.bottom() - t.mm(if wide { 3.7 } else { 4.5 }) - t.button_h;
@@ -88,6 +93,7 @@ impl ReaderMenu {
             top_panel,
             handle,
             top,
+            bookmark,
             search,
             light,
             battery,
@@ -121,6 +127,24 @@ impl ReaderMenu {
         self.battery
     }
     #[cfg(test)]
+    pub fn bookmark_rect(&self) -> Rect {
+        self.bookmark.rect()
+    }
+    #[cfg(test)]
+    pub fn bookmark_filled(&self) -> bool {
+        self.bookmark.icon == Icon::BookmarkFilled
+    }
+    #[cfg(test)]
+    pub fn bookmark_dimmed(&self) -> bool {
+        self.bookmark.dimmed
+    }
+    /// The ribbon button: filled when the page has a bookmark, gray (but
+    /// still tappable, to say why) while the book checks its annotations.
+    pub fn set_bookmark(&mut self, on: bool, ready: bool) {
+        self.bookmark.icon = if on { Icon::BookmarkFilled } else { Icon::Bookmark };
+        self.bookmark.dimmed = !ready;
+    }
+    #[cfg(test)]
     pub fn search_rect(&self) -> Rect {
         self.search.rect()
     }
@@ -144,6 +168,7 @@ impl ReaderMenu {
         cx.canvas.fill_rounded_rect(shape, t.radius_sheet, PAPER);
         cx.canvas.stroke_rounded_rect(shape, t.radius_sheet, t.border as f32, INK);
         self.top.draw(cx);
+        self.bookmark.draw(cx);
         self.search.draw(cx);
         self.light.draw(cx);
         if let Some(battery) = cx.battery {
@@ -174,10 +199,11 @@ impl ReaderMenu {
     }
     /// Snapshot of visible control state that `on_gesture` can change without
     /// returning an event (pressed buttons or scrubbed slider position).
-    pub fn visual_state(&self) -> ([bool; 9], u32) {
+    pub fn visual_state(&self) -> ([bool; 10], u32) {
         (
             [
                 self.top.is_pressed(),
+                self.bookmark.is_pressed(),
                 self.search.is_pressed(),
                 self.light.is_pressed(),
                 self.prev.is_pressed(),
@@ -214,6 +240,9 @@ impl ReaderMenu {
         }
         if self.search.on_gesture(g) {
             return Some(MenuEvent::Search);
+        }
+        if self.bookmark.on_gesture(g) {
+            return Some(MenuEvent::Bookmark);
         }
         if self.contents.on_gesture(g) {
             return Some(MenuEvent::Contents);
@@ -294,8 +323,10 @@ mod tests {
             }
             let slider = menu.progress.rect();
             assert!(slider.y > panel.y + t.mm(9.0) && slider.bottom() < buttons[0].y, "{screen:?}: {slider:?}");
-            // Search, Sun, and Battery sit in the top bar, apart, inside the screen.
+            // The ribbon, Search, Sun, and Battery sit in the top bar, apart, inside the screen.
             let (search, light, battery) = (menu.search_rect(), menu.light_rect(), menu.battery_rect());
+            let bookmark = menu.bookmark_rect();
+            assert!(bookmark.right() <= search.x && bookmark.center().y == search.center().y);
             assert!(search.right() <= light.x && light.right() <= battery.x && battery.right() <= screen.right());
             assert!(battery.y >= 0 && battery.bottom() <= t.top_bar);
             let top_panel = menu.top_panel();
@@ -316,6 +347,14 @@ mod tests {
         assert!(matches!(tap(&mut menu, light), Some(MenuEvent::QuickSettings)));
         assert!(matches!(tap(&mut menu, battery), Some(MenuEvent::QuickSettings)));
         assert!(matches!(tap(&mut menu, search), Some(MenuEvent::Search)));
+        // The ribbon toggles even while dimmed: a tap then says why it waits.
+        let bookmark = menu.bookmark_rect().center();
+        assert!(matches!(tap(&mut menu, bookmark), Some(MenuEvent::Bookmark)));
+        menu.set_bookmark(true, false);
+        assert!(menu.bookmark_filled() && menu.bookmark_dimmed());
+        assert!(matches!(tap(&mut menu, bookmark), Some(MenuEvent::Bookmark)));
+        menu.set_bookmark(false, true);
+        assert!(!menu.bookmark_filled() && !menu.bookmark_dimmed());
         // Swiping down on the pull-handle area opens the Top Drawer.
         let handle = menu.handle_rect().center();
         menu.on_gesture(&Gesture::Down(handle), true);
