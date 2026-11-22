@@ -1,0 +1,15 @@
+[package]
+name = "hunspell-sys"
+description = "Hunspell (spelling and morphology library), built from source, behind a small safe wrapper for stemming."
+version.workspace = true
+edition.workspace = true
+# Hunspell is MPL 1.1 / GPL 2.0+ / LGPL 2.1+; Verso uses it under the GPL/LGPL terms.
+license = "GPL-2.0-or-later"
+links = "hunspell"
+build = "build.rs"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+cc = { version = "1.11.1", features = ["parallel"] }

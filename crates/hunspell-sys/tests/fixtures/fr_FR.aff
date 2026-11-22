@@ -1,0 +1,11 @@
+# A tiny original French-like dictionary for hunspell-sys tests (ISO8859-1).
+SET ISO8859-1
+TRY esaitnrulodcpmévqfbghjàxèyêzçôùâûîëïü
+
+# cheval -> chevaux
+SFX X Y 1
+SFX X al aux al
+
+# élève -> élèves
+SFX S Y 1
+SFX S 0 s .

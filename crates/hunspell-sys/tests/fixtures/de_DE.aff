@@ -1,0 +1,22 @@
+# A tiny original German-like dictionary for hunspell-sys tests (UTF-8).
+SET UTF-8
+TRY esianrtolcdugmphbyfvkwzäöüß
+
+# Haus -> Häuser
+SFX U Y 1
+SFX U aus äuser aus
+
+# Maus -> Mäuse
+SFX M Y 1
+SFX M aus äuse aus
+
+# Kind -> Kinder, Kindes
+SFX R Y 2
+SFX R 0 er .
+SFX R 0 es .
+
+# schön -> schöne, schöner, schönsten
+SFX A Y 3
+SFX A 0 e .
+SFX A 0 er .
+SFX A 0 sten .
