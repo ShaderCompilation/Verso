@@ -13,9 +13,9 @@ pub struct PowerFiles {
 }
 impl PowerFiles {
     /// The first supply of type `Battery` with a `capacity`, and the first
-    /// `Mains` or `USB` supply with `online` as the cable. On the Paperwhite
-    /// these are `bd71827_bat` and `bd71827_ac`; the `USB_WET` moisture sensor
-    /// and the `Wireless` supply are not cables.
+    /// `Mains` or `USB` (`USB`, `USB_DCP`, `USB_CDP`) supply with `online` as
+    /// the cable. On the Paperwhite these are `bd71827_bat` and `bd71827_ac`;
+    /// the `USB_WET` moisture sensor and the `Wireless` supply are not cables.
     pub fn find(root: &Path) -> Option<Self> {
         let mut entries: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| Some(e.ok()?.path())).collect();
         entries.sort();
@@ -24,7 +24,9 @@ impl PowerFiles {
             entries.iter().find(|d| kind(d).as_deref() == Some("Battery") && d.join("capacity").exists())?.clone();
         let cable = entries
             .iter()
-            .find(|d| matches!(kind(d).as_deref(), Some("Mains" | "USB")) && d.join("online").exists())
+            .find(|d| {
+                matches!(kind(d).as_deref(), Some("Mains" | "USB" | "USB_DCP" | "USB_CDP")) && d.join("online").exists()
+            })
             .cloned();
         let files = Self { battery, cable };
         files.battery().is_some().then_some(files)
@@ -36,10 +38,16 @@ impl PowerFiles {
         let charging = read("status").is_some_and(|s| s.trim() == "Charging");
         Some(Battery { percent: percent.clamp(0, 100) as u8, charging })
     }
-    /// A cable is attached, charging or not.
+    /// A USB data cable is attached, charging or not. A wall charger
+    /// (`USB_DCP`) sets `online = 1` while powerd reports `usb = false`.
     pub fn usb(&self) -> Option<bool> {
-        let online = std::fs::read_to_string(self.cable.as_ref()?.join("online")).ok()?;
-        Some(online.trim() == "1")
+        let cable = self.cable.as_ref()?;
+        let online = std::fs::read_to_string(cable.join("online")).ok()?;
+        if online.trim() != "1" {
+            return Some(false);
+        }
+        let kind = std::fs::read_to_string(cable.join("type")).ok();
+        Some(kind.as_deref().map(str::trim) != Some("USB_DCP"))
     }
 }
 
@@ -114,6 +122,11 @@ mod tests {
         // Full on a cable: connected but not charging.
         std::fs::write(root.join("bd71827_bat/status"), "Full\n").unwrap();
         assert_eq!(files.battery(), Some(Battery { percent: 41, charging: false }));
+        // Wall charger (USB_DCP): found by `find()`, online=1, not a USB data host.
+        std::fs::write(root.join("bd71827_ac/type"), "USB_DCP\n").unwrap();
+        let files = PowerFiles::find(&root).unwrap();
+        assert_eq!(files.cable, Some(root.join("bd71827_ac")));
+        assert_eq!(files.usb(), Some(false), "wall charger is not a USB data connection");
         // No cable supply: the cable state comes from powerd instead.
         std::fs::remove_dir_all(root.join("bd71827_ac")).unwrap();
         let files = PowerFiles::find(&root).unwrap();

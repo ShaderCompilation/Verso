@@ -163,6 +163,9 @@ pub struct Store {
     /// Counts settings saves through this store and its clones, so screens
     /// can notice a change without rereading the file.
     settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Cached normalized `Settings`, populated on first read and updated on
+    /// `save_settings` so repeated lookups avoid FUSE reads and JSON parses.
+    settings_cache: std::sync::Arc<std::sync::Mutex<Option<Settings>>>,
     /// Counts external book-state writes through this store and its clones, so
     /// the position writer knows when to re-read its cached `BookState`.
     book_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -208,6 +211,7 @@ impl Store {
             selected_home: Default::default(),
             opened_leader: Default::default(),
             settings_saves: Default::default(),
+            settings_cache: Default::default(),
             book_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
@@ -241,15 +245,19 @@ impl Store {
         worker
     }
     pub fn settings(&self) -> Settings {
-        let mut s = read_settings(&self.root.join("settings.json"));
-        s.normalize();
-        if !verso_mdns::valid_label(&s.hostname) {
-            s.hostname = verso_mdns::DEFAULT_LABEL.to_owned();
+        let mut slot = self.settings_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = slot.as_ref() {
+            return cached.clone();
         }
+        let s = normalize_settings(read_settings(&self.root.join("settings.json")));
+        *slot = Some(s.clone());
         s
     }
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
         let result = atomic(&self.root.join("settings.json"), s);
+        if result.is_ok() {
+            *self.settings_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(normalize_settings(s.clone()));
+        }
         self.settings_saves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         result
     }
@@ -512,6 +520,7 @@ impl Store {
             selected_home: Default::default(),
             opened_leader: Default::default(),
             settings_saves: Default::default(),
+            settings_cache: Default::default(),
             book_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
@@ -533,6 +542,15 @@ pub fn book_id(path: &Path) -> Result<String> {
     }
     Ok(format!("{hash:016x}"))
 }
+/// Normalizes settings and enforces a valid mDNS hostname label.
+fn normalize_settings(mut s: Settings) -> Settings {
+    s.normalize();
+    if !verso_mdns::valid_label(&s.hostname) {
+        s.hostname = verso_mdns::DEFAULT_LABEL.to_owned();
+    }
+    s
+}
+
 /// Reads settings field by field when the whole file doesn't parse, so one
 /// invalid value (a typo in a hand-edited enum) resets only that setting.
 fn read_settings(path: &Path) -> Settings {
@@ -792,6 +810,32 @@ mod tests {
         elsewhere.save_settings(&Settings::default())?;
         assert!(other.path().join("settings.json").exists(), "another data folder still saves");
         assert!(!elsewhere.live_data_edited());
+        Ok(())
+    }
+    #[test]
+    fn settings_are_cached_across_clones_and_updated_on_save() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        let clone = store.clone();
+        std::fs::write(dir.path().join("settings.json"), r#"{"page_flash":12,"hostname":"bad host!"}"#)?;
+        let initial = store.settings();
+        assert_eq!(initial.page_flash, 12);
+        assert_eq!(initial.hostname, verso_mdns::DEFAULT_LABEL);
+        // External edits on disk are not re-read once cached.
+        std::fs::write(dir.path().join("settings.json"), r#"{"page_flash":3}"#)?;
+        assert_eq!(clone.settings().page_flash, 12);
+        // Saving updates the cache across clones and normalizes the hostname.
+        let updated = Settings { page_flash: 4, hostname: "still bad!".into(), ..initial };
+        store.save_settings(&updated)?;
+        let read_back = clone.settings();
+        assert_eq!(read_back.page_flash, 4);
+        assert_eq!(read_back.hostname, verso_mdns::DEFAULT_LABEL);
+        // A failed save leaves the cached settings untouched.
+        std::fs::remove_file(dir.path().join("settings.json"))?;
+        std::fs::create_dir_all(dir.path().join("settings.json"))?;
+        let bad = Settings { page_flash: 99, ..read_back };
+        assert!(store.save_settings(&bad).is_err());
+        assert_eq!(clone.settings().page_flash, 4);
         Ok(())
     }
     #[test]

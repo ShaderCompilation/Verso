@@ -307,8 +307,12 @@ impl Books {
             started.elapsed().as_micros()
         );
         let home = home.unwrap_or_default();
+        let t_nav = std::time::Instant::now();
         let navigation = store.navigation();
+        let nav_us = t_nav.elapsed().as_micros();
+        let t_lib = std::time::Instant::now();
         let library = library.unwrap_or_else(|| store.library_worker(worker.waker()));
+        let worker_us = t_lib.elapsed().as_micros();
         let navigation_writer = NavigationWriter::new(store.clone(), worker.waker());
         let cy = t.top_bar / 2;
         let narrow = screen.w < t.mm(100.0);
@@ -349,9 +353,13 @@ impl Books {
         let fonts = worker.fonts();
         // Read with the first frame: a notice saved by an earlier check is
         // drawn at once (two small files).
+        let t_upd = std::time::Instant::now();
         let updates = store.updates();
         let update_status = updates.status();
+        let updates_us = t_upd.elapsed().as_micros();
+        let t_crash = std::time::Instant::now();
         let crash_notice = crate::report::newest_unseen_crash(&store.root());
+        let crash_us = t_crash.elapsed().as_micros();
         let thumbnails = Thumbnails::new(store.clone());
         let mut s = Self {
             screen,
@@ -440,11 +448,18 @@ impl Books {
             opened_touched: false,
         };
         s.pager.page = s.navigation.page();
+        let t_ref = std::time::Instant::now();
         s.refresh(t);
+        let refresh_us = t_ref.elapsed().as_micros();
+        let t_pre = std::time::Instant::now();
         if s.is_home() {
             let covers = s.home_covers(t);
             s.thumbnails.prefetch(covers);
         }
+        let prefetch_us = t_pre.elapsed().as_micros();
+        log::debug!(
+            "startup stage: books init nav_us={nav_us} worker_us={worker_us} updates_us={updates_us} crash_us={crash_us} refresh_us={refresh_us} prefetch_us={prefetch_us}"
+        );
         s
     }
     fn is_home(&self) -> bool {

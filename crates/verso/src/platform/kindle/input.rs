@@ -129,51 +129,33 @@ pub struct TouchInput {
 }
 
 impl TouchInput {
-    /// Finds the touchscreen, grabs it exclusively, and reads its coordinate range.
-    pub fn open(map: Mapping) -> Result<Self> {
-        let mut paths: Vec<_> = std::fs::read_dir("/dev/input")
-            .context("can't list /dev/input")?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
-            .collect();
-        paths.sort();
-        for path in paths {
-            let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path)
-            else {
-                continue;
-            };
-            if !has_mt_position(file.as_raw_fd()) {
-                continue;
-            }
-            let fd = file.as_raw_fd();
-            let name = device_name(fd);
-            let x = abs_info(fd, ABS_MT_POSITION_X)?;
-            let y = abs_info(fd, ABS_MT_POSITION_Y)?;
-            // Exclusive grab: the paused Kindle UI must not collect our taps.
-            // The kernel releases it automatically if we exit or crash.
-            // SAFETY: EVIOCGRAB takes an int argument by value.
-            if unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1 as libc::c_int) } < 0 {
-                bail!("can't grab {}: {}", path.display(), std::io::Error::last_os_error());
-            }
-            let empty = Slot { id: -1, reported_id: -1, ..Slot::default() };
-            let mut input = Self {
-                grabbed: true,
-                file,
-                path: path.display().to_string(),
-                device_name: name,
-                x_range: (x.minimum, x.maximum),
-                y_range: (y.minimum, y.maximum),
-                map,
-                slots: [empty; MAX_SLOTS],
-                slot: 0,
-                dropping: false,
-                buf: vec![InputEvent::default(); 64],
-            };
-            input.reset_contacts();
-            return Ok(input);
+    fn from_file(file: File, path: &std::path::Path, map: Mapping) -> Result<Self> {
+        let fd = file.as_raw_fd();
+        let name = device_name(fd);
+        let x = abs_info(fd, ABS_MT_POSITION_X)?;
+        let y = abs_info(fd, ABS_MT_POSITION_Y)?;
+        // Exclusive grab: the paused Kindle UI must not collect our taps.
+        // The kernel releases it automatically if we exit or crash.
+        // SAFETY: EVIOCGRAB takes an int argument by value.
+        if unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1 as libc::c_int) } < 0 {
+            bail!("can't grab {}: {}", path.display(), std::io::Error::last_os_error());
         }
-        Err(Unsupported("no touchscreen found in /dev/input".into()).into())
+        let empty = Slot { id: -1, reported_id: -1, ..Slot::default() };
+        let mut input = Self {
+            grabbed: true,
+            file,
+            path: path.display().to_string(),
+            device_name: name,
+            x_range: (x.minimum, x.maximum),
+            y_range: (y.minimum, y.maximum),
+            map,
+            slots: [empty; MAX_SLOTS],
+            slot: 0,
+            dropping: false,
+            buf: vec![InputEvent::default(); 64],
+        };
+        input.reset_contacts();
+        Ok(input)
     }
 
     pub fn summary(&self) -> String {
@@ -361,45 +343,62 @@ pub struct Buttons {
     buf: Vec<InputEvent>,
 }
 
-impl Buttons {
-    /// The first input device (other than a touchscreen) with a page key,
-    /// grabbed so the paused Kindle UI doesn't turn its own pages on
-    /// resume. `None` on Kindles without buttons.
-    pub fn open() -> Option<Self> {
-        let mut paths: Vec<_> = std::fs::read_dir("/dev/input")
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
-            .collect();
-        paths.sort();
-        for path in paths {
-            let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path)
-            else {
-                continue;
-            };
-            let fd = file.as_raw_fd();
-            if has_mt_position(fd) {
-                continue;
-            }
-            let Some(keys) = key_bits(fd) else { continue };
-            if !PAGE_KEYS.iter().any(|&k| keys.has(k)) {
-                continue;
-            }
-            let mut buttons = Self {
-                file,
-                path: path.display().to_string(),
-                device_name: device_name(fd),
-                can_grab: !keys.has(KEY_POWER),
-                grabbed: false,
-                buf: vec![InputEvent::default(); 16],
-            };
-            if let Err(e) = buttons.grab(true) {
-                log::warn!("{e:#}");
-            }
-            return Some(buttons);
+/// Scans `/dev/input/event*` once to find the touchscreen and, when requested,
+/// the page-turn buttons. Touch-only Kindles pass `probe_buttons = false` and
+/// stop scanning as soon as the touchscreen is found.
+pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<Buttons>)> {
+    let mut paths: Vec<_> = std::fs::read_dir("/dev/input")
+        .context("can't list /dev/input")?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
+        .collect();
+    paths.sort();
+    let mut touch: Option<TouchInput> = None;
+    let mut buttons: Option<Buttons> = None;
+    let mut map = Some(map);
+    for path in paths {
+        if touch.is_some() && (!probe_buttons || buttons.is_some()) {
+            break;
         }
-        None
+        let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path)
+        else {
+            continue;
+        };
+        let fd = file.as_raw_fd();
+        if has_mt_position(fd) {
+            if touch.is_none() {
+                touch = Some(TouchInput::from_file(file, &path, map.take().expect("touch opened once"))?);
+            }
+            continue;
+        }
+        if probe_buttons && buttons.is_none() {
+            buttons = Buttons::from_file(file, &path);
+        }
+    }
+    let touch = touch.ok_or_else(|| Unsupported("no touchscreen found in /dev/input".into()))?;
+    Ok((touch, buttons))
+}
+
+impl Buttons {
+    fn from_file(file: File, path: &std::path::Path) -> Option<Self> {
+        let fd = file.as_raw_fd();
+        let keys = key_bits(fd)?;
+        if !PAGE_KEYS.iter().any(|&k| keys.has(k)) {
+            return None;
+        }
+        let mut buttons = Self {
+            file,
+            path: path.display().to_string(),
+            device_name: device_name(fd),
+            can_grab: !keys.has(KEY_POWER),
+            grabbed: false,
+            buf: vec![InputEvent::default(); 16],
+        };
+        if let Err(e) = buttons.grab(true) {
+            log::warn!("{e:#}");
+        }
+        Some(buttons)
     }
 
     pub fn summary(&self) -> String {

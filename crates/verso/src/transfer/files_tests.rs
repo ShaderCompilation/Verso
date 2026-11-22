@@ -769,8 +769,7 @@ fn entries_say_who_needs_a_folder() {
     assert_eq!(env.delete("documents/KOReader link", false).0, 200);
     assert!(env.root.join("koreader").is_dir());
     // A folder holding the library folder.
-    let store = Store::at(env.root.join("verso/data"));
-    store.save_library_folders(vec![env.root.join("documents/Russian")]).unwrap();
+    env.store.save_library_folders(vec![env.root.join("documents/Russian")]).unwrap();
     assert_eq!(needs("", "documents"), json!(["library", "documents"]));
     assert_eq!(needs("documents", "Russian"), json!(["library"]));
 }

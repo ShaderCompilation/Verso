@@ -236,6 +236,7 @@ fn run() -> Result<i32> {
         }
         Err(e) => return Err(e),
     };
+    let platform_us = started.elapsed().as_micros();
     // One Store for every screen, so they share preferences and the dictionary service.
     let store = store::Store::new();
     let orientation = store.settings().orientation;
@@ -269,11 +270,13 @@ fn run() -> Result<i32> {
         info.color,
         platform.waker(),
     ));
-    let mut app = App::new(
-        &info,
-        theme.clone(),
-        start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone(), store.clone())?,
-    );
+    let t_screen = Instant::now();
+    let screen = start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone(), store.clone())?;
+    let screen_us = t_screen.elapsed().as_micros();
+    let t_app = Instant::now();
+    let mut app = App::new(&info, theme.clone(), screen);
+    let app_us = t_app.elapsed().as_micros();
+    let t_setup = Instant::now();
     app.set_orientation(orientation);
     app.set_services(app::Services::device(store.clone(), platform.waker()));
     // After a rollback, the restored version says why with its first frame.
@@ -299,6 +302,10 @@ fn run() -> Result<i32> {
     if let Some(connected) = platform.usb_connected() {
         app.on_usb(connected);
     }
+    let setup_us = t_setup.elapsed().as_micros();
+    log::debug!(
+        "startup stage: init platform_us={platform_us} screen_us={screen_us} app_us={app_us} setup_us={setup_us}"
+    );
     let mut gestures = GestureDetector::new(GestureConfig::for_dpi(info.dpi));
     app.refresh_all(RefreshMode::Full);
     let mut first_frame = true;
@@ -314,10 +321,13 @@ fn run() -> Result<i32> {
             log::error!("{e:#}");
             app.frontlight = platform.frontlight();
         }
+        let frame_started = Instant::now();
         let updates = app.frame();
+        let frame_us = frame_started.elapsed().as_micros();
         if !updates.is_empty() {
             let t = Instant::now();
             platform.present(app.canvas(), &updates)?;
+            let present_us = t.elapsed().as_micros();
             let save_started = Instant::now();
             app.after_present();
             log::debug!("after_present: {:?}", save_started.elapsed());
@@ -328,6 +338,7 @@ fn run() -> Result<i32> {
                 perf.page_turn(released.elapsed());
             }
             if first_frame {
+                log::debug!("startup stage: first frame draw_us={frame_us} present_us={present_us}");
                 perf.first_frame(started.elapsed());
                 log::info!(
                     "first frame on screen {:?} after start (display request returned; optical completion unmeasured)",

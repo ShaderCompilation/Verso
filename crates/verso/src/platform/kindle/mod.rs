@@ -50,16 +50,25 @@ pub struct Kindle {
 impl Kindle {
     pub fn open() -> Result<Self> {
         install_signal_handlers();
+        let t0 = Instant::now();
         let display = Display::open()?;
-        let touch = match TouchInput::open(Mapping {
-            width: display.width,
-            height: display.height,
-            swap_axes: display.touch_swap_axes,
-            mirror_x: display.touch_mirror_x,
-            mirror_y: display.touch_mirror_y,
-            orientation: Orientation::Portrait,
-        }) {
-            Ok(touch) => touch,
+        let display_us = t0.elapsed().as_micros();
+        let id = display.session.device_id;
+        let profile = kindle_profiles::lookup(id);
+        let probe_buttons = profile.is_none_or(|p| p.page_buttons);
+        let t_in = Instant::now();
+        let (touch, buttons) = match input::open(
+            Mapping {
+                width: display.width,
+                height: display.height,
+                swap_axes: display.touch_swap_axes,
+                mirror_x: display.touch_mirror_x,
+                mirror_y: display.touch_mirror_y,
+                orientation: Orientation::Portrait,
+            },
+            probe_buttons,
+        ) {
+            Ok(inputs) => inputs,
             Err(e) => {
                 if let Some(Unsupported(reason)) = e.downcast_ref::<Unsupported>() {
                     display.show_refusal(reason);
@@ -67,9 +76,7 @@ impl Kindle {
                 return Err(e);
             }
         };
-        let buttons = Buttons::open();
-        let id = display.session.device_id;
-        let profile = kindle_profiles::lookup(id);
+        let input_us = t_in.elapsed().as_micros();
         let model = kindle_profiles::model(profile, id, &display.name);
         let lights = Lights::for_profile(profile);
         let profile_line = match profile {
@@ -101,9 +108,18 @@ impl Kindle {
             return Err(io::Error::last_os_error().into());
         }
         let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        let t_pw = Instant::now();
         let (tx, power_rx) = std::sync::mpsc::channel();
         let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()))?;
+        let power_events_us = t_pw.elapsed().as_micros();
         let frontlight_rx = spawn_frontlight_read(fd_waker(wake_fd.clone()), lights);
+        let t_pf = Instant::now();
+        let power_files = super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply"));
+        let power_files_us = t_pf.elapsed().as_micros();
+        log::debug!(
+            "startup stage: kindle open display_us={display_us} input_us={input_us} power_events_us={power_events_us} power_files_us={power_files_us} total_us={}",
+            t0.elapsed().as_micros(),
+        );
         Ok(Self {
             info,
             model,
@@ -121,7 +137,7 @@ impl Kindle {
             sleeping: false,
             native_sleep: false,
             status: None,
-            power_files: super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply")),
+            power_files,
         })
     }
 
