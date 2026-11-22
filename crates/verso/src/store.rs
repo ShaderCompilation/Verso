@@ -163,6 +163,9 @@ pub struct Store {
     /// Counts settings saves through this store and its clones, so screens
     /// can notice a change without rereading the file.
     settings_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Counts external book-state writes through this store and its clones, so
+    /// the position writer knows when to re-read its cached `BookState`.
+    book_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The update check, shared by startup and Settings; made on first use.
     updates: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::update::Updates>>>,
     /// Set when the web app's Files tab wrote into Verso's live data
@@ -205,6 +208,7 @@ impl Store {
             selected_home: Default::default(),
             opened_leader: Default::default(),
             settings_saves: Default::default(),
+            book_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),
@@ -272,18 +276,42 @@ impl Store {
     pub fn book(&self, id: &str) -> BookState {
         read(&self.book_path(id)).unwrap_or_default()
     }
+    /// Changes whenever an external caller writes or removes a book record.
+    pub(crate) fn book_saves(&self) -> u64 {
+        self.book_saves.load(std::sync::atomic::Ordering::Acquire)
+    }
     pub fn save_book(&self, id: &str, s: &BookState) -> Result<()> {
+        let result = self.save_book_position(id, s, true);
+        if result.is_ok() {
+            self.book_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+    /// Writes authoritative `books/<id>.json`, optionally updating derived
+    /// `home.json` and `opened.json`. Routine page turns pass `update_home =
+    /// false` and sync Home on open and flush instead.
+    pub(crate) fn save_book_position(&self, id: &str, s: &BookState, update_home: bool) -> Result<()> {
         let started = std::time::Instant::now();
         let result = atomic(&self.book_path(id), s);
         log::debug!("position write: {:?}, ok={}", started.elapsed(), result.is_ok());
-        if result.is_ok()
-            && let Err(error) = self.update_home_after_save(id, s)
-        {
-            // A rebuildable display cache must never make a durable position
-            // look failed, cause an old position to replay, or erase book state.
-            log::warn!("updating Home summary: {error:#}");
+        if result.is_ok() && update_home {
+            self.sync_home(id, s);
         }
         result
+    }
+    /// Writes `books/<id>.json` without updating derived Home caches or
+    /// emitting a position-turn timing log (for metadata like detected language).
+    pub(crate) fn save_book_record(&self, id: &str, s: &BookState) -> Result<()> {
+        atomic(&self.book_path(id), s)
+    }
+    /// Updates derived `home.json` and `opened.json` for a book whose state is
+    /// already durable. Failures only log: a rebuildable display cache must
+    /// never make a durable position look failed, cause an old position to
+    /// replay, or erase book state.
+    pub(crate) fn sync_home(&self, id: &str, s: &BookState) {
+        if let Err(error) = self.update_home_after_save(id, s) {
+            log::warn!("updating Home summary: {error:#}");
+        }
     }
     /// Sets the finished flag of many books, skipping those that already have
     /// it. Home is updated once, for the books it shows, rather than per
@@ -302,6 +330,9 @@ impl Store {
                 break;
             }
             changed.push((id.clone(), state));
+        }
+        if !changed.is_empty() {
+            self.book_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
         let shown: std::collections::HashSet<String> = self
             .home_summary()
@@ -341,7 +372,10 @@ impl Store {
         }
         match std::fs::remove_file(self.book_path(id)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
+            _ => {
+                self.book_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }
         }
     }
     pub fn library(&self) -> LibraryIndex {
@@ -478,6 +512,7 @@ impl Store {
             selected_home: Default::default(),
             opened_leader: Default::default(),
             settings_saves: Default::default(),
+            book_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),

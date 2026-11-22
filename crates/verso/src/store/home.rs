@@ -1,7 +1,7 @@
 //! Derived Home writes follow authoritative book writes and serialize with
 //! background rebuilds. No reading position is ever copied out of this cache.
 //! The opened order for folder previews (`opened.json`) follows the same rules.
-use super::{BookState, Store, atomic, read};
+use super::{BookState, Store, atomic_bytes, read};
 use crate::library::{
     Book, LibraryIndex,
     home::{Entry, Summary},
@@ -73,7 +73,7 @@ impl Store {
         }
         summary.complete = true;
         summary.set_library_counts(counts);
-        if let Err(error) = self.persist_home(&summary) {
+        if let Err(error) = self.persist_home(&summary, self.home_summary().as_ref()) {
             self.invalidate_home_locked();
             return Err(error);
         }
@@ -105,10 +105,11 @@ impl Store {
     /// Availability/identity changes use a full background rebuild instead.
     pub fn refresh_home_metadata(&self, index: &LibraryIndex) -> Result<Option<Summary>> {
         let _guard = SUMMARY_WRITE.lock().unwrap();
-        let Some(mut summary) = self.home_summary() else { return Ok(None) };
-        if !summary.complete {
+        let Some(original) = self.home_summary() else { return Ok(None) };
+        if !original.complete {
             return Ok(None);
         }
+        let mut summary = original.clone();
         for entry in &mut summary.books {
             if let Some(book) = index.books.iter().find(|book| book.id == entry.book.id) {
                 let status = entry.status.clone();
@@ -116,16 +117,17 @@ impl Store {
                 entry.status = status;
             }
         }
-        self.persist_home(&summary)?;
+        self.persist_home(&summary, Some(&original))?;
         Ok(Some(summary))
     }
 
-    fn persist_home(&self, summary: &Summary) -> Result<()> {
-        if self.home_summary().as_ref() == Some(summary) {
+    fn persist_home(&self, summary: &Summary, existing: Option<&Summary>) -> Result<()> {
+        if existing == Some(summary) {
             return Ok(());
         }
-        ensure!(serde_json::to_vec(summary)?.len() as u64 <= MAX_BYTES, "Home summary exceeds display-cache limit");
-        atomic(&self.root.join("home.json"), summary)
+        let bytes = serde_json::to_vec(summary)?;
+        ensure!(bytes.len() as u64 <= MAX_BYTES, "Home summary exceeds display-cache limit");
+        atomic_bytes(&self.root.join("home.json"), &bytes)
     }
 
     /// Returns whether the file changed.
@@ -173,22 +175,29 @@ impl Store {
     pub(super) fn update_home_after_save(&self, id: &str, state: &BookState) -> Result<()> {
         let _guard = SUMMARY_WRITE.lock().unwrap();
         self.update_opened_after_save(id, state);
-        let mut summary = self.home_summary().unwrap_or_default();
+        let existing = self.home_summary();
+        let (complete, counts, mut books) = match &existing {
+            Some(summary) => (
+                summary.complete,
+                (summary.library_root_count, summary.library_folders, summary.library_books),
+                summary.books.clone(),
+            ),
+            None => (false, (0, 0, 0), Vec::new()),
+        };
         let selected = self.selected_home.lock().unwrap();
         let source = selected
             .as_ref()
             .filter(|book| book.id == id)
-            .or_else(|| summary.books.iter().find(|entry| entry.book.id == id).map(|entry| &entry.book));
+            .or_else(|| books.iter().find(|entry| entry.book.id == id).map(|entry| &entry.book));
         let Some(book) = source else { return Ok(()) };
         let entry = Entry::new(book, state);
-        summary.books.retain(|entry| entry.book.id != id);
-        summary.books.push(entry);
-        let complete = summary.complete;
-        let counts = (summary.library_root_count, summary.library_folders, summary.library_books);
-        let mut summary = Summary::select(summary.books);
+        drop(selected);
+        books.retain(|entry| entry.book.id != id);
+        books.push(entry);
+        let mut summary = Summary::select(books);
         summary.complete = complete;
         summary.set_library_counts(counts);
-        let result = self.persist_home(&summary);
+        let result = self.persist_home(&summary, existing.as_ref());
         if result.is_err() {
             let _ = std::fs::remove_file(self.root.join("home.json"));
         }
@@ -198,6 +207,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::super::atomic;
     use super::*;
     use crate::{document::Position, library::selection_tests::book};
 
