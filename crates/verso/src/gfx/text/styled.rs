@@ -197,6 +197,47 @@ impl StyledPagination {
         self.complete
     }
 
+    /// The page size this pagination lays out for, as `(width, height)`.
+    pub fn size(&self) -> (i32, i32) {
+        (self.width, self.height)
+    }
+
+    /// Break the pieces laid out so far into pages of a new `height`,
+    /// without shaping anything again (the width, and so every line, stays
+    /// the same). Pagination then continues where it was. For screens that
+    /// first try a taller page and give some of it to controls when the
+    /// content needs more than one page.
+    pub fn repage(&mut self, height: i32) -> Result<()> {
+        ensure!(height > 0, "page dimensions must be positive");
+        for block in &self.blocks {
+            if let StyledBlock::Paragraph(paragraph) = block {
+                ensure!(paragraph.base.line_height() <= height as f32, "page is shorter than one text line");
+            }
+        }
+        let pieces = std::mem::take(&mut self.paragraphs);
+        self.height = height;
+        self.pages.clear();
+        self.page = StyledPage::default();
+        self.missing_logged.clear();
+        (self.next_block, self.next_byte, self.gap, self.rule, self.complete) = (0, 0, 0.0, None, false);
+        self.skip_gaps();
+        // Pieces are in reading order, so they replay the original walk.
+        for piece in pieces {
+            let (block, end) = (piece.block, piece.source_bytes.end);
+            let len = source(&self.blocks, block).text.len();
+            self.place(piece)?;
+            if end == len {
+                self.next_block = block + 1;
+                self.next_byte = 0;
+                self.skip_gaps();
+            } else {
+                self.next_block = block;
+                self.next_byte = end;
+            }
+        }
+        Ok(())
+    }
+
     /// The bounded paragraph shaped for `paragraphs()[index]`.
     #[cfg(test)]
     pub fn piece(&self, index: usize) -> StyledParagraph {
@@ -969,6 +1010,43 @@ mod tests {
         assert_eq!(empty.pages()[0].height, 0.0);
         let gaps = renderer.paginate_styled(vec![StyledBlock::Gap(5.0)], 360, 230).unwrap();
         assert_eq!(gaps.pages().len(), 1);
+    }
+
+    #[test]
+    fn repaging_matches_a_fresh_pagination_at_the_new_height() {
+        let mut renderer = TextRenderer::new();
+        let rule = || StyledBlock::Rule { space: 10.0, thickness: 2, gray: 0xbb };
+        let mut blocks = vec![StyledBlock::Gap(4.0)];
+        for i in 0..6 {
+            blocks.extend([
+                StyledBlock::Paragraph(styled(&format!("Headword {i}"), SpanStyle::BOLD)),
+                StyledBlock::Paragraph(paragraph(&"Some definition words. ".repeat(12))),
+                StyledBlock::Gap(12.0),
+                rule(),
+            ]);
+        }
+        // Longer than one shaping piece, so a paragraph spans several pieces.
+        blocks.push(StyledBlock::Paragraph(paragraph(&"A long definition. ".repeat(1200))));
+        let mut fresh = |height| renderer.paginate_styled(blocks.clone(), 360, height).unwrap();
+        let (tall, short) = (format!("{:?}", fresh(400).pages()), format!("{:?}", fresh(150).pages()));
+        let mut renderer = TextRenderer::new();
+        // Partly paginated: the pages so far are rebuilt and the rest follow.
+        let mut pages = StyledPagination::new(blocks.clone(), 360, 400).unwrap();
+        renderer.paginate_styled_until(&mut pages, 2).unwrap();
+        assert!(!pages.is_complete());
+        pages.repage(150).unwrap();
+        assert_eq!(pages.size(), (360, 150));
+        renderer.paginate_styled_until(&mut pages, usize::MAX).unwrap();
+        assert_partition(&pages);
+        assert_eq!(format!("{:?}", pages.pages()), short);
+        // Complete, and back again.
+        pages.repage(400).unwrap();
+        assert!(pages.is_complete());
+        assert_eq!(format!("{:?}", pages.pages()), tall);
+        assert!(pages.repage(5).is_err(), "shorter than a line");
+        let mut empty = StyledPagination::new(Vec::new(), 360, 400).unwrap();
+        empty.repage(100).unwrap();
+        assert!(empty.is_complete() && empty.pages().len() == 1);
     }
 
     #[test]

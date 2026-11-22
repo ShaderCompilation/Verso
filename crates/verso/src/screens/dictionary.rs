@@ -7,15 +7,16 @@ use crate::{
     },
     geom::Rect,
     gfx::{
-        HAlign, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, TextRenderer, TextStyle, Weight,
+        HAlign, Icon, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, TextRenderer, TextStyle,
+        Weight,
     },
-    platform::TextInput,
+    platform::{RefreshMode, TextInput},
     screens::EventCx,
     ui::{
         gesture::Gesture,
-        theme::{INK2, LINE, Theme},
-        widget::DrawCx,
-        widgets::{Button, ButtonKind, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
+        theme::{INK, INK2, LINE, PAPER, Theme},
+        widget::{DrawCx, Press, PressEvent},
+        widgets::{Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
     },
 };
 use std::rc::Rc;
@@ -23,7 +24,7 @@ use std::rc::Rc;
 const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
                        then open Dictionaries and tap Rescan.";
 const DISABLED: &str = "All dictionaries are disabled. Open Dictionaries to enable one.";
-const NO_RESULT: &str = "No definition found. Tap the query to edit it, or switch dictionary sets.";
+const NO_RESULT: &str = "No definition found. Edit the word above, or switch dictionary sets.";
 const FIRST_DRAW_WAIT: std::time::Duration = std::time::Duration::from_millis(12);
 /// Nesting levels that indent; deeper blocks stay at the last level.
 const MAX_DEPTH: u8 = 4;
@@ -122,8 +123,12 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
 
 pub enum LookupEvent {
     Close,
-    /// Passage actions, retaining the independently edited lookup query.
-    Actions(String),
+    /// The action strip's book-selection actions.
+    Highlight,
+    Note,
+    /// Search the book for the submitted query.
+    Search(String),
+    Extend,
     /// Open dictionary management at this lookup's set, or at the list of
     /// sets while the worker hasn't yet said which set the lookup resolves to.
     Manage(Option<String>),
@@ -141,6 +146,14 @@ struct Picker {
 }
 
 pub struct Lookup {
+    screen: Rect,
+    /// Where the looked-up text is on the book page: the card stands away
+    /// from it.
+    word: Option<Rect>,
+    /// Portrait only: the compact card was expanded to 80% height.
+    expanded: bool,
+    /// The card already grew once by itself for content that needed it.
+    grew: bool,
     sheet: Sheet,
     worker: Rc<Worker>,
     request: u64,
@@ -148,7 +161,8 @@ pub struct Lookup {
     active_set: String,
     /// Whether `active_set` came from a worker reply rather than the placeholder.
     set_known: bool,
-    /// The last submitted query. The field may have been edited since.
+    /// The last submitted query, shown as the card's title. The field may
+    /// have been edited since.
     query: String,
     pending: bool,
     complete: bool,
@@ -157,15 +171,26 @@ pub struct Lookup {
     sets: Vec<Set>,
     revision: u64,
     picker: Option<Picker>,
-    counter: Rect,
+    /// The tappable query in the header row, which opens query editing.
+    heading: Rect,
+    heading_press: Press,
+    expand: IconButton,
+    close: IconButton,
+    previous: Button,
+    /// The dictionary switcher between ‹ and ›, which opens the picker.
+    switcher: Rect,
+    switcher_press: Press,
+    next: Button,
+    /// The divider under the header rows, and the one above the action
+    /// strip while it shows.
+    divider: i32,
+    actions_divider: Option<i32>,
     field: TextField,
     keyboard: Keyboard,
     search: Button,
-    previous: Button,
-    dictionaries_button: Button,
-    next: Button,
-    find: Button,
     manage: Button,
+    /// Highlight, Note, Search, Extend.
+    actions: [Button; 4],
     returning: bool,
     catalog: Vec<Dictionary>,
     sources: Vec<Source>,
@@ -185,12 +210,18 @@ pub struct Lookup {
     layout_timing: (std::time::Instant, std::time::Duration),
     layout_error: Option<String>,
     pager: Pager,
+    /// The pager shows: the content needs more than one page.
+    paged: bool,
+    /// The definition area without the pager row, and with it.
+    body_full: Rect,
+    body_paged: Rect,
     body: Rect,
 }
 impl Lookup {
-    /// `word` is where the looked-up text is on the page. In landscape a
-    /// bottom sheet would cover most of the page, so the dictionary stands at
-    /// the side away from the word instead.
+    /// `word` is where the looked-up text is on the page. The compact card
+    /// opens on the half of the screen away from it (the bottom half when
+    /// unknown), so the word, its sentence and the selection handles stay
+    /// visible; in landscape it stands at the side away from the word.
     pub fn new(
         query: &str,
         worker: Rc<Worker>,
@@ -199,53 +230,20 @@ impl Lookup {
         word: Option<Rect>,
         selection: crate::dictionary::sets::Selection,
     ) -> Self {
-        let sheet = if screen.w > screen.h {
-            let right = word.is_none_or(|w| w.center().x < screen.center().x);
-            Sheet::side("Dictionary", (screen.w * 11 / 20).max(t.mm(72.0)).min(screen.w), right, screen, t)
-        } else {
-            Sheet::open("Dictionary", screen.h * 4 / 5, screen, t)
-        };
-        let content = sheet.content(t);
-        // A narrow side panel puts Actions on a row of its own.
-        let narrow = content.w < t.mm(90.0);
-        let gap = t.mm(2.0);
         let mut field = TextField::new("Word");
-        let mut search = Button::new("Look up", ButtonKind::Primary);
-        let search_w = t.mm(22.0);
-        field.place(Rect::new(content.x, content.y, content.w - search_w - gap, t.target));
         field.edit(&TextInput::Insert(query.into()));
-        search.place(Rect::new(content.right() - search_w, content.y, search_w, t.target), t);
-        let row = Rect::new(content.x, content.y + t.target + gap, content.w, t.target);
-        let arrow = t.mm(16.0);
-        let find_w = t.mm(30.0);
-        let mut previous = Button::new("‹", ButtonKind::Secondary);
-        let mut dictionaries_button = Button::new("Dictionaries", ButtonKind::Secondary);
-        let mut next = Button::new("›", ButtonKind::Secondary);
-        let mut find = Button::new("Actions", ButtonKind::Secondary);
-        let row = if narrow {
-            find.place(Rect { y: row.bottom() + gap, ..row }, t);
-            row
-        } else {
-            find.place(Rect::new(row.right() - find_w, row.y, find_w, row.h), t);
-            Rect { w: row.w - find_w - gap, ..row }
-        };
-        previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
-        next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
-        dictionaries_button.place(Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h), t);
-        let footer = Rect::new(content.x, sheet.rect().bottom() - t.target - gap, content.w, t.target);
-        let mut pager = Pager::new(1);
-        pager.place(footer, t);
-        let mut manage = Button::new("Manage dictionaries", ButtonKind::Secondary);
-        manage.place(Rect::new(content.x, footer.y - t.target - gap, content.w, t.target), t);
-        let controls = find.rect().bottom().max(row.bottom());
-        let counter = Rect::new(content.x, controls + gap, content.w, t.mm(7.0));
-        let body = Rect::new(content.x, counter.bottom(), content.w, manage.rect().y - counter.bottom() - gap);
         let request = worker.lookup_in(query.into(), false, selection.clone());
         let mut keyboard = Keyboard::default();
+        keyboard.set_submit("Look up");
         keyboard.place(screen, t);
         let revision = worker.revision();
-        Self {
-            sheet,
+        let action = |label| Button::new(label, ButtonKind::Secondary);
+        let mut lookup = Self {
+            screen,
+            word,
+            expanded: false,
+            grew: false,
+            sheet: Sheet::panel(Rect::default(), screen),
             worker,
             request,
             selection,
@@ -259,15 +257,21 @@ impl Lookup {
             sets: vec![],
             revision,
             picker: None,
-            counter,
+            heading: Rect::default(),
+            heading_press: Press::default(),
+            expand: IconButton::new(Icon::Expand),
+            close: IconButton::new(Icon::Close),
+            previous: Button::new("‹", ButtonKind::Secondary),
+            switcher: Rect::default(),
+            switcher_press: Press::default(),
+            next: Button::new("›", ButtonKind::Secondary),
+            divider: 0,
+            actions_divider: None,
             field,
             keyboard,
-            search,
-            previous,
-            dictionaries_button,
-            next,
-            find,
-            manage,
+            search: Button::new("Look up", ButtonKind::Primary),
+            manage: Button::new("Manage dictionaries", ButtonKind::Secondary),
+            actions: [action("Highlight"), action("Note"), action("Search"), action("Extend")],
             returning: false,
             catalog: Vec::new(),
             sources: Vec::new(),
@@ -279,8 +283,152 @@ impl Lookup {
             pages: None,
             layout_timing: (std::time::Instant::now(), std::time::Duration::ZERO),
             layout_error: None,
-            pager,
-            body,
+            pager: Pager::new(1),
+            paged: false,
+            body_full: Rect::default(),
+            body_paged: Rect::default(),
+            body: Rect::default(),
+        };
+        lookup.place(t);
+        lookup
+    }
+    /// The card's rectangle on screen. Touches outside it belong to the book
+    /// page (a selection handle) or close the card.
+    pub fn rect(&self, t: &Theme) -> Rect {
+        self.frame(t)
+    }
+    /// Whether the book selection's handles can be dragged beside the card:
+    /// only on the plain card, not while picking a dictionary or typing.
+    pub fn allows_handles(&self) -> bool {
+        self.picker.is_none() && !self.keyboard.visible
+    }
+    /// The middle of an action strip button (Highlight, Note, Search, Extend).
+    #[cfg(test)]
+    pub(crate) fn action_point(&self, index: usize) -> crate::geom::Point {
+        self.actions[index].rect().center()
+    }
+    fn landscape(&self) -> bool {
+        self.screen.w > self.screen.h
+    }
+    /// Portrait: compact (~46%) at the bottom or top, away from the word, or
+    /// 80% at the bottom when expanded and while the picker or the keyboard
+    /// needs the room. Landscape: a full-height side panel.
+    fn frame(&self, t: &Theme) -> Rect {
+        let s = self.screen;
+        if self.landscape() {
+            let right = self.word.is_none_or(|w| w.center().x < s.center().x);
+            let width = (s.w * 52 / 100).max(t.mm(72.0)).min(s.w);
+            return if right { s.split_right(width).0 } else { s.split_left(width).0 };
+        }
+        if self.expanded || self.picker.is_some() || self.keyboard.visible {
+            return s.split_bottom(s.h * 4 / 5).0;
+        }
+        let height = (s.h * 46 / 100).max(t.mm(64.0)).min(s.h * 52 / 100);
+        if self.word.is_none_or(|w| w.center().y < s.center().y) {
+            s.split_bottom(height).0
+        } else {
+            s.split_top(height).0
+        }
+    }
+    fn definition_shown(&self) -> bool {
+        !self.pending && matches!(self.state, State::Definition { .. })
+    }
+    /// The query field and Look up: while typing, and on a miss so editing
+    /// the query is one tap away.
+    fn edit_row(&self) -> bool {
+        self.keyboard.visible || !self.pending && self.state == State::NoResult
+    }
+    fn actions_shown(&self) -> bool {
+        self.picker.is_none() && !self.keyboard.visible
+    }
+    /// Places everything for the current mode. Cheap, and called before
+    /// each gesture and draw, since replies, the keyboard and the picker
+    /// change which rows show.
+    fn place(&mut self, t: &Theme) {
+        let frame = self.frame(t);
+        if self.sheet.rect() != frame {
+            self.sheet = Sheet::panel(frame, self.screen);
+        }
+        let landscape = self.landscape();
+        let typing = self.keyboard.visible;
+        let c = frame.inset_xy(t.margin, 0);
+        let gap = t.mm(1.4);
+        // Header: query ✎ … ⤢ ×
+        let header = Rect::new(c.x, frame.y + t.mm(1.7), c.w, t.mm(8.6));
+        let (side, cy) = (t.target, header.center().y);
+        self.close.place(Rect::new(c.right() - side + t.mm(2.0), cy - side / 2, side, side));
+        let expandable = !landscape && self.picker.is_none() && !typing;
+        self.expand.icon = if self.expanded { Icon::Collapse } else { Icon::Expand };
+        self.expand.place(if expandable {
+            Rect::new(self.close.rect().x - side, cy - side / 2, side, side)
+        } else {
+            Rect::default()
+        });
+        let end = if expandable { self.expand.rect().x } else { self.close.rect().x };
+        self.heading = Rect::new(c.x, header.y, (end - gap - c.x).max(0), header.h);
+        let mut y = header.bottom();
+        // Switcher: ‹ · name · i / N ▾ · ›
+        if !typing && self.picker.is_none() {
+            let row = Rect::new(c.x, y + t.mm(0.4), c.w, t.mm(7.8));
+            let arrow = t.mm(if landscape { 7.1 } else { 8.1 });
+            self.previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
+            self.next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
+            self.switcher = Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h);
+            y = row.bottom();
+        }
+        if self.edit_row() {
+            let row = Rect::new(c.x, y + gap, c.w, t.target);
+            let search_w = t.mm(18.6).min(row.w / 3);
+            self.field.place(Rect::new(row.x, row.y, row.w - search_w - gap, row.h));
+            self.search.place(Rect::new(row.right() - search_w, row.y, search_w, row.h), t);
+            y = row.bottom();
+        }
+        self.divider = y + t.mm(1.7);
+        let top = self.divider + t.hairline + t.mm(1.5);
+        // From the bottom edge up: actions, then Manage or the pager.
+        let mut bottom = frame.bottom() - t.mm(2.4);
+        if typing {
+            bottom = bottom.min(self.keyboard.rect().y - t.mm(2.0));
+        }
+        self.actions_divider = None;
+        if self.actions_shown() {
+            // One row, or two in a side panel too narrow for "Highlight".
+            let gap = t.mm(if landscape { 1.2 } else { 1.7 });
+            let cols = if (c.w - 3 * gap) / 4 < t.mm(17.0) { 2 } else { 4 };
+            let (h, rows) = (t.mm(8.8), 4 / cols);
+            let strip = Rect::new(c.x, bottom - rows * h - (rows - 1) * gap, c.w, rows * h + (rows - 1) * gap);
+            let w = (strip.w - (cols - 1) * gap) / cols;
+            for (i, b) in self.actions.iter_mut().enumerate() {
+                let (col, row) = (i as i32 % cols, i as i32 / cols);
+                b.place(Rect::new(strip.x + col * (w + gap), strip.y + row * (h + gap), w, h), t);
+            }
+            let line = strip.y - t.mm(1.4) - t.hairline;
+            self.actions_divider = Some(line);
+            bottom = line - t.mm(1.4);
+        }
+        self.manage.place(Rect::new(c.x, bottom - t.target, c.w, t.target), t);
+        let (lowest, pager_bottom) = if self.definition_shown() {
+            (bottom, bottom)
+        } else {
+            (self.manage.rect().y - t.mm(2.0), self.manage.rect().y - t.mm(1.0))
+        };
+        let pager = Rect::new(c.x, pager_bottom - t.mm(7.0), c.w, t.mm(7.0));
+        self.pager.place(pager, t);
+        self.body_full = Rect::new(c.x, top, c.w, (lowest - top).max(1));
+        self.body_paged = Rect::new(c.x, top, c.w, (pager.y - t.mm(1.0) - top).max(1));
+        self.body = if self.paged { self.body_paged } else { self.body_full };
+        if let Some(p) = &mut self.picker {
+            let area = Rect::new(c.x, header.bottom() + gap, c.w, frame.bottom() - t.mm(2.4) - header.bottom() - gap);
+            let gap = t.mm(2.0);
+            let footer = Rect::new(area.x, area.bottom() - t.target, area.w, t.target);
+            let back_w = t.mm(17.0);
+            p.back.place(Rect::new(area.x, footer.y, back_w, footer.h), t);
+            p.manage.place(Rect::new(area.x + back_w + gap, footer.y, area.w - back_w - gap, footer.h), t);
+            p.pager.place(Rect::new(area.x, footer.y - t.target - gap, area.w, t.target), t);
+            p.status = Rect::new(area.x, p.pager.rect().y - t.mm(8.0), area.w, t.mm(8.0));
+            p.set.place(Rect::new(area.x, area.y, area.w, t.target), t);
+            let list_y = area.y + t.target + gap;
+            p.list.place(Rect::new(area.x, list_y, area.w, p.status.y - list_y), t.row2, 0);
         }
     }
     /// The name, plus its source when another dictionary has the same name.
@@ -426,36 +574,34 @@ impl Lookup {
             self.choose(target as usize);
         }
     }
+    /// The switcher's counter ("2 / 13"), with a quiet suffix while the
+    /// search is still running.
     fn status(&self) -> String {
-        let count = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref()).map_or_else(
-            || format!("{} found", self.matches.len()),
-            |i| format!("{} of {}", i + 1, self.matches.len()),
-        );
-        if !self.complete && self.preparing.is_some() {
-            format!("{count} · Preparing dictionaries…")
-        } else if !self.complete {
-            format!("{count} · Searching…")
-        } else {
-            count
+        let n = self.matches.len();
+        let mut parts = Vec::new();
+        match self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref()) {
+            Some(i) => parts.push(format!("{} / {n}", i + 1)),
+            None if n > 0 || self.complete => parts.push(format!("{n} found")),
+            None => {}
         }
+        if !self.complete {
+            parts.push(if self.preparing.is_some() { "Preparing…" } else { "Searching…" }.to_owned());
+        }
+        parts.join(" · ")
     }
     fn open_picker(&mut self, t: &Theme) {
-        let c = self.sheet.content(t);
-        let gap = t.mm(2.0);
-        let footer = Rect::new(c.x, self.sheet.rect().bottom() - t.target - gap, c.w, t.target);
-        let mut back = Button::new("Back", ButtonKind::Secondary);
-        let mut manage = Button::new("Manage dictionaries", ButtonKind::Secondary);
-        let back_w = t.mm(17.0);
-        back.place(Rect::new(c.x, footer.y, back_w, footer.h), t);
-        manage.place(Rect::new(c.x + back_w + gap, footer.y, c.w - back_w - gap, footer.h), t);
-        let mut pager = Pager::new(1);
-        pager.place(Rect::new(c.x, footer.y - t.target - gap, c.w, t.target), t);
-        let status = Rect::new(c.x, pager.rect().y - t.mm(8.0), c.w, t.mm(8.0));
-        let mut set = Button::new("", ButtonKind::Secondary);
-        set.place(Rect::new(c.x, c.y, c.w, t.target), t);
-        let mut list = List::new(vec![]);
-        list.place(Rect::new(c.x, c.y + t.target + gap, c.w, status.y - c.y - t.target - gap), t.row2, 0);
-        self.picker = Some(Picker { sets: false, list, pager, set, back, manage, status });
+        let button = |label| Button::new(label, ButtonKind::Secondary);
+        self.picker = Some(Picker {
+            sets: false,
+            list: List::new(vec![]),
+            pager: Pager::new(1),
+            set: button(""),
+            back: button("Back"),
+            manage: button("Manage dictionaries"),
+            status: Rect::default(),
+        });
+        self.refresh_picker(t);
+        self.place(t);
         self.refresh_picker(t);
     }
     fn refresh_picker(&mut self, _t: &Theme) {
@@ -516,34 +662,69 @@ impl Lookup {
                 self.field.edit(input);
             }
         }
+        self.place(cx.theme);
         cx.redraw();
         true
     }
+    fn start_editing(&mut self) {
+        self.field.focused = true;
+        self.keyboard.visible = true;
+    }
+    fn manage_event(&mut self) -> LookupEvent {
+        self.picker = None;
+        self.returning = true;
+        if !self.complete {
+            self.worker.cancel();
+        }
+        LookupEvent::Manage(self.set_known.then(|| self.active_set.clone()))
+    }
     /// All gestures are consumed by the reader while this overlay is open.
     pub fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Option<LookupEvent> {
+        self.place(cx.theme);
+        let event = self.gesture(g, cx);
+        // Closing the picker or the keyboard, or expanding, moves the rows.
+        self.place(cx.theme);
+        event
+    }
+    fn gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Option<LookupEvent> {
+        let t = cx.theme;
         if self.keyboard.visible {
-            if let Some(input) = self.keyboard.on_gesture(g, cx.theme) {
-                self.on_text_input(&input, cx);
+            if let Some(input) = self.keyboard.on_gesture_inside(g, t) {
+                if let Some(input) = input {
+                    self.on_text_input(&input, cx);
+                }
+                return None;
+            }
+            // Beside the keyboard: ×, Look up and the field; anything else
+            // puts the keyboard away.
+            if self.close.on_gesture(g) {
+                return Some(LookupEvent::Close);
+            }
+            if self.search.on_gesture(g) {
+                self.submit(false);
+                return None;
+            }
+            if !self.field.on_gesture(g) && matches!(g, Gesture::Tap(_)) {
+                self.on_text_input(&TextInput::Dismiss, cx);
             }
             return None;
         }
-        if self.sheet.on_gesture(g) {
+        if self.sheet.on_gesture(g) || self.close.on_gesture(g) {
             return Some(LookupEvent::Close);
+        }
+        if self.expand.on_gesture(g) {
+            self.expanded = !self.expanded;
+            return None;
         }
         if let Some(p) = &mut self.picker {
             if p.manage.on_gesture(g) {
-                self.picker = None;
-                self.returning = true;
-                if !self.complete {
-                    self.worker.cancel();
-                }
-                return Some(LookupEvent::Manage(self.set_known.then(|| self.active_set.clone())));
+                return Some(self.manage_event());
             }
             if p.back.on_gesture(g) {
                 if p.sets {
                     p.sets = false;
                     p.list.page = 0;
-                    self.refresh_picker(cx.theme);
+                    self.refresh_picker(t);
                 } else {
                     self.picker = None;
                 }
@@ -552,7 +733,7 @@ impl Lookup {
             if p.set.on_gesture(g) {
                 p.sets = !p.sets;
                 p.list.page = 0;
-                self.refresh_picker(cx.theme);
+                self.refresh_picker(t);
                 return None;
             }
             p.pager.on_gesture(g);
@@ -573,23 +754,29 @@ impl Lookup {
             }
             return None;
         }
-        if self.dictionaries_button.on_gesture(g) {
-            self.open_picker(cx.theme);
+        let tapped = |press: &mut Press, area: Rect| {
+            matches!(press.on_gesture(g, area), Some(PressEvent::Tap | PressEvent::LongPressEnd))
+        };
+        if tapped(&mut self.heading_press, self.heading) {
+            self.start_editing();
             return None;
         }
-        if (self.pending || !matches!(self.state, State::Definition { .. })) && self.manage.on_gesture(g) {
-            self.returning = true;
-            if !self.complete {
-                self.worker.cancel();
+        if tapped(&mut self.switcher_press, self.switcher) {
+            self.open_picker(t);
+            return None;
+        }
+        if !self.definition_shown() && self.manage.on_gesture(g) {
+            return Some(self.manage_event());
+        }
+        if self.edit_row() {
+            if self.field.on_gesture(g) {
+                self.start_editing();
+                return None;
             }
-            return Some(LookupEvent::Manage(self.set_known.then(|| self.active_set.clone())));
-        }
-        if self.field.on_gesture(g) {
-            self.field.focused = true;
-            self.keyboard.visible = true;
-        }
-        if self.search.on_gesture(g) {
-            self.submit(false);
+            if self.search.on_gesture(g) {
+                self.submit(false);
+                return None;
+            }
         }
         if self.previous.on_gesture(g) {
             self.cycle(-1);
@@ -597,24 +784,172 @@ impl Lookup {
         if self.next.on_gesture(g) {
             self.cycle(1);
         }
-        if self.find.on_gesture(g) {
-            return Some(LookupEvent::Actions(self.field.value().to_owned()));
+        let [highlight, note, search, extend] = &mut self.actions;
+        if highlight.on_gesture(g) {
+            return Some(LookupEvent::Highlight);
         }
-        self.pager.on_gesture(g);
+        if note.on_gesture(g) {
+            return Some(LookupEvent::Note);
+        }
+        if search.on_gesture(g) {
+            return Some(LookupEvent::Search(self.query.clone()));
+        }
+        if extend.on_gesture(g) {
+            return Some(LookupEvent::Extend);
+        }
+        if self.paged {
+            self.pager.on_gesture(g);
+        }
+        // Swipes turn pages even when the pager row had no room.
         if let Gesture::Swipe { dir, .. } = g {
             self.pager.on_swipe(*dir);
         }
         None
     }
+    /// The query (or "Look up word" while typing), then ⤢ and ×.
+    fn draw_header(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        let r = self.heading;
+        if self.keyboard.visible {
+            cx.line("Look up word", t.heading, r, HAlign::Left);
+        } else {
+            let label = if self.query.trim().is_empty() { "Look up a word" } else { self.query.as_str() };
+            let style = t.dictionary_headword;
+            let (gap, icon) = (t.mm(1.5), t.icon_small);
+            let w = (cx.text.width(label, style).ceil() as i32).min((r.w - gap - icon).max(0));
+            let pressed = self.heading_press.is_down();
+            let (fg, quiet) = if pressed { (PAPER, PAPER) } else { (INK, INK2) };
+            if pressed {
+                let pill = Rect::new(r.x - t.mm(1.0), r.y + t.mm(0.6), w + gap + icon + t.mm(2.0), r.h - t.mm(1.2));
+                cx.canvas.fill_rounded_rect(pill, t.radius, INK);
+                cx.hint(pill, RefreshMode::Fast);
+            }
+            cx.line(label, style.gray(fg), Rect::new(r.x, r.y, w + 2, r.h), HAlign::Left);
+            if self.picker.is_none() {
+                cx.icon(Icon::Pencil, Rect::new(r.x + w + gap, r.y, icon, r.h), icon, quiet);
+            }
+        }
+        if self.expand.rect().w > 0 {
+            self.expand.draw(cx);
+        }
+        self.close.draw(cx);
+    }
+    fn draw_switcher(&mut self, cx: &mut DrawCx, status: &str) {
+        let t = cx.theme;
+        let index = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref());
+        self.previous.enabled = index.is_some_and(|i| i > 0);
+        self.next.enabled = index.is_some_and(|i| i + 1 < self.matches.len());
+        self.previous.draw(cx);
+        self.next.draw(cx);
+        let r = self.switcher;
+        let pressed = self.switcher_press.is_down();
+        let (fg, quiet) = if pressed {
+            cx.canvas.fill_rounded_rect(r, t.radius, INK);
+            cx.hint(r, RefreshMode::Fast);
+            (PAPER, PAPER)
+        } else {
+            cx.canvas.stroke_rounded_rect(r, t.radius, t.border as f32, INK);
+            (INK, INK2)
+        };
+        let (pad, icon) = (t.mm(2.2), t.icon_small);
+        let chevron = Rect::new(r.right() - pad - icon, r.y, icon, r.h);
+        cx.icon(Icon::ChevronDown, chevron, icon, quiet);
+        let meta_style = t.small.gray(quiet);
+        let meta_w = (cx.text.width(status, meta_style).ceil() as i32).min(r.w / 2);
+        let meta = Rect::new(chevron.x - t.mm(1.0) - meta_w, r.y, meta_w + 1, r.h);
+        cx.line(status, meta_style, meta, HAlign::Right);
+        let name = self
+            .catalog
+            .iter()
+            .find(|d| Some(&d.id) == self.selected.as_ref())
+            .map_or_else(|| "Dictionaries".into(), |d| self.title(d));
+        let name_rect = Rect::new(r.x + pad, r.y, (meta.x - t.mm(1.5) - r.x - pad).max(0), r.h);
+        cx.line(&name, t.button.gray(fg), name_rect, HAlign::Left);
+    }
+    /// Lays out the first page. A definition that fits one page uses the
+    /// pager's row too; a longer one gives that row back to the pager,
+    /// re-breaking the lines already shaped.
+    fn paginate(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        if let Some(pages) = &self.pages {
+            let want = if self.paged { self.body_paged } else { self.body_full };
+            if pages.size() != (want.w, want.h) {
+                // The card changed size (expanded, collapsed, or typing).
+                self.pages = None;
+            }
+        }
+        if self.pages.is_some() || self.layout_error.is_some() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let (mut result, mut bytes);
+        loop {
+            let blocks = content(&self.state, self.pending, &self.warnings, t);
+            bytes =
+                blocks.iter().map(|b| if let StyledBlock::Paragraph(p) = b { p.text.len() } else { 0 }).sum::<usize>();
+            let (full, paged_h) = (self.body_full, self.body_paged.h);
+            // The pager row is worth it only if a few lines stay beside it.
+            let roomy = paged_h >= 3 * t.dictionary_body.line_height().ceil() as i32;
+            result = StyledPagination::new(blocks, full.w, full.h).and_then(|mut pages| {
+                cx.text.paginate_styled_until(&mut pages, 1)?;
+                let paged = !(pages.is_complete() && pages.pages().len() <= 1);
+                if paged && roomy {
+                    pages.repage(paged_h)?;
+                    cx.text.paginate_styled_until(&mut pages, 1)?;
+                }
+                Ok((pages, paged))
+            });
+            // Long status text in a compact card with Manage and the query
+            // field: grow once to the expanded card rather than squeezing it.
+            if matches!(&result, Ok((_, true))) && !roomy && !self.landscape() && !self.expanded && !self.grew {
+                self.grew = true;
+                self.expanded = true;
+                self.place(t);
+                continue;
+            }
+            // Otherwise pages turn by swipe alone.
+            if let Ok((_, paged)) = &mut result {
+                *paged &= roomy;
+            }
+            break;
+        }
+        match result {
+            Ok((pages, paged)) => {
+                self.paged = paged;
+                self.pager.set(0, pages.pages().len());
+                self.pager.incomplete = !pages.is_complete();
+                self.pages = Some(pages);
+            }
+            Err(e) => {
+                self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
+                self.paged = false;
+                self.pager.set(0, 1);
+                self.pager.incomplete = false;
+            }
+        }
+        self.body = if self.paged { self.body_paged } else { self.body_full };
+        self.layout_timing = (started, started.elapsed());
+        log::debug!(
+            "dictionary first page pagination: {:?}, {bytes} text bytes, {} pages, complete {}",
+            self.layout_timing.1,
+            self.pages.as_ref().map_or(0, |p| p.pages().len()),
+            self.pages.as_ref().is_some_and(StyledPagination::is_complete)
+        );
+    }
     pub fn draw(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        self.place(t);
         self.sheet.draw(cx);
         // Drawing the cached book page takes long enough that a warm lookup
         // may finish while the sheet chrome is drawn. Consume it before
         // laying out content so the first update can contain the definition.
-        self.take_reply(cx.theme, true);
-        let t = cx.theme;
+        self.take_reply(t, true);
+        // The reply may change which rows show.
+        self.place(t);
         let status = self.status();
         log::debug!("dictionary status draw: {status}, set {}", self.active_set);
+        self.draw_header(cx);
+        let rule = |cx: &mut DrawCx, y: i32, r: Rect| cx.fill(Rect::new(r.x, y, r.w, t.hairline), LINE);
         if let Some(p) = &mut self.picker {
             p.set.draw(cx);
             p.list.draw(cx);
@@ -624,56 +959,24 @@ impl Lookup {
             cx.line(&status, t.small.gray(INK2), p.status, HAlign::Left);
             return;
         }
-        self.field.draw(cx);
-        self.search.draw(cx);
-        let index = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref());
-        self.previous.enabled = index.is_some_and(|i| i > 0);
-        self.next.enabled = index.is_some_and(|i| i + 1 < self.matches.len());
-        cx.line(&status, t.small.gray(INK2), self.counter, HAlign::Left);
-        self.dictionaries_button.label = self
-            .catalog
-            .iter()
-            .find(|d| Some(&d.id) == self.selected.as_ref())
-            .map_or_else(|| "Dictionaries".into(), |d| self.title(d));
-        self.previous.draw(cx);
-        self.dictionaries_button.draw(cx);
-        self.next.draw(cx);
-        self.find.draw(cx);
-        let definition = !self.pending && matches!(self.state, State::Definition { .. });
-        let bottom = if definition { self.pager.rect().y } else { self.manage.rect().y };
-        self.body.h = bottom - self.body.y - t.mm(2.0);
-        if !definition {
+        if !self.keyboard.visible {
+            self.draw_switcher(cx, &status);
+        }
+        if self.edit_row() {
+            self.field.draw(cx);
+            self.search.draw(cx);
+        }
+        rule(cx, self.divider, self.body_full);
+        if let Some(y) = self.actions_divider {
+            rule(cx, y, self.body_full);
+            for b in &self.actions {
+                b.draw(cx);
+            }
+        }
+        if !self.definition_shown() {
             self.manage.draw(cx);
         }
-        if self.pages.is_none() && self.layout_error.is_none() {
-            let started = std::time::Instant::now();
-            let blocks = content(&self.state, self.pending, &self.warnings, t);
-            let bytes: usize =
-                blocks.iter().map(|b| if let StyledBlock::Paragraph(p) = b { p.text.len() } else { 0 }).sum();
-            let result = StyledPagination::new(blocks, self.body.w, self.body.h).and_then(|mut pages| {
-                cx.text.paginate_styled_until(&mut pages, 1)?;
-                Ok(pages)
-            });
-            match result {
-                Ok(pages) => {
-                    self.pager.set(0, pages.pages().len());
-                    self.pager.incomplete = !pages.is_complete();
-                    self.pages = Some(pages);
-                }
-                Err(e) => {
-                    self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
-                    self.pager.set(0, 1);
-                    self.pager.incomplete = false;
-                }
-            }
-            self.layout_timing = (started, started.elapsed());
-            log::debug!(
-                "dictionary first page pagination: {:?}, {bytes} text bytes, {} pages, complete {}",
-                self.layout_timing.1,
-                self.pages.as_ref().map_or(0, |p| p.pages().len()),
-                self.pages.as_ref().is_some_and(StyledPagination::is_complete)
-            );
-        }
+        self.paginate(cx);
         if let Some(pages) = &mut self.pages {
             let started = std::time::Instant::now();
             // Keep accents, italic overhangs and descenders in the controls' gap.
@@ -686,7 +989,9 @@ impl Lookup {
         if let Some(error) = &self.layout_error {
             cx.text.draw(cx.canvas, error, t.body, self.body, HAlign::Left);
         }
-        self.pager.draw(cx);
+        if self.paged {
+            self.pager.draw(cx);
+        }
         self.keyboard.draw(cx);
     }
 }

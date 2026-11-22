@@ -97,7 +97,6 @@ pub struct Reader {
     pending_position: Option<Position>,
     annotations: annotations::State,
     extension: Option<annotations::ExtendBar>,
-    lookup_query: Option<String>,
     bars: BarState,
     /// Where the reader was before the last jump (Contents, highlights,
     /// chapter buttons, the progress slider), offered back until the next
@@ -215,7 +214,6 @@ impl Reader {
             pending_position: None,
             annotations: annotations::State::default(),
             extension: None,
-            lookup_query: None,
             bars: BarState { opened: generation, live_due: true, ..BarState::default() },
             back: None,
             back_rect: Rect::default(),
@@ -471,7 +469,6 @@ impl Reader {
     }
     fn selection_released(&mut self, cx: &mut EventCx) {
         if let Some(text) = self.selection.take_released() {
-            self.lookup_query = None;
             if self.selection.extending {
                 return;
             }
@@ -1225,6 +1222,20 @@ impl Reader {
         if self.pending_turn && matches!(g, Gesture::LongPress(_)) {
             self.commit_turn(cx);
         }
+        // A selection handle beside the dictionary card: the card closes and
+        // the drag adjusts the selection, which reopens the card for a single
+        // word or offers the passage actions on release.
+        if let Overlay::Lookup(lookup) = &self.overlay
+            && lookup.allows_handles()
+            && matches!(g, Gesture::Down(p) if !lookup.rect(cx.theme).contains(p))
+            && self.selection.adjusting(g, cx.theme)
+        {
+            if let Some(worker) = &self.dictionary {
+                worker.cancel();
+            }
+            self.overlay = Overlay::None;
+            cx.redraw();
+        }
         if (matches!(self.overlay, Overlay::None)
             || matches!(self.overlay, Overlay::SelectionActions(_)) && self.selection.adjusting(g, cx.theme))
             && let Some(context) = self.selection_context()
@@ -1265,16 +1276,25 @@ impl Reader {
                             set.as_deref(),
                         )));
                     }
-                    if let Some(worker) = &self.dictionary {
-                        worker.cancel();
+                    match event {
+                        // Each opens its own screen or closes the card on success.
+                        LookupEvent::Highlight => self.save_highlight(cx),
+                        LookupEvent::Note => self.note_selection(cx),
+                        LookupEvent::Search(query) => self.open_search(Some(&query), cx),
+                        LookupEvent::Extend => {
+                            self.selection.extend();
+                            self.extension = Some(annotations::ExtendBar::new(cx.theme, self.screen));
+                            self.overlay = Overlay::None;
+                        }
+                        _ => {
+                            self.overlay = Overlay::None;
+                            self.selection.clear();
+                        }
                     }
-                    self.overlay = Overlay::None;
-                    if let LookupEvent::Actions(query) = event {
-                        self.lookup_query = Some(query);
-                        self.overlay =
-                            Overlay::SelectionActions(Box::new(SelectionActions::new(cx.theme, self.screen)));
-                    } else {
-                        self.selection.clear();
+                    if !matches!(self.overlay, Overlay::Lookup(_))
+                        && let Some(worker) = &self.dictionary
+                    {
+                        worker.cancel();
                     }
                 }
             }
@@ -1292,8 +1312,7 @@ impl Reader {
                     }
                 }
                 Some(SelectionAction::Search) => {
-                    let query =
-                        self.lookup_query.take().or_else(|| self.selection.selected.as_ref().map(|s| s.text.clone()));
+                    let query = self.selection.selected.as_ref().map(|s| s.text.clone());
                     self.open_search(query.as_deref(), cx);
                 }
                 Some(SelectionAction::Dismiss) => {
@@ -2572,6 +2591,90 @@ mod tests {
             r.on_gesture(Gesture::Down(blank), cx);
         });
         assert!(!r.selection.adjusting(Gesture::Move(blank), &theme));
+    }
+
+    #[test]
+    fn the_dictionary_card_acts_on_the_book_selection_and_yields_handles_beside_it() {
+        use crate::{
+            document::{Selection, TextRange},
+            geom::{Point, Rect},
+        };
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("lookup-actions");
+        r.pages = 10;
+        r.target = 2;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 2));
+        let word = Rect::new(100, 100, 120, 30);
+        let open = |r: &mut Reader| {
+            r.selection.clear();
+            r.extension = None;
+            r.selection.selected = Some(Selection {
+                range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+                text: "word".into(),
+                rects: vec![word],
+                start_page: 2,
+                start_visible: true,
+                end_visible: true,
+            });
+            test_cx(&theme, |cx| r.lookup("word", cx));
+            let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
+            lookup.rect(&theme)
+        };
+        let tap = |r: &mut Reader, p: Point| {
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(p), cx);
+                r.on_gesture(Gesture::Tap(p), cx);
+            })
+        };
+        let action = |r: &Reader, i| match &r.overlay {
+            Overlay::Lookup(lookup) => lookup.action_point(i),
+            _ => panic!("no lookup"),
+        };
+        // The compact card opens at the bottom, away from the word near the top.
+        let card = open(&mut r);
+        assert_eq!(card.bottom(), r.screen.h);
+        assert!(card.intersect(&word).is_none());
+        // Highlight can't save before annotations are ready: the card stays.
+        let p = action(&r, 0);
+        tap(&mut r, p);
+        assert!(matches!(r.overlay, Overlay::Lookup(_)));
+        assert!(r.selection.selected.is_some());
+        // Extend goes straight to extending the book selection.
+        let p = action(&r, 3);
+        tap(&mut r, p);
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(r.selection.extending && r.extension.is_some());
+        // Search opens book search for the query.
+        open(&mut r);
+        let p = action(&r, 2);
+        tap(&mut r, p);
+        assert!(matches!(r.overlay, Overlay::Search(_)));
+        assert_eq!(r.search.query, "word");
+        assert!(commands.try_iter().any(|c| matches!(c, Command::Search { query, .. } if query == "word")));
+        // A handle beside the card closes it and drags the selection.
+        open(&mut r);
+        let handle = Point::new(word.right(), word.bottom() + theme.mm(1.2));
+        assert!(!card.contains(handle));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(handle), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(r.selection.adjusting(Gesture::Move(handle), &theme), "the handle was grabbed");
+        let to = Point::new(400, 300);
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Move(to), cx);
+            r.on_gesture(Gesture::End(to), cx);
+        });
+        assert!(
+            commands.try_iter().any(|c| matches!(c, Command::Select { query: SelectionQuery::Extend { .. }, .. })),
+            "the drag extends the selection"
+        );
+        // Elsewhere outside the card, a tap closes it and drops the selection.
+        open(&mut r);
+        tap(&mut r, Point::new(500, 300));
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(r.selection.selected.is_none());
     }
 
     #[test]
