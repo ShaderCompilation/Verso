@@ -28,6 +28,9 @@ pub struct Metadata {
     pub authors: String,
     pub language: String,
     pub cover: Option<String>,
+    /// Whether the package has a description (synopsis) with text; `None`
+    /// until the book has been read for one. The text is read when shown.
+    pub synopsis: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

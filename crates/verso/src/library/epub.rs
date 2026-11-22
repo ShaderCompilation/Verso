@@ -61,6 +61,9 @@ fn xml(bytes: &[u8]) -> Result<Node> {
                     );
                 }
                 if empty {
+                    if node.name == "br" && stack[1..].iter().any(|n| n.name == "description") {
+                        stack.last_mut().unwrap().text.push('\n');
+                    }
                     stack.last_mut().unwrap().children.push(node);
                 } else {
                     stack.push(node);
@@ -69,8 +72,21 @@ fn xml(bytes: &[u8]) -> Result<Node> {
             Event::End(_) => {
                 ensure!(stack.len() > 1, "unexpected XML end");
                 let node = stack.pop().unwrap();
-                if matches!(stack.last().unwrap().name.as_str(), "title" | "creator" | "language" | "identifier") {
+                // Text fields keep the text of elements inside them; a
+                // description written as XHTML keeps its paragraph breaks.
+                if stack[1..].iter().any(|n| matches!(n.name.as_str(), "title" | "creator" | "language" | "identifier"))
+                {
                     stack.last_mut().unwrap().text.push_str(&node.text);
+                } else if stack[1..].iter().any(|n| n.name == "description") {
+                    let parent = stack.last_mut().unwrap();
+                    parent.text.push_str(&node.text);
+                    match node.name.as_str() {
+                        "p" | "div" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" => {
+                            parent.text.push_str("\n\n")
+                        }
+                        "br" => parent.text.push('\n'),
+                        _ => {}
+                    }
                 }
                 stack.last_mut().unwrap().children.push(node);
             }
@@ -170,7 +186,7 @@ pub(super) fn package<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(String
 pub fn read_metadata(path: &Path) -> Result<Metadata> {
     let mut zip = open(path)?;
     let (package_path, package) = package(&mut zip)?;
-    let mut result = Metadata::default();
+    let mut result = Metadata { synopsis: Some(false), ..Metadata::default() };
     let mut cover_id = "";
     if let Some(meta) = package.find("metadata") {
         let identifier = package.attr("unique-identifier");
@@ -181,6 +197,7 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
         result.authors =
             meta.all("creator").map(|n| text(Some(n))).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
         result.language = text(meta.find("language"));
+        result.synopsis = Some(meta.all("description").any(|n| has_text(&n.text)));
         cover_id = meta.all("meta").find(|n| n.attr("name") == "cover").map_or("", |n| n.attr("content"));
     }
     let mut candidates = Vec::new();
@@ -219,6 +236,31 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
         }
     }
     Ok(result)
+}
+
+/// Whether a description shows any text once its markup is left out.
+fn has_text(description: &str) -> bool {
+    let mut tag = false;
+    description.chars().any(|c| {
+        match c {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ => return !tag && c.is_alphanumeric(),
+        }
+        false
+    })
+}
+
+/// The book's description (synopsis) as written in the package: usually
+/// HTML, sometimes plain text with blank lines between paragraphs. `None`
+/// when it has no text.
+pub fn synopsis(path: &Path) -> Result<Option<String>> {
+    let mut zip = open(path)?;
+    let (_, package) = package(&mut zip)?;
+    Ok(package
+        .find("metadata")
+        .and_then(|meta| meta.all("description").find(|n| has_text(&n.text)))
+        .map(|n| n.text.trim().to_owned()))
 }
 
 pub fn read(path: &Path) -> Result<Metadata> {
@@ -317,6 +359,48 @@ pub(crate) mod tests {
             zip.finish()?;
         }
         assert!(entry(&mut ZipArchive::new(data)?, "huge", 1024).is_err());
+        Ok(())
+    }
+    #[test]
+    fn synopses_from_escaped_html_xhtml_and_plain_text() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("verso-synopsis-{}.epub", std::process::id()));
+        let opf = |description: &str| {
+            format!(
+                r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title>{description}</metadata></package>"#
+            )
+        };
+        // Calibre and most stores escape the HTML.
+        fixture(
+            &path,
+            &opf("<dc:description>&lt;p&gt;A &lt;i&gt;sweeping&lt;/i&gt; saga.&lt;/p&gt;</dc:description>"),
+            &[],
+        )?;
+        assert_eq!(read(&path)?.synopsis, Some(true));
+        assert_eq!(synopsis(&path)?.as_deref(), Some("<p>A <i>sweeping</i> saga.</p>"));
+        // XHTML elements keep their text and paragraph breaks.
+        fixture(
+            &path,
+            &opf(
+                r#"<dc:description><div xmlns="http://www.w3.org/1999/xhtml"><p>One <i>two</i>.</p><p>Three<br/>four</p></div></dc:description>"#,
+            ),
+            &[],
+        )?;
+        assert_eq!(synopsis(&path)?.as_deref(), Some("One two.\n\nThree\nfour"));
+        // An empty or markup-only description, or none, is no synopsis.
+        for description in
+            ["<dc:description>  </dc:description>", "<dc:description>&lt;p&gt; &lt;/p&gt;</dc:description>", ""]
+        {
+            fixture(&path, &opf(description), &[])?;
+            assert_eq!(read(&path)?.synopsis, Some(false), "{description}");
+            assert_eq!(synopsis(&path)?, None);
+        }
+        // The first description with text wins.
+        fixture(&path, &opf("<dc:description/><dc:description>Plain.\n\nSecond.</dc:description>"), &[])?;
+        assert_eq!(synopsis(&path)?.as_deref(), Some("Plain.\n\nSecond."));
+        // A package without metadata has been read, not left unknown.
+        fixture(&path, "<package/>", &[])?;
+        assert_eq!(read(&path)?.synopsis, Some(false));
+        std::fs::remove_file(path)?;
         Ok(())
     }
 }

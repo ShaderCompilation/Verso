@@ -12,6 +12,7 @@ pub mod footnote;
 pub mod gallery;
 pub mod reader;
 pub mod reader_menu;
+pub mod styled_sheet;
 pub mod system;
 pub mod text_sheet;
 pub mod top_drawer;

@@ -1388,6 +1388,11 @@ pub fn scan_roots(
         {
             let mut b = (*cached).clone();
             b.available = true;
+            // Indexed before synopses were recorded: read it again in the
+            // background, keeping the record shown meanwhile.
+            if b.metadata.synopsis.is_none() && b.error.is_none() {
+                dirty.insert(path.clone());
+            }
             books.push(b);
             continue;
         }
@@ -1571,6 +1576,18 @@ mod tests {
         let unchanged = run(&root, &initial.index, false);
         assert_eq!(unchanged.metadata_reads, 0);
         assert_eq!(run(&root, &unchanged.index, true).metadata_reads, 1);
+        // A book indexed before synopses were recorded is read once more and
+        // keeps its identity; the broken one isn't retried.
+        let mut unknown = unchanged.index.clone();
+        unknown.books.iter_mut().for_each(|b| b.metadata.synopsis = None);
+        let refreshed = run(&root, &unknown, false);
+        assert_eq!(refreshed.metadata_reads, 1);
+        let one = refreshed.index.books.iter().find(|b| b.path == a).unwrap();
+        assert_eq!(
+            (one.metadata.synopsis, &one.id),
+            (Some(false), &unchanged.index.books.iter().find(|b| b.path == a).unwrap().id)
+        );
+        assert_eq!(run(&root, &refreshed.index, false).metadata_reads, 0);
         let id = initial.index.books.iter().find(|b| b.path == a).unwrap().id.clone();
         let moved_path = root.join("renamed.epub");
         std::fs::rename(&a, &moved_path)?;

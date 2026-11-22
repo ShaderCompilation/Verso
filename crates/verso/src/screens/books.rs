@@ -17,6 +17,7 @@ use crate::library::{
 use crate::page_layout::PageLayout;
 use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
+use crate::screens::styled_sheet::StyledSheet;
 use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBook, TopDrawerBookAction};
 use crate::store::{BookState, FolderPreview, Store, navigation::Writer as NavigationWriter};
@@ -224,6 +225,8 @@ pub struct Books {
     menu: Option<(Target, PopupMenu)>,
     name_sheet: Option<NameSheet>,
     details: Option<Details>,
+    /// A book's synopsis, opened from its menu.
+    synopsis: Option<StyledSheet>,
     confirm: Option<ConfirmDelete<ConfirmRequest>>,
     selection: Option<Selection>,
     carry: Option<Carry>,
@@ -412,6 +415,7 @@ impl Books {
             menu: None,
             name_sheet: None,
             details: None,
+            synopsis: None,
             confirm: None,
             selection: None,
             carry: None,
@@ -1074,6 +1078,7 @@ impl Books {
     fn overlay_open(&self) -> bool {
         self.menu.is_some()
             || self.details.is_some()
+            || self.synopsis.is_some()
             || self.confirm.is_some()
             || self.clash.is_some()
             || self.name_sheet.is_some()
@@ -1508,15 +1513,15 @@ impl Books {
     }
     fn open_menu(&mut self, id: String, anchor: Point, t: &Theme) {
         let state = self.store.book(&id);
-        let mut items = vec![
-            (Some(Icon::BookOpen), "Open".into()),
-            (Some(Icon::Info), "Details".into()),
-            if state.finished {
-                (Some(Icon::Close), "Mark unfinished".into())
-            } else {
-                (Some(Icon::Check), "Mark finished".into())
-            },
-        ];
+        let mut items = vec![(Some(Icon::BookOpen), "Open".into()), (Some(Icon::Info), "Details".into())];
+        if self.book(&id).is_some_and(|b| b.metadata.synopsis == Some(true)) {
+            items.push((Some(Icon::List), "Synopsis".into()));
+        }
+        items.push(if state.finished {
+            (Some(Icon::Close), "Mark unfinished".into())
+        } else {
+            (Some(Icon::Check), "Mark finished".into())
+        });
         if self.is_home() && !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
             items.push((Some(Icon::Close), "Remove from continue reading".into()));
         }
@@ -1531,6 +1536,28 @@ impl Books {
         self.menu = Some((Target::Book(id), menu));
         self.continue_press = Press::default();
         self.grid.on_gesture(&Gesture::Cancel(anchor));
+    }
+    /// Reads the book's synopsis from its file and shows it.
+    fn show_synopsis(&mut self, id: &str, cx: &mut EventCx) {
+        let Some(book) = self.book(id) else { return };
+        let started = std::time::Instant::now();
+        match library::epub::synopsis(&book.path) {
+            Ok(Some(text)) => {
+                let sheet = Sheet::open("Synopsis", self.screen.h * 3 / 4, self.screen, cx.theme);
+                let html = synopsis_html(&text);
+                self.synopsis = Some(StyledSheet::new(
+                    sheet,
+                    self.screen,
+                    &html,
+                    "This book has no synopsis.",
+                    "synopsis",
+                    cx.theme,
+                ));
+                log::debug!("synopsis read in {:?}", started.elapsed());
+            }
+            Ok(None) => cx.toast("This book has no synopsis", None),
+            Err(e) => cx.toast(format!("Couldn't read the synopsis: {e:#}"), None),
+        }
     }
     /// Whether a book is finished, from the loaded states, or the saved one
     /// before they are all loaded.
@@ -2836,6 +2863,9 @@ impl Screen for Books {
         if let Some(details) = &mut self.details {
             details.draw(cx);
         }
+        if let Some(synopsis) = &mut self.synopsis {
+            synopsis.draw(cx);
+        }
         if let Some(confirm) = &self.confirm {
             confirm.draw(cx);
         }
@@ -2977,6 +3007,16 @@ impl Screen for Books {
                 Some(false) => self.confirm = None,
                 None => {}
             }
+        } else if let Some(synopsis) = &mut self.synopsis {
+            let (before, page) = (synopsis.visual_state(), synopsis.pager.page);
+            if synopsis.on_gesture(&g).is_some() {
+                self.synopsis = None;
+                cx.redraw();
+            } else if synopsis.pager.page != page {
+                cx.refresh(synopsis.sheet.rect(), RefreshMode::Full);
+            } else if synopsis.visual_state() != before {
+                cx.redraw();
+            }
         } else if let Some(details) = &mut self.details {
             let before = (details.sheet.is_pressed(), details.pager.visual_state());
             if details.on_gesture(&g, cx) {
@@ -2991,6 +3031,10 @@ impl Screen for Books {
             let delete_index = menu.items.len() - 1;
             let select_index = menu.items.iter().position(|(_, label)| label == "Select");
             let move_index = menu.items.iter().position(|(_, label)| label == "Move");
+            let chosen = match &event {
+                Some(MenuEvent::Chosen(i)) => menu.items.get(*i).map(|(_, label)| label.clone()),
+                _ => None,
+            };
             let target = target.clone();
             if let Some(event) = event {
                 self.menu = None;
@@ -3003,16 +3047,18 @@ impl Screen for Books {
                     return Action::None;
                 }
                 match (target, event) {
-                    (Target::Book(id), event) => match event {
-                        MenuEvent::Chosen(0) => self.open(id, cx),
-                        MenuEvent::Chosen(1) => {
+                    // Book menu items vary with the book, so they go by label.
+                    (Target::Book(id), event) => match chosen.as_deref().unwrap_or_default() {
+                        "Open" => self.open(id, cx),
+                        "Details" => {
                             // Home entries are stripped summaries; show the full record.
                             if let Some(book) = self.reading_book(&id) {
                                 self.details = Some(Details::new(cx.theme, self.screen, &book, &self.store.book(&id)));
                             }
                         }
-                        MenuEvent::Chosen(2) => self.mark_book(&id, !self.is_finished(&id), cx),
-                        MenuEvent::Chosen(index) if index == delete_index => {
+                        "Synopsis" => self.show_synopsis(&id, cx),
+                        "Mark finished" | "Mark unfinished" => self.mark_book(&id, !self.is_finished(&id), cx),
+                        _ if matches!(event, MenuEvent::Chosen(index) if index == delete_index) => {
                             if let Some(book) = self.book(&id) {
                                 let title: String = book.metadata.title.chars().take(160).collect();
                                 let message =
@@ -3026,7 +3072,7 @@ impl Screen for Books {
                                 ));
                             }
                         }
-                        MenuEvent::Chosen(3) => self.hide_from_continue(&id, cx),
+                        "Remove from continue reading" => self.hide_from_continue(&id, cx),
                         _ => {}
                     },
                     (Target::Folder(path), event) => match event {
@@ -3134,7 +3180,12 @@ impl Screen for Books {
             return false;
         }
         // Entry overlays retain ownership until their touch is released.
-        if self.menu.is_some() || self.details.is_some() || self.jump.is_some() || self.touching {
+        if self.menu.is_some()
+            || self.details.is_some()
+            || self.synopsis.is_some()
+            || self.jump.is_some()
+            || self.touching
+        {
             return true;
         }
         if !self.search.as_ref().is_some_and(|s| s.field.focused) {
@@ -3425,6 +3476,32 @@ fn relayout_stack_from(
         screens.push(Box::new(crate::screens::system::SystemSettings::new(t, screen, store, waker).on_display_tab()));
     }
     screens
+}
+
+/// A synopsis as HTML for the styled text reader. Plain text (no tags) keeps
+/// its paragraphs, which HTML would run together: blank lines part
+/// paragraphs, single newlines break lines.
+fn synopsis_html(text: &str) -> String {
+    let markup = text
+        .match_indices('<')
+        .any(|(i, _)| text[i + 1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/' || c == '!'));
+    if markup {
+        return text.to_owned();
+    }
+    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace("\r\n", "\n");
+    let mut html = String::with_capacity(escaped.len() + 64);
+    let mut paragraph = Vec::new();
+    for line in escaped.lines().map(str::trim).chain([""]) {
+        if line.is_empty() {
+            if !paragraph.is_empty() {
+                html.push_str(&format!("<p>{}</p>", paragraph.join("<br>")));
+                paragraph.clear();
+            }
+        } else {
+            paragraph.push(line);
+        }
+    }
+    html
 }
 
 /// A sheet of paged plain text, e.g. book details or a full folder path.
@@ -6017,6 +6094,94 @@ mod tests {
         for page in pages {
             assert!(text.measure(&page, theme.body, Some(area.w as f32)).1 <= area.h as f32);
         }
+    }
+    #[test]
+    fn synopsis_html_keeps_markup_and_plain_paragraphs() {
+        assert_eq!(synopsis_html("<p>A <i>saga</i>.</p>"), "<p>A <i>saga</i>.</p>");
+        assert_eq!(
+            synopsis_html("One & two\nlines.\r\n\r\n  Next 1 < 2.\n\n\n"),
+            "<p>One &amp; two<br>lines.</p><p>Next 1 &lt; 2.</p>"
+        );
+        let blocks = crate::dictionary::html_blocks(&synopsis_html("First.\n\nSecond."));
+        let texts: Vec<_> = blocks.iter().filter(|b| !b.text.is_empty()).map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["First.", "Second."]);
+    }
+    #[test]
+    fn synopsis_shows_from_the_menu_only_for_books_that_have_one() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-library-synopsis-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("books-folder"))?;
+        let store = Store::at(root.join("state"));
+        let mut settings = store.settings();
+        settings.library_folder = Some(root.join("books-folder"));
+        store.save_settings(&settings)?;
+        let with = root.join("books-folder/0.epub");
+        crate::library::epub::tests::fixture(
+            &with,
+            r#"<package><metadata><title>T</title><description>&lt;p&gt;A &lt;i&gt;sweeping&lt;/i&gt; saga.&lt;/p&gt;</description></metadata></package>"#,
+            &[],
+        )?;
+        let shelf: Vec<_> = (0..2)
+            .map(|i| {
+                let mut b = book(i);
+                b.path = root.join(format!("books-folder/{i}.epub"));
+                b.metadata.synopsis = Some(i == 0);
+                b
+            })
+            .collect();
+        store.save_library(&LibraryIndex { books: shelf, ..Default::default() })?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        books.pager.page = 1;
+        books.refresh(&t);
+        let labels = |books: &Books| -> Vec<String> {
+            books.menu.as_ref().unwrap().1.items.iter().map(|(_, l)| l.clone()).collect()
+        };
+        books.open_menu("1".into(), Point::new(600, 800), &t);
+        assert!(!labels(&books).iter().any(|l| l == "Synopsis"));
+        books.open_menu("0".into(), Point::new(600, 800), &t);
+        let items = labels(&books);
+        assert_eq!(items[..4], ["Open", "Details", "Synopsis", "Mark finished"]);
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut cx = EventCx {
+            theme: &t,
+            screen,
+            now: std::time::Instant::now(),
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut false,
+            battery: None,
+        };
+        let tap = |books: &mut Books, cx: &mut EventCx, label: &str| {
+            let (menu_items, rects) = {
+                let menu = &books.menu.as_ref().unwrap().1;
+                (labels(books), menu.item_rects(cx.theme))
+            };
+            let at = rects[menu_items.iter().position(|l| l == label).unwrap()].center();
+            books.on_gesture(Gesture::Down(at), cx);
+            books.on_gesture(Gesture::Tap(at), cx);
+        };
+        tap(&mut books, &mut cx, "Synopsis");
+        let sheet = books.synopsis.as_ref().expect("the synopsis opens");
+        let crate::gfx::StyledBlock::Paragraph(p) = &sheet.blocks[0] else { panic!() };
+        assert_eq!(p.text, "A sweeping saga.");
+        assert!(
+            p.spans
+                .iter()
+                .any(|s| &p.text[s.bytes.clone()] == "sweeping" && s.style.contains(crate::gfx::SpanStyle::ITALIC))
+        );
+        let outside = Point::new(1, 1);
+        books.on_gesture(Gesture::Down(outside), &mut cx);
+        books.on_gesture(Gesture::Tap(outside), &mut cx);
+        assert!(books.synopsis.is_none());
+        // The items after it still do what they say.
+        books.open_menu("0".into(), Point::new(600, 800), &t);
+        tap(&mut books, &mut cx, "Mark finished");
+        assert!(books.store.book("0").finished);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn touches_menus_and_sheets_defer_scan_reordering_and_clamp_pages() -> anyhow::Result<()> {
