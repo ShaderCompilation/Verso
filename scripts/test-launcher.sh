@@ -44,7 +44,8 @@ TAB="$(printf '\t')"
 # thing queued for its version (queue-<v>), else its default (default-<v>):
 # stage (stage version 2 and ask for the update, as Verso does), update (ask
 # without staging), ok, goback, restart (Restart to apply, noting the
-# protocol the launcher told it), fail, crash, panic, hang or powerloss.
+# protocol the launcher told it), fail, unsupported, crash, panic, hang or
+# powerloss.
 make_app() {
     printf '#!/bin/sh\n# Fake Verso %s (scripts/test-launcher.sh)\nV=%s\n' "$1" "$1"
     cat <<'EOF'
@@ -64,6 +65,7 @@ case "${b:-ok}" in
     goback) : >"${VERSO_STARTED_MARKER}"; exit 86 ;;
     restart) echo "${VERSO_LAUNCHER_PROTOCOL:-}" >>"${T}/protocol"; : >"${VERSO_STARTED_MARKER}"; exit 87 ;;
     fail) echo "Error: opening the framebuffer" >&2; exit 3 ;;
+    unsupported) echo "this Kindle isn't supported yet: 32 bpp" >&2; exit 88 ;;
     crash) kill -SEGV $$ ;;
     panic)
         echo "thread 'main' panicked at crates/verso/src/main.rs:12:5:" >&2
@@ -82,7 +84,7 @@ make_bin() {
     mkdir -p "${B}"
     printf '#!/bin/sh\nexit 1\n' >"${B}/pidof"
     printf '#!/bin/sh\necho active\n' >"${B}/lipc-get-prop"
-    for c in killall lipc-set-prop; do
+    for c in killall lipc-set-prop eips; do
         printf '#!/bin/sh\necho "%s $*" >>"${VERSO_TEST_DIR}/calls"\n' "${c}" >"${B}/${c}"
     done
     # A firewall that keeps its rules in a file, one per line.
@@ -209,16 +211,19 @@ fresh() {
     : >"${W}/calls"
     install_files "${R}" 1
     printf 'framebuffer' >"${W}/fb"
+    : >"${W}/ld-linux-armhf.so.3"
 }
 
 # Runs the installed launcher like KUAL does, in its own process group;
-# CRASH_AT=$1 loses power at that step.
+# CRASH_AT=$1 loses power at that step. ARMHF names the hard-float loader
+# (a stand-in file that fresh makes).
 launch() {
     : >"${W}/steps"
     (
         CRASH_AT="${1:-}" VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
-            VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 \
+            VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
+            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
             setsid ${SH} "${R}/verso/verso.sh" </dev/null >/dev/null 2>&1 &
         wait $!
     ) 2>/dev/null
@@ -378,6 +383,29 @@ for i in 1 2 3 4 5 6 7; do
 done
 n_reports="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | wc -l | tr -d ' ')"
 [ "${n_reports}" = 5 ] || fail "expected 5 crash reports after 7 crashes, got ${n_reports}"
+
+begin "soft-float firmware is refused before pausing the Kindle UI"
+fresh
+ARMHF="${W}/no-such-loader" launch
+runs_are ""
+! grep -q 'killall -STOP\|appmgrd' "${W}/calls" || fail "touched the Kindle UI: $(cat "${W}/calls")"
+grep -q "eips .*Verso does not support this Kindle firmware yet" "${W}/calls" || fail "no message on screen"
+grep -q "no hard-float loader" "${R}/verso/verso.log" || fail "refusal not logged"
+report_file="$(ls "${R}/verso/reports"/report-*.txt 2>/dev/null | head -n 1)"
+[ -n "${report_file}" ] || fail "no problem report written"
+absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
+
+begin "unsupported screen: problem report, then the Kindle UI"
+fresh
+echo unsupported >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0"
+ui_restored_once
+grep -q "Verso ended: unsupported (code 88)" "${R}/verso/verso.log" || fail "unsupported exit not logged"
+report_file="$(ls "${R}/verso/reports"/report-*.txt 2>/dev/null | head -n 1)"
+[ -n "${report_file}" ] || fail "no problem report written"
+grep -q "isn't supported yet: 32 bpp" "${report_file}" || fail "report lacks Verso's reason"
+[ -z "$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null)" ] || fail "unsupported exit counted as a crash"
 
 begin "Wi-Fi transfer left on"
 fresh

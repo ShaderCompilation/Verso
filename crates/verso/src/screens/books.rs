@@ -3168,6 +3168,9 @@ impl Screen for Books {
             r.after_present();
         }
     }
+    fn take_page_turn(&mut self) -> bool {
+        self.reader.as_mut().is_some_and(|r| r.take_page_turn())
+    }
     fn on_sleep(&mut self) {
         self.flush_navigation();
         self.touching = false;

@@ -22,6 +22,7 @@ mod gfx;
 mod library;
 mod logging;
 mod page_layout;
+mod perf;
 mod platform;
 mod reader;
 mod report;
@@ -213,9 +214,18 @@ fn run() -> Result<i32> {
     log::info!("Verso {} ({}) starting", env!("CARGO_PKG_VERSION"), env!("VERSO_GIT_COMMIT"));
     let started = Instant::now();
     let opts = if cfg!(feature = "desktop") { parse_args()? } else { Options::default() };
-    let mut platform = match &opts.screenshot {
-        Some(path) => platform::open_headless(path, opts.script.clone(), opts.device.as_deref())?,
-        None => platform::open(opts.device.as_deref())?,
+    let opened = match &opts.screenshot {
+        Some(path) => platform::open_headless(path, opts.script.clone(), opts.device.as_deref()),
+        None => platform::open(opts.device.as_deref()),
+    };
+    let mut platform = match opened {
+        Ok(platform) => platform,
+        // Already said on screen; the launcher saves a problem report.
+        Err(e) if e.downcast_ref::<platform::Unsupported>().is_some() => {
+            log::error!("{e:#}");
+            return Ok(verso_update::launcher::EXIT_UNSUPPORTED);
+        }
+        Err(e) => return Err(e),
     };
     // One Store for every screen, so they share preferences and the dictionary service.
     let store = store::Store::new();
@@ -257,6 +267,17 @@ fn run() -> Result<i32> {
         log::info!("showing the rollback note: {:?}", rollback.reason);
         app.show_rollback(screens::update::RollbackSheet::new(&theme, bounds, store.updates(), &rollback));
     }
+    let model = platform.model();
+    app.set_light_range(model.light_range);
+    if screens::untested::due(&store.settings(), &model) {
+        log::info!("showing the untested-model notice: {}", model.name);
+        app.show_notice(app::Notice::Untested(screens::untested::UntestedSheet::new(
+            &theme,
+            bounds,
+            store.clone(),
+            &model,
+        )));
+    }
     if let Some(light) = platform.initial_frontlight() {
         app.frontlight = light;
     }
@@ -268,6 +289,9 @@ fn run() -> Result<i32> {
     app.refresh_all(RefreshMode::Full);
     let mut first_frame = true;
     let mut quit = false;
+    let mut perf = perf::SessionPerf::default();
+    // When the last finger lifted: a page turn is timed from there.
+    let mut last_release: Option<Instant> = None;
 
     loop {
         if let Some(light) = app.light_request()
@@ -284,7 +308,13 @@ fn run() -> Result<i32> {
             app.after_present();
             log::debug!("after_present: {:?}", save_started.elapsed());
             log::debug!("presented {} update(s) in {:?}: {updates:?}", updates.len(), t.elapsed());
+            if app.take_page_turn()
+                && let Some(released) = last_release.take()
+            {
+                perf.page_turn(released.elapsed());
+            }
             if first_frame {
+                perf.first_frame(started.elapsed());
                 log::info!(
                     "first frame on screen {:?} after start (display request returned; optical completion unmeasured)",
                     started.elapsed()
@@ -353,6 +383,9 @@ fn run() -> Result<i32> {
                 }
                 Some(Event::Touch(t)) => {
                     log::trace!("{t:?}");
+                    if t.phase == platform::TouchPhase::Up {
+                        last_release = Some(t.time);
+                    }
                     if let Some(g) = gestures.on_touch(&t) {
                         log::debug!("{g:?}");
                         app.on_gesture(g);
@@ -430,6 +463,7 @@ fn run() -> Result<i32> {
         // Closed cleanly before the started delay ran out: it works.
         update::mark_started();
     }
+    log::info!("{}", perf.summary(perf::peak_rss_kib()));
     let code = app.exit_code();
     log::info!("bye{}", if code == 0 { String::new() } else { format!(" (exit code {code} for the launcher)") });
     Ok(code)

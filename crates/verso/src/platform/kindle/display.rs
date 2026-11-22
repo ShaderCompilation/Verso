@@ -3,7 +3,7 @@
 //! We write pixels straight into the memory-mapped framebuffer, then ask FBInk
 //! to refresh just that rectangle with the waveform matching the refresh intent.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 
 use anyhow::{Result, bail};
 use fbink_sys as fb;
@@ -11,7 +11,7 @@ use fbink_sys as fb;
 use crate::geom::Rect;
 use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
-use crate::platform::{Orientation, RefreshMode, Update};
+use crate::platform::{Orientation, RefreshMode, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
 pub struct DisplaySession {
@@ -116,6 +116,8 @@ impl Display {
                 inverted: st.inverted_grayscale,
             };
 
+            // A screen Verso can't drive yet: say so on it, since the log
+            // isn't where a user looks.
             let fail = |msg: String| -> Result<Self> {
                 log::error!(
                     "FBInk {}: {} ({}, {}, id={:#06x}), view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, {} dpi, mtk={}, inverted={}",
@@ -138,8 +140,9 @@ impl Display {
                     session.is_mtk,
                     session.inverted,
                 );
+                print_refusal(fd, &msg);
                 fb::fbink_close(fd);
-                bail!(msg)
+                Err(Unsupported(msg).into())
             };
             if st.bpp != 8 {
                 return fail(format!("only 8-bit grayscale screens are supported, this one is {} bpp", st.bpp));
@@ -173,6 +176,11 @@ impl Display {
                 flash_fence: FlashFence::default(),
             })
         }
+    }
+
+    /// Tells the user on screen that Verso can't run here, and why.
+    pub fn show_refusal(&self, reason: &str) {
+        print_refusal(self.fd, reason);
     }
 
     pub fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
@@ -252,6 +260,36 @@ impl Display {
         }
         if let Some(marker) = tail {
             self.wait_for_marker(marker);
+        }
+    }
+}
+
+/// Clears the screen and prints, centred, that Verso can't run on this
+/// Kindle and why. The launcher saves a problem report and keeps the message
+/// up for a few seconds before the Kindle's home screen comes back.
+fn print_refusal(fd: i32, reason: &str) {
+    let lines = [
+        "Verso can't run on this Kindle yet:",
+        reason,
+        "A problem report is saved in verso/reports.",
+        "The Kindle's home screen comes back in a moment.",
+    ];
+    // SAFETY: FFI calls with an open FBInk fd and a valid, zero-initialised
+    // config; the strings outlive the calls.
+    unsafe {
+        let mut cfg: fb::FBInkConfig = std::mem::zeroed();
+        cfg.is_quiet = true;
+        cfg.is_flashing = true;
+        fb::fbink_cls(fd, &cfg, std::ptr::null(), false);
+        cfg.is_flashing = false;
+        cfg.is_centered = true;
+        cfg.is_halfway = true;
+        let mut row: i16 = -4;
+        for line in lines {
+            let text = CString::new(line.replace('\0', " ")).unwrap_or_default();
+            cfg.row = row;
+            let rows = fb::fbink_print(fd, text.as_ptr(), &cfg);
+            row = row.saturating_add(rows.clamp(1, 8) as i16 + 1);
         }
     }
 }

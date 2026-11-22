@@ -6,9 +6,12 @@ use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode, TextInput, Update, Waker};
+use crate::platform::{
+    Battery, DeviceInfo, Frontlight, LightRange, Orientation, RefreshMode, TextInput, Update, Waker,
+};
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
+use crate::screens::untested::UntestedSheet;
 use crate::screens::update::RollbackSheet;
 use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBookAction};
 use crate::store::Store;
@@ -29,6 +32,31 @@ pub struct Services {
 impl Services {
     pub fn device(store: Store, waker: Waker) -> Self {
         Self { store, waker, net: Arc::new(top_drawer::DeviceNet) }
+    }
+}
+
+/// A sheet shown once over whatever screen is open, until OK.
+pub enum Notice {
+    /// Why the launcher went back to this version.
+    Rollback(RollbackSheet),
+    /// This Kindle model hasn't been tested yet.
+    Untested(UntestedSheet),
+}
+
+impl Notice {
+    fn draw(&self, cx: &mut DrawCx) {
+        match self {
+            Self::Rollback(sheet) => sheet.draw(cx),
+            Self::Untested(sheet) => sheet.draw(cx),
+        }
+    }
+
+    /// True when dismissed.
+    fn on_gesture(&mut self, g: &Gesture) -> bool {
+        match self {
+            Self::Rollback(sheet) => sheet.on_gesture(g),
+            Self::Untested(sheet) => sheet.on_gesture(g),
+        }
     }
 }
 
@@ -56,11 +84,13 @@ pub struct App {
     exit_prompt: Option<ExitPrompt>,
     /// The exit code a screen asked for (`Action::ExitWith`).
     exit_code: Option<i32>,
-    /// Why the launcher went back to this version, shown once over any screen.
-    rollback: Option<RollbackSheet>,
+    /// Startup notices, one at a time, over any screen.
+    notices: std::collections::VecDeque<Notice>,
     stop_ssh_on_exit: bool,
     pub frontlight: Option<Frontlight>,
     light_request: Option<Frontlight>,
+    /// The light sliders' top step on this model.
+    light_range: LightRange,
     pub battery: Option<Battery>,
     usb_prompt: Option<Box<dyn Screen>>,
     usb_connected: bool,
@@ -100,10 +130,11 @@ impl App {
             exit: false,
             exit_prompt: None,
             exit_code: None,
-            rollback: None,
+            notices: Default::default(),
             stop_ssh_on_exit: false,
             frontlight: None,
             light_request: None,
+            light_range: LightRange::default(),
             battery: None,
             usb_prompt: None,
             usb_connected: false,
@@ -206,8 +237,19 @@ impl App {
     /// Shows why the launcher went back to this version, over whatever
     /// screen is open, until OK.
     pub fn show_rollback(&mut self, sheet: RollbackSheet) {
-        self.rollback = Some(sheet);
+        self.show_notice(Notice::Rollback(sheet));
+    }
+
+    /// Queues a sheet shown once over whatever screen is open, after the
+    /// ones already queued.
+    pub fn show_notice(&mut self, notice: Notice) {
+        self.notices.push_back(notice);
         self.needs_redraw = true;
+    }
+
+    /// The model's light range, for the Top Drawer's sliders.
+    pub fn set_light_range(&mut self, range: LightRange) {
+        self.light_range = range;
     }
 
     /// User-requested exits ask what to do with a running SSH server. System
@@ -262,8 +304,8 @@ impl App {
             if let Some(drawer) = &mut self.drawer {
                 drawer.draw(&mut cx);
             }
-            if let Some(sheet) = &self.rollback {
-                sheet.draw(&mut cx);
+            if let Some(notice) = self.notices.front() {
+                notice.draw(&mut cx);
             }
             if let Some(prompt) = &mut self.usb_prompt {
                 prompt.draw(&mut cx);
@@ -374,12 +416,12 @@ impl App {
             }
             return;
         }
-        if let Some(sheet) = &mut self.rollback {
+        if let Some(notice) = self.notices.front_mut() {
             if g.ends_touch() || matches!(g, Gesture::Down(_)) {
                 self.needs_redraw = true;
             }
-            if sheet.on_gesture(&g) {
-                self.rollback = None;
+            if notice.on_gesture(&g) {
+                self.notices.pop_front();
                 self.on_background();
             }
             return;
@@ -417,7 +459,7 @@ impl App {
             || self.asleep
             || self.exit_prompt.is_some()
             || self.usb_prompt.is_some()
-            || self.rollback.is_some()
+            || !self.notices.is_empty()
         {
             return;
         }
@@ -441,6 +483,7 @@ impl App {
             self.orientation,
             developer,
             self.frontlight,
+            self.light_range,
             net.state(),
             book,
             now,
@@ -660,6 +703,11 @@ impl App {
             Action::None
         });
     }
+    /// True once after a frame that showed a page turn.
+    pub fn take_page_turn(&mut self) -> bool {
+        self.stack.last_mut().is_some_and(|s| s.take_page_turn())
+    }
+
     pub fn after_present(&mut self) {
         if let Some(s) = self.stack.last_mut() {
             s.after_present();

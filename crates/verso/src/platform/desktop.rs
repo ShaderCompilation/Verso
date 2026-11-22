@@ -106,6 +106,10 @@ impl Platform for Desktop {
         &self.info
     }
 
+    fn model(&self) -> super::DeviceModel {
+        self.device.model()
+    }
+
     fn session_details(&self) -> Vec<String> {
         vec![self.device.details()]
     }

@@ -20,6 +20,9 @@ mod flash;
 mod headless;
 #[cfg(feature = "kindle")]
 mod kindle;
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+mod kindle_profiles;
 #[cfg(feature = "kindle")]
 pub mod mdns;
 #[cfg(any(feature = "kindle", test))]
@@ -85,6 +88,47 @@ pub struct DeviceInfo {
     pub height: u32,
     pub dpi: u32,
 }
+
+/// The top step of the light controls, in powerd's own scale (`flIntensity`
+/// and `currentAmberLevel`). Every Kindle so far uses 0..=24.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightRange {
+    pub brightness: u8,
+    pub warmth: u8,
+}
+
+impl Default for LightRange {
+    fn default() -> Self {
+        Self { brightness: 24, warmth: 24 }
+    }
+}
+
+/// What the app knows about the device model, beyond its screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceModel {
+    /// "Kindle Paperwhite 5 (2021)"; empty when the backend doesn't say.
+    pub name: String,
+    /// Nobody has confirmed that Verso works on this model yet: the
+    /// untested-model notice shows once.
+    pub untested: bool,
+    /// The model's key in `Settings::untested_seen`.
+    pub key: String,
+    pub light_range: LightRange,
+}
+
+/// The device has a screen or input Verso can't drive yet. The Kindle
+/// backend has already said so on screen; Verso exits with
+/// `EXIT_UNSUPPORTED` and the launcher saves a problem report.
+#[derive(Debug)]
+pub struct Unsupported(pub String);
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "this Kindle isn't supported yet: {}", self.0)
+    }
+}
+
+impl std::error::Error for Unsupported {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchPhase {
@@ -199,6 +243,11 @@ pub trait Platform {
     }
 
     fn info(&self) -> &DeviceInfo;
+
+    /// The model, its light range and whether it has been tested.
+    fn model(&self) -> DeviceModel {
+        DeviceModel::default()
+    }
 
     /// Platform-specific lines included in the startup session header block.
     fn session_details(&self) -> Vec<String> {

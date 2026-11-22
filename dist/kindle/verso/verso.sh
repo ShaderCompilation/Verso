@@ -12,8 +12,9 @@
 # For scripts/test-launcher.sh only: VERSO_STORAGE_ROOT replaces /mnt/us,
 # VERSO_TMP replaces /tmp, VERSO_FB replaces /dev/fb0, VERSO_LAUNCHER_BIN
 # holds fake Kindle commands and counting file tools, VERSO_LAUNCHER_SHELL
-# replaces /bin/sh and VERSO_START_TIMEOUT the 120 s a new version gets to
-# start.
+# replaces /bin/sh, VERSO_START_TIMEOUT the 120 s a new version gets to
+# start, VERSO_ARMHF_LOADER the hard-float loader it checks for and
+# VERSO_REFUSAL_WAIT the 8 s an "unsupported" message stays up.
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
 if [ -n "${VERSO_LAUNCHER_BIN}" ]; then
@@ -55,6 +56,9 @@ TRANSFER_PORT=80
 EXIT_INSTALL=85
 EXIT_GO_BACK=86
 EXIT_RESTART=87
+EXIT_UNSUPPORTED=88
+ARMHF_LOADER="${VERSO_ARMHF_LOADER:-/lib/ld-linux-armhf.so.3}"
+REFUSAL_WAIT="${VERSO_REFUSAL_WAIT:-8}"
 TAB="$(printf '\t')"
 
 # Run from a copy in /tmp. /mnt/us is a FUSE filesystem; if this file were
@@ -67,6 +71,13 @@ fi
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') launcher: $*" >>"${LOG}"
+}
+
+# Writes a full problem report (tools/report.sh, docs/device-support.md).
+save_report() {
+    [ -f "${APP_DIR}/tools/report.sh" ] || return
+    REPORT_FILE="$(VERSO_STORAGE_ROOT="${ROOT}" sh "${APP_DIR}/tools/report.sh" report 2>>"${LOG}")"
+    [ -n "${REPORT_FILE}" ] && log "saved problem report: ${REPORT_FILE}"
 }
 
 # Prepare the owner before claiming the lock, so even a kill at the instant of
@@ -111,6 +122,17 @@ fi
 POWER_STATE="$(lipc-get-prop com.lab126.powerd state 2>/dev/null)"
 if [ "${POWER_STATE}" != "active" ]; then
     log "the Kindle isn't awake (power state: ${POWER_STATE}); not starting"
+    exit 1
+fi
+# Verso is built for hard-float firmware (5.16.3 and later); older firmware
+# can't even load it. Say so over the Kindle UI, which was never paused, so
+# there is nothing to restore (docs/device-support.md, Phase 3).
+if [ ! -e "${ARMHF_LOADER}" ]; then
+    log "this firmware has no hard-float loader (${ARMHF_LOADER}); Verso needs firmware 5.16.3 or later"
+    # eips can't draw apostrophes.
+    eips 1 3 "Verso does not support this Kindle firmware yet" >/dev/null 2>&1
+    eips 1 4 "A problem report is saved in verso/reports" >/dev/null 2>&1
+    save_report
     exit 1
 fi
 echo $$ >"${PIDFILE}"
@@ -554,6 +576,9 @@ run_verso() {
         0 | "${EXIT_INSTALL}" | "${EXIT_GO_BACK}" | "${EXIT_RESTART}")
             EXIT_KIND=bye
             ;;
+        "${EXIT_UNSUPPORTED}")
+            EXIT_KIND=unsupported
+            ;;
         *)
             if tail -c +"$((LOG_SIZE + 1))" "${LOG}" 2>/dev/null | grep -E -q 'panicked at|panic:'; then
                 EXIT_KIND=panic
@@ -571,6 +596,12 @@ run_verso() {
             CRASH_FILE="$(VERSO_STORAGE_ROOT="${ROOT}" sh "${APP_DIR}/tools/report.sh" crash "${EXIT_DESC}" 2>>"${LOG}")"
             [ -n "${CRASH_FILE}" ] && log "saved crash report: ${CRASH_FILE}"
         fi
+    fi
+    # Verso said on screen why it can't run here. Save the hardware facts and
+    # leave the message up long enough to read before the Kindle UI returns.
+    if [ "${EXIT_KIND}" = unsupported ]; then
+        save_report
+        sleep "${REFUSAL_WAIT}"
     fi
 }
 

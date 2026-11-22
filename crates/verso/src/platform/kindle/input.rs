@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use crate::geom::Point;
-use crate::platform::{Event, Orientation, Touch, TouchPhase};
+use crate::platform::{Event, Orientation, Touch, TouchPhase, Unsupported};
 
 // Event types and codes from <linux/input-event-codes.h>.
 const EV_SYN: u16 = 0x00;
@@ -163,7 +163,7 @@ impl TouchInput {
             input.reset_contacts();
             return Ok(input);
         }
-        bail!("no multi-touch screen found in /dev/input")
+        Err(Unsupported("no touchscreen found in /dev/input".into()).into())
     }
 
     pub fn summary(&self) -> String {

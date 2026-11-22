@@ -2,11 +2,12 @@
 //! the Kindle models Verso targets, picked with `--device <name>` or
 //! `VERSO_SIM_DEVICE=<name>` (the flag wins). `VERSO_SIM_SIZE`,
 //! `VERSO_SIM_DPI`, `VERSO_SIM_SCALE` and `VERSO_SIM_LIGHT` still override
-//! single fields.
+//! single fields. `VERSO_SIM_UNTESTED=1` makes the model untested, to see
+//! the untested-model notice.
 
 use anyhow::{Context, Result, bail};
 
-use super::Frontlight;
+use super::{DeviceModel, Frontlight};
 
 /// Which lights the device has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +63,8 @@ pub struct SimDevice {
     pub scale: f64,
     /// `VERSO_SIM_SIZE` or `VERSO_SIM_DPI` changed the preset's screen.
     pub custom_screen: bool,
+    /// `VERSO_SIM_UNTESTED=1`: show the untested-model notice.
+    pub untested: bool,
 }
 
 impl SimDevice {
@@ -86,6 +89,16 @@ impl SimDevice {
             Light::None => None,
             Light::White => Some(Frontlight { warmth: None, ..value }),
             Light::WhiteWarm => Some(value),
+        }
+    }
+
+    /// The model for the app: the preset, tested unless `VERSO_SIM_UNTESTED`.
+    pub fn model(&self) -> DeviceModel {
+        DeviceModel {
+            name: format!("the simulated {}", self.name),
+            untested: self.untested,
+            key: format!("sim {}", self.name),
+            ..DeviceModel::default()
         }
     }
 
@@ -144,6 +157,7 @@ pub fn resolve(flag: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Resu
         color: p.color,
         scale: p.scale,
         custom_screen: false,
+        untested: env("VERSO_SIM_UNTESTED").is_some_and(|v| v.trim() == "1"),
     };
     if let Some(s) = env("VERSO_SIM_SIZE") {
         (device.width, device.height) =
@@ -193,6 +207,17 @@ mod tests {
         assert_eq!(d.light, Light::WhiteWarm);
         assert!(!d.page_buttons && !d.color && !d.custom_screen);
         assert_eq!(d.scale, 0.5);
+    }
+
+    #[test]
+    fn untested_override_marks_the_model() {
+        let d = resolve(Some("basic-300"), env(&[])).unwrap();
+        assert!(!d.model().untested, "presets are tested by default, so captures show no notice");
+        let d = resolve(Some("basic-300"), env(&[("VERSO_SIM_UNTESTED", "1")])).unwrap();
+        let m = d.model();
+        assert!(m.untested);
+        assert_eq!((m.name.as_str(), m.key.as_str()), ("the simulated basic-300", "sim basic-300"));
+        assert_eq!(m.light_range, super::super::LightRange::default());
     }
 
     #[test]

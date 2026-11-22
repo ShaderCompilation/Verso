@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use super::{Battery, DeviceInfo, Event, Frontlight, Orientation, Platform, Update, Waker};
+use super::kindle_profiles::{self, Lights};
+use super::{Battery, DeviceInfo, DeviceModel, Event, Frontlight, Orientation, Platform, Unsupported, Update, Waker};
 use crate::gfx::Canvas;
 use display::Display;
 use input::{Mapping, TouchInput};
@@ -24,6 +25,11 @@ extern "C" fn on_signal(_: libc::c_int) {
 
 pub struct Kindle {
     info: DeviceInfo,
+    model: DeviceModel,
+    /// The model's lights and their range (docs/device-support.md, Phase 3).
+    lights: Lights,
+    /// The profile's facts for the session header.
+    profile_line: String,
     display: Display,
     touch: TouchInput,
     queue: VecDeque<Event>,
@@ -43,14 +49,37 @@ impl Kindle {
     pub fn open() -> Result<Self> {
         install_signal_handlers();
         let display = Display::open()?;
-        let touch = TouchInput::open(Mapping {
+        let touch = match TouchInput::open(Mapping {
             width: display.width,
             height: display.height,
             swap_axes: display.touch_swap_axes,
             mirror_x: display.touch_mirror_x,
             mirror_y: display.touch_mirror_y,
             orientation: Orientation::Portrait,
-        })?;
+        }) {
+            Ok(touch) => touch,
+            Err(e) => {
+                if let Some(Unsupported(reason)) = e.downcast_ref::<Unsupported>() {
+                    display.show_refusal(reason);
+                }
+                return Err(e);
+            }
+        };
+        let id = display.session.device_id;
+        let profile = kindle_profiles::lookup(id);
+        let model = kindle_profiles::model(profile, id, &display.name);
+        let lights = Lights::for_profile(profile);
+        let profile_line = match profile {
+            Some(p) => format!(
+                "model: {} ({}), light: {}, page buttons: {}, epdc: {:?}",
+                p.model,
+                if p.tested { "tested" } else { "untested" },
+                lights.describe(),
+                if p.page_buttons { "yes" } else { "no" },
+                p.epdc,
+            ),
+            None => format!("model: not in the profile table, {} (untested), light: {}", model.name, lights.describe()),
+        };
         let info =
             DeviceInfo { name: display.name.clone(), width: display.width, height: display.height, dpi: display.dpi };
         use std::os::fd::FromRawFd;
@@ -61,9 +90,12 @@ impl Kindle {
         let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
         let (tx, power_rx) = std::sync::mpsc::channel();
         let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()))?;
-        let frontlight_rx = spawn_frontlight_read(fd_waker(wake_fd.clone()));
+        let frontlight_rx = spawn_frontlight_read(fd_waker(wake_fd.clone()), lights);
         Ok(Self {
             info,
+            model,
+            lights,
+            profile_line,
             display,
             touch,
             queue: VecDeque::new(),
@@ -193,15 +225,16 @@ impl Platform for Kindle {
         fd_waker(self.wake_fd.clone())
     }
     fn frontlight(&mut self) -> Option<Frontlight> {
-        read_frontlight()
+        self.lights.reading(property("flIntensity"), property("currentAmberLevel"))
     }
     fn initial_frontlight(&mut self) -> Option<Option<Frontlight>> {
         self.take_frontlight()
     }
     fn set_frontlight(&mut self, value: Frontlight) -> Result<()> {
-        set_property("flIntensity", value.brightness.min(24))?;
+        let value = self.lights.clamp(value);
+        set_property("flIntensity", value.brightness)?;
         if let Some(warmth) = value.warmth {
-            set_property("currentAmberLevel", warmth.min(24))?;
+            set_property("currentAmberLevel", warmth)?;
         }
         Ok(())
     }
@@ -210,11 +243,16 @@ impl Platform for Kindle {
         &self.info
     }
 
+    fn model(&self) -> DeviceModel {
+        self.model.clone()
+    }
+
     fn session_details(&self) -> Vec<String> {
         let s = &self.display.session;
         vec![
             format!("fbink: {}", s.fbink_version),
             format!("device: {} ({}, {}, id={:#06x})", s.device_name, s.codename, s.platform, s.device_id),
+            self.profile_line.clone(),
             format!(
                 "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, {} dpi, mtk={}, inverted={}",
                 s.view_width,
@@ -357,13 +395,10 @@ fn fd_waker(fd: std::sync::Arc<std::os::fd::OwnedFd>) -> Waker {
         }
     })
 }
-fn read_frontlight() -> Option<Frontlight> {
-    Some(Frontlight {
-        brightness: property("flIntensity")?.clamp(0, 24) as u8,
-        warmth: property("currentAmberLevel").map(|v| v.clamp(0, 24) as u8),
-    })
-}
-fn spawn_frontlight_read(waker: Waker) -> Option<std::sync::mpsc::Receiver<Option<Frontlight>>> {
+/// Reads the light off the UI thread (two lipc calls). For a model missing
+/// from the profile table this is also the probe: no `flIntensity` hides
+/// the light controls, no `currentAmberLevel` the warmth slider.
+fn spawn_frontlight_read(waker: Waker, lights: Lights) -> Option<std::sync::mpsc::Receiver<Option<Frontlight>>> {
     let (tx, rx) = std::sync::mpsc::channel();
     match std::thread::Builder::new().name("verso-frontlight".into()).spawn(move || {
         let started = Instant::now();
@@ -374,8 +409,7 @@ fn spawn_frontlight_read(waker: Waker) -> Option<std::sync::mpsc::Receiver<Optio
             if fl.is_some() { "yes" } else { "no" },
             if amber.is_some() { "yes" } else { "no" },
         );
-        let value =
-            fl.map(|b| Frontlight { brightness: b.clamp(0, 24) as u8, warmth: amber.map(|v| v.clamp(0, 24) as u8) });
+        let value = lights.reading(fl, amber);
         log::debug!("frontlight read off-thread in {} us: {value:?}", started.elapsed().as_micros());
         let _ = tx.send(value);
         waker.wake();

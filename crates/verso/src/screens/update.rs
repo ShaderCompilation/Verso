@@ -21,7 +21,7 @@ use crate::update::{self, DownloadState, Status, Updates};
 
 /// A sheet at the bottom in portrait, or at the right in landscape, where a
 /// bottom sheet tall enough for its text would cover nearly everything.
-fn sheet(title: impl Into<String>, height: i32, screen: Rect, t: &Theme) -> Sheet {
+pub(crate) fn sheet(title: impl Into<String>, height: i32, screen: Rect, t: &Theme) -> Sheet {
     if screen.w > screen.h {
         Sheet::side(title, screen.w * 11 / 20, true, screen, t)
     } else {

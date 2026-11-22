@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon, Weight};
-use crate::platform::{Frontlight, Orientation, RefreshMode, Waker, ssh, wifi};
+use crate::platform::{Frontlight, LightRange, Orientation, RefreshMode, Waker, ssh, wifi};
 use crate::screens::TopDrawerBook;
 use crate::store::Store;
 use crate::ui::gesture::{Direction, Gesture};
@@ -32,8 +32,6 @@ const SSH_RECHECK_FOR: Duration = Duration::from_secs(90);
 const MIN_ROW_TILE_MM: f32 = 19.0;
 /// Sub-labels on an "on" (black) tile.
 const ON_SUB: u8 = 0xdd;
-/// Light and warmth steps, like the Kindle's own slider.
-const LIGHT_MAX: f32 = 24.0;
 
 /// A quick-settings tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,6 +506,8 @@ pub struct TopDrawer {
     layout: DrawerLayout,
     light: Option<Slider>,
     warmth: Option<Slider>,
+    /// The sliders' top step on this model.
+    range: LightRange,
     tiles: Vec<(Tile, Press)>,
     net: NetState,
     clock: Option<String>,
@@ -526,11 +526,13 @@ impl TopDrawer {
         orientation: Orientation,
         developer: bool,
         light: Option<Frontlight>,
+        range: LightRange,
         net: NetState,
         book: Option<TopDrawerBook>,
         now: Instant,
     ) -> Self {
         let mut drawer = Self {
+            range,
             screen,
             orientation,
             developer,
@@ -595,9 +597,11 @@ impl TopDrawer {
         }
     }
 
+    /// One step per powerd step, like the Kindle's own sliders.
     fn make_sliders(&mut self, light: Frontlight) {
-        self.light = Some(Slider::new(0.0, LIGHT_MAX, 1.0, light.brightness as f32));
-        self.warmth = light.warmth.map(|w| Slider::new(0.0, LIGHT_MAX, 1.0, w as f32));
+        let (b, w) = (self.range.brightness as f32, self.range.warmth as f32);
+        self.light = Some(Slider::new(0.0, b, 1.0, (light.brightness as f32).min(b)));
+        self.warmth = light.warmth.map(|v| Slider::new(0.0, w, 1.0, (v as f32).min(w)));
     }
 
     fn book_narrow(&self, t: &Theme) -> bool {

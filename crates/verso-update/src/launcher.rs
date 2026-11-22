@@ -29,6 +29,11 @@ pub const EXIT_GO_BACK: i32 = 86;
 /// Exit code: start Verso again, without bringing back the Kindle UI
 /// (Restart to apply, after hand edits of Verso's data). Protocol 2.
 pub const EXIT_RESTART: i32 = 87;
+/// Exit code: this Kindle's screen or touchscreen isn't supported yet.
+/// Verso has said so on screen; the launcher saves a problem report, keeps
+/// the message up a few seconds and brings back the Kindle UI. An older
+/// launcher counts it as a crash, which also saves a report.
+pub const EXIT_UNSUPPORTED: i32 = 88;
 
 /// One of these empty files is present while the launcher moves files,
 /// naming the job; the next launch finishes it. The launcher renames one

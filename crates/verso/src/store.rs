@@ -49,6 +49,9 @@ pub struct Settings {
     pub check_updates: bool,
     /// How folder tiles in Collections look. Older files read as Covers.
     pub folder_preview: FolderPreview,
+    /// Untested Kindle models whose notice was dismissed
+    /// (`DeviceModel::key`), so it shows once per model.
+    pub untested_seen: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -67,6 +70,7 @@ impl Default for Settings {
             text_shaping: TextShaping::default(),
             check_updates: true,
             folder_preview: FolderPreview::default(),
+            untested_seen: Vec::new(),
         }
     }
 }

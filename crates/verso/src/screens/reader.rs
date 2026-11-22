@@ -59,6 +59,8 @@ pub struct Reader {
     batching: bool,
     /// A page turn queued during the current event batch, committed on `finish_batch`.
     pending_turn: bool,
+    /// A page turn was drawn since the last `take_page_turn`.
+    turned: bool,
     save_pending: bool,
     persistence: Writer,
     save_error: Option<String>,
@@ -189,6 +191,7 @@ impl Reader {
             turn_pending: false,
             batching: false,
             pending_turn: false,
+            turned: false,
             save_pending: false,
             save_error: None,
             settings_save_pending: false,
@@ -537,6 +540,7 @@ impl Reader {
         let mode = if layout_changed {
             RefreshMode::Full
         } else if self.turn_pending {
+            self.turned = true;
             self.refresh.turn(page.images, chapter_start)
         } else {
             RefreshMode::Ui
@@ -1771,6 +1775,9 @@ impl Screen for Reader {
             }
             _ => false,
         }
+    }
+    fn take_page_turn(&mut self) -> bool {
+        std::mem::take(&mut self.turned)
     }
     fn after_present(&mut self) {
         if self.shown.is_some()

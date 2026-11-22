@@ -16,6 +16,7 @@ pub mod system;
 pub mod text_sheet;
 pub mod top_drawer;
 pub mod transfer;
+pub mod untested;
 pub mod update;
 
 use std::time::Instant;
@@ -169,6 +170,11 @@ pub trait Screen {
     fn on_background(&mut self, _cx: &mut EventCx) {}
     /// Called after pixels reach the platform, before waiting for input.
     fn after_present(&mut self) {}
+    /// True once after a frame that showed a page turn (for the exit
+    /// performance line).
+    fn take_page_turn(&mut self) -> bool {
+        false
+    }
     /// The exit was refused (see `on_quit`): drop any pending exit intent, or
     /// the main loop would ask again before it reads another touch.
     fn exit_refused(&mut self) {}

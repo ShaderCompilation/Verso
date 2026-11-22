@@ -173,6 +173,7 @@ fn drawer(developer: bool, net: NetState) -> (Theme, TopDrawer) {
         Orientation::Portrait,
         developer,
         Some(LIGHT),
+        LightRange::default(),
         net,
         None,
         Instant::now(),
@@ -337,11 +338,55 @@ fn light_sliders_drag_and_report_the_frontlight() {
 }
 
 #[test]
+fn light_sliders_follow_the_model_range() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let range = LightRange { brightness: 10, warmth: 5 };
+    let mut d = TopDrawer::new(
+        &t,
+        screen,
+        Orientation::Portrait,
+        false,
+        Some(LIGHT),
+        range,
+        net(Some(true), false),
+        None,
+        Instant::now(),
+    );
+    let light = row_parts(&t, d.layout().sliders[0], false).slider;
+    let warmth = row_parts(&t, d.layout().sliders[1], false).slider;
+    // A reading above the range starts at the top step; the far right is the top step.
+    let left = Point::new(light.x + 2, light.center().y);
+    let right = Point::new(light.right() - 2, light.center().y);
+    assert_eq!(
+        d.on_gesture(&Gesture::Down(left)),
+        Some(DrawerEvent::Light(Frontlight { brightness: 0, warmth: Some(5) }))
+    );
+    assert_eq!(
+        d.on_gesture(&Gesture::Move(right)),
+        Some(DrawerEvent::Light(Frontlight { brightness: 10, warmth: Some(5) }))
+    );
+    d.on_gesture(&Gesture::Tap(right));
+    let mid = Point::new(warmth.center().x, warmth.center().y);
+    let Some(DrawerEvent::Light(l)) = d.on_gesture(&Gesture::Down(mid)) else { panic!("no light event") };
+    assert!((2..=3).contains(&l.warmth.unwrap()), "{l:?}");
+}
+
+#[test]
 fn late_frontlight_reading_adds_the_sliders_once() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    let mut d =
-        TopDrawer::new(&t, screen, Orientation::Portrait, false, None, net(Some(true), false), None, Instant::now());
+    let mut d = TopDrawer::new(
+        &t,
+        screen,
+        Orientation::Portrait,
+        false,
+        None,
+        LightRange::default(),
+        net(Some(true), false),
+        None,
+        Instant::now(),
+    );
     assert!(d.layout().sliders.is_empty());
     let short = d.rect().h;
     assert!(d.set_frontlight(&t, LIGHT));
@@ -602,8 +647,17 @@ fn in_book_drawer_header_geometry_and_actions_in_portrait_landscape_and_small() 
         (167, Rect::new(0, 0, 600, 800), Orientation::Portrait, 11.0..=12.0),
     ] {
         let t = Theme::for_dpi(dpi);
-        let mut d =
-            TopDrawer::new(&t, screen, orientation, false, Some(LIGHT), net(Some(true), false), book(), Instant::now());
+        let mut d = TopDrawer::new(
+            &t,
+            screen,
+            orientation,
+            false,
+            Some(LIGHT),
+            LightRange::default(),
+            net(Some(true), false),
+            book(),
+            Instant::now(),
+        );
         check_layout(&t, d.layout(), screen);
         let head_mm = mm(&t, d.layout().status.h);
         assert!(head_range.contains(&head_mm), "{screen:?}: head {head_mm} mm");
