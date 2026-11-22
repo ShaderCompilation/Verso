@@ -10,7 +10,7 @@ use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode,
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
 use crate::screens::update::RollbackSheet;
-use crate::screens::{Action, EventCx, Screen};
+use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::Store;
 use crate::ui::damage::{self, FrameDiff};
 use crate::ui::gesture::{Direction, Gesture};
@@ -127,15 +127,26 @@ impl App {
         self.orientation = orientation;
     }
 
-    /// Saves the screens before handing the pending orientation to the platform.
+    /// Saves the screens before handing the pending orientation to the
+    /// platform, with what they showed so `relayout` can rebuild the same.
     /// A failed save leaves the request pending so a later event can retry it.
-    pub fn prepare_orientation(&mut self) -> Option<Orientation> {
+    pub fn prepare_orientation(&mut self) -> Option<(Orientation, RelayoutState)> {
         let orientation = self.orientation_request?;
+        let state = self.relayout_state();
         if !self.prepare_relayout() {
             return None;
         }
         self.orientation_request = None;
-        Some(orientation)
+        Some((orientation, state))
+    }
+
+    /// What the screens show, bottom to top.
+    pub fn relayout_state(&self) -> RelayoutState {
+        let mut state = RelayoutState::default();
+        for s in &self.stack {
+            s.relayout_state(&mut state);
+        }
+        state
     }
 
     /// Saves every screen like a normal exit, before a relayout. On failure
@@ -155,8 +166,9 @@ impl App {
     }
 
     /// Replaces the screens with ones built for a new screen size (after
-    /// `prepare_relayout`). The old screens are dropped first, so their
-    /// workers stop before the new ones start.
+    /// `prepare_orientation`, whose `RelayoutState` says what to rebuild).
+    /// The old screens are dropped first, so their workers stop before the
+    /// new ones start.
     pub fn relayout(
         &mut self,
         info: &DeviceInfo,
@@ -1179,7 +1191,7 @@ mod tests {
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Turns(saves.clone())));
         app.frame();
         tap(&mut app, crate::geom::Point::new(300, 400));
-        assert_eq!(app.prepare_orientation(), Some(Orientation::Landscape));
+        assert_eq!(app.prepare_orientation(), Some((Orientation::Landscape, RelayoutState::default())));
         assert!(app.prepare_orientation().is_none());
         assert_eq!(saves.get(), 1, "positions are saved before the screens are rebuilt");
         let turned = DeviceInfo { width: 800, height: 600, ..info };
@@ -1216,7 +1228,7 @@ mod tests {
         assert_eq!(app.canvas.bounds(), Rect::new(0, 0, 600, 800));
         assert!(app.toast.is_some());
         assert!(!app.frame().is_empty(), "the save error must be visible");
-        assert_eq!(app.prepare_orientation(), Some(Orientation::Landscape));
+        assert_eq!(app.prepare_orientation().map(|(o, _)| o), Some(Orientation::Landscape));
         assert!(app.prepare_orientation().is_none(), "a successful preparation consumes the request once");
     }
 

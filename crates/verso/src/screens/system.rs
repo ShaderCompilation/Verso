@@ -13,7 +13,7 @@ use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
-use crate::screens::{Action, EventCx, Screen};
+use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
@@ -903,6 +903,9 @@ fn ssh_note(pending: Option<bool>, s: &ssh::Status, wifi: Option<bool>, rechecki
 }
 
 impl Screen for SystemSettings {
+    fn relayout_state(&self, state: &mut RelayoutState) {
+        state.in_settings = true;
+    }
     fn draw(&mut self, cx: &mut DrawCx) {
         self.top.draw(cx);
         self.tabs.draw(cx);

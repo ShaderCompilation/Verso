@@ -18,7 +18,7 @@ use crate::page_layout::PageLayout;
 use crate::platform::{RefreshMode, TextInput};
 use crate::screens::reader::Reader;
 use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
-use crate::screens::{Action, EventCx, Screen};
+use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::{BookState, FolderPreview, Store, navigation::Writer as NavigationWriter};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
@@ -1240,6 +1240,42 @@ impl Books {
             return;
         }
         let Some(book) = self.reading_book(&id) else { return };
+        self.open_book(book, cx.theme);
+    }
+    /// The open book's id.
+    pub fn open_book_id(&self) -> Option<&str> {
+        self.reader.as_ref().map(Reader::book_id)
+    }
+    /// Library (a folder and page) rather than Home, under any open book.
+    pub fn is_in_library(&self) -> bool {
+        !self.home_active
+    }
+    /// A fresh `Books` after the display turned: back to the Library folder
+    /// and page `Navigation` saved, or Home, and the open book reopened at
+    /// the position its reader saved on the way out.
+    pub fn reopen_after_relayout(&mut self, state: &RelayoutState, t: &Theme) {
+        self.generation = self.generation.max(state.book_generation);
+        if state.library_open {
+            self.home_active = false;
+            self.prepare_browsing();
+            self.pager.page = self.navigation.page();
+            self.refresh(t);
+        }
+        let Some(id) = &state.open_book else { return };
+        // A book opened from search or another page isn't displayed now.
+        let find = |index: &LibraryIndex| index.books.iter().find(|b| &b.id == id).cloned();
+        let book = self
+            .reading_book(id)
+            .or_else(|| self.browsing_ready.then(|| find(&self.index)).flatten())
+            .or_else(|| self.pending.as_ref().and_then(|snapshot| find(&snapshot.index)))
+            .or_else(|| find(&self.store.library()));
+        match book {
+            Some(book) => self.open_book(book, t),
+            None => log::warn!("book {id} to reopen after turning the screen is gone"),
+        }
+    }
+    fn open_book(&mut self, book: Book, t: &Theme) {
+        let id = book.id.clone();
         let path = book.path.clone();
         let annotation_book = book.clone();
         self.store.select_home_book(&book);
@@ -1249,7 +1285,7 @@ impl Books {
         self.library.pause(true);
         self.thumbnails.clear();
         let settings = self.store.settings();
-        let (layout, typography, page) = self.open_settings(&settings, cx.theme);
+        let (layout, typography, page) = self.open_settings(&settings, t);
         let saved = self.store.book(&id);
         self.generation += 1;
         self.reader = Some(Reader::new(
@@ -2009,6 +2045,11 @@ fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &m
     );
 }
 impl Screen for Books {
+    fn relayout_state(&self, state: &mut RelayoutState) {
+        state.open_book = self.open_book_id().map(str::to_owned);
+        state.library_open = self.is_in_library();
+        state.book_generation = self.reader.as_ref().map_or(self.generation, Reader::generation);
+    }
     /// Home and Library in their normal states: no book, sheet, menu,
     /// search, multi-select or Cut-and-paste.
     fn allows_top_drawer(&self) -> bool {
@@ -2962,6 +3003,36 @@ impl Screen for Books {
     }
 }
 
+/// Home or Library and any open book after the display turned, with Settings
+/// (on its Display tab, where the turn is chosen) on top if it was open.
+pub fn relayout_stack(
+    state: &RelayoutState,
+    t: &Theme,
+    screen: Rect,
+    worker: Rc<Worker>,
+    store: Store,
+) -> Vec<Box<dyn Screen>> {
+    let waker = worker.waker();
+    let books = Books::with_store(t, screen, worker, store.clone());
+    relayout_stack_from(books, state, t, store, waker)
+}
+/// [`relayout_stack`] with `Books` made by the caller (tests stub its library worker).
+fn relayout_stack_from(
+    mut books: Books,
+    state: &RelayoutState,
+    t: &Theme,
+    store: Store,
+    waker: crate::platform::Waker,
+) -> Vec<Box<dyn Screen>> {
+    let screen = books.screen;
+    books.reopen_after_relayout(state, t);
+    let mut screens: Vec<Box<dyn Screen>> = vec![Box::new(books)];
+    if state.in_settings {
+        screens.push(Box::new(crate::screens::system::SystemSettings::new(t, screen, store, waker).on_display_tab()));
+    }
+    screens
+}
+
 /// A sheet of paged plain text, e.g. book details or a full folder path.
 pub(crate) struct Details {
     sheet: Sheet,
@@ -3215,6 +3286,108 @@ mod tests {
         books.push(other);
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
+    }
+    #[test]
+    fn turning_the_screen_keeps_home_library_page_open_book_and_settings() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("relayout")?;
+        let t = Theme::for_dpi(300);
+        let portrait = Rect::new(0, 0, 1272, 1696);
+        let landscape = Rect::new(0, 0, 1696, 1272);
+        let worker = Rc::new(Worker::stub());
+        let snapshot = |screens: &[&dyn Screen]| {
+            let mut state = RelayoutState::default();
+            for s in screens {
+                s.relayout_state(&mut state);
+            }
+            state
+        };
+        let rebuilt = |state: &RelayoutState, worker: Rc<Worker>| {
+            let mut books = Books::with_library(&t, landscape, worker, store.clone(), Some(LibraryWorker::stub()));
+            books.reopen_after_relayout(state, &t);
+            books
+        };
+
+        // Home stays Home.
+        let mut books = Books::with_library(&t, portrait, worker.clone(), store.clone(), Some(LibraryWorker::stub()));
+        assert!(books.is_home());
+        let state = snapshot(&[&books]);
+        assert_eq!(state, RelayoutState::default());
+        books.on_quit()?;
+        let books = rebuilt(&state, worker.clone());
+        assert!(books.is_home() && books.reader.is_none());
+        assert_eq!(books.screen, landscape);
+        drop(books);
+
+        // A Library folder keeps its page.
+        let nested = PathBuf::from("/books/Fiction/Nested");
+        let mut books = browsing_books(&t, portrait, worker.clone(), store.clone());
+        with_cx(&t, portrait, |cx| {
+            books.navigate(Some(nested.clone()), cx);
+            let next = books.pager.rect().split_right(t.target).0.center();
+            tap(&mut books, next, cx);
+            assert_eq!(books.pager.page, 1);
+        });
+        let state = snapshot(&[&books]);
+        assert_eq!(state, RelayoutState { library_open: true, ..Default::default() });
+        books.on_quit()?;
+        let id = books.grid_book(books.grid.cells()[0].0).unwrap().id.clone();
+        let books = rebuilt(&state, worker.clone());
+        assert!(books.is_in_library() && !books.is_home());
+        assert_eq!(books.navigation.folder.as_ref(), Some(&nested));
+        assert_eq!(books.pager.page, 1, "the same folder page");
+        drop(books);
+
+        // A book opened from that page reopens at its saved place, over the
+        // same Library page, with a new generation.
+        store.save_book(
+            &id,
+            &BookState {
+                position: crate::document::Position("chapter-3".into()),
+                progress: 2500,
+                ..Default::default()
+            },
+        )?;
+        let mut books = browsing_books(&t, portrait, worker.clone(), store.clone());
+        with_cx(&t, portrait, |cx| {
+            books.navigate(Some(nested.clone()), cx);
+            books.open(id.clone(), cx);
+        });
+        let state = snapshot(&[&books]);
+        assert_eq!(
+            state,
+            RelayoutState { open_book: Some(id.clone()), library_open: true, in_settings: false, book_generation: 1 }
+        );
+        books.on_quit()?;
+        drop(books);
+        let (recording, commands) = Worker::recording_stub();
+        let mut books = rebuilt(&state, Rc::new(recording));
+        assert_eq!(books.open_book_id(), Some(id.as_str()));
+        let open = commands.try_iter().find_map(|c| match c {
+            Command::Open { generation, layout, position, .. } => Some((generation, layout.width, position)),
+            _ => None,
+        });
+        assert_eq!(open, Some((2, 1696, crate::document::Position("chapter-3".into()))));
+        with_cx(&t, landscape, |cx| books.returned(cx));
+        assert!(books.is_in_library());
+        assert_eq!(books.navigation.folder.as_ref(), Some(&nested));
+        drop(books);
+
+        // Settings over a book comes back on top of the reopened book.
+        let mut books = browsing_books(&t, portrait, worker.clone(), store.clone());
+        with_cx(&t, portrait, |cx| books.open(id.clone(), cx));
+        let settings = crate::screens::system::SystemSettings::new(&t, portrait, store.clone(), worker.waker());
+        let state = snapshot(&[&books, &settings]);
+        assert!(state.in_settings && state.open_book.as_deref() == Some(id.as_str()));
+        books.on_quit()?;
+        drop((books, settings));
+        let books = Books::with_library(&t, landscape, worker.clone(), store.clone(), Some(LibraryWorker::stub()));
+        let stack = relayout_stack_from(books, &state, &t, store.clone(), worker.waker());
+        assert_eq!(stack.len(), 2);
+        let after = snapshot(&stack.iter().map(|s| s.as_ref()).collect::<Vec<_>>());
+        assert_eq!(after, RelayoutState { book_generation: state.book_generation + 1, ..state });
+        drop(stack);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn returning_over_a_book_closes_it_only_when_its_file_was_removed() -> anyhow::Result<()> {

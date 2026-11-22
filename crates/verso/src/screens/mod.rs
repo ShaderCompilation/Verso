@@ -42,10 +42,27 @@ pub enum Action {
     /// any exit, and leaves a running SSH server running.
     ExitWith(i32),
     /// Turn the screen. The app saves like on exit and rebuilds its screens
-    /// at the new size, reopening Settings on top of the library.
+    /// at the new size as they were (see [`RelayoutState`]).
     Orientation(Orientation),
     /// Open the Top Drawer (quick settings) over this screen.
     OpenTopDrawer,
+}
+
+/// What the screens were showing before the display turned, so the screens
+/// rebuilt at the new size show the same: Home or the Library folder and
+/// page (saved in `Navigation`), the open book at its saved position, and
+/// Settings on top.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RelayoutState {
+    /// The open book's id.
+    pub open_book: Option<String>,
+    /// Library (its saved folder and page) rather than Home.
+    pub library_open: bool,
+    /// Settings was open over the other screens.
+    pub in_settings: bool,
+    /// The last book generation used, so the reopened book's replies never
+    /// mix with ones still on their way to the old reader.
+    pub book_generation: u64,
 }
 
 pub trait Screen {
@@ -67,6 +84,9 @@ pub trait Screen {
 
     /// The screen pushed over this one closed; this one is on top again.
     fn on_return(&mut self, _cx: &mut EventCx) {}
+
+    /// Notes what this screen shows, before the display turns.
+    fn relayout_state(&self, _state: &mut RelayoutState) {}
 
     /// Draws the whole screen. Called whenever anything may have changed;
     /// only what actually changed reaches the display.

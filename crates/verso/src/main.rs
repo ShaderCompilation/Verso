@@ -154,6 +154,24 @@ fn start_screen(
     })
 }
 
+/// The screens after turning the display, showing what they showed before.
+fn relayout_screens(
+    name: Option<&str>,
+    theme: &ui::theme::Theme,
+    rect: geom::Rect,
+    worker: std::rc::Rc<document::thread::Worker>,
+    store: store::Store,
+    state: &screens::RelayoutState,
+) -> Vec<Box<dyn Screen>> {
+    match name.unwrap_or("home") {
+        "home" | "library" | "books" | "reader" => screens::books::relayout_stack(state, theme, rect, worker, store),
+        "settings" => {
+            vec![Box::new(screens::system::SystemSettings::new(theme, rect, store, worker.waker()).on_display_tab())]
+        }
+        _ => vec![start_screen(name, theme, rect, worker, store).expect("checked at startup")],
+    }
+}
+
 /// Runs Verso; the exit code for the launcher (0, or one a screen asked for).
 fn run() -> Result<i32> {
     if std::env::var("VERSO_SEARCH_BENCH").as_deref() == Ok("1") {
@@ -277,16 +295,14 @@ fn run() -> Result<i32> {
             quit = false;
             continue;
         }
-        if let Some(orientation) = app.prepare_orientation() {
+        if let Some((orientation, state)) = app.prepare_orientation() {
             platform.set_orientation(orientation)?;
             let info = platform.info().clone();
-            log::info!("screen turned: {}x{}, {orientation:?}", info.width, info.height);
+            log::info!("screen turned: {}x{}, {orientation:?}, {state:?}", info.width, info.height);
             gestures.reset();
             let name = opts.screen.as_deref();
             app.relayout(&info, orientation, |theme, rect| {
-                let root = start_screen(name, theme, rect, worker.clone(), store.clone()).expect("checked at startup");
-                let settings = screens::system::SystemSettings::new(theme, rect, store.clone(), worker.waker());
-                vec![root, Box::new(settings.on_display_tab())]
+                relayout_screens(name, theme, rect, worker.clone(), store.clone(), &state)
             });
             continue;
         }
