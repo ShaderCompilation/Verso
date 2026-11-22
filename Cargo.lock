@@ -2574,6 +2574,7 @@ dependencies = [
  "env_logger",
  "fbink-sys",
  "flate2",
+ "hunspell-sys",
  "image",
  "libc",
  "log",

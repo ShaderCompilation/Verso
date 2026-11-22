@@ -110,8 +110,9 @@ enum Command {
     Edit { request: Request, edit: Edit },
     Retry { request: Request, set: String, dictionary: String },
     Open { request: Request, dictionary: String },
-    Prepare(u64),
+    Prepare { ticket: u64, selection: Selection },
     Release,
+    Unload,
     Close { id: String, done: mpsc::Sender<()> },
     Rescan,
     Flush(mpsc::Sender<Result<(), String>>),
@@ -146,6 +147,10 @@ pub struct Service {
 pub struct Worker {
     service: Arc<Service>,
     mailbox: Arc<Mailbox>,
+    /// Set by a lookup or warm-up: closing this client then frees the open
+    /// Hunspell dictionary, so screens that never look words up (Library,
+    /// Settings) don't keep it in memory.
+    looked_up: AtomicBool,
 }
 
 /// Source and configuration problems worth showing. An absent native or
@@ -189,7 +194,7 @@ struct Inner {
     save_error: Option<String>,
     /// The query that failed in each dictionary, with its word-form languages.
     failed_queries: std::collections::HashMap<String, (String, Vec<String>)>,
-    /// Base-form analyzers; packs open on first use.
+    /// Base-form analyzers; packs and Hunspell dictionaries open on first use.
     word_forms: WordForms,
     /// The preference file exists but couldn't be read or parsed. Automatic
     /// saves then leave it alone; the user's next change replaces it.
@@ -489,9 +494,10 @@ impl Inner {
         publish(request, reply, current);
     }
     /// Opens (building if needed) the index of every dictionary that some
-    /// set searches, and the word-form packs. Failures are left for the
-    /// next lookup to find and report.
-    fn prepare(&mut self, current: &impl Fn() -> bool) {
+    /// set searches, the word-form packs, and the Hunspell dictionary the
+    /// book's words will use. Failures are left for the next lookup to find
+    /// and report.
+    fn prepare(&mut self, selection: &Selection, current: &impl Fn() -> bool) {
         let started = std::time::Instant::now();
         let searched =
             |id: &str| self.preferences.sets.iter().any(|s| s.dictionaries.iter().any(|p| p.id == id && !p.disabled));
@@ -516,10 +522,26 @@ impl Inner {
             return;
         }
         self.word_forms.status();
+        // The book's set (its languages replace the book's), else the book
+        // language. Hunspell loading can't be cancelled, so check first.
+        let set = self.preferences.choose(selection, "");
+        let languages = if set.languages.is_empty() {
+            vec![super::languages::normalize_language(&selection.language)]
+        } else {
+            set.languages.clone()
+        };
+        if !current() {
+            return;
+        }
+        self.word_forms.warm(&languages);
         log::info!("dictionary prepare: {opened} indexes opened in {:?}", started.elapsed());
     }
     #[cfg(test)]
     fn lookup(&mut self, query: &str, current: &impl Fn() -> bool) -> (Option<String>, State) {
+        self.lookup_language(query, "", current)
+    }
+    #[cfg(test)]
+    fn lookup_language(&mut self, query: &str, language: &str, current: &impl Fn() -> bool) -> (Option<String>, State) {
         let mailbox = Arc::new(Mailbox {
             result: Mutex::new(None),
             ready: Condvar::new(),
@@ -528,7 +550,7 @@ impl Inner {
             waker: Waker::new(|| {}),
         });
         let request = Request { id: 0, mailbox: mailbox.clone(), revision: 0 };
-        self.lookup_session(&request, query, "", current);
+        self.lookup_session(&request, query, language, current);
         let Some(reply) = mailbox.result.lock().unwrap().take() else { return (None, State::NoResult) };
         (reply.selected, reply.state.unwrap())
     }
@@ -656,7 +678,7 @@ impl Service {
                 // Even preference reads wait for an actual request.
                 let Ok(first) = commands.recv() else { return };
                 let prefs_path = store.dictionary_preferences();
-                let word_forms = WordForms::new(store.wordforms_dir());
+                let word_forms = WordForms::new(store.wordforms_dir(), store.hunspell_dir());
                 let mut inner = Inner {
                     store,
                     prefs_path,
@@ -709,13 +731,16 @@ impl Service {
                             }
                         }
                         // Any command sent after it moves the send count on and stops it.
-                        Command::Prepare(ticket) => {
+                        Command::Prepare { ticket, selection } => {
                             let current = || alive() && sent_seen.load(Ordering::Relaxed) == ticket;
                             if (!inner.fresh || folders_changed(&inner)) && !inner.discover(&current) {
                                 continue;
                             }
-                            inner.prepare(&current);
+                            inner.prepare(&selection, &current);
                         }
+                        // A client that looked words up closed (the reader):
+                        // free the Hunspell dictionary.
+                        Command::Unload => inner.word_forms.release(),
                         Command::Release => {
                             // A queued request from another client reopens what it needs.
                             // Open indexes stay: they are file handles, and the next
@@ -832,7 +857,7 @@ impl Service {
         Self { tx, revision, stopped, folders, sent }
     }
     fn send(&self, command: Command) {
-        if !matches!(command, Command::Prepare(_)) {
+        if !matches!(command, Command::Prepare { .. }) {
             self.sent.fetch_add(1, Ordering::Relaxed);
         }
         let _ = self.tx.send(command);
@@ -878,6 +903,7 @@ impl Worker {
                 latest: AtomicU64::new(0),
                 waker,
             }),
+            looked_up: AtomicBool::new(false),
         }
     }
     fn request(&self) -> Request {
@@ -893,6 +919,7 @@ impl Worker {
         if rescan {
             self.service.revision.fetch_add(1, Ordering::Relaxed);
         }
+        self.looked_up.store(true, Ordering::Relaxed);
         let request = self.request();
         *self.mailbox.session.lock().unwrap() = None;
         let id = request.id;
@@ -937,12 +964,14 @@ impl Worker {
         };
         self.service.send(Command::Open { request, dictionary: dictionary.into() });
     }
-    /// Opens the indexes a lookup will search, in the background, so the
-    /// first lookup in a book is as quick as the ones after it. Any request
-    /// from any client stops it.
-    pub fn prepare(&self) {
+    /// Opens the indexes a lookup will search, and the Hunspell dictionary
+    /// for the book's `selection`, in the background, so the first lookup in
+    /// a book is as quick as the ones after it. Any request from any client
+    /// stops it, except while a Hunspell dictionary is loading.
+    pub fn prepare(&self, selection: Selection) {
+        self.looked_up.store(true, Ordering::Relaxed);
         let ticket = self.service.sent.load(Ordering::Relaxed);
-        let _ = self.service.tx.send(Command::Prepare(ticket));
+        let _ = self.service.tx.send(Command::Prepare { ticket, selection });
     }
     pub fn receive(&self) -> Option<Reply> {
         self.mailbox.result.lock().unwrap().take().filter(|r| r.id == self.mailbox.latest.load(Ordering::Relaxed))
@@ -981,6 +1010,9 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         self.cancel();
+        if self.looked_up.load(Ordering::Relaxed) {
+            self.service.send(Command::Unload);
+        }
     }
 }
 

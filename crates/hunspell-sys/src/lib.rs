@@ -178,12 +178,7 @@ impl Hunspell {
     /// tens of milliseconds on a desktop for the main Western languages, so
     /// call it off the UI thread.
     pub fn open(aff: &Path, dic: &Path) -> Result<Hunspell, Error> {
-        check_file(aff)?;
-        check_file(dic)?;
-        let name = read_encoding(aff)?;
-        let encoding = Encoding::from_name(&name).ok_or(Error::UnsupportedEncoding(name))?;
-        check_word_count(dic)?;
-
+        let encoding = check(aff, dic)?;
         let aff_c = CString::new(aff.as_os_str().as_bytes()).map_err(|_| Error::BadPath(aff.to_path_buf()))?;
         let dic_c = CString::new(dic.as_os_str().as_bytes()).map_err(|_| Error::BadPath(dic.to_path_buf()))?;
         // SAFETY: two valid NUL-terminated paths; the shim catches exceptions.
@@ -242,6 +237,20 @@ impl Drop for Hunspell {
         // SAFETY: the handle came from Hunspell_create and is destroyed once.
         unsafe { ffi::Hunspell_destroy(self.handle.as_ptr()) }
     }
+}
+
+/// Runs the checks [`Hunspell::open`] makes before loading, without
+/// loading: both files exist, are readable files under [`MAX_FILE_BYTES`],
+/// the `.aff` names a supported encoding and the `.dic` starts with a word
+/// count. Cheap (it reads the `.aff` up to its `SET` line and the first line
+/// of the `.dic`), for showing a dictionary's state without loading it.
+pub fn check(aff: &Path, dic: &Path) -> Result<Encoding, Error> {
+    check_file(aff)?;
+    check_file(dic)?;
+    let name = read_encoding(aff)?;
+    let encoding = Encoding::from_name(&name).ok_or(Error::UnsupportedEncoding(name))?;
+    check_word_count(dic)?;
+    Ok(encoding)
 }
 
 /// The file exists, is a regular readable file and isn't too large.

@@ -15,9 +15,9 @@ pub mod worker;
 use anyhow::{Context, Result, ensure};
 use dictzip::Definitions;
 pub use discovery::{Catalog, Source, SourceStatus, discover_catalog};
-#[cfg(test)]
-pub(crate) use forms::write_pack;
 pub use forms::{WordFormsSource, WordFormsStatus};
+#[cfg(test)]
+pub(crate) use forms::{install_hunspell_fixture, write_hunspell, write_pack};
 use index::Index;
 pub(crate) use index::remove_cache;
 pub use model::{Block, BlockKind, Entry, Span, Style};

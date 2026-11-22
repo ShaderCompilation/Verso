@@ -73,6 +73,24 @@ fn encoding_names() {
 }
 
 #[test]
+fn check_without_loading() {
+    let (aff, dic) = fixture("de_DE");
+    assert_eq!(hunspell_sys::check(&aff, &dic).unwrap(), Encoding::Utf8);
+    let (aff, dic) = fixture("fr_FR");
+    assert_eq!(hunspell_sys::check(&aff, &dic).unwrap(), Encoding::Latin1);
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, d) = (tmp.path().join("t.aff"), tmp.path().join("t.dic"));
+    fs::write(&a, "SET KOI8-R\n").unwrap();
+    fs::write(&d, "1\nword\n").unwrap();
+    assert!(matches!(hunspell_sys::check(&a, &d), Err(Error::UnsupportedEncoding(n)) if n == "KOI8-R"));
+    fs::write(&a, "SET UTF-8\n").unwrap();
+    fs::write(&d, "word\n").unwrap();
+    assert!(matches!(hunspell_sys::check(&a, &d), Err(Error::BadDic(_))));
+    fs::remove_file(&d).unwrap();
+    assert!(matches!(hunspell_sys::check(&a, &d), Err(Error::Missing(_))));
+}
+
+#[test]
 fn is_send() {
     fn send<T: Send>() {}
     send::<Hunspell>();

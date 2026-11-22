@@ -281,7 +281,17 @@ impl Reader {
                 // An unreadable book stores nothing and keeps its tag.
                 if let Ok(detected) = result {
                     self.persistence.save_language(detected.clone());
+                    let before = self.book_language();
                     self.detected_language = Some(detected);
+                    // The warm-up (or a lookup) already ran with the tag:
+                    // warm the detected language's word forms instead.
+                    if self.book_language() != before
+                        && self.dictionary_prepare_at.is_none()
+                        && self.dictionary.is_some()
+                    {
+                        let selection = self.dictionary_selection();
+                        self.dictionary_service().prepare(selection);
+                    }
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -440,14 +450,19 @@ impl Reader {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
         })
     }
+    /// The book's dictionary set choice and language, for lookups and the
+    /// warm-up.
+    fn dictionary_selection(&self) -> crate::dictionary::sets::Selection {
+        crate::dictionary::sets::Selection {
+            book_set: self.store.book(&self.id).dictionary_set,
+            language: self.book_language(),
+        }
+    }
     pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
         self.dictionary_prepare_at = None;
         let service = self.dictionary_service().clone();
         let word = self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)));
-        let selection = crate::dictionary::sets::Selection {
-            book_set: self.store.book(&self.id).dictionary_set,
-            language: self.book_language(),
-        };
+        let selection = self.dictionary_selection();
         self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service, cx.theme, self.screen, word, selection)));
         cx.redraw();
     }
@@ -1585,7 +1600,8 @@ impl Screen for Reader {
         }
         if self.dictionary_prepare_at.is_some_and(|t| cx.now >= t) {
             self.dictionary_prepare_at = None;
-            self.dictionary_service().prepare();
+            let selection = self.dictionary_selection();
+            self.dictionary_service().prepare(selection);
         }
         if self.language_detect_at.is_some_and(|t| cx.now >= t) {
             self.language_detect_at = None;

@@ -483,9 +483,9 @@ fn prepare_opens_the_searched_indexes_and_stops_when_asked() {
     let mut inner = inner(&f);
     inner.edit_preferences(Edit::Disabled { set: DEFAULT.into(), dictionary: "c.ifo".into(), disabled: true }).unwrap();
     // Cancelled before the first index: nothing opens.
-    inner.prepare(&|| false);
+    inner.prepare(&Selection::default(), &|| false);
     assert!(inner.probes.is_empty());
-    inner.prepare(&|| true);
+    inner.prepare(&Selection::default(), &|| true);
     let mut open: Vec<_> = inner.probes.keys().cloned().collect();
     open.sort();
     assert_eq!(open, ["a.ifo", "b.ifo"], "only dictionaries some set searches");
@@ -502,7 +502,7 @@ fn a_request_from_any_client_stops_a_running_prepare() {
     let f = Fixture::new();
     install(&f.join("dictionaries/a.ifo"), "A", "thunder");
     let ticket = f.worker.service.sent.load(Ordering::Relaxed);
-    f.worker.prepare();
+    f.worker.prepare(Selection::default());
     // A lookup sent after it moves the send count on, and still completes.
     assert!(matches!(f.lookup("thunder").state, Some(State::Definition { .. })));
     assert!(f.worker.service.sent.load(Ordering::Relaxed) > ticket);
@@ -574,7 +574,7 @@ fn inner(f: &Fixture) -> Inner {
         definitions: None,
         save_error: None,
         failed_queries: Default::default(),
-        word_forms: WordForms::new(f.store.wordforms_dir()),
+        word_forms: WordForms::new(f.store.wordforms_dir(), f.store.hunspell_dir()),
         prefs_error: None,
     };
     assert!(inner.discover(&|| true));
@@ -1319,6 +1319,239 @@ fn russian_forms_cancel_at_any_point_without_errors() {
             let State::Definition { entries, base_forms } = state else { panic!("{state:?}") };
             assert_eq!(entries.len(), 2);
             assert_eq!(base_forms.map(|b| b.count), Some(2));
+            break;
+        }
+        if let State::Definition { base_forms, .. } = state {
+            assert!(base_forms.is_some(), "cancelled at check {n}");
+        }
+        assert!(inner.catalog.dictionaries.iter().all(|d| d.error.is_none()), "cancelled at check {n}");
+    }
+}
+
+/// Installs the hunspell-sys test dictionary `name` (`de_DE`, `fr_FR`).
+fn hunspell(f: &Fixture, name: &str) {
+    forms::install_hunspell_fixture(&f.store.hunspell_dir(), name);
+}
+/// A complete lookup from `client` in a book of `language`.
+fn lookup_client(client: &Worker, query: &str, language: &str) -> Reply {
+    let id = client.lookup_in(query.into(), false, Selection { book_set: None, language: language.into() });
+    loop {
+        let reply = wait_client(client, id);
+        if reply.complete {
+            return reply;
+        }
+    }
+}
+/// Whether each Hunspell language's dictionary is loaded, from a catalog.
+fn loaded(reply: &Reply) -> Vec<(&str, bool)> {
+    reply
+        .word_forms
+        .iter()
+        .filter_map(|s| match s.source {
+            WordFormsSource::Hunspell { loaded, .. } => Some((s.language.as_str(), loaded)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn hunspell_gives_book_language_forms_and_english_and_russian_keep_theirs() {
+    let f = Fixture::new();
+    hunspell(&f, "de_DE");
+    russian_pack(&f);
+    // Hunspell dictionaries for English and Russian are never used.
+    let odd = "SET UTF-8\nSFX A Y 2\nSFX A 0 s .\nSFX A 0 и .\n";
+    forms::write_hunspell(&f.store.hunspell_dir(), "en_GB", odd, "1\nthunde/A\n");
+    forms::write_hunspell(&f.store.hunspell_dir(), "ru_RU", odd, "1\nкошк/A\n");
+    install_entries(
+        &f.join("dictionaries/a.ifo"),
+        "A",
+        &[("Haus", "house"), ("Kind", "child"), ("thunder", "t"), ("thunde", "x"), ("кошка", "cat"), ("кошк", "x")],
+        &[],
+    );
+    // Tagged or detected German: the reader passes the resolved language.
+    for (query, expected) in [("Häuser", "Haus"), ("Kindes", "Kind"), ("HÄUSER", "Haus")] {
+        let reply = lookup_book(&f, query, None, "de");
+        assert_eq!(definition(&reply), (vec![expected], Some(1)), "{query}");
+    }
+    // An English book gets English rules for the same word: none apply.
+    assert_eq!(lookup_book(&f, "Häuser", None, "en").state, Some(State::NoResult));
+    assert_eq!(definition(&lookup_book(&f, "thunders", None, "en")), (vec!["thunder"], Some(1)));
+    assert_eq!(definition(&lookup_book(&f, "thunders", None, "")), (vec!["thunder"], Some(1)));
+    assert_eq!(definition(&lookup_book(&f, "кошки", None, "ru")), (vec!["кошка"], Some(1)));
+    assert_eq!(definition(&lookup_book(&f, "кошки", None, "de")), (vec!["кошка"], Some(1)));
+    // A set assigned German gets German forms whatever the book's tag.
+    f.catalog();
+    set(&f.worker, "german", "de", "a.ifo");
+    let reply = lookup_book(&f, "Häuser", Some("german"), "en");
+    assert_eq!((reply.active_set.as_str(), definition(&reply)), ("german", (vec!["Haus"], Some(1))));
+    let languages: Vec<_> = f.catalog().word_forms.into_iter().map(|s| (s.language, s.unused)).collect();
+    assert_eq!(
+        languages,
+        [
+            ("en".to_owned(), vec!["en_GB.aff".to_owned()]),
+            ("de".to_owned(), vec![]),
+            ("ru".to_owned(), vec!["ru_RU.aff".to_owned()])
+        ]
+    );
+}
+
+#[test]
+fn one_hunspell_dictionary_is_open_and_closing_the_reader_frees_it() {
+    let f = Fixture::new();
+    hunspell(&f, "de_DE");
+    hunspell(&f, "fr_FR");
+    install_entries(&f.join("dictionaries/a.ifo"), "A", &[("Haus", "house"), ("cheval", "horse")], &[]);
+    assert_eq!(loaded(&f.catalog()), [("fr", false), ("de", false)], "Settings only checks them");
+    let (reader, _) = Fixture::worker(&f.store);
+    assert_eq!(definition(&lookup_client(&reader, "Häuser", "de")), (vec!["Haus"], Some(1)));
+    assert_eq!(loaded(&f.catalog()), [("fr", false), ("de", true)]);
+    // Another language replaces it.
+    assert_eq!(definition(&lookup_client(&reader, "chevaux", "fr")), (vec!["cheval"], Some(1)));
+    assert_eq!(loaded(&f.catalog()), [("fr", true), ("de", false)]);
+    // Closing a screen that never looked words up keeps it.
+    let (settings, _) = Fixture::worker(&f.store);
+    wait_client(&settings, settings.catalog(false));
+    drop(settings);
+    assert_eq!(loaded(&f.catalog()), [("fr", true), ("de", false)]);
+    // Closing the reader frees it.
+    drop(reader);
+    assert_eq!(loaded(&f.catalog()), [("fr", false), ("de", false)]);
+    // The next book's first miss opens it again.
+    let (reader, _) = Fixture::worker(&f.store);
+    assert_eq!(definition(&lookup_client(&reader, "Häuser", "de")), (vec!["Haus"], Some(1)));
+    assert_eq!(loaded(&f.catalog()), [("fr", false), ("de", true)]);
+    drop(reader);
+    assert_eq!(loaded(&f.catalog()), [("fr", false), ("de", false)]);
+}
+
+#[test]
+fn prepare_warms_the_book_languages_hunspell_dictionary() {
+    let f = Fixture::new();
+    hunspell(&f, "de_DE");
+    hunspell(&f, "fr_FR");
+    install(&f.join("dictionaries/a.ifo"), "A", "Haus");
+    let mut inner = inner(&f);
+    let book =
+        |set: Option<&str>, language: &str| Selection { book_set: set.map(str::to_owned), language: language.into() };
+    inner.prepare(&book(None, "deu-DE"), &|| false);
+    assert_eq!(inner.word_forms.open_language(), None, "cancelled");
+    for language in ["en", "ru", "it", ""] {
+        inner.prepare(&book(None, language), &|| true);
+        assert_eq!(inner.word_forms.open_language(), None, "{language:?}");
+    }
+    inner.prepare(&book(None, "deu-DE"), &|| true);
+    assert_eq!(inner.word_forms.open_language(), Some("de"));
+    // A set chosen for the book replaces the book's language.
+    inner.edit_preferences(Edit::Create { id: "french".into(), name: "French".into() }).unwrap();
+    inner
+        .edit_preferences(Edit::Languages { set: "french".into(), languages: vec!["it".into(), "fr".into()] })
+        .unwrap();
+    inner.prepare(&book(Some("french"), "de"), &|| true);
+    assert_eq!(inner.word_forms.open_language(), Some("fr"));
+    // So does a set assigned the book's language.
+    inner.word_forms.release();
+    inner.prepare(&book(None, "it"), &|| true);
+    assert_eq!(inner.word_forms.open_language(), Some("fr"));
+}
+
+#[test]
+fn broken_hunspell_dictionaries_keep_exact_lookup_and_rescan_recovers() {
+    let f = Fixture::new();
+    let dir = f.store.hunspell_dir();
+    install_entries(
+        &f.join("dictionaries/a.ifo"),
+        "A",
+        &[("Maus", "mouse"), ("Häuser", "houses"), ("cheval", "horse")],
+        &[],
+    );
+    forms::write_hunspell(&dir, "fr_FR", "SET KOI8-R\n", "1\ncheval\n");
+    hunspell(&f, "de_DE");
+    fs::remove_file(dir.join("de_DE.dic")).unwrap();
+    forms::write_hunspell(&dir, "it_IT", "SET UTF-8\n", "1\n");
+    let source = |reply: &Reply, language: &str| {
+        reply.word_forms.iter().find(|s| s.language == language).unwrap().source.clone()
+    };
+    // English rules, the next language, don't know these words either.
+    for (language, query) in [("fr", "chevaux"), ("de", "Mäuse"), ("it", "case")] {
+        assert_eq!(definition(&lookup_book(&f, "Häuser", None, language)), (vec!["Häuser"], None), "{language}");
+        let reply = lookup_book(&f, query, None, language);
+        assert_eq!(reply.state, Some(State::NoResult), "{language}");
+        // A word-form problem is not a dictionary problem.
+        assert!(reply.dictionaries.iter().all(|d| d.error.is_none()) && reply.warnings.is_empty());
+    }
+    let reply = f.catalog();
+    assert_eq!(source(&reply, "fr"), WordFormsSource::Unsupported { name: "fr_FR".into(), encoding: "KOI8-R".into() });
+    assert!(matches!(source(&reply, "de"), WordFormsSource::Error(e) if e.contains("is missing")));
+    assert!(matches!(source(&reply, "it"), WordFormsSource::Error(e) if e.contains("No words")));
+    hunspell(&f, "fr_FR");
+    hunspell(&f, "de_DE");
+    // Settled until a rescan.
+    assert_eq!(lookup_book(&f, "chevaux", None, "fr").state, Some(State::NoResult));
+    let reply = f.reply(f.worker.catalog(true)).0;
+    assert!(matches!(source(&reply, "fr"), WordFormsSource::Hunspell { .. }));
+    assert!(matches!(source(&reply, "de"), WordFormsSource::Hunspell { .. }));
+    assert_eq!(definition(&lookup_book(&f, "chevaux", None, "fr")), (vec!["cheval"], Some(1)));
+    assert_eq!(definition(&lookup_book(&f, "Mäuse", None, "de")), (vec!["Maus"], Some(1)));
+}
+
+/// `stan` comes from four words; Hunspell lists them all.
+const DUTCH_AFF: &str =
+    "SET UTF-8\nSFX A Y 1\nSFX A 0 n .\nSFX B Y 1\nSFX B 0 an .\nSFX C Y 1\nSFX C 0 tan .\nPFX P Y 1\nPFX P 0 s .\n";
+const DUTCH_DIC: &str = "4\nsta/A\nst/B\ns/C\ntan/P\n";
+
+#[test]
+fn hunspell_forms_keep_exact_first_precedence_and_the_three_form_cap() {
+    let f = Fixture::new();
+    forms::write_hunspell(&f.store.hunspell_dir(), "nl_NL", DUTCH_AFF, DUTCH_DIC);
+    hunspell(&f, "de_DE");
+    install(&f.join("dictionaries/a.ifo"), "A", "Haus");
+    install(&f.join("dictionaries/b.ifo"), "B", "Häuser");
+    install_entries(&f.join("dictionaries/c.ifo"), "C", &[("Haus", "base"), ("Häuser", "exact")], &[]);
+    // The preferred dictionary's base form beats a later exact entry.
+    let reply = lookup_book(&f, "Häuser", None, "de");
+    assert_eq!(reply.selected.as_deref(), Some("a.ifo"));
+    assert_eq!(definition(&reply), (vec!["Haus"], Some(1)));
+    let counts: Vec<_> = reply.matches.iter().map(|m| (m.dictionary.as_str(), m.hits.forms)).collect();
+    assert_eq!(counts, [("a.ifo", Some(1)), ("b.ifo", None), ("c.ifo", None)]);
+    // An exact entry beats base forms in the same dictionary.
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "a.ifo".into(), disabled: true });
+    edit(&f.worker, Edit::Disabled { set: DEFAULT.into(), dictionary: "b.ifo".into(), disabled: true });
+    let reply = lookup_book(&f, "Häuser", None, "de");
+    assert_eq!((reply.selected.as_deref(), definition(&reply)), (Some("c.ifo"), (vec!["Häuser"], None)));
+    // At most three base forms, in Hunspell's order.
+    install_entries(&f.join("dictionaries/d.ifo"), "D", &[("sta", "1"), ("st", "2"), ("s", "3"), ("tan", "4")], &[]);
+    f.reply(f.worker.catalog(true));
+    let stems = {
+        let dir = f.store.hunspell_dir();
+        hunspell_sys::Hunspell::open(&dir.join("nl_NL.aff"), &dir.join("nl_NL.dic")).unwrap().stem("stan")
+    };
+    assert_eq!(stems.len(), 4, "{stems:?}");
+    let reply = lookup_book(&f, "stan", None, "nl");
+    let (headwords, count) = definition(&reply);
+    assert_eq!((headwords, count), (stems[..3].iter().map(String::as_str).collect(), Some(3)));
+}
+
+#[test]
+fn hunspell_forms_cancel_at_any_point_without_errors() {
+    use std::cell::Cell;
+    let f = Fixture::new();
+    hunspell(&f, "de_DE");
+    install(&f.join("dictionaries/a.ifo"), "A", "anderes");
+    install_entries(&f.join("dictionaries/b.ifo"), "B", &[("Kind", "child")], &[]);
+    let mut inner = inner(&f);
+    for n in 0.. {
+        assert!(n < 1000, "the lookup never completed");
+        let checks = Cell::new(0);
+        let current = || {
+            checks.set(checks.get() + 1);
+            checks.get() <= n
+        };
+        let (_, state) = inner.lookup_language("Kindes", "de", &current);
+        if checks.get() <= n {
+            let State::Definition { entries, base_forms } = state else { panic!("{state:?}") };
+            assert_eq!(entries.len(), 1);
+            assert_eq!(base_forms.map(|b| b.count), Some(1));
             break;
         }
         if let State::Definition { base_forms, .. } = state {

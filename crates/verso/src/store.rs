@@ -364,6 +364,11 @@ impl Store {
     pub fn dictionary_dir(&self) -> PathBuf {
         self.root.join("dictionaries")
     }
+    /// User-installed Hunspell dictionaries (`.aff`/`.dic` pairs) for base
+    /// forms, next to the native dictionaries folder.
+    pub fn hunspell_dir(&self) -> PathBuf {
+        self.root.join("hunspell")
+    }
     pub fn dictionary_cache(&self) -> PathBuf {
         self.root.join("dictionary-cache")
     }

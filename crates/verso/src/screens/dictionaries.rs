@@ -316,6 +316,10 @@ impl Dictionaries {
                     Row::new(format!("{} word forms", language_name(&forms.language))).sub(match &forms.source {
                         WordFormsSource::BuiltIn => "Built-in".into(),
                         WordFormsSource::Pack(source) => source.clone(),
+                        WordFormsSource::Hunspell { name, .. } => format!("Hunspell {name}"),
+                        WordFormsSource::Unsupported { encoding, .. } => {
+                            format!("Unsupported encoding {encoding} · use a UTF-8 copy")
+                        }
                         WordFormsSource::Error(_) => "Couldn’t be read · Tap for details".into(),
                     })
                 }))
@@ -522,17 +526,8 @@ impl Dictionaries {
             View::Sets if index < self.sets.len() => self.open(View::Set(self.sets[index].id.clone()), cx.theme),
             View::Sets => {
                 let Some(forms) = self.word_forms.get(index - self.sets.len()) else { return };
+                let text = word_forms_details(forms);
                 let name = language_name(&forms.language);
-                let source = match &forms.source {
-                    WordFormsSource::BuiltIn => "Built into Verso.".into(),
-                    WordFormsSource::Pack(source) => format!("Source: {source}"),
-                    WordFormsSource::Error(error) => {
-                        format!("Couldn’t be read, so {name} words get no base forms. Rescan tries again.\n\n{error}")
-                    }
-                };
-                let text = format!(
-                    "{source}\n\nWhen a dictionary has no entry for a selected {name} word, Verso looks up its base forms instead."
-                );
                 self.details = Some(Details::from_text(cx.theme, self.screen, &format!("{name} word forms"), text));
             }
             View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id().into()), cx.theme),
@@ -592,6 +587,40 @@ impl Dictionaries {
         }
     }
 }
+/// The details text for a word-form language: its source or error, its
+/// Hunspell files and the Hunspell dictionaries it doesn't use.
+fn word_forms_details(forms: &WordFormsStatus) -> String {
+    let name = language_name(&forms.language);
+    let mut text = match &forms.source {
+        WordFormsSource::BuiltIn => "Built into Verso.".into(),
+        WordFormsSource::Pack(source) => format!("Source: {source}"),
+        WordFormsSource::Hunspell { name: dictionary, encoding, .. } => {
+            format!("Source: Hunspell dictionary {dictionary} ({encoding}).")
+        }
+        WordFormsSource::Unsupported { name: dictionary, encoding } => format!(
+            "The Hunspell dictionary {dictionary} uses the {encoding} encoding, which Verso can’t read, so {name} words \
+             get no base forms. Install a UTF-8 copy of it and tap Rescan."
+        ),
+        WordFormsSource::Error(error) => {
+            format!("Couldn’t be read, so {name} words get no base forms. Rescan tries again.\n\n{error}")
+        }
+    };
+    if !forms.files.is_empty() {
+        text.push_str(&format!("\n\nFiles in the hunspell folder: {}", forms.files.join(", ")));
+    }
+    if !forms.unused.is_empty() {
+        let why = match forms.source {
+            WordFormsSource::BuiltIn | WordFormsSource::Pack(_) => format!("{name} uses its own word forms"),
+            _ => "only the first by name is used".into(),
+        };
+        text.push_str(&format!("\n\nNot used ({why}): {}", forms.unused.join(", ")));
+    }
+    text.push_str(&format!(
+        "\n\nWhen a dictionary has no entry for a selected {name} word, Verso looks up its base forms instead."
+    ));
+    text
+}
+
 fn languages(set: &Set) -> String {
     if set.id == DEFAULT {
         "Fallback for books without an assigned set".into()
@@ -1129,6 +1158,49 @@ mod tests {
         wait(&mut s, &t);
         assert!(matches!(&s.view, View::Set(id) if id == DEFAULT));
         assert_eq!(s.list.rows.len(), 1);
+        drop(s);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hunspell_languages_get_rows_with_their_files_and_errors() {
+        let (root, store) = temp_store("management-hunspell");
+        let dir = store.hunspell_dir();
+        crate::dictionary::install_hunspell_fixture(&dir.join("de"), "de_DE");
+        crate::dictionary::install_hunspell_fixture(&dir, "de_DE");
+        fs::rename(dir.join("de_DE.aff"), dir.join("de_DE_frami.aff")).unwrap();
+        fs::rename(dir.join("de_DE.dic"), dir.join("de_DE_frami.dic")).unwrap();
+        crate::dictionary::write_hunspell(&dir, "fr_FR", "SET KOI8-R\n", "1\nmot\n");
+        crate::dictionary::write_hunspell(&dir, "it_IT", "SET UTF-8\n", "no count\n");
+        crate::dictionary::write_hunspell(&dir, "en_US", "SET UTF-8\n", "1\nword\n");
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}), None);
+        wait(&mut s, &t);
+        let rows: Vec<_> = s.list.rows.iter().map(|r| (r.label.as_str(), r.sub.as_deref().unwrap_or(""))).collect();
+        assert_eq!(
+            rows[1..],
+            [
+                ("English word forms", "Built-in"),
+                ("French word forms", "Unsupported encoding KOI8-R · use a UTF-8 copy"),
+                ("German word forms", "Hunspell de_DE"),
+                ("Italian word forms", "Couldn’t be read · Tap for details"),
+                ("Russian word forms", "Couldn’t be read · Tap for details"),
+            ]
+        );
+        let details: Vec<_> = s.word_forms.iter().map(word_forms_details).collect();
+        assert!(details[0].contains("Not used (English uses its own word forms): en_US.aff"), "{}", details[0]);
+        assert!(
+            details[1].contains("KOI8-R encoding") && details[1].contains("fr_FR.aff, fr_FR.dic"),
+            "{}",
+            details[1]
+        );
+        assert!(details[2].contains("Hunspell dictionary de_DE (UTF-8)"), "{}", details[2]);
+        assert!(details[2].contains("Files in the hunspell folder: de/de_DE.aff, de/de_DE.dic"), "{}", details[2]);
+        assert!(details[2].contains("only the first by name is used): de_DE_frami.aff"), "{}", details[2]);
+        assert!(details[3].contains("doesn't start with a word count"), "{}", details[3]);
+        row(&mut s, 3, &t);
+        assert!(s.details.is_some(), "a Hunspell row opens its details");
         drop(s);
         let _ = fs::remove_dir_all(root);
     }
