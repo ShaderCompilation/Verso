@@ -1,19 +1,36 @@
 //! The app: owns the canvas and the screen stack, turns gestures and timers
 //! into redraws, and works out which parts of the display to refresh.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, DeviceInfo, Frontlight, Orientation, RefreshMode, TextInput, Update, Waker};
 use crate::screens::system::{ExitChoice, ExitPrompt};
+use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
 use crate::screens::update::RollbackSheet;
 use crate::screens::{Action, EventCx, Screen};
+use crate::store::Store;
 use crate::ui::damage::{self, FrameDiff};
-use crate::ui::gesture::Gesture;
+use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::Toast;
+
+/// What the Top Drawer needs from the rest of Verso: settings, screens to
+/// open, and a way to wake the UI when Wi-Fi or SSH finishes switching.
+pub struct Services {
+    pub store: Store,
+    pub waker: Waker,
+    pub net: Arc<dyn NetOps>,
+}
+
+impl Services {
+    pub fn device(store: Store, waker: Waker) -> Self {
+        Self { store, waker, net: Arc::new(top_drawer::DeviceNet) }
+    }
+}
 
 pub struct App {
     canvas: Canvas,
@@ -51,6 +68,15 @@ pub struct App {
     orientation: Orientation,
     /// A screen asked to turn the display; see `prepare_orientation`.
     orientation_request: Option<Orientation>,
+    services: Option<Services>,
+    /// The quick-settings drawer while it's open, over the top screen and
+    /// under the prompts and toasts.
+    drawer: Option<TopDrawer>,
+    /// Switches Wi-Fi and SSH for the drawer; made when it first opens and
+    /// kept, so a switch finishes (and its result is kept) after it closes.
+    net: Option<DrawerWorker>,
+    /// `NetState::finished` when the claimed SSH name was last checked.
+    net_seen: u64,
 }
 
 impl App {
@@ -84,7 +110,16 @@ impl App {
             wake_cleanup: None,
             orientation: Orientation::Portrait,
             orientation_request: None,
+            services: None,
+            drawer: None,
+            net: None,
+            net_seen: 0,
         }
+    }
+
+    /// Gives the app what the Top Drawer needs. Without it the drawer stays closed.
+    pub fn set_services(&mut self, services: Services) {
+        self.services = Some(services);
     }
 
     /// The orientation the canvas is drawn in (set at startup or by `relayout`).
@@ -107,6 +142,7 @@ impl App {
     /// the error is shown and the screens stay as they are.
     fn prepare_relayout(&mut self) -> bool {
         self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
+        self.close_drawer();
         for s in &mut self.stack {
             if let Err(e) = s.on_quit() {
                 log::error!("before turning the screen: {e:#}");
@@ -128,6 +164,7 @@ impl App {
         build: impl FnOnce(&Theme, Rect) -> Vec<Box<dyn Screen>>,
     ) {
         self.stack.clear();
+        self.drawer = None;
         self.orientation = orientation;
         self.canvas = Canvas::new(info.width, info.height);
         self.diff = FrameDiff::new(&self.canvas);
@@ -209,6 +246,9 @@ impl App {
             cx.battery = self.battery;
             if let Some(screen) = self.stack.last_mut() {
                 screen.draw(&mut cx);
+            }
+            if let Some(drawer) = &mut self.drawer {
+                drawer.draw(&mut cx);
             }
             if let Some(sheet) = &self.rollback {
                 sheet.draw(&mut cx);
@@ -343,7 +383,144 @@ impl App {
             }
             return;
         }
+        if self.drawer.is_some() {
+            self.drawer_gesture(g);
+            return;
+        }
+        if let Gesture::Swipe { dir: Direction::Down, from, .. } = g
+            && from.y < self.theme.top_bar.max(self.canvas.bounds().h / 10)
+            && self.stack.last().is_some_and(|s| s.allows_top_drawer())
+        {
+            // The screen saw this touch start: end it there without acting on it.
+            self.with_screen(|screen, cx| screen.on_gesture(Gesture::Cancel(g.pos()), cx));
+            self.open_drawer();
+            return;
+        }
         self.with_screen(|screen, cx| screen.on_gesture(g, cx));
+    }
+
+    /// Opens the Top Drawer over the top screen, unless a prompt is up.
+    fn open_drawer(&mut self) {
+        if self.drawer.is_some()
+            || self.asleep
+            || self.exit_prompt.is_some()
+            || self.usb_prompt.is_some()
+            || self.rollback.is_some()
+        {
+            return;
+        }
+        let Some(services) = &self.services else {
+            log::warn!("Top Drawer: no services");
+            return;
+        };
+        let net = self.net.get_or_insert_with(|| DrawerWorker::new(services.net.clone(), services.waker.clone()));
+        // SSH is read here (no subprocess); Wi-Fi in the background.
+        net.read_ssh();
+        net.probe();
+        let developer = services.store.settings().developer;
+        let now = Instant::now();
+        self.drawer = Some(TopDrawer::new(
+            &self.theme,
+            self.canvas.bounds(),
+            self.orientation,
+            developer,
+            self.frontlight,
+            net.state(),
+            now,
+        ));
+        self.needs_redraw = true;
+    }
+
+    fn close_drawer(&mut self) {
+        if self.drawer.take().is_some() {
+            self.needs_redraw = true;
+        }
+    }
+
+    fn drawer_gesture(&mut self, g: Gesture) {
+        let Some(drawer) = &mut self.drawer else { return };
+        let event = drawer.on_gesture(&g);
+        // Pressed tiles and sliders change as the finger moves.
+        self.needs_redraw = true;
+        let Some(event) = event else { return };
+        let bounds = self.canvas.bounds();
+        match event {
+            DrawerEvent::Close => self.close_drawer(),
+            DrawerEvent::Light(light) => {
+                self.frontlight = Some(light);
+                self.light_request = Some(light);
+            }
+            DrawerEvent::Wifi(on) => {
+                if let Some(net) = &mut self.net {
+                    net.set_wifi(on);
+                }
+                self.sync_drawer();
+            }
+            DrawerEvent::Probe => {
+                if let Some(net) = &mut self.net {
+                    net.probe();
+                }
+                self.sync_drawer();
+            }
+            DrawerEvent::Ssh(on) => {
+                if let (Some(net), Some(services)) = (&mut self.net, &self.services) {
+                    net.set_ssh(on, services.store.settings().hostname);
+                }
+                self.sync_drawer();
+            }
+            DrawerEvent::Orientation(orientation) => {
+                self.close_drawer();
+                let Some(services) = &self.services else { return };
+                let mut settings = services.store.settings();
+                settings.orientation = orientation;
+                match services.store.save_settings(&settings) {
+                    Ok(()) => self.orientation_request = Some(orientation),
+                    Err(e) => {
+                        log::error!("saving orientation: {e:#}");
+                        self.toast = Some(Toast::new("Couldn't save orientation", None, Instant::now()));
+                    }
+                }
+            }
+            DrawerEvent::Refresh => {
+                self.close_drawer();
+                self.refresh_all(RefreshMode::Full);
+            }
+            DrawerEvent::Transfer | DrawerEvent::Settings => {
+                self.close_drawer();
+                let Some(services) = &self.services else { return };
+                let (store, waker) = (services.store.clone(), services.waker.clone());
+                let screen: Box<dyn Screen> = if event == DrawerEvent::Settings {
+                    Box::new(crate::screens::system::SystemSettings::new(&self.theme, bounds, store, waker))
+                } else {
+                    Box::new(crate::screens::transfer::TransferScreen::new(&self.theme, bounds, store, waker))
+                };
+                self.stack.push(screen);
+            }
+        }
+    }
+
+    /// Takes the worker's latest Wi-Fi/SSH state: into the open drawer,
+    /// failures as a toast, and a newly claimed SSH name into the settings.
+    fn sync_drawer(&mut self) {
+        let Some(net) = &self.net else { return };
+        let now = Instant::now();
+        if let Some(message) = net.take_errors().pop() {
+            self.toast = Some(Toast::new(message, None, now));
+            self.needs_redraw = true;
+        }
+        let state = net.state();
+        if state.finished != self.net_seen {
+            self.net_seen = state.finished;
+            if let Some(services) = &self.services {
+                top_drawer::remember_hostname(&services.store, &state.ssh);
+            }
+        }
+        if let Some(drawer) = &mut self.drawer
+            && drawer.net() != &state
+        {
+            drawer.set_net(&self.theme, state, now);
+            self.needs_redraw = true;
+        }
     }
 
     pub fn on_text_input(&mut self, input: &TextInput) -> bool {
@@ -364,6 +541,12 @@ impl App {
             }
             return true;
         }
+        if self.drawer.is_some() {
+            if matches!(input, TextInput::Dismiss) {
+                self.close_drawer();
+            }
+            return true;
+        }
         let mut consumed = false;
         self.with_screen(|screen, cx| {
             consumed = screen.on_text_input(input, cx);
@@ -380,7 +563,8 @@ impl App {
         }
         let screen = self.stack.last().and_then(|s| s.deadline());
         let idle = self.stack.last().filter(|s| s.has_idle_work()).map(|_| Instant::now());
-        [screen, idle, self.toast.as_ref().map(|t| t.until), self.wake_cleanup].into_iter().flatten().min()
+        let drawer = self.drawer.as_ref().and_then(TopDrawer::deadline);
+        [screen, idle, drawer, self.toast.as_ref().map(|t| t.until), self.wake_cleanup].into_iter().flatten().min()
     }
 
     pub fn on_tick(&mut self, now: Instant) {
@@ -412,6 +596,16 @@ impl App {
             self.toast = None;
             self.needs_redraw = true;
         }
+        if let (Some(drawer), Some(net)) = (&mut self.drawer, &self.net)
+            && drawer.deadline().is_some_and(|d| now >= d)
+        {
+            if drawer.on_tick(now, net) {
+                self.needs_redraw = true;
+            }
+            if let Some(services) = &self.services {
+                top_drawer::remember_hostname(&services.store, &drawer.net().ssh);
+            }
+        }
         if self.stack.last().and_then(|s| s.deadline()).is_some_and(|d| now >= d) {
             self.needs_redraw = true;
             self.with_screen(|screen, cx| screen.on_tick(cx));
@@ -419,7 +613,7 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        self.stack.last().is_some_and(|s| s.busy())
+        self.stack.last().is_some_and(|s| s.busy()) || self.net.as_ref().is_some_and(DrawerWorker::busy)
     }
 
     pub fn has_pending_work(&self) -> bool {
@@ -435,6 +629,7 @@ impl App {
         if self.asleep {
             return;
         }
+        self.sync_drawer();
         self.with_screen(|screen, cx| {
             screen.on_background(cx);
             Action::None
@@ -487,6 +682,7 @@ impl App {
     pub fn on_sleep(&mut self) {
         // Cancel captures before dropping raw touch state, including overlays.
         self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
+        self.close_drawer();
         for s in &mut self.stack {
             s.on_sleep();
         }
@@ -528,8 +724,15 @@ impl App {
     /// Delivers an asynchronous startup frontlight reading without overwriting
     /// a value already set by the user.
     pub fn set_initial_frontlight(&mut self, light: Option<Frontlight>) {
-        if self.frontlight.is_none() && light.is_some() {
-            self.frontlight = light;
+        if self.frontlight.is_none()
+            && let Some(light) = light
+        {
+            self.frontlight = Some(light);
+            if let Some(drawer) = &mut self.drawer
+                && drawer.set_frontlight(&self.theme, light)
+            {
+                self.needs_redraw = true;
+            }
             self.on_background();
         }
     }
@@ -605,6 +808,7 @@ impl App {
                 self.exit_code = Some(code);
             }
             Action::Orientation(o) => self.orientation_request = Some(o),
+            Action::OpenTopDrawer => self.open_drawer(),
         }
     }
 }
@@ -1208,5 +1412,212 @@ mod tests {
         app.set_initial_frontlight(Some(Frontlight { brightness: 1, warmth: Some(0) }));
         assert_eq!(app.frontlight, Some(hw));
         assert_eq!(backgrounds.get(), 1);
+    }
+
+    /// A screen that counts what reaches it and can ask for the drawer.
+    struct Under {
+        allows: bool,
+        taps: Rc<Cell<usize>>,
+        cancels: Rc<Cell<usize>>,
+        swipes: Rc<Cell<usize>>,
+        open_on_tap: bool,
+    }
+    impl Screen for Under {
+        fn draw(&mut self, cx: &mut DrawCx) {
+            cx.canvas.fill(0xcc);
+        }
+        fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+            match g {
+                Gesture::Tap(_) if self.open_on_tap => return Action::OpenTopDrawer,
+                Gesture::Tap(_) => self.taps.set(self.taps.get() + 1),
+                Gesture::Cancel(_) => self.cancels.set(self.cancels.get() + 1),
+                Gesture::Swipe { .. } => self.swipes.set(self.swipes.get() + 1),
+                _ => {}
+            }
+            Action::None
+        }
+        fn allows_top_drawer(&self) -> bool {
+            self.allows
+        }
+    }
+    struct DrawerApp {
+        app: App,
+        taps: Rc<Cell<usize>>,
+        cancels: Rc<Cell<usize>>,
+        swipes: Rc<Cell<usize>>,
+        ops: Arc<top_drawer::tests::FakeNet>,
+        store: Store,
+        _dir: tempfile::TempDir,
+    }
+    fn drawer_app(allows: bool, open_on_tap: bool) -> DrawerApp {
+        let (taps, cancels, swipes) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let under = Under { allows, taps: taps.clone(), cancels: cancels.clone(), swipes: swipes.clone(), open_on_tap };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(under));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().to_path_buf());
+        let ops = Arc::new(top_drawer::tests::FakeNet::new(false, false));
+        app.set_services(Services { store: store.clone(), waker: Waker::new(|| {}), net: ops.clone() });
+        app.frame();
+        DrawerApp { app, taps, cancels, swipes, ops, store, _dir: dir }
+    }
+    fn swipe(app: &mut App, from: crate::geom::Point, to: crate::geom::Point) {
+        app.on_gesture(Gesture::Down(from));
+        app.on_gesture(Gesture::Move(to));
+        let dir = if to.y > from.y { Direction::Down } else { Direction::Up };
+        app.on_gesture(Gesture::Swipe { dir, from, to });
+    }
+    fn tile(app: &App, kind: top_drawer::Tile) -> crate::geom::Point {
+        let drawer = app.drawer.as_ref().expect("drawer open");
+        let i = drawer.tile_kinds().iter().position(|&k| k == kind).unwrap();
+        drawer.layout().tiles[i].center()
+    }
+    fn settle(app: &mut App) {
+        let started = Instant::now();
+        while app.net.as_ref().is_some_and(DrawerWorker::busy) {
+            assert!(started.elapsed() < Duration::from_secs(10), "worker finishes");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.on_background();
+    }
+    use crate::geom::Point;
+
+    #[test]
+    fn top_edge_swipe_down_opens_the_drawer_and_cancels_the_touch_below() {
+        let mut d = drawer_app(true, false);
+        // The zone is the larger of the top bar and a tenth of the screen.
+        let zone = d.app.theme.top_bar.max(80);
+        swipe(&mut d.app, Point::new(300, zone + 5), Point::new(300, 500));
+        assert!(d.app.drawer.is_none(), "below the top edge it's an ordinary swipe");
+        assert_eq!(d.swipes.get(), 1);
+        swipe(&mut d.app, Point::new(300, zone - 5), Point::new(300, 500));
+        assert!(d.app.drawer.is_some());
+        assert_eq!((d.cancels.get(), d.swipes.get()), (1, 1), "the screen sees its touch cancelled");
+        let updates = d.app.frame();
+        let panel = d.app.drawer.as_ref().unwrap().rect();
+        assert!(!updates.is_empty() && updates.iter().all(|u| u.mode == RefreshMode::Ui), "{updates:?}");
+        assert!(updates.iter().all(|u| u.rect.y < panel.bottom() + 32), "only the drawer area changes");
+        // Touches on the drawer stay there; a tap below closes it without reaching the screen.
+        let status = d.app.drawer.as_ref().unwrap().layout().status.center().y;
+        tap(&mut d.app, Point::new(300, status));
+        assert!(d.app.drawer.is_some());
+        tap(&mut d.app, Point::new(300, 780));
+        assert!(d.app.drawer.is_none());
+        assert_eq!(d.taps.get(), 0);
+        assert!(!d.app.frame().is_empty(), "closing redraws the screen below");
+        tap(&mut d.app, Point::new(300, 780));
+        assert_eq!(d.taps.get(), 1);
+        // Swipe up on the drawer closes it too.
+        swipe(&mut d.app, Point::new(300, 10), Point::new(300, 400));
+        swipe(&mut d.app, Point::new(300, 200), Point::new(300, 10));
+        assert!(d.app.drawer.is_none());
+    }
+
+    #[test]
+    fn screens_and_prompts_can_keep_the_drawer_closed() {
+        let mut d = drawer_app(false, false);
+        swipe(&mut d.app, Point::new(300, 10), Point::new(300, 500));
+        assert!(d.app.drawer.is_none(), "this screen's state doesn't allow it");
+        assert_eq!(d.swipes.get(), 1);
+        let mut d = drawer_app(true, true);
+        d.app.on_usb(true);
+        swipe(&mut d.app, Point::new(300, 10), Point::new(300, 500));
+        assert!(d.app.drawer.is_none(), "the USB prompt comes first");
+        d.app.on_usb(false);
+        // A screen can ask for the drawer (the battery tap).
+        tap(&mut d.app, Point::new(300, 600));
+        assert!(d.app.drawer.is_some());
+        // Prompts that appear draw and take touches above it.
+        d.app.on_usb(true);
+        tap(&mut d.app, Point::new(300, 100));
+        assert!(d.app.usb_prompt.is_none(), "the tap dismissed the USB prompt");
+        assert!(d.app.drawer.is_some(), "and didn't reach the drawer");
+        assert!(d.app.on_text_input(&TextInput::Insert("q".into())), "typing doesn't reach the screen below");
+        assert!(d.app.on_text_input(&TextInput::Dismiss));
+        assert!(d.app.drawer.is_none());
+    }
+
+    #[test]
+    fn sleep_closes_the_drawer_and_a_late_frontlight_reading_fills_it() {
+        let mut d = drawer_app(true, true);
+        tap(&mut d.app, Point::new(300, 600));
+        assert!(d.app.drawer.as_ref().unwrap().layout().sliders.is_empty(), "no reading yet");
+        d.app.set_initial_frontlight(Some(Frontlight { brightness: 9, warmth: Some(4) }));
+        assert_eq!(d.app.drawer.as_ref().unwrap().layout().sliders.len(), 2);
+        // Dragging light reaches the hardware.
+        let row = d.app.drawer.as_ref().unwrap().layout().sliders[0];
+        let p = Point::new(row.right() - d.app.theme.mm(8.0), row.center().y);
+        d.app.on_gesture(Gesture::Down(p));
+        let light = d.app.light_request().expect("light changed");
+        assert!(light.brightness > 9 && light.warmth == Some(4), "{light:?}");
+        assert_eq!(d.app.frontlight, Some(light));
+        d.app.on_gesture(Gesture::Tap(p));
+        d.app.on_sleep();
+        assert!(d.app.drawer.is_none());
+        d.app.on_wake();
+        assert!(d.app.drawer.is_none());
+    }
+
+    #[test]
+    fn drawer_tiles_flash_open_screens_turn_and_switch_wifi() {
+        use top_drawer::Tile;
+        let mut d = drawer_app(true, true);
+        tap(&mut d.app, Point::new(300, 600));
+        settle(&mut d.app);
+        assert_eq!(d.app.drawer.as_ref().unwrap().net().wifi, Some(false), "Wi-Fi read in the background");
+        let p = tile(&d.app, Tile::Refresh);
+        tap(&mut d.app, p);
+        assert!(d.app.drawer.is_none());
+        assert_eq!(d.app.frame(), vec![Update { rect: Rect::new(0, 0, 600, 800), mode: RefreshMode::Full }]);
+        // Wi-Fi switches in the background; the drawer shows it pending, then on.
+        tap(&mut d.app, Point::new(300, 600));
+        let gate = d.ops.gated();
+        let p = tile(&d.app, Tile::Wifi);
+        tap(&mut d.app, p);
+        assert_eq!(d.app.drawer.as_ref().unwrap().net().wifi_pending, Some(true));
+        assert!(d.app.busy());
+        tap(&mut d.app, p);
+        gate.send(()).unwrap();
+        settle(&mut d.app);
+        assert_eq!(d.ops.calls(), ["wifi true"], "the second tap was ignored while pending");
+        let net = d.app.drawer.as_ref().unwrap().net().clone();
+        assert_eq!((net.wifi, net.wifi_pending), (Some(true), None));
+        drop(gate);
+        // Orientation saves the choice and asks for the turn.
+        let p = tile(&d.app, Tile::Orientation);
+        tap(&mut d.app, p);
+        assert!(d.app.drawer.is_none());
+        assert_eq!(d.app.orientation_request, Some(Orientation::Landscape));
+        assert_eq!(d.store.settings().orientation, Orientation::Landscape);
+        d.app.orientation_request = None;
+        // Settings opens over the screen.
+        tap(&mut d.app, Point::new(300, 600));
+        let p = tile(&d.app, Tile::Settings);
+        tap(&mut d.app, p);
+        assert!(d.app.drawer.is_none());
+        assert_eq!(d.app.stack.len(), 2);
+    }
+
+    #[test]
+    fn ssh_tile_starts_the_server_with_the_saved_name_and_failures_show() {
+        use top_drawer::Tile;
+        let mut d = drawer_app(true, true);
+        let mut settings = d.store.settings();
+        settings.developer = true;
+        settings.hostname = "reader".into();
+        d.store.save_settings(&settings).unwrap();
+        *d.ops.calls.lock().unwrap() = Vec::new();
+        tap(&mut d.app, Point::new(300, 600));
+        settle(&mut d.app);
+        let p = tile(&d.app, Tile::Ssh);
+        tap(&mut d.app, p);
+        settle(&mut d.app);
+        assert_eq!(d.ops.calls(), ["ssh start reader"]);
+        assert!(d.app.drawer.as_ref().unwrap().net().ssh.running);
+        d.ops.fail_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        tap(&mut d.app, p);
+        settle(&mut d.app);
+        assert!(d.app.toast.is_some(), "a failed stop says so");
+        assert!(d.app.drawer.as_ref().unwrap().net().ssh.running);
     }
 }

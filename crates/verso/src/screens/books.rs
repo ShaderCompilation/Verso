@@ -203,6 +203,8 @@ pub struct Books {
     fonts: Vec<FontFace>,
     title_rect: Rect,
     battery_rect: Rect,
+    /// Tapping the battery opens the Top Drawer.
+    battery_press: Press,
     exit: IconButton,
     search_action: IconButton,
     rescan_action: IconButton,
@@ -376,6 +378,7 @@ impl Books {
             fonts,
             title_rect,
             battery_rect,
+            battery_press: Press::default(),
             exit,
             search_action,
             rescan_action,
@@ -2000,6 +2003,15 @@ fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &m
     );
 }
 impl Screen for Books {
+    /// Home and Library in their normal states: no book, sheet, menu,
+    /// search, multi-select or Cut-and-paste.
+    fn allows_top_drawer(&self) -> bool {
+        self.reader.is_none()
+            && !self.overlay_open()
+            && self.search.is_none()
+            && self.selection.is_none()
+            && self.carry.is_none()
+    }
     fn draw(&mut self, cx: &mut DrawCx) {
         if let Some(reader) = &mut self.reader {
             reader.draw(cx);
@@ -2486,6 +2498,10 @@ impl Screen for Books {
                 self.edit_search(&input, cx);
             }
         } else {
+            if self.allows_top_drawer() && self.battery_press.on_gesture(&g, self.battery_rect) == Some(PressEvent::Tap)
+            {
+                return Action::OpenTopDrawer;
+            }
             if self.selection_controls(&g, cx) {
                 return Action::None;
             }
@@ -3177,6 +3193,47 @@ mod tests {
         books.push(other);
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
+    }
+    #[test]
+    fn top_drawer_opens_from_the_battery_only_in_normal_home_and_library_states() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("top-drawer")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.navigation.folder = Some("/books/Fiction/Nested".into());
+        books.refresh(&t);
+        let battery = books.battery_rect.center();
+        let opens = |books: &mut Books| {
+            let mut opened = false;
+            with_cx(&t, screen, |cx| {
+                books.on_gesture(Gesture::Down(battery), cx);
+                opened = matches!(books.on_gesture(Gesture::Tap(battery), cx), Action::OpenTopDrawer);
+            });
+            opened
+        };
+        assert!(books.allows_top_drawer(), "Library");
+        assert!(opens(&mut books));
+        with_cx(&t, screen, |cx| books.open_home(cx));
+        assert!(books.allows_top_drawer(), "Home");
+        assert!(opens(&mut books));
+        with_cx(&t, screen, |cx| books.open_library(cx));
+        with_cx(&t, screen, |cx| books.toggle_search(cx));
+        assert!(!books.allows_top_drawer(), "Search");
+        assert!(!opens(&mut books));
+        with_cx(&t, screen, |cx| books.toggle_search(cx));
+        assert!(books.allows_top_drawer());
+        let id = books.books[0].id.clone();
+        books.open_menu(id.clone(), Point::new(600, 800), &t);
+        assert!(!books.allows_top_drawer(), "a menu is open");
+        books.menu = None;
+        with_cx(&t, screen, |cx| books.start_selection(Target::Book(id.clone()), cx));
+        assert!(!books.allows_top_drawer(), "Multi-select");
+        books.selection = None;
+        with_cx(&t, screen, |cx| books.start_move(vec![Target::Book(id)], cx));
+        assert!(!books.allows_top_drawer(), "Cut-and-paste carrying");
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn selection_across_pages_and_ending_rules() -> anyhow::Result<()> {

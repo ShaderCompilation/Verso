@@ -163,6 +163,25 @@ impl Canvas {
         self.trim_shape_rgba();
     }
 
+    /// Strokes a dashed outline *inside* `rect` (`dash` px on, `dash` px off),
+    /// for controls waiting on something (a Wi-Fi tile turning on).
+    pub fn stroke_dashed_rounded_rect(&mut self, rect: Rect, radius: f32, width: f32, dash: f32, gray: u8) {
+        let half = width / 2.0;
+        let Some(inner) = tiny_skia::Rect::from_xywh(
+            rect.x as f32 + half,
+            rect.y as f32 + half,
+            rect.w as f32 - width,
+            rect.h as f32 - width,
+        ) else {
+            return;
+        };
+        let rad = (radius - half).max(0.0).min(inner.width() / 2.0).min(inner.height() / 2.0);
+        let Some(path) = rounded_path(inner, rad) else { return };
+        let Some(dash) = tiny_skia::StrokeDash::new(vec![dash.max(1.0), dash.max(1.0)], 0.0) else { return };
+        let stroke = Stroke { width, dash: Some(dash), ..Stroke::default() };
+        self.draw_path(&path, Some(&stroke), gray, None);
+    }
+
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, gray: u8) {
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             self.draw_path(&path, None, gray, None);
@@ -454,6 +473,27 @@ fn rounded_path(r: tiny_skia::Rect, radius: f32) -> Option<tiny_skia::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashed_outline_alternates_along_edges_and_stays_inside() {
+        let mut canvas = Canvas::new(120, 60);
+        canvas.fill(255);
+        canvas.stroke_dashed_rounded_rect(Rect::new(10, 10, 100, 40), 6.0, 4.0, 8.0, 0x55);
+        let px = |x: u32, y: u32| canvas.gray_data()[(y * 120 + x) as usize];
+        // Along the straight top edge (row 11, inside the 4 px stroke) there
+        // are both inked dashes and paper gaps.
+        let top: Vec<u8> = (20..100).map(|x| px(x, 11)).collect();
+        assert!(top.contains(&0x55) && top.contains(&255), "{top:?}");
+        // Nothing outside the rect, and the inside stays clear.
+        for y in 0..60 {
+            for x in 0..120 {
+                if !Rect::new(10, 10, 100, 40).contains(crate::geom::Point::new(x as i32, y as i32)) {
+                    assert_eq!(px(x, y), 255, "({x}, {y})");
+                }
+            }
+        }
+        assert_eq!(px(60, 30), 255);
+    }
 
     #[test]
     fn saved_highlights_preserve_black_text_and_overlaps_are_idempotent() {

@@ -41,11 +41,15 @@ pub enum Icon {
     Wifi,
     Home,
     Refresh,
+    Flame,
+    Terminal,
+    Portrait,
+    Landscape,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 29] = [
+    pub const ALL: [Icon; 33] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -75,6 +79,10 @@ impl Icon {
         Icon::Wifi,
         Icon::Home,
         Icon::Refresh,
+        Icon::Flame,
+        Icon::Terminal,
+        Icon::Portrait,
+        Icon::Landscape,
     ];
 
     fn svg(self) -> &'static str {
@@ -108,6 +116,10 @@ impl Icon {
             Icon::Wifi => include_str!("../../../../assets/icons/wifi.svg"),
             Icon::Home => include_str!("../../../../assets/icons/house.svg"),
             Icon::Refresh => include_str!("../../../../assets/icons/rotate-cw.svg"),
+            Icon::Flame => include_str!("../../../../assets/icons/flame.svg"),
+            Icon::Terminal => include_str!("../../../../assets/icons/terminal.svg"),
+            Icon::Portrait => include_str!("../../../../assets/icons/portrait.svg"),
+            Icon::Landscape => include_str!("../../../../assets/icons/landscape.svg"),
         }
     }
 }

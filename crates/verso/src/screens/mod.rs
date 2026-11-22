@@ -14,6 +14,7 @@ pub mod reader;
 pub mod reader_menu;
 pub mod system;
 pub mod text_sheet;
+pub mod top_drawer;
 pub mod transfer;
 pub mod update;
 
@@ -43,11 +44,20 @@ pub enum Action {
     /// Turn the screen. The app saves like on exit and rebuilds its screens
     /// at the new size, reopening Settings on top of the library.
     Orientation(Orientation),
+    /// Open the Top Drawer (quick settings) over this screen.
+    OpenTopDrawer,
 }
 
 pub trait Screen {
     /// True when drawing replaces every pixel, so the app can skip its clear.
     fn fills_canvas(&self) -> bool {
+        false
+    }
+
+    /// True in the states where a swipe down from the top edge opens the Top
+    /// Drawer (no sheet, menu, keyboard or selection open). The app then
+    /// cancels the touch this screen saw start.
+    fn allows_top_drawer(&self) -> bool {
         false
     }
 

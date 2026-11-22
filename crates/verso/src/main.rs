@@ -209,6 +209,7 @@ fn run() -> Result<i32> {
         start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone(), store.clone())?,
     );
     app.set_orientation(orientation);
+    app.set_services(app::Services::device(store.clone(), platform.waker()));
     // After a rollback, the restored version says why with its first frame.
     if let Some(rollback) = store.updates().rollback() {
         log::info!("showing the rollback note: {:?}", rollback.reason);
