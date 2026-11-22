@@ -69,7 +69,7 @@ impl BarData<'_> {
     }
     /// The book percentage; the last page always reads 100%.
     pub fn percent(&self) -> u32 {
-        if self.page + 1 >= self.pages { 100 } else { (self.progress / 100).min(100) }
+        book_percent(self.page, self.pages, self.progress)
     }
 
     /// The book progress as a fraction, for the progress line.
@@ -190,6 +190,13 @@ pub fn fit(slots: [Option<Need>; 3], width: i32, gap: i32) -> [i32; 3] {
             [take(left, avail - keeps(right)), 0, take(right, avail - keeps(left))]
         }
     }
+}
+
+/// The book percentage of zero-based `page` at `progress` (basis points
+/// of the text); the last page always reads 100%. The bars, the Reader Menu
+/// and Home show this same number.
+pub fn book_percent(page: usize, pages: usize, progress: u32) -> u32 {
+    if page + 1 >= pages { 100 } else { (progress / 100).min(100) }
 }
 
 #[cfg(test)]

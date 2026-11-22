@@ -103,7 +103,9 @@ impl ReaderMenu {
     pub fn button_rects(&self) -> [Rect; 4] {
         [self.contents.rect(), self.highlights.rect(), self.text.rect(), self.layout.rect()]
     }
-    pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize, pages_ready: bool) {
+    /// `percent` is the book percentage of the slider's page, once that page
+    /// is on screen (while scrubbing elsewhere, only the page number shows).
+    pub fn draw(&mut self, cx: &mut DrawCx, chapter: &str, pages: usize, percent: Option<u32>, pages_ready: bool) {
         let t = cx.theme;
         cx.fill(self.top.rect(), PAPER);
         self.top.draw(cx);
@@ -122,7 +124,7 @@ impl ReaderMenu {
         cx.icon(Icon::ChevronDown, chevron, t.icon_small, INK2);
         cx.fill(self.panel, PAPER);
         cx.hline(self.panel.y, 0, self.panel.right(), t.border, INK);
-        let progress = progress_label(self.progress.value as usize, pages);
+        let progress = progress_label(self.progress.value as usize, pages, percent);
         cx.line(chapter, t.body, Rect { w: self.info.w - t.mm(36.0), ..self.info }, HAlign::Left);
         cx.line(&progress, t.small.gray(INK2), self.info, HAlign::Right);
         if pages_ready {
@@ -178,11 +180,15 @@ impl ReaderMenu {
     }
 }
 
-/// `"{page} / {pages} · {percent}%"` for the zero-based `page`.
-fn progress_label(page: usize, pages: usize) -> String {
+/// `"{page} / {pages} · {percent}%"` for the zero-based `page`, or just
+/// `"{page} / {pages}"` while its percentage isn't known.
+fn progress_label(page: usize, pages: usize, percent: Option<u32>) -> String {
     let pages = pages.max(1);
     let page = (page + 1).min(pages);
-    format!("{page} / {pages} · {}%", (page * 100 + pages / 2) / pages)
+    match percent {
+        Some(percent) => format!("{page} / {pages} · {percent}%"),
+        None => format!("{page} / {pages}"),
+    }
 }
 
 #[cfg(test)]
@@ -237,10 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn progress_label_shows_page_count_and_rounded_percent() {
-        assert_eq!(progress_label(111, 438), "112 / 438 · 26%");
-        assert_eq!(progress_label(0, 438), "1 / 438 · 0%");
-        assert_eq!(progress_label(437, 438), "438 / 438 · 100%");
-        assert_eq!(progress_label(0, 0), "1 / 1 · 100%");
+    fn progress_label_shows_page_count_and_the_book_percent_once_known() {
+        assert_eq!(progress_label(111, 438, Some(26)), "112 / 438 · 26%");
+        assert_eq!(progress_label(0, 438, Some(0)), "1 / 438 · 0%");
+        assert_eq!(progress_label(437, 438, Some(100)), "438 / 438 · 100%");
+        assert_eq!(progress_label(0, 0, Some(100)), "1 / 1 · 100%");
+        assert_eq!(progress_label(111, 438, None), "112 / 438");
     }
 }

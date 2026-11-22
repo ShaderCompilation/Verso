@@ -15,7 +15,7 @@ def main():
     books = OUT / 'books'
     books.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/selection.epub', books / 'selection.epub')
-    opening = ['--tap', '1000,230', '--tap', '200,550']
+    opening = ['--tap', '636,1560', '--tap', '165,500']  # Home → Library → book
     passage = [*opening, '--hold-drag', '200,110,500,190']
     extend = [*passage, '--tap', '338,1535']
     moved = [*extend, '--tap', '490,1600', '--tap', '500,200']
@@ -33,7 +33,8 @@ def main():
     state = OUT / 'saved-state'
     env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
     resume = ['--tap', '200,550']
-    listing = [*resume, '--swipe', '636,10,636,400', '--tap', '790,1600']
+    # Centre tap → Reader Menu → Highlights.
+    listing = [*resume, '--tap', '636,848', '--tap', '487,1584']
     for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,400'],
                         'jump': [*listing, '--tap', '400,400', '--tap', '300,1500']}.items():
         subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps], env=env, check=True, timeout=30)
@@ -106,7 +107,7 @@ def notes(passage, resume):
     run('note-editor', [*add_note, '--text', first], OUT / 'scratch-state', fresh=True)
     state = OUT / 'notes-state'
     run('note-saved', [*add_note, '--text', first, '--edit', 'submit'], state, fresh=True)
-    listing = [*resume, '--swipe', '636,10,636,400', '--tap', '790,1600']
+    listing = [*resume, '--tap', '636,848', '--tap', '487,1584']
     edit = [*listing, '--tap', '400,400', '--tap', '300,1337', '--edit', 'clear', '--text',
             'An edited note that is long enough to wrap across more than one line of the note box, with ünïcödé.']
     run('notes-list', listing, state)

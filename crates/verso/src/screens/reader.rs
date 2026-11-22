@@ -1539,10 +1539,13 @@ impl Screen for Reader {
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Menu(menu) => {
-                let title = reader::chapter(&self.toc, menu.progress.value as usize)
-                    .map(|i| self.toc[i].title.as_str())
-                    .unwrap_or("Book");
-                menu.draw(cx, title, self.pages, !self.laying_out && self.layout_at.is_none());
+                let page = menu.progress.value as usize;
+                let title = reader::chapter(&self.toc, page).map(|i| self.toc[i].title.as_str()).unwrap_or("Book");
+                // The same percentage as the bars and Home, for the page on screen.
+                let percent = (self.shown.as_ref())
+                    .filter(|p| p.number == page)
+                    .map(|p| reader::bars::book_percent(p.number, self.pages, p.progress));
+                menu.draw(cx, title, self.pages, percent, !self.laying_out && self.layout_at.is_none());
             }
             Overlay::Text(sheet) => sheet.draw(cx, &self.settings.typography),
             Overlay::Layout(_) => {}
