@@ -388,6 +388,27 @@ fn script(text: &str, sub: bool) -> Option<String> {
         })
         .collect()
 }
+/// Some plain-text dictionaries put a sense number ("1.", "2)") alone on its
+/// line, with the definition on the next one. Join them: "1. Definition".
+fn join_sense_markers(source: &str) -> String {
+    let is_marker = |l: &str| {
+        let t = l.trim();
+        t.len() >= 2
+            && t.len() <= 4
+            && (t.ends_with('.') || t.ends_with(')'))
+            && t[..t.len() - 1].bytes().all(|b| b.is_ascii_digit())
+    };
+    let mut out = String::with_capacity(source.len());
+    let mut lines = source.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        out.push_str(line);
+        if let Some(next) = lines.peek() {
+            let sep = if is_marker(line) && !next.trim().is_empty() { ' ' } else { '\n' };
+            out.push(sep);
+        }
+    }
+    out
+}
 #[cfg(test)]
 fn parse(source: &str, kind: u8) -> Vec<Block> {
     let mut blocks = parse_field(source, kind, &mut true);
@@ -397,6 +418,13 @@ fn parse(source: &str, kind: u8) -> Vec<Block> {
 /// `first_k` is true until an entry shows content; only a `<k>` before any
 /// content is the index headword and dropped.
 pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Block> {
+    let joined;
+    let source = if kind == b'm' {
+        joined = join_sense_markers(source);
+        joined.as_str()
+    } else {
+        source
+    };
     let mut out = Builder::default();
     let mut stack: Vec<Frame> = Vec::new();
     let markup = matches!(kind, b'h' | b'x' | b'g');
@@ -676,6 +704,10 @@ mod tests {
         );
         assert_eq!(lines(&parse("one\n two\n\n\nthree\n", b'x')), "one\ntwo\n\nthree");
         assert_eq!(lines(&parse("one\n two\n\nthree", b'h')), "one two three");
+        assert_eq!(
+            lines(&parse("прил.\n1.\n Уже есть.\n2)\n Другое.\n3.\n\nx", b'm')),
+            "прил.\n1. Уже есть.\n2) Другое.\n3.\n\nx"
+        );
         assert_eq!(lines(&parse("<span>one\ntwo</span>\n\nthree", b'g')), "one\ntwo\n\nthree");
         assert_eq!(lines(&parse("<def>one</def>\n<def>two</def>", b'x')), "one\ntwo");
         assert_eq!(lines(&parse("one\t two\r\n\r\nthree <b>literal</b>", b'm')), "one two\n\nthree <b>literal</b>");
