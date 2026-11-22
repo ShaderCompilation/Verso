@@ -1,17 +1,19 @@
-//! One book's highlights and notes as UTF-8 Markdown, written beneath the app
+//! One book's highlights, page bookmarks and notes as UTF-8 Markdown, written beneath the app
 //! data directory. Exporting reads a snapshot and never changes annotations.
-use super::Annotation;
+use super::{Annotation, Kind};
 use crate::store::{Store, atomic_bytes};
 use anyhow::{Context, Result, ensure};
 use std::path::PathBuf;
 
 /// What the I/O thread needs to write one book's export. `records` are in
-/// reading order (unresolved entries last, in saved order).
+/// reading order (unresolved entries last, in saved order); `pages` holds
+/// each one's page in the current layout, None when unresolved.
 #[derive(Clone, Debug)]
 pub struct Export {
     pub title: String,
     pub author: String,
     pub records: Vec<Annotation>,
+    pub pages: Vec<Option<usize>>,
 }
 
 pub fn markdown(export: &Export, exported: &str) -> String {
@@ -23,20 +25,35 @@ pub fn markdown(export: &Export, exported: &str) -> String {
         out.push_str(&format!("{author}\n\n"));
     }
     let notes = export.records.iter().filter(|a| a.note.as_deref().is_some_and(|n| !n.trim().is_empty())).count();
-    out.push_str(&format!(
-        "*{} · {} · exported from Verso on {exported}*\n",
-        count(export.records.len(), "highlight", "highlights"),
-        count(notes, "note", "notes"),
-    ));
+    let bookmarks = export.records.iter().filter(|a| a.kind == Kind::Bookmark).count();
+    let mut counts = vec![count(export.records.len() - bookmarks, "highlight", "highlights")];
+    if bookmarks > 0 {
+        counts.push(count(bookmarks, "bookmark", "bookmarks"));
+    }
+    counts.push(count(notes, "note", "notes"));
+    out.push_str(&format!("*{} · exported from Verso on {exported}*\n", counts.join(" · ")));
     let mut chapter: Option<String> = None;
-    for a in &export.records {
+    for (i, a) in export.records.iter().enumerate() {
         let c = one_line(&a.chapter);
         if chapter.as_ref() != Some(&c) {
             out.push_str(&format!("\n## {}\n", if c.is_empty() { "Untitled chapter" } else { &c }));
             chapter = Some(c);
         }
         out.push('\n');
-        for line in a.quotation.trim().lines() {
+        if a.kind == Kind::Bookmark {
+            // One line: the page in the current layout (none when unresolved)
+            // and the opening words, or nothing more for a page without text.
+            out.push_str("**Bookmark**");
+            if let Some(page) = export.pages.get(i).copied().flatten() {
+                out.push_str(&format!(" · p. {}", page + 1));
+            }
+            let words = one_line(&a.quotation);
+            if !words.is_empty() {
+                out.push_str(&format!(" — \"{words}…\""));
+            }
+            out.push('\n');
+        }
+        for line in a.quotation.trim().lines().filter(|_| a.kind == Kind::Highlight) {
             let line = line.trim_end();
             out.push_str(if line.is_empty() { ">\n" } else { "> " });
             if !line.is_empty() {
@@ -81,7 +98,7 @@ pub fn file_name(title: &str, book: &str) -> String {
 
 /// Writes atomically (temp file, fsync, rename) and returns the destination.
 pub fn write(store: &Store, book: &str, export: &Export) -> Result<PathBuf> {
-    ensure!(!export.records.is_empty(), "this book has no highlights to export");
+    ensure!(!export.records.is_empty(), "this book has no highlights or bookmarks to export");
     let path = store.export_dir().join(file_name(&export.title, book));
     atomic_bytes(&path, markdown(export, &super::created_now()).as_bytes())
         .with_context(|| format!("couldn't write {}", path.display()))?;
@@ -110,7 +127,10 @@ mod tests {
         third.chapter = String::new();
         third.note = Some(" ".into());
         Export {
-            title: "Война и мир".into(), author: "Лев Толстой".into(), records: vec![first, second, third]
+            title: "Война и мир".into(),
+            author: "Лев Толстой".into(),
+            records: vec![first, second, third],
+            pages: vec![Some(2), Some(4), None],
         }
     }
     #[test]
@@ -122,6 +142,42 @@ mod tests {
         assert!(md.contains("**Note:** My *note*\n"));
         assert!(md.contains("## Untitled chapter"));
         assert_eq!(md.matches("**Note:**").count(), 1, "blank notes are left out");
+        assert!(!md.contains("bookmark") && !md.contains("p. "), "highlights alone read as before");
+    }
+    #[test]
+    fn bookmarks_are_listed_in_reading_order_with_page_opening_words_and_note() {
+        let mut e = export();
+        let mut mark = super::super::tests::record("mark");
+        mark.kind = Kind::Bookmark;
+        mark.chapter = "Глава 1".into();
+        mark.quotation = "It was a bright\ncold day".into();
+        mark.note = Some("Come back".into());
+        let mut blank = super::super::tests::record("blank");
+        blank.kind = Kind::Bookmark;
+        blank.chapter = "Глава 1".into();
+        blank.quotation.clear();
+        blank.note = None;
+        let mut lost = blank.clone();
+        lost.quotation = "Gone".into();
+        lost.chapter = String::new();
+        e.records.insert(1, mark);
+        e.records.insert(2, blank);
+        e.records.push(lost);
+        e.pages = vec![Some(2), Some(213), Some(214), Some(4), None, None];
+        let md = markdown(&e, "2026-11-22 12:00:00 UTC");
+        assert!(md.contains("*3 highlights · 3 bookmarks · 2 notes · exported"), "{md}");
+        assert_eq!(md.matches("## Глава 1").count(), 1, "bookmarks share the chapter heading");
+        assert!(
+            md.contains("\n**Bookmark** · p. 214 — \"It was a bright cold day…\"\n\n**Note:** Come back\n"),
+            "{md}"
+        );
+        assert!(md.contains("\n**Bookmark** · p. 215\n"), "a page without text");
+        assert!(md.contains("\n**Bookmark** — \"Gone…\"\n"), "an unresolved bookmark has no page");
+        let first = md.find("Первая строка").unwrap();
+        let mark = md.find("p. 214").unwrap();
+        let second = md.find("> a quote").unwrap();
+        assert!(first < mark && mark < second, "reading order is kept");
+        assert!(!md.contains("> It was"), "a bookmark isn't quoted as a highlight");
     }
     #[test]
     fn file_names_are_fat_safe_stable_and_distinct() {

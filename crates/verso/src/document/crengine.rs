@@ -641,7 +641,19 @@ impl CreDocument {
     /// `max_chars` characters from where the page starts, ending on a word
     /// boundary and within the page. Empty end and text on a page without text.
     pub fn page_opening(&mut self, max_chars: usize) -> Result<Opening> {
-        let n = unsafe { sys::verso_cre_page_opening(self.raw, max_chars.try_into()?) };
+        self.opening(None, max_chars)
+    }
+    /// The opening words of an imported page bookmark: from `start` (its
+    /// first text at or after it) up to about `max_chars` characters, within
+    /// the page that holds it. Fails when `start` isn't in this book.
+    pub fn opening_at(&mut self, start: &Position, max_chars: usize) -> Result<Opening> {
+        anyhow::ensure!(!start.0.is_empty(), "the bookmark has no position");
+        self.opening(Some(start), max_chars)
+    }
+    fn opening(&mut self, start: Option<&Position>, max_chars: usize) -> Result<Opening> {
+        let start = start.map(|p| CString::new(p.0.as_str())).transpose()?;
+        let at = start.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+        let n = unsafe { sys::verso_cre_page_opening(self.raw, at, max_chars.try_into()?) };
         anyhow::ensure!(n >= 0, "couldn't read the page's opening words");
         let field = |f| read_string(|buf, len| unsafe { sys::verso_cre_page_opening_text(self.raw, f, buf, len) });
         let start = Position(field(0)?);

@@ -170,9 +170,12 @@ int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity
 
 /* Page bookmarks. The current page's opening words: from where the page
  * starts (the reading position's XPointer) to the end of the last whole word
- * within `max_chars` characters and the page. Returns the text's UTF-8 length,
- * 0 for a page without text (empty end and text), or -1. */
-int verso_cre_page_opening(VersoCreDoc *doc, int max_chars);
+ * within `max_chars` characters and the page. With a non-empty `start` (a
+ * saved XPointer, such as an imported bookmark's), the words from there to the
+ * end of the page holding it instead, or -1 when it isn't in this book.
+ * Returns the text's UTF-8 length, 0 for a page without text (empty end and
+ * text), or -1. */
+int verso_cre_page_opening(VersoCreDoc *doc, const char *start, int max_chars);
 /* The last opening's field 0 = start, 1 = end, 2 = text; full UTF-8 length. */
 int verso_cre_page_opening_text(VersoCreDoc *doc, int field, char *buf, int len);
 /* Checks a saved bookmark like verso_cre_annotation_check: the start must still

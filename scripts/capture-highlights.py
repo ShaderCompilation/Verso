@@ -52,7 +52,7 @@ def main():
     quote = lambda text: json.dumps(text, ensure_ascii=False)
     entries = []
     for text in [annotation['quotation'], 'Edited quotation']:
-        entries.append('{pos0=' + quote(annotation['range']['start']) + ',pos1=' + quote(annotation['range']['end']) + ',text=' + quote(text) + ',note="Imported note",datetime="2026-11-15 00:00:00",chapter="Fixture"}')
+        entries.append('{drawer="lighten",pos0=' + quote(annotation['range']['start']) + ',pos1=' + quote(annotation['range']['end']) + ',text=' + quote(text) + ',note="Imported note",datetime="2026-11-15 00:00:00",chapter="Fixture"}')
     source = sidecar / 'metadata.epub.lua'
     source.write_text('return {annotations={' + ','.join(entries) + '}}')
     before = source.read_bytes()

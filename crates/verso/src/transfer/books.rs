@@ -372,7 +372,7 @@ impl Books {
         Response::json(200, &json!({ "ok": true, "warning": warning }))
     }
 
-    /// `GET /api/highlights/<id>`: one book's highlights and notes as UTF-8
+    /// `GET /api/highlights/<id>`: one book's highlights, bookmarks and notes as UTF-8
     /// Markdown, in saved order (looked up by `annotation_id`).
     pub fn highlights(&self, id: &str) -> Response {
         let index = self.library.current();
@@ -394,6 +394,8 @@ impl Books {
             title: book.metadata.title.clone(),
             author: book.metadata.authors.clone(),
             records: collection.records,
+            // No layout here: bookmarks are listed without a page.
+            pages: vec![],
         };
         let md = export::markdown(&exp, &annotations::created_now());
         let name = export::file_name(&exp.title, ann_id);
@@ -429,6 +431,8 @@ impl Books {
                 title: book.metadata.title.clone(),
                 author: book.metadata.authors.clone(),
                 records: collection.records,
+                // No layout here: bookmarks are listed without a page.
+                pages: vec![],
             };
             let md = export::markdown(&exp, &exported);
             let mut entry_name = export::file_name(&exp.title, ann_id);

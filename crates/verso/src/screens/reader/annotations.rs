@@ -54,6 +54,18 @@ pub(super) struct State {
     /// (the mark or the ribbon is the confirmation). Failures still show.
     quiet: bool,
 }
+/// What a KOReader import preview found (`State::preview_counts`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ImportCounts {
+    /// New highlights, including unresolved ones (imported all the same).
+    pub highlights: usize,
+    pub unresolved_highlights: usize,
+    /// New page bookmarks that resolved; only these are imported.
+    pub bookmarks: usize,
+    pub unresolved_bookmarks: usize,
+    pub duplicates: usize,
+    pub unsupported: usize,
+}
 /// What toggling the bookmark on a page did or needs.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Toggle {
@@ -325,11 +337,16 @@ impl State {
         if !self.can_export() {
             return false;
         }
-        let records = self.ordered().into_iter().filter_map(|i| self.collection.records.get(i).cloned()).collect();
+        let pages = self.pages();
+        let (records, pages) = self
+            .ordered()
+            .into_iter()
+            .filter_map(|i| Some((self.collection.records.get(i)?.clone(), pages.get(i).copied().flatten())))
+            .unzip();
         self.exporting = true;
         self.export_result = None;
         if let Some(w) = &self.service {
-            w.send(worker::Command::Export(Export { title, author, records }));
+            w.send(worker::Command::Export(Export { title, author, records, pages }));
         }
         true
     }
@@ -420,9 +437,19 @@ impl State {
         }
     }
     pub fn receive(&mut self, reply: Reply) -> bool {
-        if let Reply::Resolved { revision, entries, preview, .. } = reply {
+        if let Reply::Resolved { revision, entries, openings, preview, .. } = reply {
             if preview {
                 if revision == self.import_id && self.importing {
+                    // Imported page bookmarks store the opening words at their
+                    // position, so later checks work as for Verso's own.
+                    if let Some(p) = &mut self.preview {
+                        for (i, opening) in openings {
+                            if let Some(a) = p.records.get_mut(i).filter(|a| a.kind == Kind::Bookmark) {
+                                a.range = opening.range;
+                                a.quotation = opening.text;
+                            }
+                        }
+                    }
                     self.preview_resolved = entries;
                     self.importing = false;
                     return true;
@@ -466,16 +493,54 @@ impl State {
             self.import_error = Some(reason.into());
         }
     }
+    /// The finished import preview's counts by kind. An unresolved highlight
+    /// is still imported (listed as unresolved); an unresolved bookmark has
+    /// no opening words to store, so it is left out and not counted as new.
+    pub fn preview_counts(&self) -> ImportCounts {
+        let Some(p) = &self.preview else { return ImportCounts::default() };
+        let unresolved = self.preview_unresolved();
+        let mut counts = ImportCounts { duplicates: p.duplicates, unsupported: p.unsupported, ..Default::default() };
+        for (a, lost) in p.records.iter().zip(unresolved) {
+            match (a.kind, lost) {
+                (Kind::Highlight, false) => counts.highlights += 1,
+                (Kind::Highlight, true) => {
+                    counts.highlights += 1;
+                    counts.unresolved_highlights += 1;
+                }
+                (Kind::Bookmark, false) => counts.bookmarks += 1,
+                (Kind::Bookmark, true) => counts.unresolved_bookmarks += 1,
+            }
+        }
+        counts
+    }
+    /// Which preview records didn't resolve, by index.
+    fn preview_unresolved(&self) -> Vec<bool> {
+        let n = self.preview.as_ref().map_or(0, |p| p.records.len());
+        let mut unresolved = vec![false; n];
+        for e in self.preview_resolved.iter().filter(|e| e.page.is_none()) {
+            if let Some(u) = unresolved.get_mut(e.index) {
+                *u = true;
+            }
+        }
+        unresolved
+    }
     pub fn confirm(&mut self, generation: u64, worker: &Worker) {
+        self.confirm_with(generation, &mut |c| worker.send(c));
+    }
+    fn confirm_with(&mut self, generation: u64, send: &mut dyn FnMut(Command)) {
         if self.importing {
             return;
         }
+        let unresolved = self.preview_unresolved();
         if let Some(p) = self.preview.take() {
-            for a in p.records {
+            for (i, a) in p.records.into_iter().enumerate() {
+                if a.kind == Kind::Bookmark && unresolved[i] {
+                    continue;
+                }
                 self.collection.add(a);
             }
             self.save();
-            self.resolve(generation, worker);
+            self.resolve_with(generation, send);
         }
     }
 }
@@ -511,6 +576,30 @@ enum Mode {
 fn bookmark_label(opening: &str) -> String {
     let words = opening.split_whitespace().collect::<Vec<_>>().join(" ");
     if words.is_empty() { "A page without text".into() } else { format!("{words}…") }
+}
+/// The import preview's status: what is new by kind, what was found
+/// before, and what won't show on a page or isn't imported.
+fn import_summary(c: &ImportCounts) -> String {
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut text = format!(
+        "New: {}, {} · {} already imported · {} unresolved · {} unsupported",
+        count(c.highlights, "highlight", "highlights"),
+        count(c.bookmarks, "bookmark", "bookmarks"),
+        c.duplicates,
+        c.unresolved_highlights + c.unresolved_bookmarks,
+        c.unsupported,
+    );
+    // One paragraph after the counts, so the text stays clear of the
+    // Confirm button on 6" screens in landscape.
+    text.push_str("\n\n");
+    if c.unresolved_highlights > 0 {
+        text.push_str("Unresolved highlights are imported without a page. ");
+    }
+    if c.unresolved_bookmarks > 0 {
+        text.push_str("Unresolved bookmarks are left out. ");
+    }
+    text.push_str("One-way import. KOReader files stay untouched.");
+    text
 }
 /// The Notes list's filter segments, in order.
 const FILTERS: [&str; 3] = ["All", "Highlights", "Bookmarks"];
@@ -861,14 +950,8 @@ impl View {
                     format!("Couldn't preview this import: {e}\n\nPreview again to continue.")
                 } else if state.preview.is_some() && stale {
                     "The path changed. Preview the new file to see what it contains.".into()
-                } else if let Some(p) = &state.preview {
-                    format!(
-                        "{} new · {} duplicate · {} unresolved · {} unsupported\n\nOne-way import. KOReader files stay untouched.",
-                        p.records.len(),
-                        p.duplicates,
-                        state.preview_resolved.iter().filter(|e| e.page.is_none()).count(),
-                        p.unsupported
-                    )
+                } else if state.preview.is_some() {
+                    import_summary(&state.preview_counts())
                 } else {
                     "Choose a metadata.epub.lua file and preview the import.".into()
                 };
@@ -1127,6 +1210,7 @@ mod tests {
             generation: 1,
             revision,
             entries: vec![Resolved { index: 0, page: Some(3) }],
+            openings: vec![],
             preview,
         };
         assert!(!state.receive(reply(6, false)));
@@ -1152,6 +1236,7 @@ mod tests {
                 generation: 1,
                 revision,
                 entries: vec![Resolved { index: 0, page: Some(3) }],
+                openings: vec![],
                 preview,
             };
             if stage >= 1 {
@@ -1320,6 +1405,7 @@ mod tests {
             generation: 1,
             revision: state.revision,
             entries: (0..count).map(|index| Resolved { index, page: Some(1) }).collect(),
+            openings: vec![],
             preview: false,
         });
         // The engine couldn't read the page.
@@ -1358,6 +1444,55 @@ mod tests {
             state.collection.add(entry(id, None));
         }
         state
+    }
+    #[test]
+    fn imported_bookmarks_take_their_opening_words_and_unresolved_ones_are_left_out() {
+        let mut state = ready(&["saved"]);
+        let mut sent = vec![];
+        state.start_import("/metadata.epub.lua".into());
+        let id = state.import_id;
+        let mut records = vec![entry("highlight", None), entry("bookmark", None), entry("lost", None)];
+        for a in &mut records[1..] {
+            a.kind = Kind::Bookmark;
+            a.range.end = crate::document::Position(String::new());
+            a.quotation.clear();
+        }
+        let preview = Preview { records, duplicates: 4, unsupported: 1 };
+        state.apply(worker::Reply::Preview(id, Ok(preview)), 1, &mut |c| sent.push(c));
+        assert!(matches!(sent.pop(), Some(Command::Resolve { preview: true, .. })));
+        let found = [(0, None), (1, Some(7)), (2, None)];
+        assert!(state.receive(Reply::Resolved {
+            generation: 1,
+            revision: id,
+            entries: found.into_iter().map(|(index, page)| Resolved { index, page }).collect(),
+            openings: vec![(1, opening("/body/p[3]"))],
+            preview: true,
+        }));
+        let counts = state.preview_counts();
+        let expected = ImportCounts {
+            highlights: 1,
+            unresolved_highlights: 1,
+            bookmarks: 1,
+            unresolved_bookmarks: 1,
+            duplicates: 4,
+            unsupported: 1,
+        };
+        assert_eq!(counts, expected);
+        let summary = import_summary(&counts);
+        assert!(
+            summary.starts_with("New: 1 highlight, 1 bookmark · 4 already imported · 2 unresolved · 1 unsupported")
+        );
+        assert!(summary.contains("imported without a page") && summary.contains("are left out"));
+        assert!(!import_summary(&ImportCounts { bookmarks: 1, ..Default::default() }).contains("left out"));
+        state.confirm_with(1, &mut |c| sent.push(c));
+        let ids: Vec<_> = state.collection.records.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["saved", "highlight", "bookmark"], "the unresolved highlight stays; the bookmark doesn't");
+        let b = &state.collection.records[2];
+        assert_eq!(b.quotation, "It was a bright cold");
+        assert_eq!(b.range, opening("/body/p[3]").range);
+        assert!(!state.collection.manifest.sources.contains("lost"), "a later import can try it again");
+        assert!(state.pending);
+        assert!(matches!(sent.pop(), Some(Command::Resolve { preview: false, .. })));
     }
     #[test]
     fn a_new_note_saves_with_its_highlight_and_waits_while_a_save_runs() {

@@ -835,20 +835,34 @@ static bool is_space(lChar32 c) {
 static lString8 range_text(const ldomXPointerEx &a, const ldomXPointerEx &b) {
     return UnicodeToUtf8(removeSoftHyphens(ldomXRange(a, b).getRangeText()));
 }
-int verso_cre_page_opening(VersoCreDoc *doc, int max_chars) {
+int verso_cre_page_opening(VersoCreDoc *doc, const char *start, int max_chars) {
     GUARD(-1, {
         LVDocView *v = doc->view;
-        ldomXPointer bm = v->getBookmark();
-        doc->opening_start = bm.toString();
+        doc->opening_start.clear();
         doc->opening_end.clear();
         doc->opening_text.clear();
-        auto visible = v->getPageDocumentRange(-1);
+        ldomXPointer bm;
+        int page;
+        if (start && *start) {
+            // A saved position (an imported bookmark): it must still be a
+            // laid-out position in this book, checked as bookmark_check does.
+            ldomXPointerEx a = v->getDocument()->createXPointer(Utf8ToUnicode(start));
+            if (a.isNull() || a.toPoint().y < 0) return -1;
+            if (a.isText() && (a.getOffset() < 0 || a.getOffset() > a.getNode()->getText().length())) return -1;
+            bm = a;
+            page = v->getBookmarkPage(bm);
+            if (page < 0 || page >= v->getPageCount()) return -1;
+        } else {
+            bm = v->getBookmark();
+            page = v->getCurPage();
+        }
+        doc->opening_start = bm.toString();
+        auto visible = v->getPageDocumentRange(page);
         if (bm.isNull() || visible.isNull()) return 0;
         // The range's end can be the first line of the next page (crengine
         // counts a line starting at the page's bottom edge), so the next
         // page's start bounds the page when it comes first.
         ldomXPointerEx page_end = visible->getEnd();
-        int page = v->getCurPage();
         if (page + 1 < v->getPageCount()) {
             auto next = v->getPageDocumentRange(page + 1);
             if (!next.isNull() && !next->getStart().isNull() && ldomXPointerEx(next->getStart()).compare(page_end) < 0)

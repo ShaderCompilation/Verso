@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Page bookmarks, Phases 2 and 3 (docs/bookmarks.md): the mark, the menu's
-ribbon, the corner tap and its setting, the remove-with-note question, and the
-Notes list (filter, details, a note, jumping back and removing).
+"""Page bookmarks, Phases 2 to 4 (docs/bookmarks.md): the mark, the menu's
+ribbon, the corner tap and its setting, the remove-with-note question, the
+Notes list (filter, details, a note, jumping back and removing), and KOReader
+import and Markdown export.
 
 Run cargo build first. Outputs go to gitignored screenshots/bookmarks/, each
 scene with isolated state. Taps come from the theme's millimetre sizes, as in
@@ -131,6 +132,7 @@ def main():
     run('confirmed', 'pw6', {}, [*resume, *corner, *remove], state=state)
     assert records(state) == []
     notes(portrait, page2, corner, menu)
+    koreader(portrait, page2, corner, menu)
     print(OUT)
 
 
@@ -160,6 +162,67 @@ def notes(s, page2, corner, menu):
                                     {'orientation': 'landscape'})]:
         p2, c, m, _ = steps(screen)
         run(name, 'basic-167', settings, [*p2, *c, *m, *notes_taps(screen)['notes']])
+
+
+
+def koreader(s, page2, corner, menu):
+    """Phase 4: importing KOReader page bookmarks (a resolved one, one whose
+    place isn't in the book and a PDF one, next to a highlight that doesn't
+    resolve), exporting them, and importing the same file again."""
+    n = notes_taps(s)
+    # A real page start: where Verso's own bookmark on page 2 starts.
+    own = records(run('koreader-own', 'pw6', {}, [*page2, *corner]))[0]
+    sidecar = OUT / 'book/selection.sdr'
+    sidecar.mkdir(exist_ok=True)
+    source = sidecar / 'metadata.epub.lua'
+    quote = lambda text: json.dumps(text, ensure_ascii=False)
+    source.write_text('return {annotations={'
+                      '{page=' + quote(own['range']['start']) + ',text="in Fixture",chapter="Fixture",'
+                      'datetime="2026-11-20 08:00:00",note="From KOReader",pageno=2},'
+                      '{page="/body/DocFragment[99]/body/p[1]/text().0",text="in Nowhere",chapter="Nowhere"},'
+                      '{page=3,text="in PDF"},'
+                      '{drawer="lighten",pos0="/body/DocFragment[99]/body/p[1]/text().0",'
+                      'pos1="/body/DocFragment[99]/body/p[1]/text().5",text="Lost",chapter="Nowhere"}}}')
+    before = source.read_bytes()
+    try:
+        listing = [*page2, *menu, *n['notes']]
+        top = s.mm(13) + s.mm(2) + s.mm(9) / 2
+        importing = [*listing, *s.tap(s.w * 0.27, top)]
+        confirm = s.tap(300, 1500)
+        state = run('koreader-preview', 'pw6', {}, importing)
+        assert records(state) == []
+        run('koreader-imported', 'pw6', {}, [*importing, *confirm], state=state)
+        saved = records(state)
+        kinds = sorted(r.get('kind', 'highlight') for r in saved)
+        assert kinds == ['bookmark', 'highlight'], 'the lost highlight comes in, unresolved'
+        b = next(r for r in saved if r.get('kind') == 'bookmark')
+        assert b['kind'] == 'bookmark' and b['id'].startswith('import-'), b
+        assert b['quotation'] == own['quotation'] and b['range'] == own['range'], (b, own)
+        assert (b['note'], b['chapter'], b['created']) == ('From KOReader', 'Fixture', '2026-11-20 08:00:00'), b
+        resume = s.tap(200, 550)
+        relisting = [*resume, *menu, *n['notes']]
+        run('koreader-list', 'pw6', {}, relisting, state=state)
+        run('koreader-exported', 'pw6', {}, [*relisting, *s.tap(s.w * 0.73, top)], state=state)
+        exports = list((state / 'exports').glob('*.md'))
+        assert len(exports) == 1, exports
+        md = exports[0].read_text(encoding='utf-8')
+        words = ' '.join(own['quotation'].split())
+        for expected in ['1 bookmark', f'**Bookmark** · p. 2 — "{words}…"', '**Note:** From KOReader']:
+            assert expected in md, (expected, md)
+        # Again: the resolved bookmark is already imported; the lost one is
+        # still left out.
+        run('koreader-again', 'pw6', {}, [*relisting, *s.tap(s.w * 0.27, top)], state=state)
+        run('koreader-again-confirmed', 'pw6', {}, [*relisting, *s.tap(s.w * 0.27, top), *confirm], state=state)
+        assert len(records(state)) == 2
+        assert source.read_bytes() == before, 'KOReader files stay untouched'
+        # The preview's text on a 6" screen in landscape.
+        small = devices.Screen(800, 600, 167)
+        p2, _, m, _ = steps(small)
+        small_top = small.mm(13) + small.mm(2) + small.mm(9) / 2
+        run('koreader-preview-landscape-basic-167', 'basic-167', {'orientation': 'landscape'},
+            [*p2, *m, *notes_taps(small)['notes'], *small.tap(small.w * 0.27, small_top)])
+    finally:
+        shutil.rmtree(sidecar)
 
 
 if __name__ == '__main__':

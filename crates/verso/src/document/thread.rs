@@ -270,6 +270,8 @@ struct Resolution {
     fingerprint: String,
     next: usize,
     found: Vec<Resolved>,
+    /// A preview's page bookmarks that resolved, with their opening words.
+    openings: Vec<(usize, Opening)>,
     preview: bool,
 }
 pub enum Command {
@@ -346,6 +348,9 @@ pub enum Reply {
         generation: u64,
         revision: u64,
         entries: Vec<Resolved>,
+        /// A preview's page bookmarks that resolved (by index into its
+        /// records), with the opening words to store for each.
+        openings: Vec<(usize, Opening)>,
         preview: bool,
     },
     Selection {
@@ -458,6 +463,21 @@ impl Worker {
                                         let i = task.next;
                                         task.next += 1;
                                         let a = &task.records[i];
+                                        // An imported page bookmark has only its
+                                        // position: it resolves when the position
+                                        // is in this book, and takes its opening
+                                        // words from there.
+                                        if task.preview && a.kind == Kind::Bookmark {
+                                            let opening = d.opening_at(&a.range.start, OPENING_CHARS).ok();
+                                            let page = opening.as_ref().and_then(|_| {
+                                                d.go_to_position(&a.range.start).ok().map(|_| d.current_page())
+                                            });
+                                            if let (Some(o), Some(_)) = (opening, page) {
+                                                task.openings.push((i, o));
+                                            }
+                                            task.found.push(Resolved { index: i, page });
+                                            continue;
+                                        }
                                         let page = holds(d, a, &task.fingerprint)
                                             .then(|| {
                                                 if task.preview {
@@ -492,6 +512,7 @@ impl Worker {
                                             generation: task.generation,
                                             revision: task.revision,
                                             entries: task.found,
+                                            openings: task.openings,
                                             preview: task.preview,
                                         });
                                     }
@@ -561,6 +582,7 @@ impl Worker {
                                         fingerprint,
                                         next: 0,
                                         found: vec![],
+                                        openings: vec![],
                                         preview,
                                     });
                                 }

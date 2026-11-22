@@ -414,6 +414,16 @@ mod tests {
         let no_end = TextRange { end: Position::default(), ..opening.range.clone() };
         assert!(!doc.bookmark_check(&no_end, &opening.text).unwrap());
         assert!(!doc.bookmark_check(&opening.range, "").unwrap());
+        // An imported bookmark has only a position: its opening words are read
+        // from there to the end of the page holding it, and then check.
+        assert_eq!(doc.opening_at(&opening.range.start, 80).unwrap(), opening, "a page start reads as its page");
+        let mid = doc.opening_at(&opening.range.end, 400).unwrap();
+        assert_eq!(mid.range.start, opening.range.end, "starts at the position, not the page start");
+        assert!(mid.text.trim().starts_with(rest.trim()), "{mid:?} / {rest:?}");
+        assert!(doc.bookmark_check(&mid.range, &mid.text).unwrap());
+        assert!(doc.opening_at(&missing.start, 80).is_err(), "a position not in this book");
+        assert!(doc.opening_at(&Position::default(), 80).is_err());
+        assert_eq!(doc.current_page(), 5, "reading the words doesn't turn the page");
         // A bigger font moves the bookmark to the page now holding its start.
         doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &PageLayout::default())
             .unwrap();
@@ -425,6 +435,9 @@ mod tests {
         assert_eq!(doc.current_page(), page);
         doc.annotation_finish(1);
         assert!(doc.annotation_page(page).is_empty());
+        let reflowed = doc.opening_at(&opening.range.start, 80).unwrap();
+        assert_eq!(reflowed.range.start, opening.range.start);
+        assert!(doc.bookmark_check(&reflowed.range, &reflowed.text).unwrap());
     }
 
     /// A page with only a picture has no opening words: its bookmark keeps
