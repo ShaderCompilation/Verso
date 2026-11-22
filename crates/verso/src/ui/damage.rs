@@ -35,10 +35,13 @@ impl Tiles {
     }
 }
 
-/// Keeps a copy of the last frame sent to the screen.
+/// Keeps a copy of the last frame sent to the screen, stored like the
+/// canvas: 1 byte per pixel on a gray canvas, 4 on a color one.
 pub struct FrameDiff {
     width: i32,
     height: i32,
+    /// Bytes per pixel of `prev` and the canvas.
+    bpp: usize,
     prev: Vec<u8>,
 }
 
@@ -47,16 +50,18 @@ impl FrameDiff {
         let mut diff = Self {
             width: canvas.width() as i32,
             height: canvas.height() as i32,
-            prev: vec![0; canvas.width() as usize * canvas.height() as usize],
+            bpp: canvas.bytes_per_pixel(),
+            prev: vec![0; canvas.width() as usize * canvas.height() as usize * canvas.bytes_per_pixel()],
         };
         diff.commit_full(canvas);
         diff
     }
 
     /// Synchronizes the baseline after a known full-screen update, without
-    /// comparing tiles. Store exactly the grayscale pixels sent to the panel.
+    /// comparing tiles. Store exactly the pixels sent to the panel.
     pub fn commit_full(&mut self, canvas: &Canvas) {
-        canvas.copy_gray(canvas.bounds(), &mut self.prev, self.width as usize);
+        debug_assert_eq!(canvas.bytes_per_pixel(), self.bpp, "the canvas changed mode");
+        canvas.copy_raw(canvas.bounds(), &mut self.prev);
     }
 
     /// Compares `canvas` with the last committed frame.
@@ -80,8 +85,13 @@ impl FrameDiff {
     /// skipped pixels into the baseline in the same pass while their rows
     /// are in cache.
     fn compare(&mut self, canvas: &Canvas, skip: &[Rect]) -> Tiles {
-        let cur = canvas.gray_data();
-        let stride = self.width as usize;
+        debug_assert_eq!(canvas.bytes_per_pixel(), self.bpp, "the canvas changed mode");
+        let cur = canvas.raw();
+        // Spans below are in pixels; `bpp` turns them into bytes (1 on a
+        // gray canvas, so its loop is the same as ever).
+        let bpp = self.bpp;
+        let width = self.width as usize;
+        let stride = width * bpp;
         let (cols, rows) = ((self.width + TILE - 1) / TILE, (self.height + TILE - 1) / TILE);
         let mut dirty = vec![false; (cols * rows) as usize];
         for (row, tiles) in dirty.chunks_mut(cols as usize).enumerate() {
@@ -115,8 +125,8 @@ impl FrameDiff {
                     }
                     x = x.max(e);
                 }
-                if x < stride {
-                    outside.push((x, stride));
+                if x < width {
+                    outside.push((x, width));
                 }
                 (outside, merged)
             };
@@ -137,10 +147,10 @@ impl FrameDiff {
                     &line_spans
                 };
                 for &(s, e) in taken {
-                    b[s..e].copy_from_slice(&a[s..e]);
+                    b[s * bpp..e * bpp].copy_from_slice(&a[s * bpp..e * bpp]);
                 }
                 for &(s, e) in outside {
-                    if same(&a[s..e], &b[s..e]) {
+                    if same(&a[s * bpp..e * bpp], &b[s * bpp..e * bpp]) {
                         continue;
                     }
                     let first = s / TILE as usize;
@@ -148,7 +158,7 @@ impl FrameDiff {
                         if !*d {
                             let x0 = ((first + col) * TILE as usize).max(s);
                             let x1 = ((first + col + 1) * TILE as usize).min(e);
-                            *d = a[x0..x1] != b[x0..x1];
+                            *d = a[x0 * bpp..x1 * bpp] != b[x0 * bpp..x1 * bpp];
                         }
                     }
                 }
@@ -162,7 +172,7 @@ impl FrameDiff {
         for row in 0..tiles.rows {
             for col in 0..tiles.cols {
                 if tiles.dirty[(row * tiles.cols + col) as usize] {
-                    canvas.copy_gray(tiles.tile_rect(col, row), &mut self.prev, self.width as usize);
+                    canvas.copy_raw(tiles.tile_rect(col, row), &mut self.prev);
                 }
             }
         }
@@ -295,6 +305,7 @@ fn contains(outer: &Rect, inner: &Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gfx::{Color, ColorMode};
     use RefreshMode::*;
 
     const W: u32 = 160;
@@ -331,6 +342,29 @@ mod tests {
 
     fn bounds() -> Rect {
         Rect::new(0, 0, W as i32, H as i32)
+    }
+
+    #[test]
+    fn a_color_canvas_marks_the_same_tiles_and_sees_single_channels() {
+        let mut gray = Canvas::new(W, H);
+        let mut color = Canvas::with_mode(W, H, ColorMode::Color32);
+        let (mut gray_diff, mut color_diff) = (FrameDiff::new(&gray), FrameDiff::new(&color));
+        assert_eq!(color_diff.prev.len(), (W * H * 4) as usize);
+        for canvas in [&mut gray, &mut color] {
+            canvas.fill_rect(Rect::new(20, 20, 30, 5), 0);
+            canvas.fill_rect(Rect::new(100, 60, 4, 4), 90);
+        }
+        let (g, c) = (gray_diff.changed(&gray), color_diff.changed(&color));
+        assert_eq!(g.dirty, c.dirty);
+        assert_eq!(plan(&c, bounds(), &[], Ui, &[]).len(), 2);
+        color_diff.commit(&color, &c);
+        gray_diff.commit(&gray, &g);
+        assert!(!color_diff.changed(&color).any());
+        // Blue only: the same brightness on a gray screen would be nearly
+        // the same, but the color screen shows it.
+        color.fill_rect_color(Rect::new(70, 40, 1, 1), Color::rgb(255, 255, 0));
+        let tiles = color_diff.changed(&color);
+        assert_eq!(plan(&tiles, bounds(), &[], Ui, &[]), vec![Update { rect: Rect::new(64, 32, 16, 16), mode: Ui }]);
     }
 
     #[test]
@@ -477,20 +511,24 @@ mod tests {
             seed ^= seed << 5;
             seed % n
         };
-        for _ in 0..200 {
-            let mut canvas = Canvas::new(70, 53);
+        for i in 0..400 {
+            // Every other frame on a color canvas, where a change can be in one channel.
+            let mode = if i % 2 == 0 { ColorMode::Gray8 } else { ColorMode::Color32 };
+            let mut canvas = Canvas::with_mode(70, 53, mode);
             let mut skipping = FrameDiff::new(&canvas);
             let mut committing = FrameDiff::new(&canvas);
             for _ in 0..next(6) {
                 let r = Rect::new(next(80) as i32 - 5, next(60) as i32 - 5, next(20) as i32 + 1, next(20) as i32 + 1);
-                canvas.fill_rect(r, next(255) as u8);
+                let mut channel = || next(2) as u8 * 255;
+                let color = Color::rgb(channel(), 255, channel());
+                canvas.fill_rect_color(r, color);
             }
             let skip: Vec<Rect> = (0..next(4))
                 .map(|_| Rect::new(next(80) as i32 - 5, next(60) as i32 - 5, next(50) as i32 + 1, next(40) as i32 + 1))
                 .collect();
             for &r in &skip {
                 if let Some(r) = r.intersect(&canvas.bounds()) {
-                    canvas.copy_gray(r, &mut committing.prev, committing.width as usize);
+                    canvas.copy_raw(r, &mut committing.prev);
                 }
             }
             let expected = committing.changed(&canvas);
@@ -523,7 +561,7 @@ mod tests {
                     let tiles = diff.changed_outside(&canvas, &[grid]);
                     diff.commit(&canvas, &tiles);
                 } else {
-                    canvas.copy_gray(grid, &mut diff.prev, w as usize);
+                    canvas.copy_raw(grid, &mut diff.prev);
                     let tiles = diff.changed(&canvas);
                     diff.commit(&canvas, &tiles);
                 }
@@ -552,7 +590,7 @@ mod tests {
         let commit = started.elapsed() / runs;
         let started = std::time::Instant::now();
         for _ in 0..runs {
-            canvas.copy_gray(grid, &mut diff.prev, w as usize);
+            canvas.copy_raw(grid, &mut diff.prev);
         }
         let copy_grid = started.elapsed() / runs;
         println!(

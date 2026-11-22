@@ -4941,7 +4941,13 @@ mod tests {
             books.search.as_mut().unwrap().field.focused = true;
             books.search.as_mut().unwrap().keyboard.visible = true;
         });
-        let info = crate::platform::DeviceInfo { name: "test".into(), width: 1272, height: 1696, dpi: 300 };
+        let info = crate::platform::DeviceInfo {
+            name: "test".into(),
+            width: 1272,
+            height: 1696,
+            dpi: 300,
+            color: crate::gfx::ColorMode::Gray8,
+        };
         let mut app = crate::app::App::new(&info, t.clone(), Box::new(books));
         app.frame();
         for text in ["q", "s", "p", "v", "ГРЕЦИЯ"] {
@@ -4974,7 +4980,13 @@ mod tests {
         let grid_rect = books.grid.rect();
         let next_pos = Point::new(books.pager.rect().right() - t.target / 2, books.pager.rect().center().y);
         let back_pos = books.back.rect().center();
-        let info = crate::platform::DeviceInfo { name: "test".into(), width: 1272, height: 1696, dpi: 300 };
+        let info = crate::platform::DeviceInfo {
+            name: "test".into(),
+            width: 1272,
+            height: 1696,
+            dpi: 300,
+            color: crate::gfx::ColorMode::Gray8,
+        };
         let mut app = crate::app::App::new(&info, t.clone(), Box::new(books));
         app.frame();
 

@@ -9,7 +9,10 @@
 //! - The left mouse button acts as a finger.
 //! - Keys: Q / Esc quit · S sleep/wake · V toggle refresh visualisation ·
 //!   P save a screenshot to `screenshots/` · PgDn / PgUp the page-turn
-//!   buttons (on every preset, so the Oasis's buttons can be tried anywhere).
+//!   buttons (on every preset, so the Oasis's buttons can be tried anywhere)
+//!   · C the Kaleido 3 preview, on color presets (kaleido.rs).
+//! - A color preset (`colorsoft`) keeps an RGBA panel and saves RGB
+//!   screenshots; the others keep 8-bit gray.
 //! - Like the real panel, `Fast` refreshes show only black and white.
 //! - With visualisation on, refreshed areas flash a colour for a moment:
 //!   red = Fast, blue = Ui, green = Page, orange = Full.
@@ -34,7 +37,7 @@ use super::{
     Waker,
 };
 use crate::geom::{Point, Rect};
-use crate::gfx::{Canvas, save_gray_png};
+use crate::gfx::{Canvas, luma, save_gray_png, save_rgba_png};
 
 const FLASH_TIME: Duration = Duration::from_millis(350);
 const LETTERBOX: u32 = 0x20_20_20;
@@ -51,10 +54,12 @@ pub struct Desktop {
 impl Desktop {
     pub fn open(device: SimDevice) -> Result<Self> {
         let (width, height, dpi) = (device.width, device.height, device.dpi);
-        let info = DeviceInfo { name: format!("Simulator ({})", device.name), width, height, dpi };
+        let info =
+            DeviceInfo { name: format!("Simulator ({})", device.name), width, height, dpi, color: device.color_mode() };
 
         let mut event_loop = EventLoop::<()>::with_user_event().build().context("can't open a window (no display?)")?;
-        let mut sim = Sim::new(width as usize, height as usize, device.scale);
+        let mut sim = Sim::new(width as usize, height as usize, device.scale, device.color);
+        sim.kaleido = device.kaleido;
         sim.title = format!("Verso simulator · {}", device.label());
         sim.light = device.initial_light();
         // Let winit create the window.
@@ -71,7 +76,8 @@ impl Desktop {
             }
         }
         log::info!(
-            "simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot · PgDn/PgUp page buttons"
+            "simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot · PgDn/PgUp page buttons{}",
+            if device.color { " · C Kaleido 3 preview" } else { "" }
         );
         Ok(Self { info, native: (width, height), event_loop, sim, device })
     }
@@ -128,7 +134,7 @@ impl Platform for Desktop {
             return Ok(());
         }
         (sim.width, sim.height) = (w as usize, h as usize);
-        sim.panel = vec![255; sim.width * sim.height];
+        sim.panel = vec![255; sim.width * sim.height * sim.bpp()];
         sim.flashes.clear();
         if let Some(window) = &sim.window {
             let size = window.inner_size();
@@ -174,7 +180,11 @@ impl Platform for Desktop {
     fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
         let sim = &mut self.sim;
         for u in updates {
-            canvas.copy_gray(u.rect, &mut sim.panel, sim.width);
+            if sim.color {
+                canvas.copy_rgba(u.rect, &mut sim.panel, sim.width);
+            } else {
+                canvas.copy_gray(u.rect, &mut sim.panel, sim.width);
+            }
             if u.mode == RefreshMode::Fast {
                 sim.threshold(u.rect);
             }
@@ -205,8 +215,12 @@ struct Sim {
     start_scale: f64,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
-    /// What the simulated e-ink panel currently shows (8-bit gray).
+    /// What the simulated e-ink panel currently shows: 8-bit gray, or
+    /// RGBA on a color panel.
     panel: Vec<u8>,
+    color: bool,
+    /// C: show the color panel through the Kaleido 3 preview.
+    kaleido: bool,
     events: VecDeque<Event>,
     cursor: Option<PhysicalPosition<f64>>,
     mouse_down: bool,
@@ -223,14 +237,16 @@ struct Sim {
 }
 
 impl Sim {
-    fn new(width: usize, height: usize, start_scale: f64) -> Self {
+    fn new(width: usize, height: usize, start_scale: f64, color: bool) -> Self {
         Self {
             width,
             height,
             start_scale,
             window: None,
             surface: None,
-            panel: vec![255; width * height],
+            panel: vec![255; width * height * if color { 4 } else { 1 }],
+            color,
+            kaleido: false,
             events: VecDeque::new(),
             cursor: None,
             mouse_down: false,
@@ -259,14 +275,47 @@ impl Sim {
         Ok(())
     }
 
+    fn bpp(&self) -> usize {
+        if self.color { 4 } else { 1 }
+    }
+
     /// `Fast` (DU) refreshes can only show black or white.
     fn threshold(&mut self, rect: Rect) {
         let Some(r) = rect.intersect(&Rect::new(0, 0, self.width as i32, self.height as i32)) else { return };
+        let bpp = self.bpp();
         for y in r.y..r.bottom() {
             let row = y as usize * self.width;
-            for v in &mut self.panel[row + r.x as usize..row + r.right() as usize] {
-                *v = if *v < 128 { 0 } else { 255 };
+            let span = &mut self.panel[(row + r.x as usize) * bpp..(row + r.right() as usize) * bpp];
+            if bpp == 1 {
+                for v in span {
+                    *v = if *v < 128 { 0 } else { 255 };
+                }
+            } else {
+                for px in span.as_chunks_mut::<4>().0 {
+                    let v = if luma(px[0], px[1], px[2]) < 128 { 0 } else { 255 };
+                    *px = [v, v, v, 255];
+                }
             }
+        }
+    }
+
+    /// The panel as it looks: through the Kaleido 3 preview when it's on.
+    fn shown(panel: &[u8], width: usize, height: usize, kaleido: bool) -> std::borrow::Cow<'_, [u8]> {
+        if kaleido {
+            let mut filtered = panel.to_vec();
+            super::kaleido::preview(&mut filtered, width, height);
+            filtered.into()
+        } else {
+            panel.into()
+        }
+    }
+
+    fn save_screenshot(&self, path: &std::path::Path) -> Result<()> {
+        let (w, h) = (self.width as u32, self.height as u32);
+        if self.color {
+            save_rgba_png(path, w, h, &Self::shown(&self.panel, self.width, self.height, self.kaleido))
+        } else {
+            save_gray_png(path, w, h, &self.panel)
         }
     }
 
@@ -298,19 +347,35 @@ impl Sim {
         };
         let xs = spans(dw, self.width);
         let ys = spans(dh, self.height);
+        let color = self.color;
+        let shown = Self::shown(&self.panel, self.width, self.height, color && self.kaleido);
 
         let mut buf = surface.buffer_mut().map_err(|e| anyhow!("softbuffer: {e}"))?;
         buf.fill(LETTERBOX);
         for (dy, &(y0, y1)) in ys.iter().enumerate() {
             let out = &mut buf[(oy + dy) * ww + ox..(oy + dy) * ww + ox + dw];
             for (dx, &(x0, x1)) in xs.iter().enumerate() {
-                let mut sum = 0u32;
-                for y in y0..y1 {
-                    let row = &self.panel[y * self.width..];
-                    sum += row[x0..x1].iter().map(|&v| v as u32).sum::<u32>();
-                }
-                let g = sum / ((y1 - y0) * (x1 - x0)) as u32;
-                let (mut r, mut gr, mut b) = (g, g, g);
+                let n = ((y1 - y0) * (x1 - x0)) as u32;
+                let (mut r, mut gr, mut b) = if color {
+                    let mut sum = [0u32; 3];
+                    for y in y0..y1 {
+                        let row = &shown[(y * self.width + x0) * 4..(y * self.width + x1) * 4];
+                        for px in row.as_chunks::<4>().0 {
+                            sum[0] += px[0] as u32;
+                            sum[1] += px[1] as u32;
+                            sum[2] += px[2] as u32;
+                        }
+                    }
+                    (sum[0] / n, sum[1] / n, sum[2] / n)
+                } else {
+                    let mut sum = 0u32;
+                    for y in y0..y1 {
+                        let row = &shown[y * self.width..];
+                        sum += row[x0..x1].iter().map(|&v| v as u32).sum::<u32>();
+                    }
+                    let g = sum / n;
+                    (g, g, g)
+                };
                 let p = Point::new(x0 as i32, y0 as i32);
                 if let Some(u) = self.flashes.iter().rev().find(|u| u.rect.contains(p)) {
                     let (tr, tg, tb) = tint(u.mode);
@@ -368,7 +433,7 @@ impl Sim {
                 let path = dir.join(format!("verso-{millis}.png"));
                 let saved = std::fs::create_dir_all(&dir)
                     .map_err(anyhow::Error::from)
-                    .and_then(|_| save_gray_png(&path, self.width as u32, self.height as u32, &self.panel));
+                    .and_then(|_| self.save_screenshot(&path));
                 match saved {
                     Ok(()) => log::info!("screenshot saved to {}", path.display()),
                     Err(e) => log::error!("couldn't save a screenshot: {e:#}"),
@@ -377,6 +442,11 @@ impl Sim {
             Key::Character("v" | "V") => {
                 self.visualize = !self.visualize;
                 log::info!("refresh visualisation {}", if self.visualize { "on" } else { "off" });
+            }
+            Key::Character("c" | "C") if self.color => {
+                self.kaleido = !self.kaleido;
+                log::info!("Kaleido 3 preview {}", if self.kaleido { "on" } else { "off" });
+                self.dirty = true;
             }
             _ => {}
         }

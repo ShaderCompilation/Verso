@@ -83,8 +83,17 @@ impl Kindle {
             ),
             None => format!("model: not in the profile table, {} (untested), light: {}", model.name, lights.describe()),
         };
-        let info =
-            DeviceInfo { name: display.name.clone(), width: display.width, height: display.height, dpi: display.dpi };
+        // Gray until the display writes true color (device-support.md
+        // Phase 6): a color canvas would only be turned back to gray on
+        // the way to the panel, at four times the memory.
+        let color = crate::gfx::ColorMode::Gray8;
+        let info = DeviceInfo {
+            name: display.name.clone(),
+            width: display.width,
+            height: display.height,
+            dpi: display.dpi,
+            color,
+        };
         use std::os::fd::FromRawFd;
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {

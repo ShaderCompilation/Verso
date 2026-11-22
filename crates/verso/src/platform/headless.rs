@@ -1,7 +1,8 @@
 //! A simulator without a window, for screenshots: plays scripted touches,
 //! saves the screen as a PNG after every update, then quits.
 //! The device follows the simulator's `--device` preset and its overrides
-//! (sim_device.rs); the battery follows VERSO_SIM_BATTERY.
+//! (sim_device.rs): a color preset saves RGB PNGs, through the Kaleido 3
+//! preview with VERSO_SIM_KALEIDO=1. The battery follows VERSO_SIM_BATTERY.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use super::desktop::sim_battery;
 use super::sim_device::SimDevice;
 use super::{DeviceInfo, Event, Frontlight, Orientation, Platform, ScriptStep, Touch, TouchPhase, Update, Waker};
 use crate::geom::Point;
-use crate::gfx::{Canvas, save_gray_png};
+use crate::gfx::{Canvas, save_gray_png, save_rgba_png};
 
 pub struct Headless {
     info: DeviceInfo,
@@ -22,7 +23,8 @@ pub struct Headless {
     /// `None` is an idle moment between steps, so the app can finish slow
     /// work (like opening a book) before the next step.
     events: VecDeque<Option<Event>>,
-    /// What the "screen" shows (8-bit gray).
+    /// What the "screen" shows: 8-bit gray, or RGBA on a color preset
+    /// (saved as an RGB PNG).
     panel: Vec<u8>,
     out: PathBuf,
     wake_tx: std::sync::mpsc::Sender<()>,
@@ -37,7 +39,13 @@ pub struct Headless {
 impl Headless {
     pub fn new(out: &Path, script: Vec<ScriptStep>, device: SimDevice) -> Result<Self> {
         let (width, height, dpi) = (device.width, device.height, device.dpi);
-        let info = DeviceInfo { name: format!("Headless simulator ({})", device.name), width, height, dpi };
+        let info = DeviceInfo {
+            name: format!("Headless simulator ({})", device.name),
+            width,
+            height,
+            dpi,
+            color: device.color_mode(),
+        };
         // Touch times are made up: each step a second after the last, so
         // nothing counts as a double tap or a long-press by accident.
         let mut t = Instant::now();
@@ -86,7 +94,7 @@ impl Headless {
             info,
             native: (width, height),
             events,
-            panel: vec![255; (width * height) as usize],
+            panel: vec![255; (width * height) as usize * if device.color { 4 } else { 1 }],
             out: out.to_owned(),
             wake_tx,
             wake_rx,
@@ -136,7 +144,7 @@ impl Platform for Headless {
         // The screenshot simply comes out in the new orientation.
         let (w, h) = orientation.screen_size(self.native.0, self.native.1);
         (self.info.width, self.info.height) = (w, h);
-        self.panel = vec![255; (w * h) as usize];
+        self.panel = vec![255; (w * h) as usize * if self.device.color { 4 } else { 1 }];
         Ok(())
     }
 
@@ -165,10 +173,24 @@ impl Platform for Headless {
     }
 
     fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
-        for u in updates {
-            canvas.copy_gray(u.rect, &mut self.panel, self.info.width as usize);
+        let (w, h) = (self.info.width, self.info.height);
+        if self.device.color {
+            for u in updates {
+                canvas.copy_rgba(u.rect, &mut self.panel, w as usize);
+            }
+            if self.device.kaleido {
+                let mut shown = self.panel.clone();
+                super::kaleido::preview(&mut shown, w as usize, h as usize);
+                save_rgba_png(&self.out, w, h, &shown)?;
+            } else {
+                save_rgba_png(&self.out, w, h, &self.panel)?;
+            }
+        } else {
+            for u in updates {
+                canvas.copy_gray(u.rect, &mut self.panel, w as usize);
+            }
+            save_gray_png(&self.out, w, h, &self.panel)?;
         }
-        save_gray_png(&self.out, self.info.width, self.info.height, &self.panel)?;
         log::info!("saved {}", self.out.display());
         Ok(())
     }

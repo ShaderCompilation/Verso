@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::geom::{Point, Rect};
-use crate::gfx::Canvas;
+use crate::gfx::{Canvas, ColorMode};
 
 pub mod awake;
 #[cfg(feature = "desktop")]
@@ -21,6 +21,8 @@ mod flash;
 mod framebuffer;
 #[cfg(feature = "desktop")]
 mod headless;
+#[cfg(feature = "desktop")]
+mod kaleido;
 #[cfg(feature = "kindle")]
 mod kindle;
 #[cfg(any(feature = "kindle", test))]
@@ -90,6 +92,9 @@ pub struct DeviceInfo {
     pub width: u32,
     pub height: u32,
     pub dpi: u32,
+    /// How the app's canvas stores pixels: `Color32` only when the backend
+    /// can show color.
+    pub color: ColorMode,
 }
 
 /// The top step of the light controls, in powerd's own scale (`flIntensity`

@@ -1,4 +1,9 @@
-//! An opaque 8-bit grayscale drawing surface, shared by both backends.
+//! An opaque drawing surface, shared by every backend.
+//!
+//! A canvas is either 8-bit gray (`ColorMode::Gray8`, every monochrome
+//! Kindle) or 32-bit RGBA (`ColorMode::Color32`, color panels), chosen once
+//! when it is made. Each call branches on the mode once, never per pixel, so
+//! the gray canvas keeps its 1 byte per pixel and its loops.
 
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, PixmapMut, Stroke, Transform};
 
@@ -8,19 +13,78 @@ use crate::geom::Rect;
 // Curved caps stay intact to preserve the rasterizer's edge coverage.
 const SHAPE_ROWS: usize = 64;
 
+/// How a canvas stores its pixels, chosen once at startup from the device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    /// One gray byte per pixel.
+    #[default]
+    Gray8,
+    /// Four bytes per pixel, R, G, B and an alpha that is always 255.
+    Color32,
+}
+
+/// A color to draw with. UI chrome stays gray; color is for book content,
+/// covers and highlights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Color {
+    pub const fn gray(v: u8) -> Self {
+        Self { r: v, g: v, b: v }
+    }
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+    /// What a gray screen shows for this color.
+    pub fn to_luma(self) -> u8 {
+        luma(self.r, self.g, self.b)
+    }
+    fn rgba(self) -> [u8; 4] {
+        [self.r, self.g, self.b, 255]
+    }
+}
+
+/// Saved highlights on a color screen: a soft yellow about as light as the
+/// gray screen's 210, so text under it stays as legible. Applied as
+/// "darken" (the smaller of each channel), like the gray screen's `min`:
+/// dark ink stays dark and drawing a highlight twice changes nothing.
+pub const HIGHLIGHT: Color = Color::rgb(255, 222, 110);
+/// The gray screen's highlight.
+const HIGHLIGHT_GRAY: u8 = 210;
+
+enum Pixels {
+    Gray(Vec<u8>),
+    Rgba(Vec<u8>),
+}
+
 pub struct Canvas {
     width: u32,
     height: u32,
-    gray: Vec<u8>,
+    pixels: Pixels,
+    /// Gray canvases only: shape-sized RGBA bands for tiny-skia.
     shape_rgba: Vec<u8>,
 }
 
 impl Canvas {
-    /// A white canvas.
+    /// A white gray canvas.
+    #[cfg(test)]
     pub fn new(width: u32, height: u32) -> Self {
+        Self::with_mode(width, height, ColorMode::Gray8)
+    }
+
+    /// A white canvas storing its pixels as `mode` says.
+    pub fn with_mode(width: u32, height: u32, mode: ColorMode) -> Self {
         assert!(width > 0 && height > 0, "canvas size must be non-zero");
         let len = (width as usize).checked_mul(height as usize).expect("canvas size overflow");
-        Self { width, height, gray: vec![255; len], shape_rgba: Vec::new() }
+        let pixels = match mode {
+            ColorMode::Gray8 => Pixels::Gray(vec![255; len]),
+            ColorMode::Color32 => Pixels::Rgba(vec![255; len.checked_mul(4).expect("canvas size overflow")]),
+        };
+        Self { width, height, pixels, shape_rgba: Vec::new() }
     }
 
     pub fn width(&self) -> u32 {
@@ -30,59 +94,159 @@ impl Canvas {
         self.height
     }
 
+    pub fn mode(&self) -> ColorMode {
+        match self.pixels {
+            Pixels::Gray(_) => ColorMode::Gray8,
+            Pixels::Rgba(_) => ColorMode::Color32,
+        }
+    }
+
+    pub fn bytes_per_pixel(&self) -> usize {
+        match self.pixels {
+            Pixels::Gray(_) => 1,
+            Pixels::Rgba(_) => 4,
+        }
+    }
+
     pub fn bounds(&self) -> Rect {
         Rect::new(0, 0, self.width as i32, self.height as i32)
     }
 
+    /// The pixels as stored: gray bytes, or RGBA.
+    pub fn raw(&self) -> &[u8] {
+        match &self.pixels {
+            Pixels::Gray(p) | Pixels::Rgba(p) => p,
+        }
+    }
+
+    /// The rows of `r` (inside the canvas) as byte slices, and the bytes
+    /// per pixel.
+    fn rows_mut(&mut self, r: Rect) -> (usize, impl Iterator<Item = &mut [u8]>) {
+        let bpp = self.bytes_per_pixel();
+        let stride = self.width as usize * bpp;
+        let (x0, x1) = (r.x as usize * bpp, r.right() as usize * bpp);
+        let buf = match &mut self.pixels {
+            Pixels::Gray(p) | Pixels::Rgba(p) => p,
+        };
+        (bpp, buf.chunks_exact_mut(stride).skip(r.y as usize).take(r.h as usize).map(move |row| &mut row[x0..x1]))
+    }
+
     pub fn fill(&mut self, gray: u8) {
-        self.gray.fill(gray);
+        match &mut self.pixels {
+            Pixels::Gray(p) => p.fill(gray),
+            Pixels::Rgba(p) => p.as_chunks_mut::<4>().0.fill([gray, gray, gray, 255]),
+        }
     }
 
     /// Replaces the whole canvas with a cached grayscale page.
     pub fn set_gray(&mut self, pixels: &[u8]) {
-        self.gray.copy_from_slice(pixels);
+        match &mut self.pixels {
+            Pixels::Gray(p) => p.copy_from_slice(pixels),
+            Pixels::Rgba(p) => {
+                assert_eq!(pixels.len() * 4, p.len(), "page size");
+                for (px, &g) in p.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
+                    *px = [g, g, g, 255];
+                }
+            }
+        }
     }
 
+    /// Replaces the whole canvas with an RGBA image (alpha ignored: pages
+    /// are opaque). A gray canvas keeps each pixel's brightness.
+    #[cfg_attr(not(test), allow(dead_code))] // color pages arrive with crengine's color draw path
+    pub fn set_rgba(&mut self, pixels: &[u8]) {
+        match &mut self.pixels {
+            Pixels::Gray(p) => {
+                assert_eq!(p.len() * 4, pixels.len(), "page size");
+                for (out, px) in p.iter_mut().zip(pixels.as_chunks::<4>().0) {
+                    *out = luma(px[0], px[1], px[2]);
+                }
+            }
+            Pixels::Rgba(p) => {
+                p.copy_from_slice(pixels);
+                for px in p.as_chunks_mut::<4>().0 {
+                    px[3] = 255;
+                }
+            }
+        }
+    }
+
+    /// The gray pixels of a `Gray8` canvas.
+    #[cfg(test)]
     pub fn gray_data(&self) -> &[u8] {
-        &self.gray
+        match &self.pixels {
+            Pixels::Gray(p) => p,
+            Pixels::Rgba(_) => panic!("gray_data on a color canvas"),
+        }
     }
 
     /// Blend a carried library card towards paper while preserving its details.
     pub fn fade_rect(&mut self, rect: Rect) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        for y in r.y..r.bottom() {
-            let row = y as usize * self.width as usize;
-            for pixel in &mut self.gray[row + r.x as usize..row + r.right() as usize] {
-                *pixel = 153 + (*pixel as u16 * 102 / 255) as u8;
+        let fade = |v: u8| 153 + (v as u16 * 102 / 255) as u8;
+        let (bpp, rows) = self.rows_mut(r);
+        for row in rows {
+            if bpp == 1 {
+                for pixel in row {
+                    *pixel = fade(*pixel);
+                }
+            } else {
+                for px in row.as_chunks_mut::<4>().0 {
+                    *px = [fade(px[0]), fade(px[1]), fade(px[2]), 255];
+                }
             }
         }
     }
 
+    /// A saved highlight: light gray on a gray canvas, `HIGHLIGHT` yellow on
+    /// a color one.
     pub fn highlight_rect(&mut self, rect: Rect) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        for y in r.y..r.bottom() {
-            let row = y as usize * self.width as usize;
-            for pixel in &mut self.gray[row + r.x as usize..row + r.right() as usize] {
-                *pixel = (*pixel).min(210);
+        let (bpp, rows) = self.rows_mut(r);
+        for row in rows {
+            if bpp == 1 {
+                for pixel in row {
+                    *pixel = (*pixel).min(HIGHLIGHT_GRAY);
+                }
+            } else {
+                let [hr, hg, hb, _] = HIGHLIGHT.rgba();
+                for px in row.as_chunks_mut::<4>().0 {
+                    *px = [px[0].min(hr), px[1].min(hg), px[2].min(hb), 255];
+                }
             }
         }
     }
 
     pub fn fill_rect(&mut self, rect: Rect, gray: u8) {
+        self.fill_rect_color(rect, Color::gray(gray));
+    }
+
+    /// Fills `rect` with `color`; a gray canvas gets its brightness.
+    pub fn fill_rect_color(&mut self, rect: Rect, color: Color) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        for y in r.y..r.bottom() {
-            let row = y as usize * self.width as usize;
-            self.gray[row + r.x as usize..row + r.right() as usize].fill(gray);
+        let (bpp, rows) = self.rows_mut(r);
+        for row in rows {
+            if bpp == 1 {
+                row.fill(color.to_luma());
+            } else {
+                row.as_chunks_mut::<4>().0.fill(color.rgba());
+            }
         }
     }
 
     /// Selection is composed on the canvas after copying cached page pixels.
     pub fn invert_rect(&mut self, rect: Rect) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
-        for y in r.y..r.bottom() {
-            let row = y as usize * self.width as usize;
-            for pixel in &mut self.gray[row + r.x as usize..row + r.right() as usize] {
-                *pixel = 255 - *pixel;
+        let (bpp, rows) = self.rows_mut(r);
+        for row in rows {
+            if bpp == 1 {
+                for pixel in row {
+                    *pixel = 255 - *pixel;
+                }
+            } else {
+                for px in row.as_chunks_mut::<4>().0 {
+                    *px = [255 - px[0], 255 - px[1], 255 - px[2], 255];
+                }
             }
         }
     }
@@ -231,6 +395,11 @@ impl Canvas {
             top_end = area.bottom();
         }
         let paint = paint(gray);
+        if let Pixels::Rgba(_) = self.pixels {
+            // Nothing to copy: tiny-skia draws straight into the rows.
+            self.rasterize_path(area, path, stroke, &paint);
+            return;
+        }
         let mut top = area.y;
         while top < area.bottom() {
             let end = if top < top_end {
@@ -251,6 +420,21 @@ impl Canvas {
         if area.w <= 0 || area.h <= 0 {
             return;
         }
+        let Pixels::Gray(gray) = &mut self.pixels else {
+            // A color canvas is tiny-skia's own (opaque, so premultiplied)
+            // format: draw into its full-width rows of `area` directly.
+            let Pixels::Rgba(rgba) = &mut self.pixels else { unreachable!() };
+            let stride = self.width as usize * 4;
+            let rows = &mut rgba[area.y as usize * stride..area.bottom() as usize * stride];
+            let mut surface = PixmapMut::from_bytes(rows, self.width, area.h as u32).unwrap();
+            let transform = Transform::from_translate(0.0, -area.y as f32);
+            if let Some(stroke) = stroke {
+                surface.stroke_path(path, paint, stroke, transform, None);
+            } else {
+                surface.fill_path(path, paint, FillRule::Winding, transform, None);
+            }
+            return;
+        };
         let band_width = area.w as usize;
         let height = area.h as usize;
         let size = band_width * height * 4;
@@ -261,7 +445,7 @@ impl Canvas {
         let pixels = &mut self.shape_rgba[..size];
         for (row, dst) in pixels.chunks_exact_mut(band_width * 4).enumerate() {
             let offset = (area.y as usize + row) * self.width as usize + area.x as usize;
-            for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&self.gray[offset..offset + band_width]) {
+            for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&gray[offset..offset + band_width]) {
                 *px = [g, g, g, 255];
             }
         }
@@ -274,7 +458,7 @@ impl Canvas {
         }
         for (row, src) in pixels.chunks_exact(band_width * 4).enumerate() {
             let offset = (area.y as usize + row) * self.width as usize + area.x as usize;
-            for (out, px) in self.gray[offset..offset + band_width].iter_mut().zip(src.as_chunks::<4>().0) {
+            for (out, px) in gray[offset..offset + band_width].iter_mut().zip(src.as_chunks::<4>().0) {
                 *out = px[0];
             }
         }
@@ -294,15 +478,30 @@ impl Canvas {
     pub fn blend_mask(&mut self, x: i32, y: i32, w: u32, h: u32, mask: &[u8], gray: u8, clip: Rect) {
         let Some(clip) = clip.intersect(&self.bounds()) else { return };
         let Some(area) = Rect::new(x, y, w as i32, h as i32).intersect(&clip) else { return };
-        for py in area.y..area.bottom() {
-            let mrow = (py - y) as usize * w as usize;
-            for px in area.x..area.right() {
-                let a = mask[mrow + (px - x) as usize] as u32;
-                if a == 0 {
-                    continue;
+        let blend = |v: &mut u8, a: u32| *v = ((*v as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
+        let width = self.width as usize;
+        let mask_rows = (area.y..area.bottom()).map(|py| {
+            let mrow = (py - y) as usize * w as usize + (area.x - x) as usize;
+            (py as usize * width + area.x as usize, &mask[mrow..mrow + area.w as usize])
+        });
+        match &mut self.pixels {
+            Pixels::Gray(p) => {
+                for (at, mask) in mask_rows {
+                    for (out, &a) in p[at..at + mask.len()].iter_mut().zip(mask) {
+                        if a != 0 {
+                            blend(out, a as u32);
+                        }
+                    }
                 }
-                let out = &mut self.gray[py as usize * self.width as usize + px as usize];
-                *out = ((*out as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
+            }
+            Pixels::Rgba(p) => {
+                for (at, mask) in mask_rows {
+                    for (px, &a) in p[at * 4..(at + mask.len()) * 4].as_chunks_mut::<4>().0.iter_mut().zip(mask) {
+                        if a != 0 {
+                            px[..3].iter_mut().for_each(|v| blend(v, a as u32));
+                        }
+                    }
+                }
             }
         }
     }
@@ -314,7 +513,42 @@ impl Canvas {
         for y in r.y..r.bottom() {
             let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
             let d = y as usize * self.width as usize + r.x as usize;
-            self.gray[d..d + r.w as usize].copy_from_slice(&src[s..s + r.w as usize]);
+            let src = &src[s..s + r.w as usize];
+            match &mut self.pixels {
+                Pixels::Gray(p) => p[d..d + r.w as usize].copy_from_slice(src),
+                Pixels::Rgba(p) => {
+                    for (px, &g) in p[d * 4..(d + r.w as usize) * 4].as_chunks_mut::<4>().0.iter_mut().zip(src) {
+                        *px = [g, g, g, 255];
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copies an RGBA image (`stride` pixels per row, alpha ignored) onto
+    /// the canvas, with its top-left corner at the top-left of `rect`. A
+    /// gray canvas keeps each pixel's brightness.
+    #[cfg_attr(not(test), allow(dead_code))] // color covers and illustrations come with the color content
+    pub fn blit_rgba(&mut self, rect: Rect, src: &[u8], stride: usize) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        for y in r.y..r.bottom() {
+            let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
+            let src = &src[s * 4..(s + r.w as usize) * 4];
+            let d = y as usize * self.width as usize + r.x as usize;
+            match &mut self.pixels {
+                Pixels::Gray(p) => {
+                    for (out, px) in p[d..d + r.w as usize].iter_mut().zip(src.as_chunks::<4>().0) {
+                        *out = luma(px[0], px[1], px[2]);
+                    }
+                }
+                Pixels::Rgba(p) => {
+                    let dst = &mut p[d * 4..(d + r.w as usize) * 4];
+                    dst.copy_from_slice(src);
+                    for px in dst.as_chunks_mut::<4>().0 {
+                        px[3] = 255;
+                    }
+                }
+            }
         }
     }
 
@@ -324,7 +558,48 @@ impl Canvas {
         for y in r.y..r.bottom() {
             let s = y as usize * self.width as usize + r.x as usize;
             let d = y as usize * stride + r.x as usize;
-            dst[d..d + r.w as usize].copy_from_slice(&self.gray[s..s + r.w as usize]);
+            let dst = &mut dst[d..d + r.w as usize];
+            match &self.pixels {
+                Pixels::Gray(p) => dst.copy_from_slice(&p[s..s + r.w as usize]),
+                Pixels::Rgba(p) => {
+                    for (out, px) in dst.iter_mut().zip(p[s * 4..(s + r.w as usize) * 4].as_chunks::<4>().0) {
+                        *out = luma(px[0], px[1], px[2]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copies `rect` into a screen-layout RGBA buffer (`stride` pixels per
+    /// row), preserving padding. Gray pixels become `[g, g, g, 255]`.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // the Kindle draws color from Phase 6
+    pub fn copy_rgba(&self, rect: Rect, dst: &mut [u8], stride: usize) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        for y in r.y..r.bottom() {
+            let s = y as usize * self.width as usize + r.x as usize;
+            let d = y as usize * stride + r.x as usize;
+            let dst = &mut dst[d * 4..(d + r.w as usize) * 4];
+            match &self.pixels {
+                Pixels::Gray(p) => {
+                    for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&p[s..s + r.w as usize]) {
+                        *px = [g, g, g, 255];
+                    }
+                }
+                Pixels::Rgba(p) => dst.copy_from_slice(&p[s * 4..(s + r.w as usize) * 4]),
+            }
+        }
+    }
+
+    /// Copies `rect` as stored (gray or RGBA) into a buffer laid out like
+    /// this canvas, for keeping a copy of a frame.
+    pub fn copy_raw(&self, rect: Rect, dst: &mut [u8]) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let bpp = self.bytes_per_pixel();
+        let stride = self.width as usize * bpp;
+        let src = self.raw();
+        for y in r.y as usize..r.bottom() as usize {
+            let span = y * stride + r.x as usize * bpp..y * stride + r.right() as usize * bpp;
+            dst[span.clone()].copy_from_slice(&src[span]);
         }
     }
 
@@ -335,6 +610,19 @@ impl Canvas {
     #[cfg_attr(not(feature = "kindle"), allow(dead_code))] // the simulator turns its window instead
     pub fn copy_gray_rotated(&self, rect: Rect, dst: &mut [u8], stride: usize) -> Option<Rect> {
         let r = rect.intersect(&self.bounds())?;
+        let gray = match &self.pixels {
+            Pixels::Gray(gray) => gray,
+            Pixels::Rgba(rgba) => {
+                let cw = self.width as usize;
+                for y in r.y as usize..r.bottom() as usize {
+                    for x in r.x as usize..r.right() as usize {
+                        let p = &rgba[(y * cw + x) * 4..];
+                        dst[(cw - 1 - x) * stride + y] = luma(p[0], p[1], p[2]);
+                    }
+                }
+                return Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w));
+            }
+        };
         let cw = self.width as usize;
         let (x0, x1, y0, y1) = (r.x as usize, r.right() as usize, r.y as usize, r.bottom() as usize);
         // Panel rows for canvas columns x1 - 1 down to x0, each reaching y1.
@@ -359,7 +647,7 @@ impl Canvas {
             // for every block below: y + 4 <= y1 <= height, bx + whole <= x1
             // <= width, and band is BAND * h long.
             assert!(y1 <= self.height as usize && bx + whole <= cw && whole * h <= band.len());
-            let (src, out) = (self.gray.as_ptr(), band.as_mut_ptr());
+            let (src, out) = (gray.as_ptr(), band.as_mut_ptr());
             while y + 4 <= y1 {
                 for k in y + AHEAD..y + AHEAD + 4 {
                     // A row's 64 bytes may straddle two cache lines.
@@ -386,12 +674,33 @@ impl Canvas {
             for yy in y0..y1 {
                 let first = if yy < y { whole } else { 0 };
                 for i in first..bw {
-                    band[i * h + (yy - y0)] = self.gray[yy * cw + bx + i];
+                    band[i * h + (yy - y0)] = gray[yy * cw + bx + i];
                 }
             }
             for i in 0..bw {
                 let row = (cw - 1 - (bx + i)) * stride;
                 dst[row + y0..row + y1].copy_from_slice(&band[i * h..(i + 1) * h]);
+            }
+        }
+        Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w))
+    }
+
+    /// `copy_gray_rotated` for an RGBA panel (`stride` pixels per row).
+    #[cfg_attr(not(test), allow(dead_code))] // the Kindle's true-color path
+    pub fn copy_rgba_rotated(&self, rect: Rect, dst: &mut [u8], stride: usize) -> Option<Rect> {
+        let r = rect.intersect(&self.bounds())?;
+        let cw = self.width as usize;
+        for x in r.x as usize..r.right() as usize {
+            let row = (cw - 1 - x) * stride;
+            for y in r.y as usize..r.bottom() as usize {
+                let px = match &self.pixels {
+                    Pixels::Gray(p) => {
+                        let g = p[y * cw + x];
+                        [g, g, g, 255]
+                    }
+                    Pixels::Rgba(p) => p[(y * cw + x) * 4..(y * cw + x) * 4 + 4].try_into().unwrap(),
+                };
+                dst[(row + y) * 4..(row + y) * 4 + 4].copy_from_slice(&px);
             }
         }
         Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w))
@@ -428,6 +737,14 @@ fn transpose4([a, b, c, d]: [u32; 4]) -> [u32; 4] {
 #[cfg(feature = "desktop")]
 pub fn save_gray_png(path: &std::path::Path, width: u32, height: u32, gray: &[u8]) -> anyhow::Result<()> {
     image::save_buffer(path, gray, width, height, image::ColorType::L8)?;
+    Ok(())
+}
+
+/// Saves an RGBA image (alpha ignored) as an RGB PNG.
+#[cfg(feature = "desktop")]
+pub fn save_rgba_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    image::save_buffer(path, &rgb, width, height, image::ColorType::Rgb8)?;
     Ok(())
 }
 
@@ -538,11 +855,11 @@ mod tests {
                 }
                 let expected: Vec<_> = rgba.pixels().iter().map(|p| p.red()).collect();
                 let mismatches: Vec<_> =
-                    canvas.gray.iter().zip(&expected).enumerate().filter(|(_, (a, b))| a != b).take(5).collect();
+                    canvas.gray_data().iter().zip(&expected).enumerate().filter(|(_, (a, b))| a != b).take(5).collect();
                 assert!(mismatches.is_empty(), "path {i}, stroke {width:?}: {mismatches:?}");
             }
         }
-        assert_eq!(canvas.gray.len(), (w * h) as usize);
+        assert_eq!(canvas.gray_data().len(), (w * h) as usize);
         let mut screen = Canvas::new(1272, 1696);
         screen.fill_rounded_rect(screen.bounds(), 12.0, 51);
         screen.stroke_rounded_rect(screen.bounds(), 12.0, 3.0, 0);
@@ -614,7 +931,7 @@ mod tests {
             }
             let expected: Vec<u8> = rgba.pixels().iter().map(|p| p.red()).collect();
             let mismatches: Vec<_> = canvas
-                .gray
+                .gray_data()
                 .iter()
                 .zip(&expected)
                 .enumerate()
@@ -632,13 +949,13 @@ mod tests {
         canvas.fill(119);
         let mask: Vec<u8> = (0..=255).collect();
         canvas.blend_mask(2, 0, 256, 1, &mask, 51, canvas.bounds());
-        assert_eq!(&canvas.gray[..4], &[119, 119, 119, 119]);
-        assert_eq!(canvas.gray[2 + 127], 85);
-        assert_eq!(&canvas.gray[257..260], &[51, 119, 119]);
-        assert!(canvas.gray[260..].iter().all(|&g| g == 119));
+        assert_eq!(&canvas.gray_data()[..4], &[119, 119, 119, 119]);
+        assert_eq!(canvas.gray_data()[2 + 127], 85);
+        assert_eq!(&canvas.gray_data()[257..260], &[51, 119, 119]);
+        assert!(canvas.gray_data()[260..].iter().all(|&g| g == 119));
         let mut out = vec![77; 264 * 2];
         canvas.copy_gray(Rect::new(-2, 0, 265, 2), &mut out, 264);
-        assert_eq!(&out[..260], &canvas.gray[..260]);
+        assert_eq!(&out[..260], &canvas.gray_data()[..260]);
         assert_eq!(&out[260..264], &[77; 4]);
     }
 
@@ -747,5 +1064,175 @@ mod tests {
         assert_eq!(&out[0..4], &[0, 255, 255, 255]);
         assert_eq!(&out[4..8], &[0, 255, 255, 255]);
         assert_eq!(&out[8..12], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn color_values_and_luma() {
+        assert_eq!(Color::gray(77), Color::rgb(77, 77, 77));
+        assert_eq!(Color::gray(200).to_luma(), 200);
+        assert_eq!(Color::rgb(255, 0, 0).to_luma(), 76);
+        // The color highlight is about as light as the gray one, so text
+        // under it reads the same on either screen.
+        assert!((HIGHLIGHT.to_luma() as i32 - HIGHLIGHT_GRAY as i32).abs() <= 12, "{}", HIGHLIGHT.to_luma());
+    }
+
+    fn rgba_at(c: &Canvas, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * c.width() + x) * 4) as usize;
+        c.raw()[i..i + 4].try_into().unwrap()
+    }
+
+    /// Draws the same scene on both canvases: gray drawing on a color
+    /// canvas must be the gray canvas's pixels, `[g, g, g, 255]`.
+    #[test]
+    fn gray_drawing_on_a_color_canvas_matches_the_gray_canvas() {
+        let (w, h) = (371u32, 289u32);
+        let page: Vec<u8> = (0..w * h).map(|i| (i * 7 % 253) as u8).collect();
+        let mut gray = Canvas::new(w, h);
+        let mut color = Canvas::with_mode(w, h, ColorMode::Color32);
+        assert_eq!(
+            (color.mode(), color.bytes_per_pixel(), color.raw().len()),
+            (ColorMode::Color32, 4, (w * h * 4) as usize)
+        );
+        let mask: Vec<u8> = (0..40 * 30).map(|i| (i * 13 % 256) as u8).collect();
+        let cover: Vec<u8> = (0..50 * 60).map(|i| (i % 256) as u8).collect();
+        for c in [&mut gray, &mut color] {
+            c.set_gray(&page);
+            c.fill_rect(Rect::new(-5, 10, 100, 20), 51);
+            c.fade_rect(Rect::new(30, 0, 60, 60));
+            c.invert_rect(Rect::new(200, 200, 80, 80));
+            c.highlight_rect(Rect::new(0, 100, 371, 10));
+            c.fill_rounded_rect(Rect::new(5, 3, 360, 280), 17.3, 119);
+            c.stroke_rounded_rect(Rect::new(25, 40, 257, 365), 18.0, 4.0, 0);
+            c.stroke_rounded_rect(Rect::new(20, 30, 210, 315), 0.0, 3.0, 17);
+            c.stroke_rounded_rect(Rect::new(5, 3, 360, 280), 35.0, 1.0, 0);
+            c.stroke_dashed_rounded_rect(Rect::new(10, 10, 100, 40), 6.0, 4.0, 8.0, 0x55);
+            c.fill_circle(187.25, 137.75, 103.6, 34);
+            c.stroke_circle(-1.5, 280.5, 28.75, 3.5, 200);
+            c.fill_polygon(&[(10.0, 250.0), (60.5, 200.25), (90.0, 280.0)], 85);
+            c.blend_mask(300, 250, 40, 30, &mask, 0, Rect::new(0, 0, 360, 270));
+            c.blit_gray(Rect::new(320, 10, 50, 60), &cover, 50);
+        }
+        // The highlight is the one place colors differ; compare it apart.
+        let mut expected = Vec::new();
+        for (i, &g) in gray.gray_data().iter().enumerate() {
+            let in_highlight = (100..110).contains(&(i as u32 / w));
+            expected.extend(if in_highlight { [0, 0, 0, 0] } else { [g, g, g, 255] });
+        }
+        let got: Vec<u8> = color
+            .raw()
+            .chunks(4)
+            .enumerate()
+            .flat_map(|(i, p)| if (100..110).contains(&(i as u32 / w)) { [0, 0, 0, 0] } else { p.try_into().unwrap() })
+            .collect();
+        let mismatches: Vec<_> =
+            got.chunks(4).zip(expected.chunks(4)).enumerate().filter(|(_, (a, b))| a != b).take(5).collect();
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+        // copy_gray of a color canvas is what a gray screen shows.
+        let mut out = vec![0u8; (w * h) as usize];
+        color.copy_gray(color.bounds(), &mut out, w as usize);
+        assert_eq!(&out[..100 * w as usize], &gray.gray_data()[..100 * w as usize]);
+    }
+
+    #[test]
+    fn color_shapes_use_the_full_canvas_without_a_scratch_band() {
+        let mut c = Canvas::with_mode(1272, 1696, ColorMode::Color32);
+        c.fill_rounded_rect(c.bounds(), 12.0, 51);
+        c.stroke_rounded_rect(c.bounds(), 12.0, 3.0, 0);
+        assert_eq!(c.shape_rgba.capacity(), 0);
+        assert_eq!(rgba_at(&c, 600, 800), [51, 51, 51, 255]);
+        assert_eq!(rgba_at(&c, 1, 800), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn color_highlights_tint_paper_keep_ink_and_are_idempotent() {
+        let mut c = Canvas::with_mode(20, 20, ColorMode::Color32);
+        c.fill_rect(Rect::new(4, 4, 5, 5), 0);
+        c.fill_rect_color(Rect::new(10, 0, 2, 2), Color::rgb(40, 90, 230));
+        c.highlight_rect(Rect::new(0, 0, 12, 12));
+        let first = c.raw().to_vec();
+        c.highlight_rect(Rect::new(0, 0, 12, 12));
+        assert_eq!(c.raw(), first);
+        assert_eq!(rgba_at(&c, 0, 0), [HIGHLIGHT.r, HIGHLIGHT.g, HIGHLIGHT.b, 255], "paper turns yellow");
+        assert_eq!(rgba_at(&c, 4, 4), [0, 0, 0, 255], "ink stays black");
+        assert_eq!(rgba_at(&c, 10, 0), [40, 90, HIGHLIGHT.b, 255], "colors darken toward yellow");
+        assert_eq!(rgba_at(&c, 19, 19), [255, 255, 255, 255], "outside is untouched");
+    }
+
+    #[test]
+    fn rgba_images_go_in_and_out_of_both_canvases() {
+        // 3×2 image: red, green, blue / white, gray, black, alpha 0 to show it's ignored.
+        let img = [255, 0, 0, 0, 0, 255, 0, 9, 0, 0, 255, 255, 255, 255, 255, 255, 128, 128, 128, 0, 0, 0, 0, 255];
+        let mut color = Canvas::with_mode(4, 3, ColorMode::Color32);
+        color.blit_rgba(Rect::new(1, 1, 3, 2), &img, 3);
+        assert_eq!(rgba_at(&color, 1, 1), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&color, 3, 1), [0, 0, 255, 255]);
+        assert_eq!(rgba_at(&color, 2, 2), [128, 128, 128, 255]);
+        assert_eq!(rgba_at(&color, 0, 0), [255; 4]);
+        let mut gray = Canvas::new(4, 3);
+        gray.blit_rgba(Rect::new(1, 1, 3, 2), &img, 3);
+        assert_eq!(&gray.gray_data()[5..8], &[luma(255, 0, 0), luma(0, 255, 0), luma(0, 0, 255)]);
+        assert_eq!(&gray.gray_data()[9..12], &[255, 128, 0]);
+
+        // copy_rgba keeps padding, and a gray canvas comes out as gray RGBA.
+        let mut out = vec![7u8; 5 * 3 * 4];
+        color.copy_rgba(Rect::new(1, 1, 3, 1), &mut out, 5);
+        assert_eq!(
+            &out[(5 + 1) * 4..(5 + 4) * 4],
+            &img[..12].iter().enumerate().map(|(i, &v)| if i % 4 == 3 { 255 } else { v }).collect::<Vec<_>>()[..]
+        );
+        assert!(out[..(5 + 1) * 4].iter().all(|&v| v == 7) && out[(5 + 4) * 4..].iter().all(|&v| v == 7));
+        let mut out = vec![0u8; 4 * 3 * 4];
+        gray.copy_rgba(gray.bounds(), &mut out, 4);
+        assert_eq!(&out[5 * 4..6 * 4], &[luma(255, 0, 0), luma(255, 0, 0), luma(255, 0, 0), 255]);
+
+        // A whole page, both ways.
+        let page: Vec<u8> = (0..4 * 3).flat_map(|i| [i as u8 * 20, 255 - i as u8, 3, 0]).collect();
+        color.set_rgba(&page);
+        assert_eq!(rgba_at(&color, 1, 2), [9 * 20, 255 - 9, 3, 255]);
+        gray.set_rgba(&page);
+        assert_eq!(gray.gray_data()[9], luma(180, 246, 3));
+        color.set_gray(&[9; 12]);
+        assert_eq!(rgba_at(&color, 3, 2), [9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn color_rotation_matches_the_gray_rule() {
+        let (w, h) = (37usize, 23usize);
+        let mut c = Canvas::with_mode(w as u32, h as u32, ColorMode::Color32);
+        let page: Vec<u8> = (0..w * h).flat_map(|i| [(i * 7) as u8, (i * 3) as u8, (i * 11) as u8, 255]).collect();
+        c.set_rgba(&page);
+        for rect in [c.bounds(), Rect::new(3, 2, 20, 9), Rect::new(36, 22, 4, 4)] {
+            let mut out = vec![9u8; w * h * 4];
+            let changed = c.copy_rgba_rotated(rect, &mut out, h);
+            let mut gray = vec![9u8; w * h];
+            assert_eq!(c.copy_gray_rotated(rect, &mut gray, h), changed);
+            for y in 0..h {
+                for x in 0..w {
+                    let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
+                    let at = (w - 1 - x) * h + y;
+                    let src = &page[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    let want: [u8; 4] = if inside { src.try_into().unwrap() } else { [9; 4] };
+                    assert_eq!(out[at * 4..at * 4 + 4], want, "{rect:?}: ({x}, {y})");
+                    assert_eq!(gray[at], if inside { luma(src[0], src[1], src[2]) } else { 9 });
+                }
+            }
+        }
+        // A gray canvas rotates into an RGBA panel as gray pixels.
+        let mut g = Canvas::new(3, 2);
+        g.blit_gray(g.bounds(), &[1, 2, 3, 4, 5, 6], 3);
+        let mut out = vec![0u8; 6 * 4];
+        g.copy_rgba_rotated(g.bounds(), &mut out, 2);
+        assert_eq!(out.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), [3, 6, 2, 5, 1, 4]);
+        assert!(out.chunks(4).all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255));
+    }
+
+    #[test]
+    fn copy_raw_copies_the_stored_bytes() {
+        let mut c = Canvas::with_mode(4, 2, ColorMode::Color32);
+        c.fill_rect_color(Rect::new(1, 0, 2, 1), Color::rgb(1, 2, 3));
+        let mut out = vec![0u8; 4 * 2 * 4];
+        c.copy_raw(Rect::new(2, 0, 5, 5), &mut out);
+        assert_eq!(&out[8..16], &[1, 2, 3, 255, 255, 255, 255, 255]);
+        assert!(out[..8].iter().all(|&v| v == 0));
     }
 }

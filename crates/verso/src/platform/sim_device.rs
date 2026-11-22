@@ -3,11 +3,13 @@
 //! `VERSO_SIM_DEVICE=<name>` (the flag wins). `VERSO_SIM_SIZE`,
 //! `VERSO_SIM_DPI`, `VERSO_SIM_SCALE` and `VERSO_SIM_LIGHT` still override
 //! single fields. `VERSO_SIM_UNTESTED=1` makes the model untested, to see
-//! the untested-model notice.
+//! the untested-model notice. On a color preset `VERSO_SIM_KALEIDO=1`
+//! starts with the Kaleido 3 preview on (kaleido.rs).
 
 use anyhow::{Context, Result, bail};
 
 use super::{DeviceModel, Frontlight};
+use crate::gfx::ColorMode;
 
 /// Which lights the device has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,7 +28,7 @@ pub struct Preset {
     pub dpi: u32,
     pub light: Light,
     pub page_buttons: bool,
-    /// A color panel. Drawn in grayscale until color rendering exists.
+    /// A color panel: the app draws on a `Color32` canvas.
     pub color: bool,
     /// The window's starting size relative to the screen.
     pub scale: f64,
@@ -65,12 +67,20 @@ pub struct SimDevice {
     pub custom_screen: bool,
     /// `VERSO_SIM_UNTESTED=1`: show the untested-model notice.
     pub untested: bool,
+    /// `VERSO_SIM_KALEIDO=1` on a color preset: show (and save) the screen
+    /// through the Kaleido 3 preview.
+    pub kaleido: bool,
 }
 
 impl SimDevice {
     /// From the `--device` flag (if given) and the process environment.
     pub fn from_env(flag: Option<&str>) -> Result<Self> {
         resolve(flag, |name| std::env::var(name).ok())
+    }
+
+    /// How the app's canvas stores pixels on this device.
+    pub fn color_mode(&self) -> ColorMode {
+        if self.color { ColorMode::Color32 } else { ColorMode::Gray8 }
     }
 
     /// The frontlight a fresh simulator starts with.
@@ -158,6 +168,7 @@ pub fn resolve(flag: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Resu
         scale: p.scale,
         custom_screen: false,
         untested: env("VERSO_SIM_UNTESTED").is_some_and(|v| v.trim() == "1"),
+        kaleido: p.color && env("VERSO_SIM_KALEIDO").is_some_and(|v| v.trim() == "1"),
     };
     if let Some(s) = env("VERSO_SIM_SIZE") {
         (device.width, device.height) =
@@ -240,6 +251,12 @@ mod tests {
         assert_eq!(get("pw5").initial_light(), Some(Frontlight { brightness: 12, warmth: Some(0) }));
         assert!(get("oasis3").page_buttons && !get("pw6").page_buttons);
         assert!(get("colorsoft").color && !get("oasis3").color);
+        assert_eq!(get("colorsoft").color_mode(), ColorMode::Color32);
+        assert_eq!(get("pw6").color_mode(), ColorMode::Gray8);
+        assert!(!get("colorsoft").kaleido, "the preview starts off");
+        let kaleido = [("VERSO_SIM_KALEIDO", "1")];
+        assert!(resolve(Some("colorsoft"), env(&kaleido)).unwrap().kaleido);
+        assert!(!resolve(Some("pw6"), env(&kaleido)).unwrap().kaleido, "only color panels have one");
         assert!(get("scribe").scale < 0.5);
         let warm = resolve(Some("basic-300"), env(&[("VERSO_SIM_LIGHT", "warm")])).unwrap();
         assert_eq!(warm.light, Light::WhiteWarm);

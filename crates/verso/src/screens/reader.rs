@@ -1565,8 +1565,11 @@ impl Screen for Reader {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
         }
         if let Some(page) = &self.shown {
+            // Prepared patches are the gray highlight; a color canvas tints
+            // the page itself.
+            let color = cx.canvas.mode() == crate::gfx::ColorMode::Color32;
             for patch in &page.painted {
-                if patch.pixels.is_empty() {
+                if patch.pixels.is_empty() || color {
                     cx.canvas.highlight_rect(patch.rect);
                 } else {
                     cx.canvas.blit_gray(patch.rect, &patch.pixels, patch.rect.w as usize);
@@ -3028,7 +3031,13 @@ mod tests {
                 start_visible: true,
                 end_visible: true,
             });
-            let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+            let info = DeviceInfo {
+                name: "test".into(),
+                width: 600,
+                height: 800,
+                dpi: 150,
+                color: crate::gfx::ColorMode::Gray8,
+            };
             let mut app = App::new(&info, Theme::for_dpi(150), Box::new(r));
             app.refresh_all(RefreshMode::Page);
             assert!(!app.frame().is_empty());
@@ -3202,7 +3211,8 @@ mod tests {
             geom::Point,
             platform::{DeviceInfo, Update},
         };
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let screen = Rect::new(0, 0, 600, 800);
         let root = std::env::temp_dir().join(format!("verso-gray-reader-{}", std::process::id()));
         for (top, bottom) in [(false, false), (false, true), (true, true)] {

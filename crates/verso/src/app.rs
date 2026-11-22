@@ -111,7 +111,7 @@ pub struct App {
 
 impl App {
     pub fn new(info: &DeviceInfo, theme: Theme, screen: Box<dyn Screen>) -> Self {
-        let canvas = Canvas::new(info.width, info.height);
+        let canvas = Canvas::with_mode(info.width, info.height, info.color);
         Self {
             diff: FrameDiff::new(&canvas),
             canvas,
@@ -209,7 +209,7 @@ impl App {
         self.stack.clear();
         self.drawer = None;
         self.orientation = orientation;
-        self.canvas = Canvas::new(info.width, info.height);
+        self.canvas = Canvas::with_mode(info.width, info.height, info.color);
         self.diff = FrameDiff::new(&self.canvas);
         self.stack = build(&self.theme, self.canvas.bounds());
         assert!(!self.stack.is_empty(), "relayout needs at least one screen");
@@ -924,7 +924,8 @@ mod tests {
                 Ok(())
             }
         }
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(FailsOnce(false)));
         app.frame();
         app.exit = true;
@@ -955,7 +956,8 @@ mod tests {
                 anyhow::bail!("Couldn't save your place")
             }
         }
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Leaving(true)));
         app.frame();
         assert!(app.has_pending_work());
@@ -992,7 +994,8 @@ mod tests {
         }
     }
     fn book_app(cover: bool) -> App {
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         App::new(
             &info,
             Theme::for_dpi(150),
@@ -1235,7 +1238,8 @@ mod tests {
                 Some(cover)
             }
         }
-        let info = DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Marked));
         app.set_orientation(Orientation::Landscape);
         assert!(app.draw_sleep_cover(crate::store::SleepScreen::Cover));
@@ -1260,7 +1264,8 @@ mod tests {
             }
         }
         let saves = Rc::new(Cell::new(0));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Turns(saves.clone())));
         app.frame();
         tap(&mut app, crate::geom::Point::new(300, 400));
@@ -1278,6 +1283,30 @@ mod tests {
     }
 
     #[test]
+    fn a_color_device_draws_on_a_color_canvas_through_relayout() {
+        struct Square;
+        impl Screen for Square {
+            fn draw(&mut self, cx: &mut DrawCx) {
+                cx.canvas.fill_rect(Rect::new(0, 0, 40, 40), 0);
+            }
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+        }
+        use crate::gfx::ColorMode::Color32;
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: Color32 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Square));
+        assert_eq!(app.canvas.mode(), Color32);
+        assert!(!app.frame().is_empty());
+        assert_eq!(app.canvas.raw()[..4], [0, 0, 0, 255]);
+        app.relayout(&DeviceInfo { width: 800, height: 600, ..info }, Orientation::Landscape, |_, _| {
+            vec![Box::new(Square)]
+        });
+        assert_eq!((app.canvas.mode(), app.canvas.raw().len()), (Color32, 800 * 600 * 4));
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 800, 600), mode: RefreshMode::Full }]);
+    }
+
+    #[test]
     fn failed_relayout_save_keeps_orientation_pending_until_retry_succeeds() {
         struct FailsOnce(bool);
         impl Screen for FailsOnce {
@@ -1290,7 +1319,8 @@ mod tests {
                 Ok(())
             }
         }
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(FailsOnce(false)));
         app.orientation_request = Some(Orientation::Landscape);
         app.frame();
@@ -1325,7 +1355,8 @@ mod tests {
     }
     #[test]
     fn landscape_wake_cleanup_targets_the_panel_bottom() {
-        let info = DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(
             &info,
             Theme::for_dpi(150),
@@ -1349,7 +1380,8 @@ mod tests {
         let touches = Rc::new(Cell::new(0));
         let backgrounds = Rc::new(Cell::new(0));
         let saves = Rc::new(Cell::new(0));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(
             &info,
             Theme::for_dpi(150),
@@ -1409,7 +1441,8 @@ mod tests {
             }
         }
         let remaining = Rc::new(Cell::new(3));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(LayoutScreen { remaining: remaining.clone() }));
         assert!(!app.frame().is_empty());
         assert_eq!(remaining.get(), 3, "present the initial frame before more layout");
@@ -1465,7 +1498,8 @@ mod tests {
     fn sleep_suspends_timers_and_worker_results_until_wake() {
         let ticks = Rc::new(Cell::new(0));
         let backgrounds = Rc::new(Cell::new(0));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let screen = TimedScreen { ticks: ticks.clone(), backgrounds: backgrounds.clone(), due: Instant::now() };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(screen));
         app.on_sleep();
@@ -1486,7 +1520,8 @@ mod tests {
     #[test]
     fn initial_frontlight_notifies_screen_once_without_overwriting_user_choice() {
         let backgrounds = Rc::new(Cell::new(0));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let screen = BookScreen {
             touches: Rc::new(Cell::new(0)),
             backgrounds: backgrounds.clone(),
@@ -1545,7 +1580,8 @@ mod tests {
     }
     fn drawer_app(allows: bool, open_on_tap: bool) -> DrawerApp {
         let (taps, cancels, swipes) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let under = Under { allows, taps: taps.clone(), cancels: cancels.clone(), swipes: swipes.clone(), open_on_tap };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(under));
         let dir = tempfile::tempdir().unwrap();
@@ -1744,7 +1780,8 @@ mod tests {
             }
         }
         let (returns, covered) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
-        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
         let lower = Lower { returns: returns.clone(), covered: covered.clone() };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(lower));
         let dir = tempfile::tempdir().unwrap();
@@ -1787,7 +1824,13 @@ mod tests {
             }
         }
         let (closed, searched) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
-        let info = DeviceInfo { name: "test".into(), width: 1272, height: 1696, dpi: 300 };
+        let info = DeviceInfo {
+            name: "test".into(),
+            width: 1272,
+            height: 1696,
+            dpi: 300,
+            color: crate::gfx::ColorMode::Gray8,
+        };
         let screen = InBook { closed: closed.clone(), searched: searched.clone() };
         let mut app = App::new(&info, Theme::for_dpi(300), Box::new(screen));
         let dir = tempfile::tempdir().unwrap();
