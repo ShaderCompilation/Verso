@@ -203,11 +203,12 @@ def main():
         center = (848, 550) if landscape else (636, 848)
         forward = (1500, 600) if landscape else (1100, 1000)
         # Prime axes: evdev can omit unchanged ABS values between sessions.
-        home = tap(1400 if landscape else 1000, 230, 'all_books') + '; sleep 2; ' if args.home else ''
+        # Verso launches on Home; tap the bottom Library card before opening the first book.
+        home = tap(848 if landscape else 636, 1135 if landscape else 1559, 'library') + '; sleep 2; '
         remote(f'{tap(1, 1, "prime")}; sleep 2; {home}{tap(200, 550, "open")}; sleep 5')
         wait_for(f'grep -q "page .* rendered in" {APP}/verso.log', 120)
         remote(f'{tap(*center, "seek_menu")}; sleep 1; '
-               f'{tap(440 if landscape else 338, 882 if landscape else 1164, "seek")}; sleep 2; '
+               f'{tap(440 if landscape else 338, 1046 if landscape else 1458, "seek")}; sleep 2; '
                f'{tap(*center, "seek_close")}; sleep 2')
         def position():
             records = json.loads(remote(f'cat {state}/books/*.json'))
