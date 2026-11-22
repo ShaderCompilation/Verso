@@ -196,6 +196,10 @@ fn run() -> Result<i32> {
         );
         return Ok(0);
     }
+    if std::env::var("VERSO_LANGUAGE_BENCH").as_deref() == Ok("1") {
+        println!("{}", library::language::benchmark(&store::Store::new().library()));
+        return Ok(0);
+    }
     if std::env::var("VERSO_COVER_BENCH").as_deref() == Ok("1") {
         let store = store::Store::new();
         println!("{}", library::covers::benchmark(&store, &store.library()));

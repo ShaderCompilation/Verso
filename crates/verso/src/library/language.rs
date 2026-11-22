@@ -94,6 +94,55 @@ pub fn detect(text: &str) -> DetectedLanguage {
     }
 }
 
+/// Explicit opt-in diagnostic (`VERSO_LANGUAGE_BENCH=1`): detects the language
+/// of every available EPUB in the library, read only, and reports how long it
+/// took, how many books have no tag (or `und`), and how many reliable
+/// detections disagree with a real tag.
+/// Nothing is stored. Mismatches are listed by file name for checking by hand.
+pub fn benchmark(index: &super::LibraryIndex) -> serde_json::Value {
+    let (mut times, mut unreadable, mut unreliable, mut mismatches) = (Vec::new(), 0, 0, Vec::new());
+    let mut untagged = 0;
+    for book in index.books.iter().filter(|b| b.available) {
+        if !book.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")) {
+            continue;
+        }
+        let tag = normalize_language(&book.metadata.language);
+        let started = std::time::Instant::now();
+        let detected = detect_book(&book.path);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        match detected {
+            Err(_) => unreadable += 1,
+            Ok(d) => {
+                times.push(elapsed_ms);
+                // "und" (undetermined) is no tag at all.
+                let tagged = !tag.is_empty() && tag != "und";
+                untagged += !tagged as u32;
+                match d.trusted() {
+                    None => unreliable += 1,
+                    Some(code) if tagged && code != tag => mismatches.push(serde_json::json!({
+                        "file": book.path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "tag": tag,
+                        "detected": code,
+                    })),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    let at = |p: usize| times.get((times.len() * p).div_ceil(100).saturating_sub(1)).copied().unwrap_or(0.0);
+    serde_json::json!({
+        "books_detected": times.len(),
+        "unreadable": unreadable,
+        "untagged": untagged,
+        "unreliable_or_unknown": unreliable,
+        "tag_mismatches": mismatches.len(),
+        "mismatches": mismatches,
+        "detect_p50_ms": at(50), "detect_p90_ms": at(90), "detect_max_ms": at(100),
+        "detect_total_ms": times.iter().sum::<f64>(),
+    })
+}
+
 /// Up to `SAMPLE_LIMIT` bytes of body text centred on the middle of the
 /// book's spine, skipping `linear="no"` documents, markup, scripts and styles.
 /// The middle avoids front and back matter, which is often in another

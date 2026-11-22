@@ -1,0 +1,39 @@
+# Quality list for Hunspell base forms (fr); see docs/universal-languages.md Phase 4.
+# form<TAB>expected lemmas, best first<TAB>note. A form counts as found when Hunspell
+# gives any stem, as right when one of its stems is expected, and as right first when
+# its first stem is the first expected lemma. Forms occur in testbooks/verne-80-jours-fr.epub
+# (scripts/gen-language-testbooks.py).
+faisait	faire
+trouvait	trouver
+prit	prendre
+regardait	regarder
+passagers	passager
+yeux	œil	irregular plural
+voulait	vouloir
+savait	savoir
+pouvaient	pouvoir
+venait	venir
+semblait	sembler
+disait	dire
+ajouta	ajouter
+quitté	quitter
+passa	passer
+mains	main
+hommes	homme
+grandes	grand
+nouvelle	nouveau
+belle	beau
+premiers	premier
+indigènes	indigène
+montagnes	montagne
+prêtres	prêtre
+journaux	journal	irregular plural
+parlait	parler
+entendit	entendre
+allant	aller
+reçu	recevoir
+perdu	perdre
+faite	faire
+arrivait	arriver
+voleur	voleur	base form
+honnête	honnête	base form

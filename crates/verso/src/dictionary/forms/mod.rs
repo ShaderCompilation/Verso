@@ -148,9 +148,17 @@ impl WordForms {
     /// Frees the open Hunspell dictionary; the next lookup or warm-up in its
     /// language loads it again.
     pub fn release(&mut self) {
-        if let Some((language, _)) = self.open.take() {
-            log::info!("word forms {language}: Hunspell dictionary released");
-        }
+        let Some((language, dictionary)) = self.open.take() else { return };
+        drop(dictionary);
+        log::info!("word forms {language}: Hunspell dictionary released");
+        // glibc keeps freed memory in the arena that allocated it; a loaded
+        // dictionary is 3-12 MiB that would otherwise stay resident
+        // (measured on the Kindle: about 10 MiB after closing a German book).
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        // SAFETY: malloc_trim only returns free heap pages to the system.
+        unsafe {
+            libc::malloc_trim(0)
+        };
     }
 
     /// The language of the open Hunspell dictionary.

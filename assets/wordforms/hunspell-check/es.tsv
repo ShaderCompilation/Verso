@@ -1,0 +1,41 @@
+# Quality list for Hunspell base forms (es); see docs/universal-languages.md Phase 4.
+# form<TAB>expected lemmas, best first<TAB>note. A form counts as found when Hunspell
+# gives any stem, as right when one of its stems is expected, and as right first when
+# its first stem is the first expected lemma. Forms occur in testbooks/cervantes-quijote-es.epub
+# (scripts/gen-language-testbooks.py).
+podía	poder
+decía	decir
+diciendo	decir
+eran	ser
+años	año
+libros	libro
+caballerías	caballería
+hermosa	hermoso
+quiso	querer
+vino	venir
+tienen	tener
+fueron	ser
+llegó	llegar
+venía	venir
+puso	poner
+dicen	decir
+comenzó	comenzar
+voces	voz	z → c plural
+volvió	volver
+preguntó	preguntar
+aventuras	aventura
+pareció	parecer
+habéis	haber
+lágrimas	lágrima
+pudo	poder
+sabía	saber
+pensamientos	pensamiento
+hallado	hallar
+dijese	decir
+mirando	mirar
+dieron	dar
+quisiera	querer
+llamaba	llamar
+pensaba	pensar
+doncellas	doncella
+mujeres	mujer

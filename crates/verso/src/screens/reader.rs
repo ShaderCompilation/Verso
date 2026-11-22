@@ -1595,6 +1595,8 @@ impl Screen for Reader {
     }
     fn busy(&self) -> bool {
         self.annotations.resolving
+            || self.language_detect_at.is_some()
+            || self.language_detection.is_some()
             || self.annotations.paint_pending
             || self.annotations.importing
             || self.annotations.exporting

@@ -1,0 +1,48 @@
+# Quality list for Hunspell base forms (de); see docs/universal-languages.md Phase 4.
+# form<TAB>expected lemmas, best first<TAB>note. A form counts as found when Hunspell
+# gives any stem, as right when one of its stems is expected, and as right first when
+# its first stem is the first expected lemma. Forms occur in testbooks/kafka-verwandlung-de.epub
+# (scripts/gen-language-testbooks.py).
+# German compounds are listed with a "compound" note; the lookup rule is the same.
+hörte	hören
+fühlte	fühlen
+begann	beginnen
+schlug	schlagen
+wußte	wissen	old spelling (ß)
+gekommen	kommen
+gesagt	sagen
+größten	groß
+kleine	klein
+alten	alt
+fragte	fragen
+nahm	nehmen
+gingen	gehen
+verstanden	verstehen
+öffnete	öffnen
+geöffnet	öffnen
+fand	finden
+warf	werfen
+trug	tragen
+glaubte	glauben
+schrie	schreien
+saßen	sitzen
+brachte	bringen
+neuen	neu
+fürchtete	fürchten
+erkannte	erkennen
+versuchte	versuchen
+aufgestanden	aufstehen
+beobachtete	beobachten
+verließ	verlassen
+Zimmerherren	Zimmerherr	compound
+Prokuristen	Prokurist
+Familienmitglieder	Familienmitglied	compound
+Wohnzimmers	Wohnzimmer	compound
+Verhältnisse	Verhältnis
+Erklärungen	Erklärung
+Angestellten	Angestellte
+Entschlüsse	Entschluss	new spelling of the plural
+Augenblicken	Augenblick
+Atembeschwerden	Atembeschwerde	compound
+Krankenhaus	Krankenhaus	compound, base form
+Dienstmädchen	Dienstmädchen	compound, base form

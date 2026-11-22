@@ -504,7 +504,19 @@ wf --name wf-all --word людей --language und --cache-state "$COLD_STATE"
 ```
 
 `rus` selects the Russian set (five dictionaries), `und` Default (all 13).
-Afterwards remove the `wf-*` folders. Results:
+Afterwards remove the `wf-*` folders.
+
+For Hunspell ([Phase 4](../../docs/universal-languages.md#phase-4-results--2026-11-22)),
+install the dictionaries in `/mnt/us/verso/data/hunspell/` and add
+`--hunspell de_DE.aff,de_DE.dic` (those files are copied into the run's
+isolated state, so only they are loaded), a one-word book of an inflected form
+(`--word Häuser --language de`), and `--close-reader` for the RSS after
+leaving the book. `--book-text FILE` puts real text (UTF-8) after the word, so
+language detection can run: with `--language en` and German text it is the
+mistagged book. `--open-pause 0.3 --early-press` looks up before the warm-up,
+so the first miss pays the Hunspell open. The JSON gains `language_detection`,
+`hunspell_open`, `hunspell_released`, `hunspell_order` (log order of those
+lines and the searches) and `memory_after_close`. Results:
 [dictionary.md](../../docs/dictionary.md#verification--2026-11-17-russian-base-forms-word-forms-phase-4).
 
 ## Background pre-layout
