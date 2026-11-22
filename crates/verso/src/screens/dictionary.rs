@@ -42,8 +42,10 @@ fn span_style(style: Style) -> SpanStyle {
     .fold(SpanStyle::default(), |all, (_, to)| all.union(to))
 }
 
-fn plain(text: String, base: TextStyle) -> StyledBlock {
-    StyledBlock::Paragraph(StyledParagraph { text, spans: Vec::new(), base, muted: INK2, indent: 0.0 })
+/// Unstyled text. Status and provenance lines are `inert`: touches never
+/// look up their words.
+fn plain(text: String, base: TextStyle, inert: bool) -> StyledBlock {
+    StyledBlock::Paragraph(StyledParagraph { text, spans: Vec::new(), base, muted: INK2, indent: 0.0, inert })
 }
 
 /// A text or heading block with its styles and indentation.
@@ -61,6 +63,7 @@ fn styled(block: &Block, t: &Theme) -> StyledBlock {
         base,
         muted: INK2,
         indent: (i32::from(block.depth.min(MAX_DEPTH)) * t.dictionary_indent) as f32,
+        inert: false,
     })
 }
 
@@ -77,7 +80,7 @@ pub(crate) fn styled_blocks<'a>(blocks: &'a [Block], t: &'a Theme) -> impl Itera
 /// All visible content shares one pagination, including provenance and errors.
 fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<StyledBlock> {
     if pending {
-        return vec![plain("Looking up…".into(), t.body)];
+        return vec![plain("Looking up…".into(), t.body, true)];
     }
     let gap = t.dictionary_body.line_height() / 2.0;
     let rule = || StyledBlock::Rule { space: gap, thickness: t.hairline, gray: LINE };
@@ -86,23 +89,24 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
         State::Definition { entries, base_forms } => {
             if let Some(forms) = base_forms {
                 let plural = if forms.count > 1 { "s" } else { "" };
-                blocks.push(plain(format!("Base form{plural} of “{}”", forms.query), t.small.gray(INK2)));
+                blocks.push(plain(format!("Base form{plural} of “{}”", forms.query), t.small.gray(INK2), true));
                 blocks.push(StyledBlock::Gap(gap));
             }
             for (i, entry) in entries.iter().enumerate() {
                 if i > 0 {
                     blocks.push(rule());
                 }
-                blocks.push(plain(entry.headword.clone(), t.dictionary_headword));
+                blocks.push(plain(entry.headword.clone(), t.dictionary_headword, false));
                 blocks.extend(styled_blocks(&entry.blocks, t));
             }
         }
-        State::Missing => blocks.push(plain(MISSING.into(), t.body)),
-        State::Disabled => blocks.push(plain(DISABLED.into(), t.body)),
-        State::NoResult => blocks.push(plain(NO_RESULT.into(), t.body)),
+        State::Missing => blocks.push(plain(MISSING.into(), t.body, true)),
+        State::Disabled => blocks.push(plain(DISABLED.into(), t.body, true)),
+        State::NoResult => blocks.push(plain(NO_RESULT.into(), t.body, true)),
         State::Error(_) => blocks.push(plain(
             "Couldn’t read this entry. Open Manage dictionaries for details, or choose another result.".into(),
             t.body,
+            true,
         )),
     }
     if !warnings.is_empty() && !matches!(state, State::Definition { .. }) {
@@ -110,6 +114,7 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
         blocks.push(plain(
             "Search incomplete: some dictionaries couldn’t be read. Open Manage dictionaries for details.".into(),
             t.body,
+            true,
         ));
     }
     blocks

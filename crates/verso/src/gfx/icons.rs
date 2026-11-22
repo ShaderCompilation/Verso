@@ -45,11 +45,15 @@ pub enum Icon {
     Terminal,
     Portrait,
     Landscape,
+    Expand,
+    Collapse,
+    Highlighter,
+    Extend,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 33] = [
+    pub const ALL: [Icon; 37] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -83,6 +87,10 @@ impl Icon {
         Icon::Terminal,
         Icon::Portrait,
         Icon::Landscape,
+        Icon::Expand,
+        Icon::Collapse,
+        Icon::Highlighter,
+        Icon::Extend,
     ];
 
     fn svg(self) -> &'static str {
@@ -120,6 +128,10 @@ impl Icon {
             Icon::Terminal => include_str!("../../../../assets/icons/terminal.svg"),
             Icon::Portrait => include_str!("../../../../assets/icons/portrait.svg"),
             Icon::Landscape => include_str!("../../../../assets/icons/landscape.svg"),
+            Icon::Expand => include_str!("../../../../assets/icons/maximize-2.svg"),
+            Icon::Collapse => include_str!("../../../../assets/icons/minimize-2.svg"),
+            Icon::Highlighter => include_str!("../../../../assets/icons/highlighter.svg"),
+            Icon::Extend => include_str!("../../../../assets/icons/move-horizontal.svg"),
         }
     }
 }
