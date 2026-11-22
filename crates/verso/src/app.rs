@@ -418,6 +418,9 @@ impl App {
         net.read_ssh();
         net.probe();
         let developer = services.store.settings().developer;
+        if let Some(screen) = self.stack.last_mut() {
+            screen.top_drawer_opened();
+        }
         let now = Instant::now();
         self.drawer = Some(TopDrawer::new(
             &self.theme,
@@ -779,14 +782,16 @@ impl App {
             theme: &self.theme,
             screen: self.canvas.bounds(),
             now: Instant::now(),
-            frontlight: &mut self.frontlight,
-            light_request: &mut self.light_request,
             battery: self.battery,
             toast: &mut self.toast,
             forced: &mut self.forced,
             needs_redraw: &mut self.needs_redraw,
         };
         let action = f(screen.as_mut(), &mut cx);
+        self.apply(action);
+    }
+
+    fn apply(&mut self, action: Action) {
         match action {
             Action::None => {}
             Action::Push(screen) => {
@@ -799,6 +804,10 @@ impl App {
                     self.request_exit();
                 } else {
                     self.stack.pop();
+                    self.with_screen(|screen, cx| {
+                        screen.on_return(cx);
+                        Action::None
+                    });
                     self.on_background();
                 }
             }
@@ -1619,5 +1628,50 @@ mod tests {
         settle(&mut d.app);
         assert!(d.app.toast.is_some(), "a failed stop says so");
         assert!(d.app.drawer.as_ref().unwrap().net().ssh.running);
+    }
+
+    #[test]
+    fn popping_tells_the_screen_below_and_the_drawer_tells_the_screen_it_covers() {
+        struct Lower {
+            returns: Rc<Cell<usize>>,
+            covered: Rc<Cell<usize>>,
+        }
+        impl Screen for Lower {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+                if matches!(g, Gesture::Tap(_)) { Action::Push(Box::new(Upper)) } else { Action::None }
+            }
+            fn allows_top_drawer(&self) -> bool {
+                true
+            }
+            fn top_drawer_opened(&mut self) {
+                self.covered.set(self.covered.get() + 1);
+            }
+            fn on_return(&mut self, _: &mut EventCx) {
+                self.returns.set(self.returns.get() + 1);
+            }
+        }
+        struct Upper;
+        impl Screen for Upper {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+                if matches!(g, Gesture::Tap(_)) { Action::Pop } else { Action::None }
+            }
+        }
+        let (returns, covered) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150 };
+        let lower = Lower { returns: returns.clone(), covered: covered.clone() };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(lower));
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(top_drawer::tests::FakeNet::new(false, false));
+        app.set_services(Services { store: Store::at(dir.path().to_path_buf()), waker: Waker::new(|| {}), net: ops });
+        tap(&mut app, Point::new(300, 400));
+        assert_eq!((app.stack.len(), returns.get()), (2, 0));
+        tap(&mut app, Point::new(300, 400));
+        assert_eq!((app.stack.len(), returns.get()), (1, 1));
+        assert_eq!(covered.get(), 0);
+        swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
+        assert!(app.drawer.is_some());
+        assert_eq!(covered.get(), 1);
     }
 }

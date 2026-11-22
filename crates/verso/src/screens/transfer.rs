@@ -682,8 +682,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let mut frontlight = None;
-        let mut light_request = None;
         let mut toast = None;
         let mut forced = Vec::new();
         let mut needs_redraw = false;
@@ -691,8 +689,6 @@ mod tests {
             theme: &theme,
             screen: bounds,
             now: Instant::now(),
-            frontlight: &mut frontlight,
-            light_request: &mut light_request,
             battery: None,
             toast: &mut toast,
             forced: &mut forced,
@@ -744,8 +740,6 @@ mod tests {
     fn done_after_live_data_edits_offers_restart_and_leaves_without_saving() {
         let theme = Theme::for_dpi(300);
         let bounds = Rect::new(0, 0, 1272, 1696);
-        let mut frontlight = None;
-        let mut light_request = None;
         let mut toast = None;
         let mut forced = Vec::new();
         let mut needs_redraw = false;
@@ -753,8 +747,6 @@ mod tests {
             theme: &theme,
             screen: bounds,
             now: Instant::now(),
-            frontlight: &mut frontlight,
-            light_request: &mut light_request,
             battery: None,
             toast: &mut toast,
             forced: &mut forced,
@@ -866,8 +858,6 @@ mod tests {
         assert!(screen.library.current().books.is_empty(), "the Files tab doesn't touch the index itself");
 
         screen.begin_closing();
-        let mut frontlight = None;
-        let mut light_request = None;
         let mut toast = None;
         let mut forced = Vec::new();
         let mut needs_redraw = false;
@@ -875,8 +865,6 @@ mod tests {
             theme: &theme,
             screen: bounds,
             now: Instant::now(),
-            frontlight: &mut frontlight,
-            light_request: &mut light_request,
             battery: None,
             toast: &mut toast,
             forced: &mut forced,

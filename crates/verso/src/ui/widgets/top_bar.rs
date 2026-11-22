@@ -13,6 +13,8 @@ pub struct TopBar {
     pub serif: bool,
     pub border: bool,
     pub show_battery: bool,
+    /// Width kept clear at the right end for the caller's own controls.
+    pub trailing: i32,
     back: Option<IconButton>,
     rect: Rect,
 }
@@ -24,6 +26,7 @@ impl TopBar {
             serif: true,
             border: true,
             show_battery: false,
+            trailing: 0,
             back: back.then(|| IconButton::new(Icon::ArrowLeft)),
             rect: Rect::default(),
         }
@@ -59,7 +62,7 @@ impl TopBar {
             None => self.rect.x + t.margin,
         };
         let style = if self.serif { t.title } else { t.button };
-        let battery_w = if self.show_battery && cx.battery.is_some() { t.mm(32.0) } else { 0 };
+        let battery_w = if self.show_battery && cx.battery.is_some() { t.mm(32.0) } else { 0 }.max(self.trailing);
         let title = Rect::new(x, self.rect.y, self.rect.right() - t.margin - x - battery_w, self.rect.h);
         cx.line(&self.title, style, title, HAlign::Left);
         if self.show_battery {

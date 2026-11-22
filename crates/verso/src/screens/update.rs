@@ -534,8 +534,6 @@ mod tests {
             theme: &t,
             screen,
             now: Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,

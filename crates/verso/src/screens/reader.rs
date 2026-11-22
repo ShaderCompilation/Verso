@@ -63,6 +63,8 @@ pub struct Reader {
     persistence: Writer,
     save_error: Option<String>,
     settings_save_pending: bool,
+    /// `Store::settings_saves` when settings were last synced.
+    settings_seen: u64,
     error: Option<String>,
     opened_at: Option<Instant>,
     selection: SelectionState,
@@ -166,6 +168,7 @@ impl Reader {
         cache.reset(generation);
         let refresh = Refresh::new(settings.page_flash);
         Self {
+            settings_seen: store.settings_saves(),
             screen,
             persistence: Writer::new(store.clone(), id.clone(), worker.waker()),
             worker,
@@ -952,7 +955,6 @@ impl Reader {
             &self.metadata.title,
             self.target,
             self.pages,
-            *cx.frontlight,
         )));
     }
     fn text(&mut self, t: &Theme) {
@@ -1016,7 +1018,20 @@ impl Reader {
             anyhow::anyhow!("Couldn't save text settings: {e:#}")
         })?;
         self.settings_save_pending = false;
+        // Includes any other screen's saves read above.
+        self.sync_settings(&settings);
         Ok(())
+    }
+    /// Takes the settings the reader doesn't own (Settings may change them
+    /// over an open book); typography and page layout stay this reader's.
+    fn sync_settings(&mut self, saved: &Settings) {
+        self.settings_seen = self.store.settings_saves();
+        self.settings.tap_zones = saved.tap_zones;
+        self.settings.developer = saved.developer;
+        if self.settings.page_flash != saved.page_flash {
+            self.settings.page_flash = saved.page_flash;
+            self.refresh.set_every(saved.page_flash);
+        }
     }
     fn save(&mut self) {
         if !self.save_pending {
@@ -1320,6 +1335,18 @@ impl Reader {
                 Some(MenuEvent::Search) => self.open_search(None, cx),
                 Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
                 Some(MenuEvent::Text) => self.text(cx.theme),
+                Some(MenuEvent::Layout) => {
+                    self.overlay = Overlay::Layout(Box::new(LayoutView::new(
+                        cx.theme,
+                        self.screen,
+                        &self.settings.page_layout,
+                        &self.settings.typography,
+                    )))
+                }
+                Some(MenuEvent::QuickSettings) => {
+                    self.overlay = Overlay::None;
+                    return Action::OpenTopDrawer;
+                }
                 Some(MenuEvent::Page(page)) => {
                     let origin = self.back.take().or_else(|| self.here());
                     self.go(page, cx);
@@ -1336,22 +1363,10 @@ impl Reader {
                         self.jump_away(Some(page), position, cx);
                     }
                 }
-                Some(MenuEvent::Light(value)) => {
-                    *cx.frontlight = Some(value);
-                    *cx.light_request = Some(value);
-                }
                 None => {}
             },
             Overlay::Text(sheet) => match sheet.on_gesture(&g, &mut self.settings.typography) {
                 Some(TextEvent::Close) => self.overlay = Overlay::None,
-                Some(TextEvent::Layout) => {
-                    self.overlay = Overlay::Layout(Box::new(LayoutView::new(
-                        cx.theme,
-                        self.screen,
-                        &self.settings.page_layout,
-                        &self.settings.typography,
-                    )))
-                }
                 Some(TextEvent::Fonts) => {
                     self.overlay = Overlay::Fonts(Box::new(FontList::new(
                         cx.theme,
@@ -1368,9 +1383,8 @@ impl Reader {
                 let data =
                     bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages, &self.bars);
                 if let Some(LayoutEvent::Close) = view.on_gesture(&g, cx.theme, &data) {
+                    // Back to reading, with the new layout.
                     self.leave_layout();
-                    // Back to the Text sheet, with the new layout above it.
-                    self.text(cx.theme);
                 }
             }
             Overlay::Fonts(fonts) => match fonts.on_gesture(&g) {
@@ -1414,10 +1428,9 @@ impl Reader {
                     },
                     Gesture::Swipe { dir: Direction::Left, .. } => 1,
                     Gesture::Swipe { dir: Direction::Right, .. } => -1,
-                    Gesture::Swipe { dir, from, .. }
-                        if self.screen.contains(from)
-                            && (dir == Direction::Down && from.y < self.screen.y + self.screen.h / 10
-                                || dir == Direction::Up && from.y >= self.screen.bottom() - self.screen.h / 10) =>
+                    // The top edge belongs to the Top Drawer (`App`).
+                    Gesture::Swipe { dir: Direction::Up, from, .. }
+                        if self.screen.contains(from) && from.y >= self.screen.bottom() - self.screen.h / 10 =>
                     {
                         if self.pending_turn {
                             self.commit_turn(cx);
@@ -1438,6 +1451,27 @@ impl Reader {
 impl Screen for Reader {
     fn fills_canvas(&self) -> bool {
         self.shown.is_some()
+    }
+
+    /// Plain reading (no selection, highlight extension or search bar) and
+    /// the Reader Menu, which the drawer replaces.
+    fn allows_top_drawer(&self) -> bool {
+        match self.overlay {
+            Overlay::Menu(_) => true,
+            Overlay::None => {
+                self.selection.selected.is_none()
+                    && !self.selection.extending
+                    && self.extension.is_none()
+                    && self.search_bar.is_none()
+            }
+            _ => false,
+        }
+    }
+
+    fn top_drawer_opened(&mut self) {
+        if matches!(self.overlay, Overlay::Menu(_)) {
+            self.overlay = Overlay::None;
+        }
     }
 
     fn draw(&mut self, cx: &mut DrawCx) {
@@ -1622,11 +1656,11 @@ impl Screen for Reader {
         Action::None
     }
     fn on_background(&mut self, cx: &mut EventCx) {
-        if let Overlay::Menu(menu) = &mut self.overlay
-            && let Some(light) = *cx.frontlight
-            && menu.set_frontlight_if_missing(cx.theme, self.screen, light)
-        {
-            cx.redraw();
+        if self.store.settings_saves() != self.settings_seen {
+            // Settings (perhaps opened over this book) saved: apply what the
+            // reader reads from them on its own.
+            let saved = self.store.settings();
+            self.sync_settings(&saved);
         }
         if let Overlay::Lookup(lookup) = &mut self.overlay {
             lookup.receive(cx);
@@ -1833,8 +1867,6 @@ mod tests {
             theme,
             screen: Rect::new(0, 0, 600, 800),
             now: Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,
@@ -1853,8 +1885,6 @@ mod tests {
             theme,
             screen: Rect::new(0, 0, 600, 800),
             now,
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,
@@ -2379,14 +2409,14 @@ mod tests {
         Ok(())
     }
 
-    /// Opens the Page layout screen from the Text sheet's row.
+    /// Opens the Page layout screen from the Reader Menu's Layout button.
     fn open_layout(r: &mut Reader, theme: &Theme) {
         test_cx(theme, |cx| {
-            r.text(theme);
-            let Overlay::Text(sheet) = &r.overlay else { unreachable!() };
-            let row = sheet.layout_row();
-            r.on_gesture(Gesture::Down(row.center()), cx);
-            r.on_gesture(Gesture::Tap(row.center()), cx);
+            r.menu(cx);
+            let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
+            let layout = menu.button_rects()[3].center();
+            r.on_gesture(Gesture::Down(layout), cx);
+            r.on_gesture(Gesture::Tap(layout), cx);
         });
         assert!(matches!(r.overlay, Overlay::Layout(_)));
     }
@@ -2403,7 +2433,7 @@ mod tests {
         test_cx(theme, |cx| {
             r.on_gesture(Gesture::Down(back), cx);
             r.on_gesture(Gesture::Tap(back), cx);
-            assert!(matches!(r.overlay, Overlay::Text(_)), "back returns to the Text sheet");
+            assert!(matches!(r.overlay, Overlay::None), "back returns to reading");
             cx.now += Duration::from_secs(1);
             r.on_tick(cx);
         });
@@ -2625,8 +2655,6 @@ mod tests {
             theme: &theme,
             screen,
             now: Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut redraw,
@@ -2832,8 +2860,6 @@ mod tests {
             theme: &theme,
             screen,
             now: Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
@@ -3038,8 +3064,6 @@ mod tests {
             theme: &theme,
             screen,
             now: Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
@@ -3075,11 +3099,12 @@ mod tests {
             assert!(cx.forced.is_empty());
         }
         assert!(r.cache.get(1).is_some());
-        // Only inward vertical swipes starting at an edge open the controls.
-        // Opening them preserves the displayed page and requests a redraw.
+        // Only inward swipes up from the bottom edge open the controls (the
+        // top edge belongs to the Top Drawer, in `App`). Opening them
+        // preserves the displayed page and requests a redraw.
         for (dir, from_y, to_y, opens) in [
-            (Direction::Down, 0, 400, true),
-            (Direction::Down, 168, 500, true),
+            (Direction::Down, 0, 400, false),
+            (Direction::Down, 168, 500, false),
             (Direction::Down, 169, 500, false),
             (Direction::Up, 1695, 1300, true),
             (Direction::Up, 1527, 1200, true),
@@ -3164,16 +3189,12 @@ mod tests {
             saved.position,
         );
         let theme = Theme::for_dpi(300);
-        let mut light = None;
-        let mut request = None;
         let mut toast = None;
         let mut forced = Vec::new();
         let mut cx = EventCx {
             theme: &theme,
             screen,
             now: Instant::now(),
-            frontlight: &mut light,
-            light_request: &mut request,
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut false,
@@ -3371,64 +3392,61 @@ mod tests {
     }
 
     #[test]
-    fn menu_hides_light_until_async_frontlight_arrives_then_shows_real_level() {
-        use crate::geom::Point;
-        use crate::platform::Frontlight;
+    fn menu_opens_quick_settings_and_the_drawer_only_in_plain_reading() {
         let theme = Theme::for_dpi(150);
-        let (mut r, _) = test_reader("async-frontlight");
+        let (mut r, _) = test_reader("menu-quick-settings");
         r.pages = 10;
         r.laying_out = false;
-        let mut frontlight = None;
-        let mut light_request = None;
-        let mut needs_redraw = false;
-        let run = |frontlight: &mut Option<Frontlight>,
-                   light_request: &mut Option<Frontlight>,
-                   needs_redraw: &mut bool,
-                   f: &mut dyn FnMut(&mut EventCx)| {
-            let mut toast = None;
-            let mut forced = vec![];
-            f(&mut EventCx {
-                theme: &theme,
-                screen: Rect::new(0, 0, 600, 800),
-                now: Instant::now(),
-                frontlight,
-                light_request,
-                toast: &mut toast,
-                forced: &mut forced,
-                needs_redraw,
-                battery: None,
-            });
-        };
-        // Open the menu before hardware frontlight has arrived.
-        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
-            r.on_gesture(Gesture::Tap(Point::new(300, 400)), cx);
+        assert!(r.allows_top_drawer(), "plain reading");
+        test_cx(&theme, |cx| {
+            r.menu(cx);
+            assert!(r.allows_top_drawer(), "the drawer replaces the menu");
+            // Battery + ⌄ closes the menu and asks the app for the drawer.
+            let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
+            let quick = menu.quick_rect().center();
+            r.on_gesture(Gesture::Down(quick), cx);
+            assert!(matches!(r.on_gesture(Gesture::Tap(quick), cx), Action::OpenTopDrawer));
+            assert!(matches!(r.overlay, Overlay::None));
+            // A swipe opening the drawer over the menu closes it too.
+            r.menu(cx);
         });
-        assert!(matches!(r.overlay, Overlay::Menu(_)));
-        // Tapping where the brightness slider would be must not invent a value.
-        let panel_y = 800 - theme.mm(61.0);
-        let slider_pt = Point::new(300, panel_y + theme.mm(30.0));
-        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
-            r.on_gesture(Gesture::Down(slider_pt), cx);
-            r.on_gesture(Gesture::Tap(slider_pt), cx);
-        });
-        assert_eq!(light_request, None, "no default light written while reading is pending");
-        assert_eq!(frontlight, None);
-
-        // Hardware reading arrives asynchronously.
-        frontlight = Some(Frontlight { brightness: 14, warmth: Some(6) });
-        needs_redraw = false;
-        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
-            r.on_background(cx);
-        });
-        assert!(needs_redraw, "menu redraws once the real light level arrives");
-        // Now interacting with the slider updates the light request.
-        run(&mut frontlight, &mut light_request, &mut needs_redraw, &mut |cx| {
-            r.on_gesture(Gesture::Down(slider_pt), cx);
-            r.on_gesture(Gesture::Tap(slider_pt), cx);
-        });
-        assert!(light_request.is_some(), "light slider works once populated");
-        assert_eq!(light_request.unwrap().warmth, Some(6), "real warmth preserved");
-
+        r.top_drawer_opened();
+        assert!(matches!(r.overlay, Overlay::None));
+        r.top_drawer_opened();
+        assert!(matches!(r.overlay, Overlay::None), "nothing else is closed");
+        r.text(&theme);
+        assert!(!r.allows_top_drawer(), "a sheet is open");
+        r.overlay = Overlay::None;
+        r.extension = Some(annotations::ExtendBar::new(&theme, r.screen));
+        assert!(!r.allows_top_drawer(), "extending a highlight");
+        r.extension = None;
+        r.selection.extending = true;
+        assert!(!r.allows_top_drawer(), "selecting");
+        r.selection.clear();
+        assert!(r.allows_top_drawer());
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn settings_saved_over_the_book_apply_without_reopening_it() -> anyhow::Result<()> {
+        let theme = Theme::for_dpi(150);
+        let (mut r, _) = test_reader("settings-sync");
+        let mut settings = r.store.settings();
+        settings.typography.size_pt = 20.0;
+        settings.tap_zones = crate::reader::TapZones::Halves;
+        settings.page_flash = 3;
+        settings.developer = true;
+        r.store.save_settings(&settings)?;
+        let size = r.settings.typography.size_pt;
+        test_cx(&theme, |cx| r.on_background(cx));
+        assert_eq!(r.settings.tap_zones, crate::reader::TapZones::Halves);
+        assert_eq!(r.settings.page_flash, 3);
+        assert!(r.settings.developer);
+        assert_eq!(r.settings.typography.size_pt, size, "the reader keeps its own typography");
+        // The new refresh interval applies to the next turns.
+        let modes: Vec<_> = (0..3).map(|_| r.refresh.turn(false, false)).collect();
+        assert_eq!(modes, [RefreshMode::Page, RefreshMode::Page, RefreshMode::Full]);
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+        Ok(())
     }
 }

@@ -245,6 +245,9 @@ pub struct Books {
     errors: Vec<String>,
     thumbnails: Thumbnails,
     reader: Option<Reader>,
+    /// The open book's file, checked when a screen over the book closes
+    /// (Wi-Fi transfer can delete it).
+    reader_path: Option<PathBuf>,
     generation: u64,
     engine_error: Option<String>,
     // The update notice on Home and the dot on the Settings icon
@@ -413,6 +416,7 @@ impl Books {
             errors: Vec::new(),
             thumbnails,
             reader: None,
+            reader_path: None,
             generation: 0,
             engine_error: None,
             notice: update_status.notice().cloned(),
@@ -1258,6 +1262,7 @@ impl Books {
             self.fonts.clone(),
             saved.position.clone(),
         ));
+        self.reader_path = Some(path.clone());
         self.reader.as_mut().unwrap().annotations(annotation_book);
         self.reader.as_mut().unwrap().reading_speed(saved.reading_speed, self.store.reading_speed());
         self.reader.as_mut().unwrap().detected_language(saved.language);
@@ -1425,6 +1430,7 @@ impl Books {
         }
         // Only the reader writes reading state while it is open, so its book
         // is the only cached state that can be stale.
+        self.reader_path = None;
         if let Some(r) = self.reader.take() {
             self.generation = r.generation();
             let id = r.book_id();
@@ -2006,11 +2012,10 @@ impl Screen for Books {
     /// Home and Library in their normal states: no book, sheet, menu,
     /// search, multi-select or Cut-and-paste.
     fn allows_top_drawer(&self) -> bool {
-        self.reader.is_none()
-            && !self.overlay_open()
-            && self.search.is_none()
-            && self.selection.is_none()
-            && self.carry.is_none()
+        if let Some(reader) = &self.reader {
+            return reader.allows_top_drawer();
+        }
+        !self.overlay_open() && self.search.is_none() && self.selection.is_none() && self.carry.is_none()
     }
     fn draw(&mut self, cx: &mut DrawCx) {
         if let Some(reader) = &mut self.reader {
@@ -2779,6 +2784,25 @@ impl Screen for Books {
         }
         Action::None
     }
+    fn top_drawer_opened(&mut self) {
+        if let Some(reader) = &mut self.reader {
+            reader.top_drawer_opened();
+        }
+    }
+    /// Back from Settings or Wi-Fi transfer: leave a book whose file the
+    /// transfer deleted.
+    fn on_return(&mut self, cx: &mut EventCx) {
+        let Some(reader) = &mut self.reader else { return };
+        if self.reader_path.as_ref().is_none_or(|path| path.exists()) {
+            return;
+        }
+        log::info!("open book removed: {:?}", self.reader_path);
+        if let Err(e) = reader.close() {
+            log::warn!("closing a removed book: {e:#}");
+        }
+        self.returned(cx);
+        cx.toast("Book was removed", None);
+    }
     fn on_background(&mut self, cx: &mut EventCx) {
         if let Some(e) = self.navigation_writer.errors().last() {
             self.navigation_failed(e);
@@ -3156,8 +3180,6 @@ mod tests {
             theme: t,
             screen,
             now: std::time::Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
@@ -3193,6 +3215,48 @@ mod tests {
         books.push(other);
         store.save_library(&LibraryIndex { books, ..Default::default() })?;
         Ok((store, root))
+    }
+    #[test]
+    fn returning_over_a_book_closes_it_only_when_its_file_was_removed() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("removed-book")?;
+        let file = root.join("open.epub");
+        std::fs::write(&file, b"epub")?;
+        let mut settings = store.settings();
+        settings.library_folders.get_or_insert_default().push(root.clone());
+        store.save_settings(&settings)?;
+        let mut index = store.library();
+        index.books[0].path = file.clone();
+        store.save_library(&index)?;
+        let book = index.books[0].clone();
+        store.select_home_book(&book);
+        store.save_book(&book.id, &BookState { last_opened: 7, progress: 1000, ..Default::default() })?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let mut toast = None;
+        {
+            let mut cx = EventCx {
+                theme: &t,
+                screen,
+                now: std::time::Instant::now(),
+                toast: &mut toast,
+                forced: &mut Vec::new(),
+                needs_redraw: &mut false,
+                battery: None,
+            };
+            books.open(book.id.clone(), &mut cx);
+            assert!(books.reader.is_some());
+            assert!(books.allows_top_drawer(), "plain reading allows the drawer");
+            books.on_return(&mut cx);
+            assert!(books.reader.is_some(), "the book is still there");
+            std::fs::remove_file(&file)?;
+            books.on_return(&mut cx);
+            assert!(books.reader.is_none() && books.is_home());
+        }
+        assert_eq!(toast.map(|t| t.text), Some("Book was removed".to_owned()));
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn top_drawer_opens_from_the_battery_only_in_normal_home_and_library_states() -> anyhow::Result<()> {
@@ -5330,16 +5394,12 @@ mod tests {
         books.pager.page = 1;
         books.refresh(&t);
         let point = books.grid.cells()[0].1.center();
-        let mut light = None;
-        let mut light_request = None;
         let mut toast = None;
         let mut forced = Vec::new();
         let mut cx = EventCx {
             theme: &t,
             screen,
             now: std::time::Instant::now(),
-            frontlight: &mut light,
-            light_request: &mut light_request,
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut false,

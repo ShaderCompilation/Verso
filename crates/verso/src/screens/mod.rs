@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{Battery, Frontlight, Orientation, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, Orientation, RefreshMode, TextInput, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -60,6 +60,13 @@ pub trait Screen {
     fn allows_top_drawer(&self) -> bool {
         false
     }
+
+    /// The Top Drawer opened over this screen: close what it replaces (the
+    /// Reader Menu).
+    fn top_drawer_opened(&mut self) {}
+
+    /// The screen pushed over this one closed; this one is on top again.
+    fn on_return(&mut self, _cx: &mut EventCx) {}
 
     /// Draws the whole screen. Called whenever anything may have changed;
     /// only what actually changed reaches the display.
@@ -142,8 +149,6 @@ pub struct EventCx<'a> {
     /// The whole screen.
     pub screen: Rect,
     pub now: Instant,
-    pub frontlight: &'a mut Option<Frontlight>,
-    pub light_request: &'a mut Option<Frontlight>,
     /// The last battery reading (None: no battery, or unknown).
     pub battery: Option<Battery>,
     pub(crate) toast: &'a mut Option<Toast>,

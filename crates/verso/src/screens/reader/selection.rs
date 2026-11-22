@@ -290,8 +290,6 @@ mod tests {
             theme: &theme,
             screen: Rect::new(0, 0, 600, 800),
             now: std::time::Instant::now(),
-            frontlight: &mut None,
-            light_request: &mut None,
             toast: &mut None,
             forced: &mut Vec::new(),
             needs_redraw: &mut false,

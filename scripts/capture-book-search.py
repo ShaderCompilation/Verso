@@ -18,9 +18,9 @@ def main():
     books = OUT / 'books'
     books.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
-    opening = ['--tap', '1000,230', '--tap', '200,550']
+    opening = ['--tap', '636,1560', '--tap', '165,500']
     menu = [*opening, '--tap', '636,848']
-    search = [*menu, '--tap', '486,1601']
+    search = [*menu, '--tap', '948,77']
     results = [*search, '--text', 'ada', '--edit', 'submit']
     opened = [*results, '--swipe', '900,1000,300,1000', '--tap', '600,1000']
     passage = [*opening, '--hold-drag', '190,297,500,297']

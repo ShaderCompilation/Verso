@@ -17,19 +17,19 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'screenshots/page-layout'
 
-# Library → book → menu → Text → Page layout, per orientation.
+# Home → Library → book → menu → Text or Layout, per orientation.
 STEPS = {
     'portrait': {
-        'open': ['--tap', '1000,230', '--tap', '200,550'],
+        'open': ['--tap', '636,1560', '--tap', '165,500'],
         'menu': ['--tap', '636,848'],
-        'text': ['--tap', '1073,1601'],
-        'layout': ['--tap', '636,1570'],
+        'text': ['--tap', '782,1584'],
+        'layout': ['--tap', '1077,1584'],
     },
     'landscape': {
-        'open': ['--tap', '1373,230', '--tap', '240,700'],
+        'open': ['--tap', '848,1135', '--tap', '165,500'],
         'menu': ['--tap', '848,636'],
-        'text': ['--tap', '1452,1177'],
-        'layout': ['--tap', '848,1146'],
+        'text': ['--tap', '1047,1169'],
+        'layout': ['--tap', '1448,1169'],
     },
 }
 
@@ -69,7 +69,7 @@ def main():
     shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
     for orientation, s in STEPS.items():
         opened = [*s['open'], '--swipe', '1000,700,300,700']  # page 2: a chapter title and progress
-        layout = [*opened, *s['menu'], *s['text'], *s['layout']]
+        layout = [*opened, *s['menu'], *s['layout']]
         scenes = {
             'sheet': (None, [*opened, *s['menu'], *s['text']]),
             'picker': (None, [*layout, '--tap', CENTRE_SLOT[orientation]]),

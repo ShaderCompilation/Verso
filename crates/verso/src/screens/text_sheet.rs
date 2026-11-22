@@ -1,8 +1,7 @@
 //! Typography and font picker, with the page left visible above them.
 use crate::document::{FontFace, Typography};
 use crate::geom::Rect;
-use crate::gfx::{Family, HAlign, Icon};
-use crate::platform::RefreshMode;
+use crate::gfx::{Family, HAlign};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -12,7 +11,6 @@ use std::time::Instant;
 pub enum TextEvent {
     Close,
     Fonts,
-    Layout,
     Changed,
 }
 pub struct TextSheet {
@@ -20,18 +18,15 @@ pub struct TextSheet {
     rows: Vec<(Rect, &'static str)>,
     font: Rect,
     press: Press,
-    /// The whole "Page layout ›" row.
-    layout: Rect,
-    layout_press: Press,
     size: Stepper,
     spacing: Segmented,
     justify: Toggle,
 }
 impl TextSheet {
     pub fn new(t: &Theme, screen: Rect, typography: &Typography) -> Self {
-        let sheet = Sheet::open("Text", t.mm(75.5), screen, t);
+        let sheet = Sheet::open("Text", t.mm(64.0), screen, t);
         let top = sheet.content(t).y;
-        let rows: Vec<_> = ["Font", "Size", "Spacing", "Justify", "Page layout"]
+        let rows: Vec<_> = ["Font", "Size", "Spacing", "Justify"]
             .into_iter()
             .enumerate()
             .map(|(i, n)| (Rect::new(t.margin, top + i as i32 * t.mm(11.5), screen.w - 2 * t.margin, t.mm(11.5)), n))
@@ -49,18 +44,7 @@ impl TextSheet {
         spacing.place(control(2));
         let mut justify = Toggle::new(typography.justify);
         justify.place(screen.w - t.margin, rows[3].0.center().y, t);
-        let layout = Rect::new(0, rows[4].0.y, screen.w, rows[4].0.h);
-        let mut result = Self {
-            font: control(0),
-            sheet,
-            rows,
-            press: Press::default(),
-            layout,
-            layout_press: Press::default(),
-            size,
-            spacing,
-            justify,
-        };
+        let mut result = Self { font: control(0), sheet, rows, press: Press::default(), size, spacing, justify };
         result.sync(typography);
         result
     }
@@ -72,10 +56,6 @@ impl TextSheet {
     fn step(&mut self, step: Step, t: &mut Typography) {
         t.size_pt = (t.size_pt + if step == Step::Less { -1.0 } else { 1.0 }).clamp(6.0, 24.0);
         self.sync(t);
-    }
-    #[cfg(test)]
-    pub fn layout_row(&self) -> Rect {
-        self.layout
     }
     pub fn deadline(&self) -> Option<Instant> {
         self.size.deadline()
@@ -95,9 +75,6 @@ impl TextSheet {
         if let Some(PressEvent::Tap) = self.press.on_gesture(g, self.font) {
             return Some(TextEvent::Fonts);
         }
-        if let Some(PressEvent::Tap) = self.layout_press.on_gesture(g, self.layout) {
-            return Some(TextEvent::Layout);
-        }
         let before = t.clone();
         if let Some(step) = self.size.on_gesture(g) {
             self.step(step, t);
@@ -113,18 +90,9 @@ impl TextSheet {
     pub fn draw(&self, cx: &mut DrawCx, t: &Typography) {
         self.sheet.draw(cx);
         let theme = cx.theme;
-        let layout_down = self.layout_press.is_down();
-        if layout_down {
-            cx.fill(self.layout, INK);
-            cx.hint(self.layout, RefreshMode::Fast);
-        }
         for (r, label) in &self.rows {
-            let gray = if layout_down && r.y == self.layout.y { PAPER } else { INK };
-            cx.line(label, theme.body.gray(gray), *r, HAlign::Left);
+            cx.line(label, theme.body, *r, HAlign::Left);
         }
-        let (row, _) = self.rows[4];
-        let chevron = Rect::new(row.right() - theme.icon_small + theme.mm(0.6), row.y, theme.icon_small, row.h);
-        cx.icon(Icon::ChevronRight, chevron, theme.icon_small, if layout_down { PAPER } else { INK2 });
         let color = if self.press.is_down() {
             cx.fill(self.font, INK);
             PAPER
@@ -227,5 +195,22 @@ impl FontList {
             return Some(FontEvent::Chosen(self.fonts[i].name.clone()));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_sheet_holds_only_the_four_typography_rows() {
+        let t = Theme::for_dpi(300);
+        for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
+            let sheet = TextSheet::new(&t, screen, &Typography::default());
+            let labels: Vec<_> = sheet.rows.iter().map(|(_, label)| *label).collect();
+            assert_eq!(labels, ["Font", "Size", "Spacing", "Justify"]);
+            assert!(sheet.rows[0].0.y >= screen.bottom() - t.mm(64.0), "{screen:?}");
+            assert!(sheet.rows[3].0.bottom() <= screen.bottom(), "{screen:?}");
+        }
     }
 }

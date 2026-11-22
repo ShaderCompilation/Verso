@@ -109,6 +109,10 @@ impl Refresh {
     pub fn new(every: u32) -> Self {
         Self { since_flash: 0, every }
     }
+    /// A new full-refresh interval (0: only images and chapter starts).
+    pub fn set_every(&mut self, every: u32) {
+        self.every = every;
+    }
     pub fn turn(&mut self, image: bool, chapter_start: bool) -> RefreshMode {
         self.since_flash += 1;
         if image || chapter_start || self.every > 0 && self.since_flash >= self.every {
