@@ -172,6 +172,25 @@ impl ReaderMenu {
         self.text.draw(cx);
         self.layout.draw(cx);
     }
+    /// Snapshot of visible control state that `on_gesture` can change without
+    /// returning an event (pressed buttons or scrubbed slider position).
+    pub fn visual_state(&self) -> ([bool; 9], u32) {
+        (
+            [
+                self.top.is_pressed(),
+                self.search.is_pressed(),
+                self.light.is_pressed(),
+                self.prev.is_pressed(),
+                self.next.is_pressed(),
+                self.contents.is_pressed(),
+                self.highlights.is_pressed(),
+                self.text.is_pressed(),
+                self.layout.is_pressed(),
+            ],
+            self.progress.value.to_bits(),
+        )
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture, pages_ready: bool) -> Option<MenuEvent> {
         if let Gesture::Down(p) = g {
             self.outside = !self.panel.contains(*p) && !self.top_panel.contains(*p);

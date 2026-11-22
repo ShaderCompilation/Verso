@@ -308,6 +308,17 @@ impl Keyboard {
         self.rect
     }
 
+    /// Snapshot of visible state that gestures can change without returning text input.
+    pub fn visual_state(&self) -> (bool, usize, bool, u8, Option<usize>) {
+        let shift = match self.shift {
+            Shift::Off => 0,
+            Shift::Once => 1,
+            Shift::Locked => 2,
+        };
+        let pressed = self.keys.iter().position(|k| k.press.is_down());
+        (self.visible, self.language, self.symbols, shift, pressed)
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture, t: &Theme) -> Option<TextInput> {
         self.on_gesture_at(g, t, Instant::now())
     }

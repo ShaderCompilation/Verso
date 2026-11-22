@@ -246,6 +246,19 @@ impl LayoutView {
         self.picker = Some(Picker { bar, slot, menu });
     }
 
+    #[allow(clippy::type_complexity)]
+    pub fn visual_state(
+        &self,
+    ) -> (Option<(usize, usize, Option<usize>)>, bool, Option<(usize, usize)>, PageLayout, [Option<Step>; 3]) {
+        (
+            self.picker.as_ref().map(|p| (p.bar, p.slot, p.menu.is_pressed())),
+            self.top_bar.is_pressed(),
+            self.pressed,
+            self.layout.clone(),
+            [self.margins[0].pressed(), self.margins[1].pressed(), self.margins[2].pressed()],
+        )
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture, t: &Theme, data: &BarData) -> Option<LayoutEvent> {
         if let Some(picker) = &mut self.picker {
             match picker.menu.on_gesture(g, t) {

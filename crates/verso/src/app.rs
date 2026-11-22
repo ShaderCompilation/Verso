@@ -290,7 +290,31 @@ impl App {
             return Vec::new();
         }
         self.needs_redraw = false;
-        let started = Instant::now();
+
+        let mut forced = std::mem::take(&mut self.forced);
+        if !self.touch_down {
+            forced.extend(self.fast_debt.drain(..).map(|rect| Update { rect, mode: RefreshMode::Ui }));
+        }
+        let bounds = self.canvas.bounds();
+        // Check before drawing whether forced refreshes already guarantee a
+        // full-screen bypass. DrawCx::hint only emits Fast or Ui, so any
+        // full-screen forced refresh >= Ui with no stronger local forced rect
+        // skips diffing and does not need diff.prev materialized beforehand.
+        let bypass_mode = forced
+            .iter()
+            .filter(|u| u.rect == bounds)
+            .map(|u| u.mode)
+            .max()
+            .filter(|&mode| mode >= RefreshMode::Ui && forced.iter().all(|u| u.mode <= mode));
+        let sync_time = if bypass_mode.is_none() {
+            let sync_started = Instant::now();
+            self.diff.sync_baseline(&self.canvas);
+            sync_started.elapsed()
+        } else {
+            Duration::ZERO
+        };
+
+        let draw_started = Instant::now();
         if !self.stack.last().is_some_and(|s| s.fills_canvas()) {
             self.canvas.fill(PAPER);
         }
@@ -317,21 +341,16 @@ impl App {
                 self.toast_rect = toast.draw(&mut cx);
             }
         }
-        let drawn = started.elapsed();
+        let drawn = draw_started.elapsed();
 
-        let mut forced = std::mem::take(&mut self.forced);
-        if !self.touch_down {
-            forced.extend(self.fast_debt.drain(..).map(|rect| Update { rect, mode: RefreshMode::Ui }));
-        }
+        let diff_started = Instant::now();
         // A known full-screen refresh already covers all changed pixels. Keep
-        // its strongest mode (including wake/periodic flashes) and synchronize
-        // the baseline without expanding grayscale pages or comparing tiles.
-        let full_mode = forced.iter().filter(|u| u.rect == self.canvas.bounds()).map(|u| u.mode).max();
-        let updates = if let Some(mode) =
-            full_mode.filter(|&mode| mode >= RefreshMode::Ui && hints.iter().chain(&forced).all(|u| u.mode <= mode))
-        {
-            self.diff.commit_full(&self.canvas);
-            vec![Update { rect: self.canvas.bounds(), mode }]
+        // its strongest mode (including wake/periodic flashes) and defer the
+        // baseline copy until a partial frame actually needs to diff.
+        let updates = if let Some(mode) = bypass_mode {
+            let strongest = hints.iter().map(|u| u.mode).max().unwrap_or(mode).max(mode);
+            self.diff.mark_canvas_as_baseline();
+            vec![Update { rect: bounds, mode: strongest }]
         } else {
             // Pixels covered by a forced Full refresh will be sent to the panel
             // with the strongest mode anyway: tile diffing neither reads them
@@ -339,20 +358,17 @@ impl App {
             // redundant Ui update along unaligned edges of the forced rect.
             let full: Vec<Rect> = forced.iter().filter(|u| u.mode == RefreshMode::Full).map(|u| u.rect).collect();
             let tiles = self.diff.changed_outside(&self.canvas, &full);
-            let updates = damage::plan(&tiles, self.canvas.bounds(), &hints, RefreshMode::Ui, &forced);
+            let updates = damage::plan(&tiles, bounds, &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
             updates
         };
+        let diffed = sync_time + diff_started.elapsed();
         for u in updates.iter().filter(|u| u.mode == RefreshMode::Fast) {
             if !self.fast_debt.iter().any(|d| d.union(&u.rect) == *d) {
                 self.fast_debt.push(u.rect);
             }
         }
-        log::trace!(
-            "frame: drawn in {drawn:?}, diffed in {:?}, {} update(s)",
-            started.elapsed() - drawn,
-            updates.len()
-        );
+        log::trace!("frame: drawn in {drawn:?}, diffed in {diffed:?}, {} update(s)", updates.len());
         updates
     }
 
@@ -499,9 +515,11 @@ impl App {
 
     fn drawer_gesture(&mut self, g: Gesture) {
         let Some(drawer) = &mut self.drawer else { return };
+        let before = drawer.visual_state();
         let event = drawer.on_gesture(&g);
-        // Pressed tiles and sliders change as the finger moves.
-        self.needs_redraw = true;
+        if event.is_some() || drawer.visual_state() != before {
+            self.needs_redraw = true;
+        }
         let Some(event) = event else { return };
         let bounds = self.canvas.bounds();
         match event {
@@ -690,7 +708,6 @@ impl App {
             }
         }
         if self.stack.last().and_then(|s| s.deadline()).is_some_and(|d| now >= d) {
-            self.needs_redraw = true;
             self.with_screen(|screen, cx| screen.on_tick(cx));
         }
     }
@@ -800,6 +817,7 @@ impl App {
         self.canvas.fill(PAPER);
         let bounds = self.canvas.bounds();
         cover.blit(&mut self.canvas, bounds);
+        self.diff.mark_canvas_as_baseline();
         true
     }
 
@@ -1094,11 +1112,95 @@ mod tests {
         app.forced.push(Update { rect: bounds, mode: RefreshMode::Full });
         app.forced.push(Update { rect: Rect::new(0, 0, 16, 16), mode: RefreshMode::Ui });
         assert_eq!(app.frame(), vec![Update { rect: bounds, mode: RefreshMode::Full }]);
-        assert!(!app.diff.changed(&app.canvas).any());
+        assert!(app.diff.is_baseline_deferred());
         app.refresh_all(RefreshMode::Page);
         let local = Update { rect: Rect::new(0, 0, 16, 16), mode: RefreshMode::Full };
         app.forced.push(local);
         assert_eq!(app.frame(), vec![Update { rect: bounds, mode: RefreshMode::Page }, local]);
+        assert!(!app.diff.is_baseline_deferred());
+        assert!(!app.diff.changed(&app.canvas).any());
+    }
+
+    #[test]
+    fn back_to_back_full_screen_frames_defer_baseline_until_partial_frame() {
+        struct PageScreen {
+            bg: Rc<Cell<u8>>,
+            dot: Rc<Cell<bool>>,
+        }
+        impl Screen for PageScreen {
+            fn fills_canvas(&self) -> bool {
+                true
+            }
+            fn draw(&mut self, cx: &mut DrawCx) {
+                cx.canvas.fill(self.bg.get());
+                if self.dot.get() {
+                    cx.fill(Rect::new(20, 20, 4, 4), 0);
+                }
+            }
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+        }
+        let bg = Rc::new(Cell::new(240u8));
+        let dot = Rc::new(Cell::new(false));
+        let info =
+            DeviceInfo { name: "test".into(), width: 160, height: 96, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(PageScreen { bg: bg.clone(), dot: dot.clone() }));
+        let initial_copies = app.diff.full_copies();
+        // Multiple full-screen Page/Full frames copy `prev` 0 times.
+        for (value, mode) in [(220, RefreshMode::Page), (200, RefreshMode::Page), (180, RefreshMode::Full)] {
+            bg.set(value);
+            app.refresh_all(mode);
+            assert_eq!(app.frame(), vec![Update { rect: app.canvas.bounds(), mode }]);
+            assert!(app.diff.is_baseline_deferred());
+        }
+        assert_eq!(app.diff.full_copies(), initial_copies, "back-to-back full frames never copy prev");
+        // A partial frame right after syncs once and diffs accurately against bg = 180.
+        dot.set(true);
+        app.needs_redraw = true;
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(16, 16, 16, 16), mode: RefreshMode::Ui }]);
+        assert!(!app.diff.is_baseline_deferred());
+        assert_eq!(app.diff.full_copies(), initial_copies + 1);
+        // Removing the dot diffs accurately back to bg = 180.
+        dot.set(false);
+        app.needs_redraw = true;
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(16, 16, 16, 16), mode: RefreshMode::Ui }]);
+        assert_eq!(app.diff.full_copies(), initial_copies + 1);
+    }
+
+    #[test]
+    fn non_visual_on_tick_does_not_schedule_a_redraw() {
+        let ticks = Rc::new(Cell::new(0));
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
+        let screen = TimedScreen { ticks: ticks.clone(), backgrounds: Rc::new(Cell::new(0)), due: Instant::now() };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(screen));
+        app.frame();
+        assert!(!app.needs_redraw);
+        app.on_tick(Instant::now());
+        assert_eq!(ticks.get(), 1);
+        assert!(!app.needs_redraw, "non-visual tick must not redraw");
+        assert!(app.frame().is_empty());
+    }
+
+    #[test]
+    fn drawer_ignores_noop_gestures_but_keeps_press_and_cancel_feedback() {
+        use top_drawer::Tile;
+        let mut d = drawer_app(true, true);
+        tap(&mut d.app, Point::new(300, 600));
+        d.app.frame();
+        // Down outside the drawer changes nothing visually.
+        d.app.on_gesture(Gesture::Down(Point::new(300, 780)));
+        assert!(!d.app.needs_redraw);
+        assert!(d.app.frame().is_empty());
+        // Down on a tile shows immediate Fast pressed feedback; Cancel clears it.
+        let p = tile(&d.app, Tile::Refresh);
+        d.app.on_gesture(Gesture::Down(p));
+        assert!(d.app.needs_redraw);
+        assert!(d.app.frame().iter().any(|u| u.mode == RefreshMode::Fast));
+        d.app.on_gesture(Gesture::Cancel(p));
+        assert!(d.app.needs_redraw);
+        assert!(d.app.frame().iter().any(|u| u.mode == RefreshMode::Ui));
     }
 
     #[test]

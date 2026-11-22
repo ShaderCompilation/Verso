@@ -873,10 +873,15 @@ impl Lookup {
     }
     /// All gestures are consumed by the reader while this overlay is open.
     pub fn on_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Option<LookupEvent> {
+        let was_outside = !self.keyboard.visible && !self.sheet.rect().contains(g.pos());
         self.place(cx.theme);
         let event = self.gesture(g, cx);
         // Closing the picker or the keyboard, or expanding, moves the rows.
         self.place(cx.theme);
+        if event.is_some() || !(was_outside && matches!(g, Gesture::Down(_) | Gesture::Move(_) | Gesture::LongPress(_)))
+        {
+            cx.redraw();
+        }
         event
     }
     fn gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Option<LookupEvent> {
@@ -1354,6 +1359,9 @@ impl SelectionActions {
     }
     fn radius(t: &Theme) -> f32 {
         t.mm(2.2) as f32
+    }
+    pub fn visual_state(&self) -> Option<usize> {
+        self.pressed.filter(|_| self.press.is_down())
     }
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<SelectionAction> {
         if let Gesture::Down(p) = *g {

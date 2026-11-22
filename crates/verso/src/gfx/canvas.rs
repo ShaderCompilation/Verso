@@ -251,9 +251,36 @@ impl Canvas {
     }
 
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
-        if let Some(path) = rounded_rect_path(rect, radius) {
-            self.draw_path(&path, None, gray, Some(radius));
+        if rect.w <= 0 || rect.h <= 0 {
+            return;
         }
+        let rad = radius.min(rect.w as f32 / 2.0).min(rect.h as f32 / 2.0).max(0.0);
+        if rad == 0.0 {
+            self.fill_rect(rect, gray);
+            return;
+        }
+        let Some(path) = rounded_rect_path(rect, radius) else { return };
+        if !matches!(self.pixels, Pixels::Gray(_)) {
+            self.draw_path(&path, None, gray, Some(radius));
+            return;
+        }
+        // Integer-coordinate rounded fills have exact pixel-aligned straight
+        // sides between the two corner bands. Fill the straight middle directly
+        // with `fill_rect` and only rasterize the top and bottom corner bands
+        // through tiny-skia (with a 1 px outset + 2 px margin matching draw_path).
+        let bounds = Rect::new(rect.x - 1, rect.y - 1, rect.w + 2, rect.h + 2);
+        let Some(area) = bounds.intersect(&self.bounds()) else { return };
+        let top_end = ((rect.y as f32 + rad + 3.0).ceil() as i32).clamp(area.y, area.bottom());
+        let bottom_start = ((rect.bottom() as f32 - rad - 3.0).floor() as i32).clamp(area.y, area.bottom());
+        if top_end >= bottom_start {
+            self.draw_path(&path, None, gray, Some(radius));
+            return;
+        }
+        self.fill_rect(Rect::new(rect.x, top_end, rect.w, bottom_start - top_end), gray);
+        let paint = paint(gray);
+        self.rasterize_path(Rect::new(area.x, area.y, area.w, top_end - area.y), &path, None, &paint);
+        self.rasterize_path(Rect::new(area.x, bottom_start, area.w, area.bottom() - bottom_start), &path, None, &paint);
+        self.trim_shape_rgba();
     }
 
     /// Strokes the outline *inside* `rect`, so it never spills outside it.
@@ -964,6 +991,59 @@ mod tests {
                 .map(|(idx, (a, b))| (idx % w as usize, idx / w as usize, *a, *b))
                 .collect();
             assert!(mismatches.is_empty(), "case {i} ({rect:?}, r={radius}, w={width}): {mismatches:?}");
+        }
+    }
+
+    #[test]
+    fn fill_rounded_rect_matches_full_tiny_skia_pixel_for_pixel() {
+        let cases: &[(u32, u32, Rect, f32, u8)] = &[
+            // Square corners
+            (400, 500, Rect::new(20, 30, 210, 315), 0.0, 0),
+            (400, 500, Rect::new(-15, -10, 120, 140), 0.0, 51),
+            (400, 500, Rect::new(340, 440, 120, 140), 0.0, 255),
+            // Odd widths/heights and fractional radii
+            (371, 289, Rect::new(5, 3, 359, 279), 17.3, 119),
+            (371, 289, Rect::new(7, 11, 101, 213), 12.5, 0),
+            (371, 289, Rect::new(13, 17, 351, 53), 26.5, 34), // wide pill
+            (371, 289, Rect::new(13, 17, 53, 251), 26.5, 204), // tall pill
+            (371, 289, Rect::new(13, 17, 41, 41), 25.0, 68),  // clamped radius
+            (371, 289, Rect::new(10, 10, 1, 1), 5.0, 0),      // 1x1
+            (371, 289, Rect::new(10, 10, 0, 50), 10.0, 0),    // empty
+            // Clipped sheets / TopDrawer / ReaderMenu top bar (corners off-screen)
+            (400, 500, Rect::new(-4, -70, 408, 260), 35.0, 255), // top drawer / reader top panel
+            (400, 500, Rect::new(-70, 220, 540, 350), 35.0, 255), // bottom sheet
+            (400, 500, Rect::new(-11, -9, 150, 180), 18.0, 17),  // clipped top-left
+            (400, 500, Rect::new(325, 410, 150, 180), 18.0, 85), // clipped bottom-right
+            (400, 500, Rect::new(500, 500, 100, 100), 18.0, 0),  // completely off-screen
+            // Full Kindle screen coordinates (ReaderMenu top bar, sheets, lookup card)
+            (1272, 1696, Rect::new(-4, -70, 1280, 245), 35.0, 255),
+            (1272, 1696, Rect::new(-70, 896, 1412, 870), 35.0, 255),
+            (1272, 1696, Rect::new(59, 200, 1154, 1300), 35.0, 240),
+        ];
+        for (i, &(w, h, rect, radius, gray)) in cases.iter().enumerate() {
+            let page: Vec<u8> = (0..w as usize * h as usize).map(|k| ((k * 37 + i * 13) % 256) as u8).collect();
+            let mut canvas = Canvas::new(w, h);
+            canvas.set_gray(&page);
+            canvas.fill_rounded_rect(rect, radius, gray);
+
+            let mut rgba = tiny_skia::Pixmap::new(w, h).unwrap();
+            for (px, &g) in rgba.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(&page) {
+                *px = [g, g, g, 255];
+            }
+            if let Some(path) = rounded_rect_path(rect, radius) {
+                rgba.fill_path(&path, &paint(gray), FillRule::Winding, Transform::identity(), None);
+            }
+            let expected: Vec<u8> = rgba.pixels().iter().map(|p| p.red()).collect();
+            let mismatches: Vec<_> = canvas
+                .gray_data()
+                .iter()
+                .zip(&expected)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .take(5)
+                .map(|(idx, (a, b))| (idx % w as usize, idx / w as usize, *a, *b))
+                .collect();
+            assert!(mismatches.is_empty(), "case {i} ({rect:?}, r={radius}): {mismatches:?}");
         }
     }
 

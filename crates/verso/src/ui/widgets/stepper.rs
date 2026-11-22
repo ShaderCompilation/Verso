@@ -62,6 +62,10 @@ impl Stepper {
         self.rect
     }
 
+    pub fn pressed(&self) -> Option<Step> {
+        self.pressed
+    }
+
     /// The smaller side, the value and the larger side.
     #[cfg(test)]
     pub fn parts(&self) -> (Rect, Rect, Rect) {

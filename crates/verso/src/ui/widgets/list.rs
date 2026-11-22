@@ -216,6 +216,11 @@ impl List {
         self.pressed.is_some_and(|(i, _)| i == index) && self.press.is_down()
     }
 
+    /// Snapshot of visible state that gestures can change without emitting an event.
+    pub fn visual_state(&self) -> (usize, Option<usize>, bool) {
+        (self.page, self.pressed.map(|(i, _)| i), self.press.is_down())
+    }
+
     fn pressed_part(&self, index: usize) -> Option<Part> {
         self.pressed.filter(|(i, _)| *i == index && self.press.is_down()).map(|(_, part)| part)
     }

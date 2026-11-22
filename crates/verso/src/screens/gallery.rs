@@ -418,9 +418,12 @@ impl Screen for Gallery {
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
         if let Some(step) = self.stepper.on_tick(cx.now) {
             self.step_size(step);
+            cx.redraw();
         }
-        if let Some(sheet) = &mut self.sheet {
-            sheet.on_tick(cx.now);
+        if let Some(sheet) = &mut self.sheet
+            && sheet.on_tick(cx.now)
+        {
+            cx.redraw();
         }
         Action::None
     }
@@ -496,9 +499,12 @@ impl TextSheet {
         false
     }
 
-    fn on_tick(&mut self, now: std::time::Instant) {
+    fn on_tick(&mut self, now: std::time::Instant) -> bool {
         if let Some(step) = self.size.on_tick(now) {
             self.step(step);
+            true
+        } else {
+            false
         }
     }
 

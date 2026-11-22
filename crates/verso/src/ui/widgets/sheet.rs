@@ -61,6 +61,10 @@ impl Sheet {
         self.rect
     }
 
+    pub fn is_pressed(&self) -> bool {
+        self.close.as_ref().is_some_and(IconButton::is_pressed)
+    }
+
     /// Where the sheet's contents go: below the title row, if there is one.
     pub fn content(&self, theme: &Theme) -> Rect {
         let header = if self.close.is_some() { theme.mm(13.0) } else { 0 };

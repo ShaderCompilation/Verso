@@ -89,6 +89,17 @@ impl Pager {
         self.rect
     }
 
+    /// Snapshot of visible state that gestures can change without emitting an event.
+    pub fn visual_state(&self) -> (usize, usize, bool, bool, bool) {
+        (
+            self.page,
+            self.pages,
+            self.prev.is_pressed(),
+            self.next.is_pressed(),
+            self.jump && self.counter_press.is_down(),
+        )
+    }
+
     pub fn set(&mut self, page: usize, pages: usize) {
         self.pages = pages.max(1);
         self.page = page.min(self.pages - 1);

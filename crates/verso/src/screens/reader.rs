@@ -69,6 +69,9 @@ pub struct Reader {
     settings_seen: u64,
     error: Option<String>,
     opened_at: Option<Instant>,
+    /// Grace period before painting `"Opening book…"` so cached books land
+    /// straight on their first page without flashing white.
+    opening_notice_at: Option<Instant>,
     selection: SelectionState,
     dictionary: Option<Rc<crate::dictionary::worker::Worker>>,
     /// The EPUB language tag from the library metadata.
@@ -137,6 +140,9 @@ const HIGHLIGHT_ID: u64 = 1 << 63;
 /// How long after a book's first page the dictionaries' indexes open in the
 /// background: past the first page's neighbours and the chapter offsets.
 const DICTIONARY_PREPARE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// Delay before showing `"Opening book…"` so cached books land directly on
+/// their first page without an intermediate white screen.
+const OPENING_NOTICE_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 enum Overlay {
     None,
     Menu(Box<ReaderMenu>),
@@ -197,6 +203,7 @@ impl Reader {
             settings_save_pending: false,
             error: None,
             opened_at: Some(Instant::now()),
+            opening_notice_at: Some(Instant::now() + OPENING_NOTICE_DELAY),
             selection: SelectionState::default(),
             dictionary: None,
             language_tag: String::new(),
@@ -436,6 +443,7 @@ impl Reader {
             Reply::Error { generation, message } if generation == 0 || generation == self.cache.generation => {
                 log::error!("{message}");
                 self.error = Some(message.clone());
+                self.opening_notice_at = None;
                 self.laying_out = false;
                 self.layout_at = None;
                 self.pending_position = None;
@@ -444,6 +452,9 @@ impl Reader {
                 self.turn_pending = false;
                 self.pending_turn = false;
                 self.target = self.shown.as_ref().map_or(0, |p| p.number);
+                if self.shown.is_none() {
+                    cx.refresh(self.screen, RefreshMode::Ui);
+                }
                 cx.toast(message, None);
             }
             _ => {}
@@ -504,6 +515,7 @@ impl Reader {
             return;
         }
         self.laying_out = false;
+        self.opening_notice_at = None;
         let previous = self.shown.as_ref().map(|p| p.number);
         let turn = match previous {
             Some(n) if std::mem::take(&mut self.bars.stepping) && !layout_changed => {
@@ -1266,14 +1278,10 @@ impl Reader {
             self.selection_released(cx);
             return Action::None;
         }
-        if !matches!(self.overlay, Overlay::None) {
-            // Overlay handlers can change pressed state or slider position
-            // without returning an action. Keep immediate control feedback.
-            cx.redraw();
-        }
         match &mut self.overlay {
             Overlay::Lookup(lookup) => {
                 if let Some(event) = lookup.on_gesture(&g, cx) {
+                    cx.redraw();
                     if let LookupEvent::Set(set) = &event {
                         let result = self.flush_position().and_then(|()| {
                             let mut state = self.store.book(&self.id);
@@ -1317,139 +1325,192 @@ impl Reader {
                     }
                 }
             }
-            Overlay::SelectionActions(actions) => match actions.on_gesture(&g) {
-                Some(SelectionAction::Highlight) => self.save_highlight(cx),
-                Some(SelectionAction::Note) => self.note_selection(cx),
-                Some(SelectionAction::Extend) => {
-                    self.selection.extend();
-                    self.extension = Some(annotations::ExtendBar::new(cx.theme, self.screen));
-                    self.overlay = Overlay::None;
+            Overlay::SelectionActions(actions) => {
+                let before = actions.visual_state();
+                let event = actions.on_gesture(&g);
+                if event.is_some() || actions.visual_state() != before {
+                    cx.redraw();
                 }
-                Some(SelectionAction::Dictionary) => {
-                    if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
-                        self.lookup(&query, cx);
+                match event {
+                    Some(SelectionAction::Highlight) => self.save_highlight(cx),
+                    Some(SelectionAction::Note) => self.note_selection(cx),
+                    Some(SelectionAction::Extend) => {
+                        self.selection.extend();
+                        self.extension = Some(annotations::ExtendBar::new(cx.theme, self.screen));
+                        self.overlay = Overlay::None;
                     }
+                    Some(SelectionAction::Dictionary) => {
+                        if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
+                            self.lookup(&query, cx);
+                        }
+                    }
+                    Some(SelectionAction::Search) => {
+                        let query = self.selection.selected.as_ref().map(|s| s.text.clone());
+                        self.open_search(query.as_deref(), cx);
+                    }
+                    Some(SelectionAction::Dismiss) => {
+                        self.overlay = Overlay::None;
+                        self.selection.clear();
+                    }
+                    None => {}
                 }
-                Some(SelectionAction::Search) => {
-                    let query = self.selection.selected.as_ref().map(|s| s.text.clone());
-                    self.open_search(query.as_deref(), cx);
-                }
-                Some(SelectionAction::Dismiss) => {
-                    self.overlay = Overlay::None;
-                    self.selection.clear();
-                }
-                None => {}
-            },
+            }
             Overlay::Highlights(view) => {
+                cx.redraw();
                 if let Some(event) = view.gesture(&g, &self.annotations, cx.theme) {
                     self.annotation_event(event, cx);
                 }
             }
             Overlay::Search(view) => {
-                if let Some(event) = view.on_gesture(&g, &mut self.search, cx.theme) {
+                let before = view.visual_state();
+                let event = view.on_gesture(&g, &mut self.search, cx.theme);
+                if event.is_some() || view.visual_state() != before {
+                    cx.redraw();
+                }
+                if let Some(event) = event {
                     self.on_search(event, cx);
                 }
             }
-            Overlay::Menu(menu) => match menu.on_gesture(&g, !self.laying_out && self.layout_at.is_none()) {
-                Some(MenuEvent::Books) => {
-                    return match self.close() {
-                        Ok(()) => Action::Pop,
-                        Err(e) => {
-                            cx.toast(e.to_string(), None);
-                            Action::None
-                        }
-                    };
+            Overlay::Menu(menu) => {
+                let before = menu.visual_state();
+                let event = menu.on_gesture(&g, !self.laying_out && self.layout_at.is_none());
+                if event.is_some() || menu.visual_state() != before {
+                    cx.redraw();
                 }
-                Some(MenuEvent::Close) => self.overlay = Overlay::None,
-                Some(MenuEvent::Contents) => {
-                    self.overlay = Overlay::Contents(Box::new(Contents::new(
-                        cx.theme,
-                        self.screen,
-                        &self.toc,
-                        self.target,
-                        self.pages == 0,
-                    )))
-                }
-                Some(MenuEvent::Search) => self.open_search(None, cx),
-                Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
-                Some(MenuEvent::Text) => self.text(cx.theme),
-                Some(MenuEvent::Layout) => {
-                    self.overlay = Overlay::Layout(Box::new(LayoutView::new(
-                        cx.theme,
-                        self.screen,
-                        &self.settings.page_layout,
-                        &self.settings.typography,
-                    )))
-                }
-                Some(MenuEvent::QuickSettings) => {
-                    self.overlay = Overlay::None;
-                    return Action::OpenTopDrawer;
-                }
-                Some(MenuEvent::Page(page)) => {
-                    let origin = self.back.take().or_else(|| self.here());
-                    self.go(page, cx);
-                    self.back = origin;
-                }
-                Some(MenuEvent::Chapter(delta)) => {
-                    let chapter = if delta > 0 {
-                        self.toc.iter().find(|c| c.level <= 2 && c.page > self.target)
-                    } else {
-                        self.toc.iter().rev().find(|c| c.level <= 2 && c.page < self.target)
-                    };
-                    if let Some(c) = chapter {
-                        let (page, position) = (c.page, c.position.clone());
-                        self.jump_away(Some(page), position, cx);
+                match event {
+                    Some(MenuEvent::Books) => {
+                        return match self.close() {
+                            Ok(()) => Action::Pop,
+                            Err(e) => {
+                                cx.toast(e.to_string(), None);
+                                Action::None
+                            }
+                        };
                     }
+                    Some(MenuEvent::Close) => self.overlay = Overlay::None,
+                    Some(MenuEvent::Contents) => {
+                        self.overlay = Overlay::Contents(Box::new(Contents::new(
+                            cx.theme,
+                            self.screen,
+                            &self.toc,
+                            self.target,
+                            self.pages == 0,
+                        )))
+                    }
+                    Some(MenuEvent::Search) => self.open_search(None, cx),
+                    Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
+                    Some(MenuEvent::Text) => self.text(cx.theme),
+                    Some(MenuEvent::Layout) => {
+                        self.overlay = Overlay::Layout(Box::new(LayoutView::new(
+                            cx.theme,
+                            self.screen,
+                            &self.settings.page_layout,
+                            &self.settings.typography,
+                        )))
+                    }
+                    Some(MenuEvent::QuickSettings) => {
+                        self.overlay = Overlay::None;
+                        return Action::OpenTopDrawer;
+                    }
+                    Some(MenuEvent::Page(page)) => {
+                        let origin = self.back.take().or_else(|| self.here());
+                        self.go(page, cx);
+                        self.back = origin;
+                    }
+                    Some(MenuEvent::Chapter(delta)) => {
+                        let chapter = if delta > 0 {
+                            self.toc.iter().find(|c| c.level <= 2 && c.page > self.target)
+                        } else {
+                            self.toc.iter().rev().find(|c| c.level <= 2 && c.page < self.target)
+                        };
+                        if let Some(c) = chapter {
+                            let (page, position) = (c.page, c.position.clone());
+                            self.jump_away(Some(page), position, cx);
+                        }
+                    }
+                    None => {}
                 }
-                None => {}
-            },
-            Overlay::Text(sheet) => match sheet.on_gesture(&g, &mut self.settings.typography) {
-                Some(TextEvent::Close) => self.overlay = Overlay::None,
-                Some(TextEvent::Fonts) => {
-                    self.overlay = Overlay::Fonts(Box::new(FontList::new(
-                        cx.theme,
-                        self.screen,
-                        &self.fonts,
-                        self.metadata.publisher_fonts,
-                        &self.settings.typography.font,
-                    )))
+            }
+            Overlay::Text(sheet) => {
+                let before = sheet.visual_state();
+                let event = sheet.on_gesture(&g, &mut self.settings.typography);
+                if event.is_some() || sheet.visual_state() != before {
+                    cx.redraw();
                 }
-                Some(TextEvent::Changed) => self.changed(),
-                None => {}
-            },
+                match event {
+                    Some(TextEvent::Close) => self.overlay = Overlay::None,
+                    Some(TextEvent::Fonts) => {
+                        self.overlay = Overlay::Fonts(Box::new(FontList::new(
+                            cx.theme,
+                            self.screen,
+                            &self.fonts,
+                            self.metadata.publisher_fonts,
+                            &self.settings.typography.font,
+                        )))
+                    }
+                    Some(TextEvent::Changed) => self.changed(),
+                    None => {}
+                }
+            }
             Overlay::Layout(view) => {
                 let data =
                     bar_data(&self.toc, &self.metadata, self.shown.as_deref(), self.target, self.pages, &self.bars);
-                if let Some(LayoutEvent::Close) = view.on_gesture(&g, cx.theme, &data) {
+                let before = view.visual_state();
+                let event = view.on_gesture(&g, cx.theme, &data);
+                if event.is_some() || view.visual_state() != before {
+                    cx.redraw();
+                }
+                if let Some(LayoutEvent::Close) = event {
                     // Back to reading, with the new layout.
                     self.leave_layout();
                 }
             }
-            Overlay::Fonts(fonts) => match fonts.on_gesture(&g) {
-                Some(FontEvent::Close) => self.text(cx.theme),
-                Some(FontEvent::Chosen(name)) => {
-                    self.settings.typography.font = name;
-                    self.changed();
-                    self.text(cx.theme);
+            Overlay::Fonts(fonts) => {
+                let before = fonts.visual_state();
+                let event = fonts.on_gesture(&g);
+                if event.is_some() || fonts.visual_state() != before {
+                    cx.redraw();
                 }
-                None => {}
-            },
-            Overlay::Footnote(note) => match note.on_gesture(&g) {
-                Some(FootnoteEvent::Close) => self.overlay = Overlay::None,
-                Some(FootnoteEvent::GoTo(position)) => {
-                    self.overlay = Overlay::None;
-                    self.jump_away(None, position, cx);
+                match event {
+                    Some(FontEvent::Close) => self.text(cx.theme),
+                    Some(FontEvent::Chosen(name)) => {
+                        self.settings.typography.font = name;
+                        self.changed();
+                        self.text(cx.theme);
+                    }
+                    None => {}
                 }
-                None => {}
-            },
-            Overlay::Contents(contents) => match contents.on_gesture(&g) {
-                Some(ContentsEvent::Close) => self.menu(cx),
-                Some(ContentsEvent::Position(position)) => {
-                    self.overlay = Overlay::None;
-                    self.jump_away(None, position, cx);
+            }
+            Overlay::Footnote(note) => {
+                let before = note.visual_state();
+                let event = note.on_gesture(&g);
+                if event.is_some() || note.visual_state() != before {
+                    cx.redraw();
                 }
-                None => {}
-            },
+                match event {
+                    Some(FootnoteEvent::Close) => self.overlay = Overlay::None,
+                    Some(FootnoteEvent::GoTo(position)) => {
+                        self.overlay = Overlay::None;
+                        self.jump_away(None, position, cx);
+                    }
+                    None => {}
+                }
+            }
+            Overlay::Contents(contents) => {
+                let before = contents.visual_state();
+                let event = contents.on_gesture(&g);
+                if event.is_some() || contents.visual_state() != before {
+                    cx.redraw();
+                }
+                match event {
+                    Some(ContentsEvent::Close) => self.menu(cx),
+                    Some(ContentsEvent::Position(position)) => {
+                        self.overlay = Overlay::None;
+                        self.jump_away(None, position, cx);
+                    }
+                    None => {}
+                }
+            }
             Overlay::None => {
                 let step = match g {
                     Gesture::Tap(p) => match reader::tap_zone(self.screen, p, self.settings.tap_zones) {
@@ -1484,11 +1545,20 @@ impl Reader {
         }
         Action::None
     }
+    /// True while a book is opening within the brief grace period before
+    /// showing `"Opening book…"`, leaving the previous screen intact so cached
+    /// books land straight on their first page.
+    fn waiting_for_open(&self) -> bool {
+        self.shown.is_none()
+            && self.opening_notice_at.is_some()
+            && self.error.is_none()
+            && matches!(self.overlay, Overlay::None)
+    }
 }
 
 impl Screen for Reader {
     fn fills_canvas(&self) -> bool {
-        self.shown.is_some()
+        self.shown.is_some() || self.waiting_for_open()
     }
 
     /// Plain reading (no selection, highlight extension or search bar) and
@@ -1533,6 +1603,9 @@ impl Screen for Reader {
     }
 
     fn draw(&mut self, cx: &mut DrawCx) {
+        if self.waiting_for_open() {
+            return;
+        }
         let t = cx.theme;
         // The clock and battery change only with the reader's own redraws
         // (a new page, closing an overlay, wake), never with a battery poll
@@ -1694,7 +1767,10 @@ impl Screen for Reader {
             Overlay::Layout(view) => view.deadline(),
             _ => None,
         };
-        [self.layout_at, step, self.dictionary_prepare_at, self.language_detect_at].into_iter().flatten().min()
+        [self.layout_at, step, self.opening_notice_at, self.dictionary_prepare_at, self.language_detect_at]
+            .into_iter()
+            .flatten()
+            .min()
     }
     fn has_idle_work(&self) -> bool {
         matches!(&self.overlay, Overlay::Lookup(lookup) if lookup.paginating())
@@ -1707,11 +1783,18 @@ impl Screen for Reader {
             && s.on_tick(cx.now, &mut self.settings.typography)
         {
             self.changed();
+            cx.redraw();
         }
         if let Overlay::Layout(view) = &mut self.overlay
             && view.on_tick(cx.now)
         {
             cx.redraw();
+        }
+        if self.opening_notice_at.is_some_and(|t| cx.now >= t) {
+            self.opening_notice_at = None;
+            if self.shown.is_none() && self.error.is_none() {
+                cx.refresh(self.screen, RefreshMode::Ui);
+            }
         }
         if self.dictionary_prepare_at.is_some_and(|t| cx.now >= t) {
             self.dictionary_prepare_at = None;
@@ -3744,5 +3827,143 @@ mod tests {
         assert_eq!(modes, [RefreshMode::Page, RefreshMode::Page, RefreshMode::Full]);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
         Ok(())
+    }
+
+    #[test]
+    fn menu_ignores_noop_outside_down_but_redraws_on_press_drag_and_close() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, _) = test_reader("menu-noop");
+        r.pages = 20;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 5));
+        r.target = 5;
+        let run = |r: &mut Reader, g: Gesture| {
+            let mut toast = None;
+            let mut forced = Vec::new();
+            let mut needs_redraw = false;
+            let mut cx = EventCx {
+                theme: &theme,
+                screen: r.screen,
+                now: Instant::now(),
+                battery: None,
+                toast: &mut toast,
+                forced: &mut forced,
+                needs_redraw: &mut needs_redraw,
+            };
+            r.on_gesture(g, &mut cx);
+            needs_redraw
+        };
+        test_cx(&theme, |cx| r.menu(cx));
+        let Overlay::Menu(menu) = &r.overlay else { unreachable!() };
+        let outside = crate::geom::Point::new(300, 400);
+        let text_btn = menu.button_rects()[2].center();
+        let slider_right = crate::geom::Point::new(menu.progress.rect().right() - 4, menu.progress.rect().center().y);
+        // Down outside the menu changes nothing visually.
+        assert!(!run(&mut r, Gesture::Down(outside)));
+        assert!(!run(&mut r, Gesture::Move(outside)));
+        // Pressing and cancelling a button redraws immediately.
+        assert!(run(&mut r, Gesture::Down(text_btn)));
+        assert!(run(&mut r, Gesture::Cancel(text_btn)));
+        assert!(!run(&mut r, Gesture::Cancel(text_btn)));
+        // Scrubbing the progress slider redraws as value changes.
+        assert!(run(&mut r, Gesture::Down(slider_right)));
+        assert!(run(&mut r, Gesture::Tap(slider_right)));
+        // Tap outside closes the menu and redraws.
+        assert!(!run(&mut r, Gesture::Down(outside)));
+        assert!(run(&mut r, Gesture::Tap(outside)));
+        assert!(matches!(r.overlay, Overlay::None));
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn opening_notice_is_deferred_and_uses_one_full_ui_refresh_when_slow() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, _) = test_reader("opening-defer");
+        // Immediately after open, Reader leaves the canvas intact until OPENING_NOTICE_DELAY.
+        assert!(r.waiting_for_open());
+        assert!(r.fills_canvas());
+        assert!(r.deadline().is_some());
+        let mut canvas = crate::gfx::Canvas::new(r.screen.w as u32, r.screen.h as u32);
+        canvas.fill(119);
+        let (mut text, mut icons, mut hints) =
+            (crate::gfx::TextRenderer::new(), crate::gfx::IconRenderer::default(), Vec::new());
+        r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+        assert!(canvas.gray_data().iter().all(|&p| p == 119), "canvas left untouched during grace period");
+        // When the 150 ms timer fires before page 0 arrives, it requests one full Ui refresh.
+        let due = r.opening_notice_at.unwrap();
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut needs_redraw = false;
+        let mut cx = EventCx {
+            theme: &theme,
+            screen: r.screen,
+            now: due,
+            battery: None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut needs_redraw,
+        };
+        r.on_tick(&mut cx);
+        assert!(!r.waiting_for_open());
+        assert!(!r.fills_canvas());
+        assert!(needs_redraw);
+        assert_eq!(forced, vec![crate::platform::Update { rect: r.screen, mode: RefreshMode::Ui }]);
+        // If page 0 arrives before the deadline, the timer is cleared cleanly.
+        let (mut r2, _) = test_reader("opening-fast");
+        assert!(r2.opening_notice_at.is_some());
+        test_cx(&theme, |cx| r2.display(test_page(1, 0), cx));
+        assert!(r2.opening_notice_at.is_none());
+        assert!(r2.fills_canvas());
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+        let _ = std::fs::remove_dir_all(settings_path(&r2).parent().unwrap());
+    }
+
+    #[test]
+    fn non_visual_reader_ticks_do_not_redraw_but_stepper_repeat_does() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, _) = test_reader("reader-ticks");
+        r.opening_notice_at = None;
+        r.shown = Some(test_page(1, 0));
+        r.laying_out = false;
+        let now = Instant::now();
+        r.layout_at = Some(now);
+        let mut toast = None;
+        let mut forced = Vec::new();
+        let mut needs_redraw = false;
+        let mut cx = EventCx {
+            theme: &theme,
+            screen: r.screen,
+            now,
+            battery: None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut needs_redraw,
+        };
+        r.on_tick(&mut cx);
+        assert!(r.laying_out && r.layout_at.is_none());
+        assert!(!needs_redraw, "debounced layout_at sends command without a redundant redraw");
+        // Held TextSheet stepper repeats and redraws.
+        r.text(&theme);
+        let Overlay::Text(sheet) = &mut r.overlay else { unreachable!() };
+        let more = crate::geom::Point::new(
+            r.screen.w - theme.margin - 4,
+            r.screen.bottom() - theme.mm(64.0) + theme.mm(13.0) + theme.mm(11.5) + theme.mm(5.5),
+        );
+        let _ = sheet.on_gesture(&Gesture::Down(more), &mut r.settings.typography);
+        let _ = sheet.on_gesture(&Gesture::LongPress(more), &mut r.settings.typography);
+        let repeat_due = r.deadline().expect("stepper repeat deadline");
+        let mut needs_redraw = false;
+        let mut cx = EventCx {
+            theme: &theme,
+            screen: r.screen,
+            now: repeat_due,
+            battery: None,
+            toast: &mut toast,
+            forced: &mut forced,
+            needs_redraw: &mut needs_redraw,
+        };
+        r.on_tick(&mut cx);
+        assert!(needs_redraw, "held stepper tick updates visible font size");
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 }

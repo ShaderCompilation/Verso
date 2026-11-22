@@ -70,6 +70,10 @@ impl TextSheet {
             false
         }
     }
+    pub fn visual_state(&self) -> (bool, bool, Option<Step>) {
+        (self.sheet.is_pressed(), self.press.is_down(), self.size.pressed())
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture, t: &mut Typography) -> Option<TextEvent> {
         if self.sheet.on_gesture(g) {
             return Some(TextEvent::Close);
@@ -184,6 +188,11 @@ impl FontList {
         }
         self.pager.draw(cx);
     }
+    #[allow(clippy::type_complexity)]
+    pub fn visual_state(&self) -> (bool, (usize, usize, bool, bool, bool), (usize, Option<usize>, bool)) {
+        (self.sheet.is_pressed(), self.pager.visual_state(), self.list.visual_state())
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<FontEvent> {
         if self.sheet.on_gesture(g) {
             return Some(FontEvent::Close);

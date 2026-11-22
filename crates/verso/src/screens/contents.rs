@@ -63,6 +63,11 @@ impl Contents {
             );
         }
     }
+    #[allow(clippy::type_complexity)]
+    pub fn visual_state(&self) -> (bool, (usize, usize, bool, bool, bool), (usize, Option<usize>, bool)) {
+        (self.top.is_pressed(), self.pager.visual_state(), self.list.visual_state())
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<ContentsEvent> {
         if self.top.on_gesture(g) {
             return Some(ContentsEvent::Close);

@@ -115,6 +115,10 @@ impl OfferSheet {
         self.skip.draw(cx);
     }
 
+    pub fn visual_state(&self) -> [bool; 4] {
+        [self.sheet.is_pressed(), self.update.is_pressed(), self.later.is_pressed(), self.skip.is_pressed()]
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<OfferEvent> {
         if self.sheet.on_gesture(g) {
             Some(OfferEvent::Close)

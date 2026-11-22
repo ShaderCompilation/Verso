@@ -64,6 +64,9 @@ impl ClashSheet {
         self.skip.draw(cx);
         self.keep.draw(cx);
     }
+    pub(super) fn visual_state(&self) -> [bool; 4] {
+        [self.sheet.is_pressed(), self.all.on, self.skip.is_pressed(), self.keep.is_pressed()]
+    }
     pub(super) fn on_gesture(&mut self, g: &Gesture) -> Option<Option<(ClashChoice, bool)>> {
         if self.sheet.on_gesture(g) {
             return Some(None);

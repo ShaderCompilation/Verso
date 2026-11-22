@@ -43,6 +43,12 @@ pub struct FrameDiff {
     /// Bytes per pixel of `prev` and the canvas.
     bpp: usize,
     prev: Vec<u8>,
+    /// True when the last presented frame bypassed tile diffing and `canvas`
+    /// itself still holds that baseline, avoiding a full-buffer copy into
+    /// `prev` across back-to-back full-screen frames (e.g. page turns).
+    canvas_is_baseline: bool,
+    #[cfg(test)]
+    full_copies: usize,
 }
 
 impl FrameDiff {
@@ -52,6 +58,9 @@ impl FrameDiff {
             height: canvas.height() as i32,
             bpp: canvas.bytes_per_pixel(),
             prev: vec![0; canvas.width() as usize * canvas.height() as usize * canvas.bytes_per_pixel()],
+            canvas_is_baseline: false,
+            #[cfg(test)]
+            full_copies: 0,
         };
         diff.commit_full(canvas);
         diff
@@ -62,6 +71,36 @@ impl FrameDiff {
     pub fn commit_full(&mut self, canvas: &Canvas) {
         debug_assert_eq!(canvas.bytes_per_pixel(), self.bpp, "the canvas changed mode");
         canvas.copy_raw(canvas.bounds(), &mut self.prev);
+        self.canvas_is_baseline = false;
+        #[cfg(test)]
+        {
+            self.full_copies += 1;
+        }
+    }
+
+    /// Records that `canvas` now holds the last presented full-screen frame,
+    /// deferring the copy into `prev` until a partial frame needs to diff
+    /// against it.
+    pub fn mark_canvas_as_baseline(&mut self) {
+        self.canvas_is_baseline = true;
+    }
+
+    /// Materializes a deferred baseline into `prev` before a partial frame
+    /// mutates `canvas`. No-op when `prev` is already current.
+    pub fn sync_baseline(&mut self, canvas: &Canvas) {
+        if self.canvas_is_baseline {
+            self.commit_full(canvas);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_baseline_deferred(&self) -> bool {
+        self.canvas_is_baseline
+    }
+
+    #[cfg(test)]
+    pub fn full_copies(&self) -> usize {
+        self.full_copies
     }
 
     /// Compares `canvas` with the last committed frame.
@@ -86,6 +125,7 @@ impl FrameDiff {
     /// are in cache.
     fn compare(&mut self, canvas: &Canvas, skip: &[Rect]) -> Tiles {
         debug_assert_eq!(canvas.bytes_per_pixel(), self.bpp, "the canvas changed mode");
+        debug_assert!(!self.canvas_is_baseline, "sync_baseline must be called before mutating canvas for a diff");
         let cur = canvas.raw();
         // Spans below are in pixels; `bpp` turns them into bytes (1 on a
         // gray canvas, so its loop is the same as ever).
@@ -332,6 +372,38 @@ mod tests {
         );
         diff.commit_full(&canvas);
         assert!(!diff.changed(&canvas).any());
+    }
+
+    #[test]
+    fn deferred_baseline_skips_copies_across_full_frames_and_diffs_accurately_after() {
+        for mode in [ColorMode::Gray8, ColorMode::Color32] {
+            let mut canvas = Canvas::with_mode(W, H, mode);
+            let mut diff = FrameDiff::new(&canvas);
+            assert_eq!(diff.full_copies(), 1);
+            // Back-to-back full-screen frames copy `prev` 0 times.
+            for value in [17u8, 42, 88] {
+                canvas.set_gray(&vec![value; (W * H) as usize]);
+                diff.mark_canvas_as_baseline();
+            }
+            assert!(diff.is_baseline_deferred());
+            assert_eq!(diff.full_copies(), 1, "no copies during full-screen bypasses");
+            // Before a partial frame mutates `canvas`, sync copies once.
+            diff.sync_baseline(&canvas);
+            assert!(!diff.is_baseline_deferred());
+            assert_eq!(diff.full_copies(), 2);
+            // A second sync is a no-op.
+            diff.sync_baseline(&canvas);
+            assert_eq!(diff.full_copies(), 2);
+            // Mutate one small area and verify the diff finds only that tile against value 88.
+            canvas.fill_rect(Rect::new(20, 20, 3, 3), 0);
+            let tiles = diff.changed(&canvas);
+            assert_eq!(
+                plan(&tiles, bounds(), &[], Ui, &[]),
+                vec![Update { rect: Rect::new(16, 16, 16, 16), mode: Ui }]
+            );
+            diff.commit(&canvas, &tiles);
+            assert!(!diff.changed(&canvas).any());
+        }
     }
 
     fn setup() -> (Canvas, FrameDiff) {

@@ -569,6 +569,20 @@ impl TopDrawer {
         &self.net
     }
 
+    /// Snapshot of visible control state that `on_gesture` can change without
+    /// emitting an event (pressed header buttons or non-pending tiles).
+    pub(crate) fn visual_state(&self) -> (bool, bool, u32) {
+        let back = self.back.as_ref().is_some_and(IconButton::is_pressed);
+        let search = self.search.as_ref().is_some_and(IconButton::is_pressed);
+        let mut tiles = 0u32;
+        for (i, (tile, press)) in self.tiles.iter().enumerate() {
+            if press.is_down() && self.tile_view(*tile).0 != TileState::Pending {
+                tiles |= 1 << i;
+            }
+        }
+        (back, search, tiles)
+    }
+
     #[cfg(test)]
     pub fn layout(&self) -> &DrawerLayout {
         &self.layout

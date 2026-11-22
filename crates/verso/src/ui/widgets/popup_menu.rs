@@ -82,6 +82,10 @@ impl PopupMenu {
         self.rect
     }
 
+    pub fn is_pressed(&self) -> Option<usize> {
+        self.pressed.filter(|_| self.press.is_down())
+    }
+
     /// The area the menu covers, including its shadow.
     pub fn bounds(&self, theme: &Theme) -> Rect {
         self.rect.union(&self.rect.moved(theme.mm(1.0), theme.mm(1.0)))

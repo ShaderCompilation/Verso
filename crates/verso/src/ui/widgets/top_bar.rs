@@ -47,6 +47,10 @@ impl TopBar {
         self.rect
     }
 
+    pub fn is_pressed(&self) -> bool {
+        self.back.as_ref().is_some_and(IconButton::is_pressed)
+    }
+
     /// True when the back arrow was tapped.
     pub fn on_gesture(&mut self, g: &Gesture) -> bool {
         self.back.as_mut().is_some_and(|b| b.on_gesture(g))

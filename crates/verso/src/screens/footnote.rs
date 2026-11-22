@@ -122,6 +122,10 @@ impl Footnote {
         self.go.rect()
     }
 
+    pub fn visual_state(&self) -> (bool, bool, (usize, usize, bool, bool, bool)) {
+        (self.sheet.is_pressed(), self.go.is_pressed(), self.pager.visual_state())
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<FootnoteEvent> {
         if self.sheet.on_gesture(g) {
             return Some(FootnoteEvent::Close);

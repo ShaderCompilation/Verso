@@ -2232,7 +2232,255 @@ fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &m
         HAlign::Center,
     );
 }
+impl Books {
+    /// Snapshot of visible state on Home/Library/Search that `normal_gesture`
+    /// can change without calling `cx.refresh` or returning a stack action.
+    #[allow(clippy::type_complexity)]
+    fn normal_visual_state(
+        &self,
+    ) -> (
+        [bool; 13],
+        Option<(bool, usize, bool, bool, bool, bool, bool)>,
+        Option<(bool, bool, bool, bool, bool)>,
+        (usize, usize, bool, bool, bool),
+        Option<usize>,
+    ) {
+        (
+            [
+                self.settings_action.is_pressed(),
+                self.transfer_action.is_pressed(),
+                self.search_action.is_pressed(),
+                self.exit.is_pressed(),
+                self.rescan_action.is_pressed(),
+                self.home_action.is_pressed(),
+                self.new_folder.is_pressed(),
+                self.back.is_pressed(),
+                self.notice_press.is_down(),
+                self.library_card_press.is_down(),
+                self.continue_press.is_down(),
+                self.scanning,
+                self.overlay_open(),
+            ],
+            self.selection.as_ref().map(|s| {
+                (
+                    s.carrying,
+                    s.items.len(),
+                    s.cancel.is_pressed(),
+                    s.paste.is_pressed(),
+                    s.move_items.is_pressed(),
+                    s.all.is_pressed(),
+                    s.delete.is_pressed(),
+                )
+            }),
+            self.search.as_ref().map(|s| {
+                (
+                    s.field.focused,
+                    s.keyboard.visible,
+                    s.all.is_pressed(),
+                    s.current.is_pressed(),
+                    matches!(s.scope, Scope::All),
+                )
+            }),
+            self.pager.visual_state(),
+            self.grid.pressed(),
+        )
+    }
+
+    fn normal_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
+        if self.allows_top_drawer() && self.battery_press.on_gesture(g, self.battery_rect) == Some(PressEvent::Tap) {
+            return Action::OpenTopDrawer;
+        }
+        if self.selection_controls(g, cx) {
+            return Action::None;
+        }
+        if self.selection.is_none() && self.settings_action.on_gesture(g) {
+            return Action::Push(Box::new(crate::screens::system::SystemSettings::new(
+                cx.theme,
+                self.screen,
+                self.store.clone(),
+                self.worker.waker(),
+            )));
+        }
+        if self.selection.is_none() && self.transfer_action.on_gesture(g) {
+            return Action::Push(Box::new(crate::screens::transfer::TransferScreen::new(
+                cx.theme,
+                self.screen,
+                self.store.clone(),
+                self.worker.waker(),
+            )));
+        }
+        if self.selection.is_none() && self.search_action.on_gesture(g) {
+            self.toggle_search(cx);
+            self.apply_pending(cx);
+            return Action::None;
+        }
+        if self.is_home()
+            && self.selection.is_none()
+            && (self.crash_notice.is_some() || self.notice.is_some())
+            && let Some(PressEvent::Tap) = self.notice_press.on_gesture(g, self.notice_rect)
+        {
+            if let Some(crash) = self.crash_notice.clone() {
+                self.crash_sheet = Some(CrashSheet::new(cx.theme, self.screen, crash));
+            } else if let Some(offer) = &self.notice {
+                self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
+            }
+            return Action::None;
+        }
+        if let Some(search) = &mut self.search {
+            if search.field.on_gesture(g) {
+                search.keyboard.visible = true;
+                search.field.focused = true;
+                self.apply_pending(cx);
+                return Action::None;
+            }
+            let scope = if search.all.on_gesture(g) {
+                Some(Scope::All)
+            } else if search.current.on_gesture(g) {
+                search.collection.clone().map(Scope::Collection)
+            } else {
+                None
+            };
+            if let Some(scope) = scope {
+                self.selection = None;
+                search.scope = scope;
+                search.debounce_at = None;
+                search.folded = search::fold(search.field.value().trim());
+                self.pager.page = 0;
+                self.refresh(cx.theme);
+                self.apply_pending(cx);
+                return Action::None;
+            }
+        }
+        if self.selection.is_none() && self.exit.on_gesture(g) {
+            return Action::Pop;
+        }
+        if self.selection.is_none() && self.rescan_action.on_gesture(g) {
+            // Drop any unconsumed completion from an earlier pass so the
+            // completion toast waits for this manual rescan.
+            let _ = self.library.take_status();
+            self.errors.clear();
+            self.library.rescan();
+            self.scanning = true;
+            self.working = true;
+            self.manual_rescan = true;
+            return Action::None;
+        }
+        if !self.is_home() && self.search.is_none() && self.selection.is_none() && self.home_action.on_gesture(g) {
+            self.open_home(cx);
+            self.apply_pending(cx);
+            return Action::None;
+        }
+        if self.is_home()
+            && self.selection.is_none()
+            && let Some(PressEvent::Tap) = self.library_card_press.on_gesture(g, self.library_card)
+        {
+            self.open_library(cx);
+            self.apply_pending(cx);
+            return Action::None;
+        }
+        if !self.is_home() && self.search.is_none() {
+            if self.show_new_folder()
+                && let Some(path) = self.navigation.folder.clone()
+                && self.new_folder.on_gesture(g)
+            {
+                self.start_name(NameOperation::Create(path), cx.theme);
+                return Action::None;
+            }
+            if !self.is_top_level() && self.back.on_gesture(g) {
+                if self.selection.is_some() && !self.carrying() {
+                    self.end_selection(cx);
+                    return Action::None;
+                }
+                let parent = self
+                    .navigation
+                    .folder
+                    .as_ref()
+                    .and_then(|p| self.collections.folders.get(p))
+                    .and_then(|f| f.parent.clone());
+                self.navigate(parent, cx);
+                self.apply_pending(cx);
+                return Action::None;
+            }
+            if matches!(self.path_press.on_gesture(g, self.path_rect), Some(PressEvent::Tap | PressEvent::LongPress))
+                && let Some(path) = &self.navigation.folder
+            {
+                self.details =
+                    Some(Details::from_text(cx.theme, self.screen, "Folder path", path.display().to_string()));
+                return Action::None;
+            }
+        }
+        if !self.is_home() {
+            let old_page = self.pager.page;
+            if self.pager.on_gesture(g) == Some(PagerEvent::Jump) {
+                self.jump = Some(PageJump::new(cx.theme, self.screen, self.pager.page, self.pager.pages));
+                return Action::None;
+            }
+            if let Gesture::Swipe { dir, .. } = *g {
+                self.pager.on_swipe(dir);
+            }
+            if old_page != self.pager.page {
+                self.go_to_page(self.pager.page, cx);
+            }
+        }
+        let mut selected = None;
+        if let Some(event) = self.grid.on_gesture(g) {
+            let (i, long) = match event {
+                GridEvent::Tapped(i) => (i, false),
+                GridEvent::LongPressed(i) => (i, true),
+            };
+            if self.carrying() {
+                if !long {
+                    if let Some(path) = self.folders.get(i).cloned() {
+                        self.navigate(Some(path), cx);
+                    } else {
+                        cx.toast("Paste or cancel first", None);
+                    }
+                }
+                self.apply_pending(cx);
+                return Action::None;
+            }
+            if self.selection.is_some() {
+                if !long {
+                    self.toggle_selection(i);
+                }
+                self.apply_pending(cx);
+                return Action::None;
+            }
+            if let Some(path) = self.folders.get(i).cloned() {
+                if long {
+                    self.open_folder_menu(path, g.pos(), cx.theme);
+                } else {
+                    self.navigate(Some(path), cx);
+                }
+                self.apply_pending(cx);
+                return Action::None;
+            }
+            selected = self.grid_book(i).map(|b| (b.id.clone(), long));
+        }
+        if let Some(event) = self.continue_press.on_gesture(g, self.continue_rect)
+            && let Some(id) = &self.continue_id
+        {
+            match event {
+                PressEvent::Tap => selected = Some((id.clone(), false)),
+                PressEvent::LongPress => selected = Some((id.clone(), true)),
+                _ => {}
+            }
+        }
+        if let Some((id, long)) = selected {
+            if long {
+                self.open_menu(id, g.pos(), cx.theme);
+            } else {
+                self.open(id, cx);
+            }
+        }
+        Action::None
+    }
+}
+
 impl Screen for Books {
+    fn fills_canvas(&self) -> bool {
+        self.reader.as_ref().is_some_and(Screen::fills_canvas)
+    }
     fn relayout_state(&self, state: &mut RelayoutState) {
         state.open_book = self.open_book_id().map(str::to_owned);
         state.library_open = self.is_in_library();
@@ -2613,22 +2861,26 @@ impl Screen for Books {
             }
             return Action::None;
         }
-        // Library controls own their press/capture state, including gestures
-        // that return no action. Reader gestures invalidate independently.
-        cx.redraw();
         if let Some(sheet) = &mut self.crash_sheet {
-            if sheet.on_gesture(&g) {
+            let before = (sheet.sheet.is_pressed(), sheet.ok.is_pressed());
+            let closed = sheet.on_gesture(&g);
+            if closed {
                 if let Some(done) = self.crash_sheet.take()
                     && let Err(e) = crate::report::dismiss_crash(&self.store.root(), &done.notice.filename)
                 {
                     log::warn!("dismissing crash notice: {e:#}");
                 }
                 self.crash_notice = None;
+                cx.redraw();
+            } else if (sheet.sheet.is_pressed(), sheet.ok.is_pressed()) != before {
+                cx.redraw();
             }
         } else if let Some(offer) = &mut self.offer {
+            let before = offer.visual_state();
             if let Some(event) = offer.on_gesture(&g) {
                 let offer = self.offer.take().unwrap();
                 offer.apply(&event, &self.updates);
+                cx.redraw();
                 if event == OfferEvent::Update {
                     let (updates, waker) = (self.updates.clone(), self.worker.waker());
                     let version = offer.offer.version.clone();
@@ -2641,23 +2893,65 @@ impl Screen for Books {
                         cx,
                     )));
                 }
+            } else if offer.visual_state() != before {
+                cx.redraw();
             }
         } else if let Some(sheet) = &mut self.name_sheet {
-            match sheet.on_gesture(&g, cx.theme) {
+            let before = (
+                sheet.keyboard.visual_state(),
+                sheet.sheet.is_pressed(),
+                sheet.cancel.is_pressed(),
+                sheet.submit.is_pressed(),
+                sheet.field.focused,
+                sheet.field.value().to_owned(),
+                sheet.error.clone(),
+            );
+            let event = sheet.on_gesture(&g, cx.theme);
+            let changed = event.is_some()
+                || (
+                    sheet.keyboard.visual_state(),
+                    sheet.sheet.is_pressed(),
+                    sheet.cancel.is_pressed(),
+                    sheet.submit.is_pressed(),
+                    sheet.field.focused,
+                    sheet.field.value().to_owned(),
+                    sheet.error.clone(),
+                ) != before;
+            match event {
                 Some(NameEvent::Cancel) => self.name_sheet = None,
                 Some(NameEvent::Submit) => self.submit_name(cx),
                 None => {}
             }
+            if changed {
+                cx.redraw();
+            }
         } else if let Some(clash) = &mut self.clash {
+            let before = clash.visual_state();
             if let Some(answer) = clash.on_gesture(&g) {
                 self.clash = None;
+                cx.redraw();
                 match answer {
                     Some(choice) => self.continue_paste(Some(choice), cx),
                     None => self.finish_paste(PasteEnd::Cancelled, cx),
                 }
+            } else if clash.visual_state() != before {
+                cx.redraw();
             }
         } else if let Some(confirm) = &mut self.confirm {
-            match confirm.on_gesture(&g) {
+            let before =
+                (confirm.sheet.is_pressed(), confirm.cancel.is_pressed(), confirm.delete.is_pressed(), confirm.working);
+            let answer = confirm.on_gesture(&g);
+            if answer.is_some()
+                || (
+                    confirm.sheet.is_pressed(),
+                    confirm.cancel.is_pressed(),
+                    confirm.delete.is_pressed(),
+                    confirm.working,
+                ) != before
+            {
+                cx.redraw();
+            }
+            match answer {
                 // A selection can be large: show "Deleting…" first, then delete
                 // in `run_pending_work` once that frame is on screen.
                 Some(true) if matches!(confirm.target, ConfirmRequest::Selection(_)) => confirm.start_working(),
@@ -2669,10 +2963,15 @@ impl Screen for Books {
                 None => {}
             }
         } else if let Some(details) = &mut self.details {
+            let before = (details.sheet.is_pressed(), details.pager.visual_state());
             if details.on_gesture(&g, cx) {
                 self.details = None;
+                cx.redraw();
+            } else if (details.sheet.is_pressed(), details.pager.visual_state()) != before {
+                cx.redraw();
             }
         } else if let Some((target, menu)) = &mut self.menu {
+            let before = menu.is_pressed();
             let event = menu.on_gesture(&g, cx.theme);
             let delete_index = menu.items.len() - 1;
             let select_index = menu.items.iter().position(|(_, label)| label == "Select");
@@ -2735,9 +3034,17 @@ impl Screen for Books {
                         _ => {}
                     },
                 }
+                if self.reader.is_none() {
+                    cx.redraw();
+                }
+            } else if menu.is_pressed() != before {
+                cx.redraw();
             }
         } else if let Some(jump) = &mut self.jump {
-            match jump.on_gesture(&g) {
+            let before = (jump.sheet.is_pressed(), jump.slider.value.to_bits());
+            let event = jump.on_gesture(&g);
+            let changed = event.is_some() || (jump.sheet.is_pressed(), jump.slider.value.to_bits()) != before;
+            match event {
                 Some(JumpEvent::Close) => self.jump = None,
                 Some(JumpEvent::Go(page)) => {
                     self.jump = None;
@@ -2745,205 +3052,33 @@ impl Screen for Books {
                 }
                 None => {}
             }
+            if changed {
+                cx.redraw();
+            }
         } else if self.search.as_ref().is_some_and(|s| s.keyboard.visible) {
-            let before = self.search.as_ref().map(|s| s.keyboard.rect());
+            let before = self.search.as_ref().map(|s| (s.keyboard.rect(), s.keyboard.visual_state()));
             let input = self.search.as_mut().and_then(|s| s.keyboard.on_gesture(&g, cx.theme));
-            if self.search.as_ref().map(|s| s.keyboard.rect()) != before {
+            let after = self.search.as_ref().map(|s| (s.keyboard.rect(), s.keyboard.visual_state()));
+            if after.as_ref().map(|a| a.0) != before.as_ref().map(|b| b.0) {
                 // Another language can add a row of keys.
                 self.refresh(cx.theme);
             }
             if let Some(input) = input {
                 self.edit_search(&input, cx);
+                cx.redraw();
+            } else if after != before {
+                cx.redraw();
             }
         } else {
-            if self.allows_top_drawer() && self.battery_press.on_gesture(&g, self.battery_rect) == Some(PressEvent::Tap)
-            {
-                return Action::OpenTopDrawer;
+            let before = self.normal_visual_state();
+            let action = self.normal_gesture(&g, cx);
+            // Opening a book defers "Opening book…" in `Reader` so cached opens
+            // land directly on the first page without an intermediate redraw.
+            if self.reader.is_none() && self.normal_visual_state() != before {
+                cx.redraw();
             }
-            if self.selection_controls(&g, cx) {
-                return Action::None;
-            }
-            if self.selection.is_none() && self.settings_action.on_gesture(&g) {
-                return Action::Push(Box::new(crate::screens::system::SystemSettings::new(
-                    cx.theme,
-                    self.screen,
-                    self.store.clone(),
-                    self.worker.waker(),
-                )));
-            }
-            if self.selection.is_none() && self.transfer_action.on_gesture(&g) {
-                return Action::Push(Box::new(crate::screens::transfer::TransferScreen::new(
-                    cx.theme,
-                    self.screen,
-                    self.store.clone(),
-                    self.worker.waker(),
-                )));
-            }
-            if self.selection.is_none() && self.search_action.on_gesture(&g) {
-                self.toggle_search(cx);
-                self.apply_pending(cx);
-                return Action::None;
-            }
-            if self.is_home()
-                && self.selection.is_none()
-                && (self.crash_notice.is_some() || self.notice.is_some())
-                && let Some(PressEvent::Tap) = self.notice_press.on_gesture(&g, self.notice_rect)
-            {
-                if let Some(crash) = self.crash_notice.clone() {
-                    self.crash_sheet = Some(CrashSheet::new(cx.theme, self.screen, crash));
-                } else if let Some(offer) = &self.notice {
-                    self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
-                }
-                return Action::None;
-            }
-            if let Some(search) = &mut self.search {
-                if search.field.on_gesture(&g) {
-                    search.keyboard.visible = true;
-                    search.field.focused = true;
-                    self.apply_pending(cx);
-                    return Action::None;
-                }
-                let scope = if search.all.on_gesture(&g) {
-                    Some(Scope::All)
-                } else if search.current.on_gesture(&g) {
-                    search.collection.clone().map(Scope::Collection)
-                } else {
-                    None
-                };
-                if let Some(scope) = scope {
-                    self.selection = None;
-                    search.scope = scope;
-                    search.debounce_at = None;
-                    search.folded = search::fold(search.field.value().trim());
-                    self.pager.page = 0;
-                    self.refresh(cx.theme);
-                    self.apply_pending(cx);
-                    return Action::None;
-                }
-            }
-            if self.selection.is_none() && self.exit.on_gesture(&g) {
-                return Action::Pop;
-            }
-            if self.selection.is_none() && self.rescan_action.on_gesture(&g) {
-                // Drop any unconsumed completion from an earlier pass so the
-                // completion toast waits for this manual rescan.
-                let _ = self.library.take_status();
-                self.errors.clear();
-                self.library.rescan();
-                self.scanning = true;
-                self.working = true;
-                self.manual_rescan = true;
-                return Action::None;
-            }
-            if !self.is_home() && self.search.is_none() && self.selection.is_none() && self.home_action.on_gesture(&g) {
-                self.open_home(cx);
-                self.apply_pending(cx);
-                return Action::None;
-            }
-            if self.is_home()
-                && self.selection.is_none()
-                && let Some(PressEvent::Tap) = self.library_card_press.on_gesture(&g, self.library_card)
-            {
-                self.open_library(cx);
-                self.apply_pending(cx);
-                return Action::None;
-            }
-            if !self.is_home() && self.search.is_none() {
-                if self.show_new_folder()
-                    && let Some(path) = self.navigation.folder.clone()
-                    && self.new_folder.on_gesture(&g)
-                {
-                    self.start_name(NameOperation::Create(path), cx.theme);
-                    return Action::None;
-                }
-                if !self.is_top_level() && self.back.on_gesture(&g) {
-                    if self.selection.is_some() && !self.carrying() {
-                        self.end_selection(cx);
-                        return Action::None;
-                    }
-                    let parent = self
-                        .navigation
-                        .folder
-                        .as_ref()
-                        .and_then(|p| self.collections.folders.get(p))
-                        .and_then(|f| f.parent.clone());
-                    self.navigate(parent, cx);
-                    self.apply_pending(cx);
-                    return Action::None;
-                }
-                if matches!(
-                    self.path_press.on_gesture(&g, self.path_rect),
-                    Some(PressEvent::Tap | PressEvent::LongPress)
-                ) && let Some(path) = &self.navigation.folder
-                {
-                    self.details =
-                        Some(Details::from_text(cx.theme, self.screen, "Folder path", path.display().to_string()));
-                    return Action::None;
-                }
-            }
-            if !self.is_home() {
-                let old_page = self.pager.page;
-                if self.pager.on_gesture(&g) == Some(PagerEvent::Jump) {
-                    self.jump = Some(PageJump::new(cx.theme, self.screen, self.pager.page, self.pager.pages));
-                    return Action::None;
-                }
-                if let Gesture::Swipe { dir, .. } = g {
-                    self.pager.on_swipe(dir);
-                }
-                if old_page != self.pager.page {
-                    self.go_to_page(self.pager.page, cx);
-                }
-            }
-            let mut selected = None;
-            if let Some(event) = self.grid.on_gesture(&g) {
-                let (i, long) = match event {
-                    GridEvent::Tapped(i) => (i, false),
-                    GridEvent::LongPressed(i) => (i, true),
-                };
-                if self.carrying() {
-                    if !long {
-                        if let Some(path) = self.folders.get(i).cloned() {
-                            self.navigate(Some(path), cx);
-                        } else {
-                            cx.toast("Paste or cancel first", None);
-                        }
-                    }
-                    self.apply_pending(cx);
-                    return Action::None;
-                }
-                if self.selection.is_some() {
-                    if !long {
-                        self.toggle_selection(i);
-                    }
-                    self.apply_pending(cx);
-                    return Action::None;
-                }
-                if let Some(path) = self.folders.get(i).cloned() {
-                    if long {
-                        self.open_folder_menu(path, g.pos(), cx.theme);
-                    } else {
-                        self.navigate(Some(path), cx);
-                    }
-                    self.apply_pending(cx);
-                    return Action::None;
-                }
-                selected = self.grid_book(i).map(|b| (b.id.clone(), long));
-            }
-            if let Some(event) = self.continue_press.on_gesture(&g, self.continue_rect)
-                && let Some(id) = &self.continue_id
-            {
-                match event {
-                    PressEvent::Tap => selected = Some((id.clone(), false)),
-                    PressEvent::LongPress => selected = Some((id.clone(), true)),
-                    _ => {}
-                }
-            }
-            if let Some((id, long)) = selected {
-                if long {
-                    self.open_menu(id, g.pos(), cx.theme);
-                } else {
-                    self.open(id, cx);
-                }
+            if !matches!(action, Action::None) {
+                return action;
             }
         }
         self.apply_pending(cx);
@@ -3115,14 +3250,21 @@ impl Screen for Books {
         if let Some(r) = &mut self.reader {
             r.on_background(cx);
         }
-        // Status only redraws the status line; it never touches the index.
+        // Status only redraws when the displayed scanning label actually changes.
         if let Some(status) = self.library.take_status() {
-            if self.reader.is_none() {
-                cx.redraw();
-            }
             let was_scanning = self.scanning;
             self.scanning = status.scanning;
             self.working = status.working;
+            if self.reader.is_none() && was_scanning != status.scanning {
+                let shows_scanning = if self.is_home() {
+                    !(self.home.complete || self.home.library_folders > 0 || self.home.library_books > 0)
+                } else {
+                    self.search.is_none()
+                };
+                if shows_scanning {
+                    cx.redraw();
+                }
+            }
             for error in &status.errors {
                 if !self.errors.contains(error) {
                     log::warn!("{error}");
@@ -6562,6 +6704,51 @@ mod tests {
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
             drop(books);
         }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn noop_gestures_and_settled_home_status_do_not_redraw_but_presses_do() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("noop-redraws")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.home_active = true;
+        books.home.complete = true;
+        books.refresh(&t);
+        let run = |books: &mut Books, g: Gesture| {
+            let mut toast = None;
+            let mut forced = Vec::new();
+            let mut needs_redraw = false;
+            let mut cx = EventCx {
+                theme: &t,
+                screen,
+                now: std::time::Instant::now(),
+                battery: None,
+                toast: &mut toast,
+                forced: &mut forced,
+                needs_redraw: &mut needs_redraw,
+            };
+            books.on_gesture(g, &mut cx);
+            needs_redraw
+        };
+        // No-op touch on empty corner changes nothing visually.
+        let empty = Point::new(1, 1);
+        assert!(!run(&mut books, Gesture::Down(empty)));
+        assert!(!run(&mut books, Gesture::Move(empty)));
+        assert!(!run(&mut books, Gesture::Cancel(empty)));
+        // Pressing and cancelling the Library card keeps immediate feedback.
+        let card = books.library_card.center();
+        assert!(run(&mut books, Gesture::Down(card)), "press on library card redraws");
+        assert!(run(&mut books, Gesture::Cancel(card)), "cancel on library card redraws");
+        assert!(!run(&mut books, Gesture::Cancel(card)), "second cancel is a no-op");
+        // Pressing and cancelling a grid cover in Library keeps immediate feedback.
+        with_cx(&t, screen, |cx| books.open_library(cx));
+        let cell = books.grid.cells()[0].1.center();
+        assert!(run(&mut books, Gesture::Down(cell)), "press on grid item redraws");
+        assert!(run(&mut books, Gesture::Cancel(cell)), "cancel on grid item redraws");
+        drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

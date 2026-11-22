@@ -257,6 +257,31 @@ impl SearchView {
         (true, None)
     }
 
+    #[allow(clippy::type_complexity)]
+    pub fn visual_state(
+        &self,
+    ) -> (
+        (bool, usize, bool, u8, Option<usize>),
+        bool,
+        bool,
+        String,
+        bool,
+        bool,
+        (usize, usize, bool, bool, bool),
+        Option<usize>,
+    ) {
+        (
+            self.keyboard.visual_state(),
+            self.top.is_pressed(),
+            self.field.focused,
+            self.field.value().to_owned(),
+            self.submit.is_pressed(),
+            self.back.is_pressed(),
+            self.pager.visual_state(),
+            self.pressed.filter(|_| self.press.is_down()),
+        )
+    }
+
     pub fn on_gesture(&mut self, g: &Gesture, session: &mut Session, t: &Theme) -> Option<SearchEvent> {
         if self.keyboard.visible {
             let input = self.keyboard.on_gesture(g, t)?;

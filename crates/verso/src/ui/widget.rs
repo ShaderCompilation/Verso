@@ -34,7 +34,11 @@ impl<'a> DrawCx<'a> {
     }
 
     /// Asks for `mode` wherever `rect` changed in this frame (see `ui::damage`).
+    /// Hints are for widget-level `Fast` or `Ui` feedback; stronger modes
+    /// (`Page`, `Full`) belong in `EventCx::refresh` so `App::frame` can decide
+    /// full-screen bypasses before mutating the canvas.
     pub fn hint(&mut self, rect: Rect, mode: RefreshMode) {
+        debug_assert!(mode <= RefreshMode::Ui, "DrawCx::hint only supports Fast or Ui; got {mode:?}");
         self.hints.push(Update { rect, mode });
     }
 
