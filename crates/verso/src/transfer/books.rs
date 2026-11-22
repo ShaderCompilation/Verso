@@ -1291,6 +1291,7 @@ mod tests {
         let mut col = Collection::load(&env.store, &ann_id).unwrap();
         col.add(Annotation {
             version: 1,
+            kind: crate::annotations::Kind::Highlight,
             id: "ann1".into(),
             book: ann_id.clone(),
             fingerprint: "fp".into(),
@@ -1368,6 +1369,7 @@ mod tests {
             for (id, quote) in quotes {
                 col.add(Annotation {
                     version: 1,
+                    kind: crate::annotations::Kind::Highlight,
                     id: (*id).into(),
                     book: ann.into(),
                     fingerprint: "fp".into(),
@@ -1497,6 +1499,7 @@ mod tests {
             let mut col = Collection::load(&env.store, &book.annotation_id).unwrap();
             col.add(Annotation {
                 version: 1,
+                kind: crate::annotations::Kind::Highlight,
                 id: format!("note-{id}"),
                 book: book.annotation_id.clone(),
                 fingerprint: "fp".into(),

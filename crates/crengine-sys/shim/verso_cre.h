@@ -161,10 +161,25 @@ int verso_cre_annotation_check(VersoCreDoc *doc, const char *start, const char *
 // Copies the last checked text; returns its full length.
 int verso_cre_annotation_checked_text(VersoCreDoc *doc, char *buf, int len);
 // Adds the last checked range as annotation `id`; returns its page, or -1.
-int verso_cre_annotation_keep(VersoCreDoc *doc, int id);
+// Unpainted entries (page bookmarks) count for reading order only:
+// verso_cre_annotation_page never lists them.
+int verso_cre_annotation_keep(VersoCreDoc *doc, int id, int painted);
 int verso_cre_annotation_finish(VersoCreDoc *doc);
 int verso_cre_annotation_order(VersoCreDoc *doc, int index);
 int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity);
+
+/* Page bookmarks. The current page's opening words: from where the page
+ * starts (the reading position's XPointer) to the end of the last whole word
+ * within `max_chars` characters and the page. Returns the text's UTF-8 length,
+ * 0 for a page without text (empty end and text), or -1. */
+int verso_cre_page_opening(VersoCreDoc *doc, int max_chars);
+/* The last opening's field 0 = start, 1 = end, 2 = text; full UTF-8 length. */
+int verso_cre_page_opening_text(VersoCreDoc *doc, int field, char *buf, int len);
+/* Checks a saved bookmark like verso_cre_annotation_check: the start must still
+ * exist; a non-empty end must be a text position after it. An empty end checks
+ * only the start, and the checked text is empty. Returns the checked text's
+ * length, or -1. The range can then be kept with verso_cre_annotation_keep. */
+int verso_cre_bookmark_check(VersoCreDoc *doc, const char *start, const char *end);
 
 #ifdef __cplusplus
 }

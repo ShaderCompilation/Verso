@@ -42,10 +42,13 @@ unsafe extern "C" {
     pub fn verso_cre_annotation_clear(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_annotation_check(doc: *mut VersoCreDoc, start: *const c_char, end: *const c_char) -> c_int;
     pub fn verso_cre_annotation_checked_text(doc: *mut VersoCreDoc, buf: *mut c_char, len: c_int) -> c_int;
-    pub fn verso_cre_annotation_keep(doc: *mut VersoCreDoc, id: c_int) -> c_int;
+    pub fn verso_cre_annotation_keep(doc: *mut VersoCreDoc, id: c_int, painted: c_int) -> c_int;
     pub fn verso_cre_annotation_finish(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_annotation_order(doc: *mut VersoCreDoc, index: c_int) -> c_int;
     pub fn verso_cre_annotation_page(doc: *mut VersoCreDoc, page: c_int, ids: *mut c_int, capacity: c_int) -> c_int;
+    pub fn verso_cre_page_opening(doc: *mut VersoCreDoc, max_chars: c_int) -> c_int;
+    pub fn verso_cre_page_opening_text(doc: *mut VersoCreDoc, field: c_int, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_bookmark_check(doc: *mut VersoCreDoc, start: *const c_char, end: *const c_char) -> c_int;
     pub fn verso_cre_selection_text(doc: *mut VersoCreDoc, field: c_int, buf: *mut c_char, len: c_int) -> c_int;
     pub fn verso_cre_page_links(
         doc: *mut VersoCreDoc,

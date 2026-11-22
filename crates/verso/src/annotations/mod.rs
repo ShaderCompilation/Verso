@@ -16,6 +16,11 @@ use std::{collections::BTreeSet, path::PathBuf};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Annotation {
     pub version: u32,
+    /// Serialized only for bookmarks, so highlight records keep the exact
+    /// bytes they were written with: `Collection::commit` compares existing
+    /// record files byte for byte.
+    #[serde(default, skip_serializing_if = "Kind::is_highlight")]
+    pub kind: Kind,
     pub id: String,
     pub book: String,
     pub fingerprint: String,
@@ -25,6 +30,21 @@ pub struct Annotation {
     pub chapter: String,
     pub note: Option<String>,
     pub provenance: Option<Provenance>,
+}
+/// What an annotation marks. A page bookmark's range runs from the page start
+/// to the end of its opening words, which are its `quotation`; on a page with
+/// no text both the end and the quotation are empty (docs/bookmarks.md §5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Highlight,
+    Bookmark,
+}
+impl Kind {
+    fn is_highlight(&self) -> bool {
+        *self == Kind::Highlight
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provenance {
@@ -227,6 +247,7 @@ mod tests {
     pub(super) fn record(id: &str) -> Annotation {
         Annotation {
             version: 1,
+            kind: crate::annotations::Kind::Highlight,
             id: id.into(),
             book: "book".into(),
             fingerprint: "content".into(),
@@ -313,6 +334,37 @@ mod tests {
         assert!(store.annotation_dir().join("second.json").exists(), "the old file is kept");
         let cleared = restored.records[1].with_note(clean_note(" \n "));
         assert!(cleared.note.is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn highlight_records_keep_their_bytes_and_bookmarks_round_trip() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("verso-annotation-kind-{}", std::process::id()));
+        let store = Store::at(root.clone());
+        // A highlight written before kinds existed, byte for byte.
+        let old = br#"{"version":1,"id":"first","book":"book","fingerprint":"content","range":{"start":"a","end":"b"},"quotation":"a quote","created":"2026-11-15","chapter":"Chapter","note":"note","provenance":{"source":"sample","entry":"first"}}"#;
+        std::fs::create_dir_all(store.annotation_dir())?;
+        std::fs::write(store.annotation_dir().join("first.json"), old)?;
+        let manifest = Manifest { version: 1, records: vec!["first".into()], sources: BTreeSet::new() };
+        atomic(&store.annotation_dir().join("book-book.json"), &manifest)?;
+        let mut c = Collection::load(&store, "book")?;
+        assert_eq!(c.records[0].kind, Kind::Highlight);
+        assert_eq!(serde_json::to_vec(&c.records[0])?, old, "a highlight serializes without a kind");
+        let mut bookmark = record("mark");
+        bookmark.kind = Kind::Bookmark;
+        bookmark.range.end = crate::document::Position(String::new());
+        bookmark.quotation.clear();
+        c.add(bookmark);
+        c.commit(&store, "book")?;
+        assert_eq!(std::fs::read(store.annotation_dir().join("first.json"))?, old, "existing file untouched");
+        assert!(
+            String::from_utf8(std::fs::read(store.annotation_dir().join("mark.json"))?)?
+                .contains(r#""kind":"bookmark""#)
+        );
+        let restored = Collection::load(&store, "book")?;
+        assert_eq!(restored.records.iter().map(|a| a.kind).collect::<Vec<_>>(), [Kind::Highlight, Kind::Bookmark]);
+        assert!(restored.records[1].quotation.is_empty() && restored.records[1].range.end.0.is_empty());
+        restored.commit(&store, "book")?;
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -368,6 +368,15 @@ impl Reader {
                 }
             }
             Reply::Link { request, result } => self.link_arrived(request, result, cx),
+            Reply::Opening { request, result } => {
+                let chapter =
+                    reader::chapter(&self.toc, request.page).map(|i| self.toc[i].title.clone()).unwrap_or_default();
+                if let Some(message) = self.annotations.receive_opening(request, result, self.cache.generation, chapter)
+                {
+                    cx.toast(message, None);
+                }
+                cx.redraw();
+            }
             Reply::Search { request, result } => {
                 if self.search.receive(request, result)
                     && (matches!(self.overlay, Overlay::Search(_)) || self.search_bar.is_some())
@@ -849,6 +858,7 @@ impl Reader {
         );
         Some(crate::annotations::Annotation {
             version: 1,
+            kind: crate::annotations::Kind::Highlight,
             id,
             book: service.book.annotation_id.clone(),
             fingerprint: service.book.fingerprint.clone(),
@@ -1213,7 +1223,7 @@ impl Reader {
                     page.annotations
                         .iter()
                         .filter(|(_, rects)| rects.iter().any(|r| r.contains(p)))
-                        .map(|(i, _)| *i)
+                        .filter_map(|(number, _)| self.annotations.highlight(*number))
                         .collect()
                 })
                 .unwrap_or_default();

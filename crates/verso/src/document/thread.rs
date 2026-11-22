@@ -1,10 +1,10 @@
 //! The only thread that touches crengine. Results carry a book/layout generation.
 use super::prelayout::{self, Job, Runner};
 use super::{
-    CreDocument, CreEngine, Document, FontFace, Layout, Link, Metadata, Paths, Position, SearchBatch, SearchStatus,
-    Selection, SelectionQuery, TocEntry, Typography,
+    CreDocument, CreEngine, Document, FontFace, Layout, Link, Metadata, Opening, Paths, Position, SearchBatch,
+    SearchStatus, Selection, SelectionQuery, TocEntry, Typography,
 };
-use crate::annotations::Annotation;
+use crate::annotations::{Annotation, Kind};
 use crate::geom::Rect;
 use crate::gfx::ColorMode;
 use crate::page_layout::PageLayout;
@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 /// Engine time per search step before the queue is checked again.
 const SEARCH_SLICE: Duration = Duration::from_millis(60);
+/// About how many characters of a page's opening words a page bookmark keeps.
+pub const OPENING_CHARS: usize = 80;
 /// Hitless progress replies are sent at most this often.
 const SEARCH_PROGRESS: Duration = Duration::from_millis(300);
 /// Maximum buffers kept in a page pixel pool (capped further by byte budget).
@@ -190,6 +192,9 @@ pub struct Page {
     pub offset: Option<u64>,
     pub images: bool,
     pub annotation_revision: u64,
+    /// Highlights on the page as (highlight number, rectangles). The number
+    /// counts highlights only, in saved order (`annotations::State::highlight`),
+    /// so adding or removing a page bookmark leaves cached pages valid.
     pub annotations: Vec<(usize, Vec<Rect>)>,
     pub painted: Vec<Paint>,
     /// Internal links on the page: (link number, rectangle) for each piece
@@ -239,6 +244,13 @@ pub struct LinkRequest {
     pub link: usize,
     pub id: u64,
 }
+/// A page whose opening words a new page bookmark needs; IDs are never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpeningRequest {
+    pub generation: u64,
+    pub page: usize,
+    pub id: u64,
+}
 /// A search session on one book layout; IDs are never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchRequest {
@@ -255,17 +267,24 @@ struct Resolution {
     generation: u64,
     revision: u64,
     records: Vec<Annotation>,
+    fingerprint: String,
     next: usize,
     found: Vec<Resolved>,
     preview: bool,
 }
 pub enum Command {
+    /// Checks saved annotations against the current layout. A bookmark on a
+    /// page without text holds only while the book's content `fingerprint`
+    /// matches the one it was saved with.
     Resolve {
         generation: u64,
         revision: u64,
         records: Vec<Annotation>,
+        fingerprint: String,
         preview: bool,
     },
+    /// A page's opening words for a new page bookmark; replies with `Reply::Opening`.
+    Opening(OpeningRequest),
     Select {
         request: SelectionRequest,
         query: SelectionQuery,
@@ -336,6 +355,10 @@ pub enum Reply {
     Link {
         request: LinkRequest,
         result: Result<Option<Link>, String>,
+    },
+    Opening {
+        request: OpeningRequest,
+        result: Result<Opening, String>,
     },
     Fonts(Vec<FontFace>),
     Opened {
@@ -435,14 +458,12 @@ impl Worker {
                                         let i = task.next;
                                         task.next += 1;
                                         let a = &task.records[i];
-                                        let page = d
-                                            .annotation_check(&a.range, &a.quotation)
-                                            .unwrap_or(false)
+                                        let page = holds(d, a, &task.fingerprint)
                                             .then(|| {
                                                 if task.preview {
                                                     d.go_to_position(&a.range.start).ok().map(|_| d.current_page())
                                                 } else {
-                                                    d.annotation_keep(i).ok()
+                                                    d.annotation_keep(i, a.kind == Kind::Highlight).ok()
                                                 }
                                             })
                                             .flatten();
@@ -525,7 +546,7 @@ impl Worker {
                     let mut opened = false;
                     let result: Result<()> = (|| {
                         match command {
-                            Command::Resolve { generation: g, revision, records, preview } => {
+                            Command::Resolve { generation: g, revision, records, fingerprint, preview } => {
                                 if g == generation
                                     && let Some(d) = &mut doc
                                 {
@@ -537,6 +558,7 @@ impl Worker {
                                         generation: g,
                                         revision,
                                         records,
+                                        fingerprint,
                                         next: 0,
                                         found: vec![],
                                         preview,
@@ -566,6 +588,21 @@ impl Worker {
                                 {
                                     let result = d.link(request.page, request.link).map_err(|e| format!("{e:#}"));
                                     send(Reply::Link { request, result });
+                                }
+                                return Ok(());
+                            }
+                            Command::Opening(request) => {
+                                if request.generation == generation
+                                    && let Some(d) = &mut doc
+                                {
+                                    let last = d.page_count().saturating_sub(1);
+                                    d.go_to_page(request.page.min(last));
+                                    let result = if d.current_page() == request.page {
+                                        d.page_opening(OPENING_CHARS).map_err(|e| format!("{e:#}"))
+                                    } else {
+                                        Err("The page is no longer in the book.".into())
+                                    };
+                                    send(Reply::Opening { request, result });
                                 }
                                 return Ok(());
                             }
@@ -798,6 +835,18 @@ fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<C
     }
     c
 }
+/// Whether a saved annotation still holds in the open book. A page bookmark
+/// without text has nothing to compare, so it also needs the book's content
+/// `fingerprint` to match the one it was saved with.
+pub(super) fn holds(d: &mut CreDocument, a: &Annotation, fingerprint: &str) -> bool {
+    match a.kind {
+        Kind::Highlight => d.annotation_check(&a.range, &a.quotation).unwrap_or(false),
+        Kind::Bookmark => {
+            d.bookmark_check(&a.range, &a.quotation).unwrap_or(false)
+                && (!a.quotation.is_empty() || a.fingerprint == fingerprint)
+        }
+    }
+}
 #[allow(clippy::too_many_arguments)]
 fn render(
     d: &mut CreDocument,
@@ -824,7 +873,8 @@ fn render(
         let mut geometry = Vec::new();
         let mut geometry_cache = std::collections::HashMap::<(&str, &str), Vec<Rect>>::new();
         for index in d.annotation_page(info.page) {
-            let Some(a) = annotations.get(index) else { continue };
+            let Some(a) = annotations.get(index).filter(|a| a.kind == Kind::Highlight) else { continue };
+            let number = annotations[..index].iter().filter(|a| a.kind == Kind::Highlight).count();
             let key = (a.range.start.0.as_str(), a.range.end.0.as_str());
             let rects = if let Some(rects) = geometry_cache.get(&key) {
                 rects.clone()
@@ -836,7 +886,7 @@ fn render(
                 geometry_cache.insert(key, selection.rects.clone());
                 selection.rects
             };
-            geometry.push((index, rects));
+            geometry.push((number, rects));
         }
         let painted = if geometry.is_empty() {
             Vec::new()

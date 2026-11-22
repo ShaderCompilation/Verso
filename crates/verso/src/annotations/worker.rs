@@ -190,6 +190,7 @@ fn preview_cancellable(
         }
         result.records.push(Annotation {
             version: 1,
+            kind: crate::annotations::Kind::Highlight,
             id: format!("import-{identity}"),
             book: book.annotation_id.clone(),
             fingerprint: book.fingerprint.clone(),

@@ -96,6 +96,15 @@ pub struct TextRange {
     pub end: Position,
 }
 
+/// A page's opening words, for a page bookmark (`CreDocument::page_opening`).
+/// The range runs from where the page starts to the end of `text`; on a page
+/// without text the end and the text are empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opening {
+    pub range: TextRange,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub range: TextRange,
@@ -365,6 +374,115 @@ mod tests {
         footnote_checks(&engine, &layout);
         missing_mimetype_checks(&engine, &layout, &book, pages);
         color_draw_checks(&engine, &layout);
+        bookmark_checks(&engine, &layout, &book);
+        textless_bookmark_checks(&engine, &layout);
+    }
+
+    /// Page bookmarks: the opening words start where the page starts and end
+    /// on a word boundary; the check survives a reflow and lands on the page
+    /// holding the position; changed text fails; bookmarks keep reading order
+    /// but are never listed for painting.
+    fn bookmark_checks(engine: &CreEngine, layout: &Layout, book: &std::path::Path) {
+        let mut doc = engine.open(book, layout, None).unwrap();
+        doc.go_to_page(5);
+        let opening = doc.page_opening(80).unwrap();
+        assert_eq!(opening.range.start, doc.page_info().unwrap().position, "starts where the page starts");
+        assert!(!opening.text.trim().is_empty() && opening.text.chars().count() <= 80, "{:?}", opening.text);
+        assert_eq!(opening.text, opening.text.trim_end(), "no trailing space");
+        let long = doc.page_opening(400).unwrap();
+        assert_eq!(long.range.start, opening.range.start);
+        let rest = long.text.strip_prefix(&opening.text).expect("the longer opening continues the shorter one");
+        assert!(rest.is_empty() || rest.starts_with(char::is_whitespace), "ends on a word boundary: {rest:?}");
+        doc.annotation_clear();
+        assert!(doc.bookmark_check(&opening.range, &opening.text).unwrap());
+        assert_eq!(doc.annotation_keep(0, false).unwrap(), 5);
+        // A highlight of the words after the opening, on the same page.
+        let after = TextRange { start: opening.range.end.clone(), end: long.range.end.clone() };
+        assert!(doc.annotation_check(&after, rest).unwrap());
+        assert_eq!(doc.annotation_keep(1, true).unwrap(), 5);
+        assert_eq!(doc.annotation_finish(2), vec![0, 1], "the page start comes first");
+        assert_eq!(doc.annotation_page(5), vec![1], "only highlights are painted");
+        assert!(doc.annotation_page(4).is_empty());
+        // Edited text, a reversed range, a missing start and a half-empty
+        // bookmark all fail.
+        assert!(!doc.bookmark_check(&opening.range, "Some other opening words").unwrap());
+        let reversed = TextRange { start: opening.range.end.clone(), end: opening.range.start.clone() };
+        assert!(!doc.bookmark_check(&reversed, &opening.text).unwrap());
+        let missing =
+            TextRange { start: Position("/body/DocFragment[999]/body/p[3]".into()), end: Position::default() };
+        assert!(!doc.bookmark_check(&missing, "").unwrap());
+        let no_end = TextRange { end: Position::default(), ..opening.range.clone() };
+        assert!(!doc.bookmark_check(&no_end, &opening.text).unwrap());
+        assert!(!doc.bookmark_check(&opening.range, "").unwrap());
+        // A bigger font moves the bookmark to the page now holding its start.
+        doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &PageLayout::default())
+            .unwrap();
+        doc.annotation_clear();
+        assert!(doc.bookmark_check(&opening.range, &opening.text).unwrap());
+        let page = doc.annotation_keep(0, false).unwrap();
+        assert!(page > 5, "a bigger font pushes the page later: {page}");
+        doc.go_to_position(&opening.range.start).unwrap();
+        assert_eq!(doc.current_page(), page);
+        doc.annotation_finish(1);
+        assert!(doc.annotation_page(page).is_empty());
+    }
+
+    /// A page with only a picture has no opening words: its bookmark keeps
+    /// just the start, which must still exist.
+    fn textless_bookmark_checks(engine: &CreEngine, layout: &Layout) {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("verso-textless-{}.epub", std::process::id()));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::GrayImage::from_pixel(200, 300, image::Luma([90])).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let mut out = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        out.start_file("mimetype", opts.compression_method(zip::CompressionMethod::Stored)).unwrap();
+        out.write_all(b"application/epub+zip").unwrap();
+        out.start_file("META-INF/container.xml", opts).unwrap();
+        out.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+        out.start_file("content.opf", opts).unwrap();
+        out.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Textless</dc:title></metadata><manifest><item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="cover.png" media-type="image/png"/></manifest><spine><itemref idref="cover"/><itemref idref="ch1"/></spine></package>"#).unwrap();
+        out.start_file("cover.png", opts).unwrap();
+        out.write_all(png.get_ref()).unwrap();
+        out.start_file("cover.xhtml", opts).unwrap();
+        out.write_all(br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Cover</title></head><body><div><img src="cover.png" alt=""/></div></body></html>"#).unwrap();
+        out.start_file("ch1.xhtml", opts).unwrap();
+        out.write_all(br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><p>The first words of the book.</p></body></html>"#).unwrap();
+        out.finish().unwrap();
+        let mut doc = engine.open(&path, layout, None).unwrap();
+        assert!(doc.page_count() >= 2, "the picture has its own page: {}", doc.page_count());
+        doc.go_to_page(0);
+        let cover = doc.page_opening(80).unwrap();
+        assert!(!cover.range.start.0.is_empty());
+        assert_eq!((cover.range.end.0.as_str(), cover.text.as_str()), ("", ""), "{cover:?}");
+        doc.annotation_clear();
+        assert!(doc.bookmark_check(&cover.range, "").unwrap());
+        assert_eq!(doc.annotation_keep(0, false).unwrap(), 0);
+        assert!(!doc.bookmark_check(&cover.range, "Some words").unwrap(), "words a picture page never had");
+        // With no words to compare, a changed book leaves the bookmark unresolved.
+        let mut saved = crate::annotations::Annotation {
+            version: 1,
+            kind: crate::annotations::Kind::Bookmark,
+            id: "cover".into(),
+            book: "textless".into(),
+            fingerprint: "original".into(),
+            range: cover.range.clone(),
+            quotation: String::new(),
+            created: "2026-11-22".into(),
+            chapter: String::new(),
+            note: None,
+            provenance: None,
+        };
+        assert!(thread::holds(&mut doc, &saved, "original"));
+        assert!(!thread::holds(&mut doc, &saved, "changed"));
+        saved.range.start = Position("/body/DocFragment[7]/body/div".into());
+        assert!(!thread::holds(&mut doc, &saved, "original"), "a start that no longer exists");
+        let last = doc.page_count() - 1;
+        doc.go_to_page(last);
+        let text = doc.page_opening(80).unwrap();
+        assert_eq!(text.text, "The first words of the book.");
+        drop(doc);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Renders an EPUB with colored headings, links and an embedded RGB image
@@ -683,7 +801,7 @@ mod tests {
         assert_eq!(geometry.rects, end.rects);
         doc.annotation_clear();
         assert!(doc.annotation_check(&all, &clipped.text).unwrap());
-        assert_eq!(doc.annotation_keep(9).unwrap(), 0);
+        assert_eq!(doc.annotation_keep(9, true).unwrap(), 0);
         assert_eq!(doc.annotation_finish(1), vec![9]);
         for page in 0..=last_page {
             assert_eq!(doc.annotation_page(page), vec![9]);
@@ -694,12 +812,13 @@ mod tests {
         assert!(!doc.annotation_check(&all, "Edited quotation").unwrap());
         let reversed = TextRange { start: all.end.clone(), end: all.start.clone() };
         assert!(!doc.annotation_check(&reversed, &clipped.text).unwrap());
-        assert!(doc.annotation_keep(1).is_err(), "a failed check leaves nothing to keep");
+        assert!(doc.annotation_keep(1, true).is_err(), "a failed check leaves nothing to keep");
         let root = std::env::temp_dir().join(format!("verso-highlight-milestone-{}", std::process::id()));
         let store = crate::store::Store::at(root.clone());
         let mut collection = crate::annotations::Collection::load(&store, "milestone").unwrap();
         collection.add(crate::annotations::Annotation {
             version: 1,
+            kind: crate::annotations::Kind::Highlight,
             id: "passage".into(),
             book: "milestone".into(),
             fingerprint: "original".into(),

@@ -1,10 +1,13 @@
 use crate::{
     annotations::{
-        Annotation, Collection, NOTE_LIMIT,
+        Annotation, Collection, Kind, NOTE_LIMIT,
         export::Export,
         worker::{self, Preview},
     },
-    document::thread::{Command, Reply, Resolved, Worker},
+    document::{
+        Opening,
+        thread::{Command, OpeningRequest, Reply, Resolved, Worker},
+    },
     geom::Rect,
     gfx::HAlign,
     platform::TextInput,
@@ -42,6 +45,22 @@ pub(super) struct State {
     /// The latest export's destination, or why it failed. Separate from the
     /// other errors: exporting never changes annotations or their saving.
     pub export_result: Option<Result<PathBuf, String>>,
+    /// A page bookmark waiting for its page's opening words, with the
+    /// resolution revision it was asked under.
+    pub bookmark_request: Option<(OpeningRequest, u64)>,
+    /// The last opening-words request ID; IDs are never reused.
+    bookmark_id: u64,
+}
+/// What toggling the bookmark on a page did or needs.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Toggle {
+    /// Every bookmark on the page was removed.
+    Removed,
+    /// A bookmark on the page has a note: ask before removing it.
+    Confirm,
+    /// The page's opening words were asked for; the bookmark is added when
+    /// they arrive (`State::receive_opening`).
+    Requested,
 }
 /// Why a highlight or note can't be saved right now.
 pub(super) const NOT_READY: &str = "Highlights aren't ready to save yet. Try again in a moment.";
@@ -54,6 +73,9 @@ impl State {
             return;
         }
         self.invalidate_import("Highlights changed. Preview the import again.");
+        // The book thread drops a request from an older layout unanswered,
+        // and a reply under an older resolution would be dropped here anyway.
+        self.bookmark_request = None;
         self.resolving = true;
         self.revision += 1;
         self.resolved.clear();
@@ -61,8 +83,157 @@ impl State {
             generation,
             revision: self.revision,
             records: self.collection.records.clone(),
+            fingerprint: self.fingerprint(),
             preview: false,
         });
+    }
+    /// The open book's content fingerprint, once loaded.
+    fn fingerprint(&self) -> String {
+        self.service.as_ref().map(|w| w.book.fingerprint.clone()).unwrap_or_default()
+    }
+    /// The saved index of highlight `number`, counting highlights only in
+    /// saved order (what `Page::annotations` holds).
+    pub fn highlight(&self, number: usize) -> Option<usize> {
+        self.collection
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.kind == Kind::Highlight)
+            .nth(number)
+            .map(|(i, _)| i)
+    }
+    /// The saved indices of the page bookmarks on `page` in the current
+    /// layout. Empty while a resolution runs: pages are known only after it.
+    pub fn bookmarks_on(&self, page: usize) -> Vec<usize> {
+        if self.resolving || self.resolved.len() != self.collection.records.len() {
+            return vec![];
+        }
+        self.resolved
+            .iter()
+            .filter(|e| e.page == Some(page))
+            .map(|e| e.index)
+            .filter(|&i| self.collection.records.get(i).is_some_and(|a| a.kind == Kind::Bookmark))
+            .collect()
+    }
+    /// Whether `page` shows the bookmark mark.
+    #[allow(dead_code)] // Drawn from Phase 2 (docs/bookmarks.md).
+    pub fn bookmarked(&self, page: usize) -> bool {
+        !self.bookmarks_on(page).is_empty()
+    }
+    /// True when a page's bookmark can be toggled now: the saved entries are
+    /// loaded and resolved for this layout, and nothing is being saved.
+    pub fn can_toggle(&self) -> bool {
+        self.can_save() && !self.resolving && self.bookmark_request.is_none()
+    }
+    /// Toggles the bookmark on `page`. A page with bookmarks loses all of
+    /// them, so one toggle clears what the page shows; when any has a note,
+    /// that waits for `confirmed`. A page without one asks for its opening
+    /// words. Toggling never re-renders a page: the mark is drawn over it.
+    #[allow(dead_code)] // The corner tap and the menu button call it from Phase 2.
+    pub fn toggle_bookmark(
+        &mut self,
+        generation: u64,
+        page: usize,
+        confirmed: bool,
+        worker: &Worker,
+    ) -> Result<Toggle, &'static str> {
+        self.toggle_with(generation, page, confirmed, &mut |c| worker.send(c))
+    }
+    fn toggle_with(
+        &mut self,
+        generation: u64,
+        page: usize,
+        confirmed: bool,
+        send: &mut dyn FnMut(Command),
+    ) -> Result<Toggle, &'static str> {
+        if !self.can_toggle() {
+            return Err(NOT_READY);
+        }
+        let marks = self.bookmarks_on(page);
+        if marks.is_empty() {
+            self.bookmark_id += 1;
+            let request = OpeningRequest { generation, page, id: self.bookmark_id };
+            self.bookmark_request = Some((request, self.revision));
+            send(Command::Opening(request));
+            return Ok(Toggle::Requested);
+        }
+        if !confirmed && marks.iter().any(|&i| self.collection.records[i].note.is_some()) {
+            return Ok(Toggle::Confirm);
+        }
+        self.remove_resolved(&marks);
+        self.save();
+        Ok(Toggle::Removed)
+    }
+    /// Removes saved entries without a new resolution, keeping the resolved
+    /// table in step: later indices shift down. Only for entries that are
+    /// never painted (page bookmarks), so cached pages stay valid.
+    fn remove_resolved(&mut self, indices: &[usize]) {
+        let mut indices = indices.to_vec();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        indices.dedup();
+        for i in indices {
+            let id = self.collection.records[i].id.clone();
+            self.collection.remove(&id);
+            self.resolved.retain(|e| e.index != i);
+            for e in &mut self.resolved {
+                if e.index > i {
+                    e.index -= 1;
+                }
+            }
+        }
+    }
+    /// Adds the bookmark a toggle asked for, once its page's opening words
+    /// arrive. Replies for another request, an older layout or an older
+    /// resolution are dropped, and so is a page that gained a bookmark
+    /// meanwhile. Returns a message to show briefly.
+    pub fn receive_opening(
+        &mut self,
+        request: OpeningRequest,
+        result: Result<Opening, String>,
+        generation: u64,
+        chapter: String,
+    ) -> Option<String> {
+        let (pending, revision) = self.bookmark_request?;
+        if pending != request {
+            return None;
+        }
+        self.bookmark_request = None;
+        if request.generation != generation || revision != self.revision || self.resolving {
+            return None;
+        }
+        let opening = match result {
+            Ok(o) => o,
+            Err(e) => return Some(format!("Couldn't bookmark the page: {e}")),
+        };
+        if !self.bookmarks_on(request.page).is_empty() {
+            return None;
+        }
+        let book = self.service.as_ref().map(|w| w.book.annotation_id.clone()).unwrap_or_default();
+        let created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let id = crate::annotations::digest(format!("{book}:{created}:bookmark:{}", opening.range.start.0).as_bytes());
+        let bookmark = Annotation {
+            version: 1,
+            kind: Kind::Bookmark,
+            id,
+            book,
+            fingerprint: self.fingerprint(),
+            range: opening.range,
+            quotation: opening.text,
+            created: crate::annotations::created_now(),
+            chapter,
+            note: None,
+            provenance: None,
+        };
+        if let Err(message) = self.add(bookmark) {
+            return Some(message.into());
+        }
+        // In reading order: the page start comes before anything starting on
+        // the page, and unresolved entries stay last.
+        let index = self.collection.records.len() - 1;
+        let at =
+            self.resolved.iter().position(|e| e.page.is_none_or(|p| p >= request.page)).unwrap_or(self.resolved.len());
+        self.resolved.insert(at, Resolved { index, page: Some(request.page) });
+        None
     }
     /// True when a new highlight or note can be saved now.
     pub fn can_save(&self) -> bool {
@@ -178,7 +349,14 @@ impl State {
             worker::Reply::Preview(id, result) if id == self.import_id && self.importing => {
                 match result {
                     Ok(p) => {
-                        send(Command::Resolve { generation, revision: id, records: p.records.clone(), preview: true });
+                        let fingerprint = self.fingerprint();
+                        send(Command::Resolve {
+                            generation,
+                            revision: id,
+                            records: p.records.clone(),
+                            fingerprint,
+                            preview: true,
+                        });
                         self.preview = Some(p);
                     }
                     Err(e) => {
@@ -904,9 +1082,118 @@ mod tests {
         assert!(state.importing, "queued import state survives the save acknowledgement");
         assert!(sent.is_empty());
     }
+    /// A loaded, resolved state: highlights "h0", "h1" on pages 2 and 6, and
+    /// bookmarks "b0" (p. 4) and "b1", "b2" (both p. 6 after a size change).
+    fn with_bookmarks() -> State {
+        let mut state = ready(&["h0", "b0", "h1", "b1", "b2"]);
+        for i in [1, 3, 4] {
+            state.collection.records[i].kind = Kind::Bookmark;
+        }
+        state.resolved = [(0, 2), (1, 4), (3, 6), (4, 6), (2, 6)]
+            .into_iter()
+            .map(|(index, page)| Resolved { index, page: Some(page) })
+            .collect();
+        state
+    }
+    fn opening(start: &str) -> Opening {
+        Opening {
+            range: crate::document::TextRange {
+                start: crate::document::Position(start.into()),
+                end: crate::document::Position(format!("{start}/text().20")),
+            },
+            text: "It was a bright cold".into(),
+        }
+    }
+    #[test]
+    fn toggling_adds_one_bookmark_and_removes_every_bookmark_on_the_page() {
+        let mut state = with_bookmarks();
+        let mut sent = vec![];
+        assert_eq!(state.bookmarks_on(6), vec![3, 4]);
+        assert!(state.bookmarked(4) && !state.bookmarked(2), "a highlight is not a bookmark");
+        assert_eq!((state.highlight(0), state.highlight(1), state.highlight(2)), (Some(0), Some(2), None));
+
+        // One bookmark: removed at once; the highlight numbers cached pages
+        // hold still name the same highlights.
+        assert_eq!(state.toggle_with(1, 4, false, &mut |c| sent.push(c)), Ok(Toggle::Removed));
+        assert!(sent.is_empty() && state.pending, "removing needs no engine call, just a save");
+        assert_eq!(state.collection.manifest.records, ["h0", "h1", "b1", "b2"]);
+        assert!(!state.bookmarked(4));
+        assert_eq!(state.ordered(), vec![0, 2, 3, 1], "reading order kept, indices shifted");
+        assert_eq!((state.highlight(0), state.highlight(1)), (Some(0), Some(1)));
+        assert_eq!(state.toggle_with(1, 6, false, &mut |c| sent.push(c)), Err(NOT_READY), "while saving");
+        state.pending = false;
+
+        // Several bookmarks on one page: all go, after asking when one has a note.
+        state.collection.records[3].note = Some("typed".into());
+        assert_eq!(state.toggle_with(1, 6, false, &mut |c| sent.push(c)), Ok(Toggle::Confirm));
+        assert_eq!(state.collection.records.len(), 4, "nothing removed before confirming");
+        assert_eq!(state.toggle_with(1, 6, true, &mut |c| sent.push(c)), Ok(Toggle::Removed));
+        assert_eq!(state.collection.manifest.records, ["h0", "h1"]);
+        assert_eq!(state.ordered(), vec![0, 1]);
+        state.pending = false;
+
+        // No bookmark: the page's opening words are asked for, then added.
+        assert_eq!(state.toggle_with(1, 6, false, &mut |c| sent.push(c)), Ok(Toggle::Requested));
+        let Some(Command::Opening(request)) = sent.pop() else { panic!("asks for the opening words") };
+        assert_eq!((request.generation, request.page), (1, 6));
+        assert!(!state.can_toggle(), "one request at a time");
+        assert!(state.receive_opening(request, Ok(opening("/p[9]")), 1, "Chapter 2".into()).is_none());
+        let added = state.collection.records.last().unwrap();
+        assert_eq!(added.kind, Kind::Bookmark);
+        assert_eq!((added.quotation.as_str(), added.chapter.as_str()), ("It was a bright cold", "Chapter 2"));
+        assert_eq!(added.range.start.0, "/p[9]");
+        assert!(state.pending && state.bookmarked(6));
+        assert_eq!(state.ordered(), vec![0, 2, 1], "the page start comes before a highlight on that page");
+        assert_eq!(state.highlight(1), Some(1));
+    }
+    #[test]
+    fn stale_or_failed_opening_replies_add_nothing() {
+        let mut state = with_bookmarks();
+        let mut sent = vec![];
+        let ask = |state: &mut State, page| {
+            let mut sent = vec![];
+            assert_eq!(state.toggle_with(1, page, false, &mut |c| sent.push(c)), Ok(Toggle::Requested));
+            match sent.pop() {
+                Some(Command::Opening(r)) => r,
+                _ => panic!("asks for the opening words"),
+            }
+        };
+        let count = state.collection.records.len();
+        // A newer layout.
+        let request = ask(&mut state, 3);
+        assert!(state.receive_opening(request, Ok(opening("/p")), 2, String::new()).is_none());
+        // A different request.
+        let request = ask(&mut state, 3);
+        let other = OpeningRequest { id: request.id + 1, ..request };
+        assert!(state.receive_opening(other, Ok(opening("/p")), 1, String::new()).is_none());
+        assert!(state.bookmark_request.is_some(), "still waiting for its own reply");
+        // A resolution started meanwhile (a relayout or another change).
+        state.resolve_with(1, &mut |c| sent.push(c));
+        assert!(matches!(sent.pop(), Some(Command::Resolve { fingerprint, .. }) if fingerprint.is_empty()));
+        assert!(state.bookmark_request.is_none() && state.bookmarks_on(6).is_empty());
+        assert!(state.receive_opening(request, Ok(opening("/p")), 1, String::new()).is_none());
+        state.receive(Reply::Resolved {
+            generation: 1,
+            revision: state.revision,
+            entries: (0..count).map(|index| Resolved { index, page: Some(1) }).collect(),
+            preview: false,
+        });
+        // The engine couldn't read the page.
+        let request = ask(&mut state, 3);
+        let message = state.receive_opening(request, Err("no page".into()), 1, String::new());
+        assert!(message.unwrap().contains("no page"));
+        assert_eq!(state.collection.records.len(), count);
+        assert!(!state.pending && state.can_toggle());
+        // Not ready: before loading, and while resolving.
+        assert_eq!(State::default().toggle_with(1, 3, false, &mut |c| sent.push(c)), Err(NOT_READY));
+        state.resolving = true;
+        assert_eq!(state.toggle_with(1, 3, false, &mut |c| sent.push(c)), Err(NOT_READY));
+        assert!(sent.is_empty());
+    }
     fn entry(id: &str, note: Option<&str>) -> Annotation {
         Annotation {
             version: 1,
+            kind: crate::annotations::Kind::Highlight,
             id: id.into(),
             book: "book".into(),
             fingerprint: "content".into(),

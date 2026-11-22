@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
 use super::{
-    Document, FontFace, Layout, Link, Metadata, Note, PageInfo, Paths, Position, SearchBatch, SearchHit, SearchStatus,
-    Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
+    Document, FontFace, Layout, Link, Metadata, Note, Opening, PageInfo, Paths, Position, SearchBatch, SearchHit,
+    SearchStatus, Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
 };
 
 /// Upper limit for crengine's on-disk document cache.
@@ -619,10 +619,40 @@ impl CreDocument {
         let text = read_string(|buf, len| unsafe { sys::verso_cre_annotation_checked_text(self.raw, buf, len) })?;
         Ok(crate::annotations::same_quotation(&text, quotation))
     }
-    /// Adds the range the last successful [`Self::annotation_check`] accepted
-    /// as annotation `id`, returning its page.
-    pub fn annotation_keep(&mut self, id: usize) -> Result<usize> {
-        let page = unsafe { sys::verso_cre_annotation_keep(self.raw, id.try_into()?) };
+    /// Whether a saved page bookmark still holds: its start exists and the
+    /// text up to its end still reads as its opening words. A bookmark on a
+    /// page without text (empty end and quotation) checks only the start; the
+    /// caller also requires an unchanged book. Never searches elsewhere.
+    /// A true result can then be kept with [`Self::annotation_keep`].
+    pub fn bookmark_check(&mut self, range: &TextRange, quotation: &str) -> Result<bool> {
+        let a = CString::new(range.start.0.as_str())?;
+        let b = CString::new(range.end.0.as_str())?;
+        let length = unsafe { sys::verso_cre_bookmark_check(self.raw, a.as_ptr(), b.as_ptr()) };
+        if length < 0 {
+            return Ok(false);
+        }
+        if quotation.is_empty() || range.end.0.is_empty() {
+            return Ok(quotation.is_empty() && range.end.0.is_empty());
+        }
+        let text = read_string(|buf, len| unsafe { sys::verso_cre_annotation_checked_text(self.raw, buf, len) })?;
+        Ok(crate::annotations::same_quotation(&text, quotation))
+    }
+    /// The current page's opening words for a page bookmark: up to about
+    /// `max_chars` characters from where the page starts, ending on a word
+    /// boundary and within the page. Empty end and text on a page without text.
+    pub fn page_opening(&mut self, max_chars: usize) -> Result<Opening> {
+        let n = unsafe { sys::verso_cre_page_opening(self.raw, max_chars.try_into()?) };
+        anyhow::ensure!(n >= 0, "couldn't read the page's opening words");
+        let field = |f| read_string(|buf, len| unsafe { sys::verso_cre_page_opening_text(self.raw, f, buf, len) });
+        let start = Position(field(0)?);
+        anyhow::ensure!(!start.0.is_empty(), "the page has no position");
+        Ok(Opening { range: TextRange { start, end: Position(field(1)?) }, text: field(2)? })
+    }
+    /// Adds the range the last successful check accepted as annotation `id`,
+    /// returning its page. An unpainted entry (a page bookmark) counts for
+    /// reading order but is never listed by [`Self::annotation_page`].
+    pub fn annotation_keep(&mut self, id: usize, painted: bool) -> Result<usize> {
+        let page = unsafe { sys::verso_cre_annotation_keep(self.raw, id.try_into()?, painted.into()) };
         anyhow::ensure!(page >= 0, "no checked annotation range");
         Ok(page as usize)
     }

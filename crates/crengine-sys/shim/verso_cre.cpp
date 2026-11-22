@@ -24,7 +24,8 @@ struct VersoCreDoc {
     lString32 selection_start, selection_end, selection_text;
     std::vector<VersoCreRect> selection_rects;
     int selection_visible = 0, selection_page = 0;
-    struct Annotation { int id; ldomXPointerEx start, end; };
+    // Bookmarks are kept for reading order only: `painted` is false.
+    struct Annotation { int id; ldomXPointerEx start, end; bool painted; };
     std::vector<Annotation> annotations, pending_annotations;
     std::vector<ldomXPointerEx> annotation_max_end;
     // The range the last annotation_check accepted, and its text.
@@ -44,6 +45,8 @@ struct VersoCreDoc {
     lString8 link_note, link_rule;
     // Cached UTF-8 XPointer from the last verso_cre_page_info call.
     lString8 page_position;
+    // The last verso_cre_page_opening result.
+    lString32 opening_start, opening_end, opening_text;
 };
 
 // Literal matching that ignores case, Unicode encoding/compatibility forms,
@@ -771,10 +774,10 @@ int verso_cre_annotation_checked_text(VersoCreDoc *doc, char *buf, int len) {
         return text.length();
     })
 }
-int verso_cre_annotation_keep(VersoCreDoc *doc, int id) {
+int verso_cre_annotation_keep(VersoCreDoc *doc, int id, int painted) {
     GUARD(-1, {
         if (doc->checked_start.isNull()) return -1;
-        doc->pending_annotations.push_back({id, doc->checked_start, doc->checked_end});
+        doc->pending_annotations.push_back({id, doc->checked_start, doc->checked_end, painted != 0});
         return doc->view->getBookmarkPage(doc->checked_start);
     })
 }
@@ -785,10 +788,12 @@ int verso_cre_annotation_finish(VersoCreDoc *doc) {
         std::stable_sort(doc->annotations.begin(), doc->annotations.end(), [](const VersoCreDoc::Annotation &a, const VersoCreDoc::Annotation &b) {
             return a.start.compare(b.start) < 0;
         });
+        // Prefix maximum of painted ends. An unpainted entry carries the
+        // previous maximum (or its own start, which keeps the sequence sorted).
         doc->annotation_max_end.clear();
         for (const auto &a : doc->annotations) {
-            auto end = a.end;
-            if (!doc->annotation_max_end.empty() && doc->annotation_max_end.back().compare(end) > 0) end = doc->annotation_max_end.back();
+            auto end = a.painted ? a.end : a.start;
+            if (!doc->annotation_max_end.empty() && (!a.painted || doc->annotation_max_end.back().compare(end) > 0)) end = doc->annotation_max_end.back();
             doc->annotation_max_end.push_back(end);
         }
         return 0;
@@ -809,11 +814,131 @@ int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity
         int count = 0;
         for (size_t i = first - doc->annotation_max_end.begin(); i < a.size(); ++i) {
             if (a[i].start.compare(visible->getEnd()) >= 0) break;
-            if (a[i].end.compare(visible->getStart()) <= 0) continue;
+            if (!a[i].painted || a[i].end.compare(visible->getStart()) <= 0) continue;
             if (ids && count < capacity) ids[count] = a[i].id;
             count++;
         }
         return count;
+    })
+}
+// The first text position at or after `p`: a page start can point at an
+// element, and its text begins in the first text node inside or after it.
+static ldomXPointerEx first_text(ldomXPointerEx p) {
+    if (p.isNull() || p.isText()) return p;
+    if (!p.nextText()) return ldomXPointerEx();
+    return p;
+}
+static bool is_space(lChar32 c) {
+    return c <= 0x20 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029
+        || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+static lString8 range_text(const ldomXPointerEx &a, const ldomXPointerEx &b) {
+    return UnicodeToUtf8(removeSoftHyphens(ldomXRange(a, b).getRangeText()));
+}
+int verso_cre_page_opening(VersoCreDoc *doc, int max_chars) {
+    GUARD(-1, {
+        LVDocView *v = doc->view;
+        ldomXPointer bm = v->getBookmark();
+        doc->opening_start = bm.toString();
+        doc->opening_end.clear();
+        doc->opening_text.clear();
+        auto visible = v->getPageDocumentRange(-1);
+        if (bm.isNull() || visible.isNull()) return 0;
+        // The range's end can be the first line of the next page (crengine
+        // counts a line starting at the page's bottom edge), so the next
+        // page's start bounds the page when it comes first.
+        ldomXPointerEx page_end = visible->getEnd();
+        int page = v->getCurPage();
+        if (page + 1 < v->getPageCount()) {
+            auto next = v->getPageDocumentRange(page + 1);
+            if (!next.isNull() && !next->getStart().isNull() && ldomXPointerEx(next->getStart()).compare(page_end) < 0)
+                page_end = next->getStart();
+        }
+        ldomXPointerEx first = first_text(ldomXPointerEx(bm));
+        if (first.isNull() || first.compare(page_end) >= 0) return 0;
+        // Walk the page's text a character at a time, remembering where the
+        // last word ended. A new block counts as a space between words.
+        ldomXPointerEx p = first;
+        ldomXPointerEx word_end;
+        ldomXPointerEx end;
+        int count = 0;
+        bool seen = false;
+        bool in_word = false;
+        ldomNode *block = p.getThisBlockNode();
+        for (;;) {
+            ldomNode *node = p.getNode();
+            const lString32 text = node->getText();
+            int limit = page_end.getNode() == node ? std::min(page_end.getOffset(), (int)text.length()) : text.length();
+            int i = std::max(0, p.getOffset());
+            for (; i < limit && count < max_chars; ++i) {
+                lChar32 c = text[i];
+                if (c == 0xAD) continue;
+                ++count;
+                if (is_space(c)) {
+                    if (in_word) { word_end = p; word_end.setOffset(i); }
+                    in_word = false;
+                } else {
+                    seen = in_word = true;
+                }
+            }
+            end = p;
+            end.setOffset(i);
+            if (count >= max_chars || i < (int)text.length()) {
+                // At the limit or the page end. Unless the next character is a
+                // space, the cut may split a word (or a word hyphenated across
+                // pages): end on the last word boundary when there is one.
+                bool mid_word = in_word && (i >= (int)text.length() || !is_space(text[i]));
+                if (mid_word && !word_end.isNull()) end = word_end;
+                break;
+            }
+            ldomXPointerEx next = p;
+            if (!next.nextText() || next.compare(page_end) >= 0) break;
+            if (next.getThisBlockNode() != block) {
+                if (in_word) word_end = end;
+                in_word = false;
+                ++count;
+                block = next.getThisBlockNode();
+            }
+            p = next;
+            if (count >= max_chars) {
+                if (!word_end.isNull()) end = word_end;
+                break;
+            }
+        }
+        if (!seen || end.isNull() || first.compare(end) >= 0) return 0;
+        doc->opening_end = end.toString();
+        doc->opening_text = removeSoftHyphens(ldomXRange(first, end).getRangeText());
+        return UnicodeToUtf8(doc->opening_text).length();
+    })
+}
+int verso_cre_page_opening_text(VersoCreDoc *doc, int field, char *buf, int len) {
+    GUARD(-1, {
+        if (field == 0) return copy_utf8(doc->opening_start, buf, len);
+        if (field == 1) return copy_utf8(doc->opening_end, buf, len);
+        if (field == 2) return copy_utf8(doc->opening_text, buf, len);
+        return -1;
+    })
+}
+int verso_cre_bookmark_check(VersoCreDoc *doc, const char *start, const char *end) {
+    GUARD(-1, {
+        doc->checked_start = doc->checked_end = ldomXPointerEx();
+        doc->checked_text.clear();
+        if (!start || !*start || !end) return -1;
+        auto *d = doc->view->getDocument();
+        ldomXPointerEx a = d->createXPointer(Utf8ToUnicode(start));
+        if (a.isNull() || a.toPoint().y < 0) return -1;
+        if (a.isText() && (a.getOffset() < 0 || a.getOffset() > a.getNode()->getText().length())) return -1;
+        ldomXPointerEx b = a;
+        if (*end) {
+            b = d->createXPointer(Utf8ToUnicode(end));
+            if (b.isNull() || !b.isText() || b.getOffset() < 0 || b.getOffset() > b.getNode()->getText().length()) return -1;
+            ldomXPointerEx text = first_text(a);
+            if (text.isNull() || text.compare(b) >= 0) return -1;
+            doc->checked_text = range_text(text, b);
+        }
+        doc->checked_start = a;
+        doc->checked_end = b;
+        return doc->checked_text.length();
     })
 }
 static lString32 cache_dir_saved;
