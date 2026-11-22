@@ -248,7 +248,7 @@ impl Books {
                 self.confirm = Some(ConfirmDelete::new(
                     cx.theme,
                     self.screen,
-                    DeleteRequest::Selection(targets),
+                    ConfirmRequest::Selection(targets),
                     "Delete selection?",
                     message,
                 ));

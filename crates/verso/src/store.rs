@@ -271,6 +271,35 @@ impl Store {
         }
         result
     }
+    /// Sets the finished flag of many books, skipping those that already have
+    /// it. Home is updated once, for the books it shows, rather than per
+    /// book. Returns the saved states, and the error that stopped the rest.
+    pub fn set_finished(&self, ids: &[String], finished: bool) -> (Vec<(String, BookState)>, Option<anyhow::Error>) {
+        let mut changed = Vec::new();
+        let mut error = None;
+        for id in ids {
+            let mut state = self.book(id);
+            if state.finished == finished {
+                continue;
+            }
+            state.finished = finished;
+            if let Err(e) = atomic(&self.book_path(id), &state) {
+                error = Some(e);
+                break;
+            }
+            changed.push((id.clone(), state));
+        }
+        let shown: std::collections::HashSet<String> = self
+            .home_summary()
+            .map(|summary| summary.books.iter().map(|entry| entry.book.id.clone()).collect())
+            .unwrap_or_default();
+        for (id, state) in changed.iter().filter(|(id, _)| shown.contains(id)) {
+            if let Err(e) = self.update_home_after_save(id, state) {
+                log::warn!("updating Home summary: {e:#}");
+            }
+        }
+        (changed, error)
+    }
     /// Ids that have a reading-state record, from one directory listing, so
     /// books never opened cost no failed file open. None when listing fails.
     pub fn book_state_ids(&self) -> Option<std::collections::HashSet<String>> {

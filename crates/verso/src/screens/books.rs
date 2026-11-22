@@ -224,7 +224,7 @@ pub struct Books {
     menu: Option<(Target, PopupMenu)>,
     name_sheet: Option<NameSheet>,
     details: Option<Details>,
-    confirm: Option<ConfirmDelete<DeleteRequest>>,
+    confirm: Option<ConfirmDelete<ConfirmRequest>>,
     selection: Option<Selection>,
     carry: Option<Carry>,
     clash: Option<ClashSheet>,
@@ -1487,7 +1487,11 @@ impl Books {
         let mut items = vec![
             (Some(Icon::BookOpen), "Open".into()),
             (Some(Icon::Info), "Details".into()),
-            (Some(Icon::Check), "Mark finished".into()),
+            if state.finished {
+                (Some(Icon::Close), "Mark unfinished".into())
+            } else {
+                (Some(Icon::Check), "Mark finished".into())
+            },
         ];
         if self.is_home() && !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
             items.push((Some(Icon::Close), "Remove from continue reading".into()));
@@ -1499,33 +1503,114 @@ impl Books {
         items.push((Some(Icon::Trash), "Delete…".into()));
         // Keep the top bar readable; on a short screen the menu opens beside the book.
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
-        let mut menu = PopupMenu::open(items, anchor, area, t);
-        menu.set_enabled(2, !state.finished);
+        let menu = PopupMenu::open(items, anchor, area, t);
         self.menu = Some((Target::Book(id), menu));
         self.continue_press = Press::default();
         self.grid.on_gesture(&Gesture::Cancel(anchor));
     }
-    fn mark(&mut self, id: &str, finished: bool, cx: &mut EventCx) {
+    /// Whether a book is finished, from the loaded states, or the saved one
+    /// before they are all loaded.
+    fn is_finished(&self, id: &str) -> bool {
+        match self.states.get(id) {
+            Some(state) => state.finished,
+            None => !self.states_loaded && self.store.book(id).finished,
+        }
+    }
+    fn mark_book(&mut self, id: &str, finished: bool, cx: &mut EventCx) {
         if let Some(book) = self.book(id) {
             self.store.select_home_book(book);
         }
         let mut state = self.store.book(id);
-        if finished {
-            state.finished = true;
-        } else {
-            state.hidden_from_continue = true;
-        }
+        state.finished = finished;
         match self.store.save_book(id, &state) {
             Ok(()) => {
                 self.set_book_state(id.to_owned(), state);
-                self.reload_home();
-                self.library.refresh_home();
-                self.apply_pending(cx);
-                self.refresh(cx.theme);
-                cx.toast(if finished { "Marked finished" } else { "Removed from continue reading" }, None);
+                self.state_changed(cx);
+                cx.toast(if finished { "Marked finished" } else { "Marked unfinished" }, None);
             }
             Err(e) => cx.toast(format!("Couldn't save book status: {e}"), None),
         }
+    }
+    fn hide_from_continue(&mut self, id: &str, cx: &mut EventCx) {
+        if let Some(book) = self.book(id) {
+            self.store.select_home_book(book);
+        }
+        let mut state = self.store.book(id);
+        state.hidden_from_continue = true;
+        match self.store.save_book(id, &state) {
+            Ok(()) => {
+                self.set_book_state(id.to_owned(), state);
+                self.state_changed(cx);
+                cx.toast("Removed from continue reading", None);
+            }
+            Err(e) => cx.toast(format!("Couldn't save book status: {e}"), None),
+        }
+    }
+    /// Home and the open list follow a finished or hidden flag.
+    fn state_changed(&mut self, cx: &mut EventCx) {
+        self.reload_home();
+        self.library.refresh_home();
+        self.apply_pending(cx);
+        self.refresh(cx.theme);
+    }
+    /// Ids of the available books in `folder` and its subfolders.
+    fn folder_book_ids(&self, folder: &std::path::Path) -> Vec<String> {
+        self.index.books.iter().filter(|b| b.available && b.path.starts_with(folder)).map(|b| b.id.clone()).collect()
+    }
+    fn ask_mark_folder(&mut self, path: PathBuf, finished: bool, cx: &mut EventCx) {
+        let ids = self.folder_book_ids(&path);
+        let count = ids.iter().filter(|id| self.is_finished(id) != finished).count();
+        let name = collections::name(&path);
+        let (title, message, action, icon) = if finished {
+            (
+                "Mark folder finished?",
+                format!(
+                    "Mark {} in “{name}” and its subfolders as finished? Reading positions are kept.",
+                    counted(count, "book")
+                ),
+                "Mark finished",
+                Icon::Check,
+            )
+        } else {
+            (
+                "Mark folder unfinished?",
+                format!(
+                    "Mark {} in “{name}” and its subfolders as unfinished? They return to where you stopped reading.",
+                    counted(count, "book")
+                ),
+                "Mark unfinished",
+                Icon::Close,
+            )
+        };
+        self.confirm = Some(ConfirmDelete::with_action(
+            cx.theme,
+            self.screen,
+            ConfirmRequest::MarkFolder(path, finished),
+            title,
+            message,
+            action,
+            icon,
+        ));
+    }
+    fn mark_folder(&mut self, path: &std::path::Path, finished: bool, cx: &mut EventCx) {
+        let ids = self.folder_book_ids(path);
+        let (changed, error) = self.store.set_finished(&ids, finished);
+        let count = changed.len();
+        for (id, state) in changed {
+            self.set_book_state(id, state);
+        }
+        if count > 0 {
+            self.state_changed(cx);
+        }
+        let name = collections::name(path);
+        let word = if finished { "finished" } else { "unfinished" };
+        cx.toast(
+            match error {
+                None => format!("Marked {} in “{name}” {word}", counted(count, "book")),
+                Some(e) => format!("Couldn't save book status: {e:#}. {} marked.", counted(count, "book")),
+            },
+            None,
+        );
     }
     fn folder_protected(&self, path: &std::path::Path) -> bool {
         self.roots.iter().any(|r| r.starts_with(path))
@@ -1536,10 +1621,17 @@ impl Books {
         self.roots.iter().any(|r| path.starts_with(r))
     }
     fn open_folder_menu(&mut self, path: PathBuf, anchor: Point, t: &Theme) {
+        let ids = self.folder_book_ids(&path);
+        let all_finished = !ids.is_empty() && ids.iter().all(|id| self.is_finished(id));
         let items = vec![
             (Some(Icon::Folder), "Open".into()),
             (Some(Icon::Info), "Details".into()),
             (Some(Icon::Search), "Search in this folder".into()),
+            if all_finished {
+                (Some(Icon::Close), "Mark all unfinished".into())
+            } else {
+                (Some(Icon::Check), "Mark all finished".into())
+            },
             (Some(Icon::SquareCheck), "Select".into()),
             (Some(Icon::FolderInput), "Move".into()),
             (Some(Icon::FolderPlus), "New folder…".into()),
@@ -1549,11 +1641,12 @@ impl Books {
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
         let mut menu = PopupMenu::open(items, anchor, area, t);
         let protected = self.folder_protected(&path);
-        menu.set_enabled(3, !protected);
+        menu.set_enabled(3, !ids.is_empty());
         menu.set_enabled(4, !protected);
-        menu.set_enabled(5, self.folder_creatable(&path));
-        menu.set_enabled(6, !protected);
+        menu.set_enabled(5, !protected);
+        menu.set_enabled(6, self.folder_creatable(&path));
         menu.set_enabled(7, !protected);
+        menu.set_enabled(8, !protected);
         self.menu = Some((Target::Folder(path), menu));
         self.grid.on_gesture(&Gesture::Cancel(anchor));
     }
@@ -1658,7 +1751,7 @@ impl Books {
                 self.confirm = Some(ConfirmDelete::new(
                     cx.theme,
                     self.screen,
-                    DeleteRequest::Item(Target::Folder(path)),
+                    ConfirmRequest::Item(Target::Folder(path)),
                     "Delete folder?",
                     message,
                 ));
@@ -1666,11 +1759,15 @@ impl Books {
             Err(e) => cx.toast(format!("{e:#}"), None),
         }
     }
-    fn delete_target(&mut self, request: DeleteRequest, cx: &mut EventCx) {
+    fn delete_target(&mut self, request: ConfirmRequest, cx: &mut EventCx) {
         let target = match request {
-            DeleteRequest::Item(target) => target,
-            DeleteRequest::Selection(targets) => {
+            ConfirmRequest::Item(target) => target,
+            ConfirmRequest::Selection(targets) => {
                 self.delete_selection(targets, cx);
+                return;
+            }
+            ConfirmRequest::MarkFolder(path, finished) => {
+                self.mark_folder(&path, finished, cx);
                 return;
             }
         };
@@ -1814,6 +1911,25 @@ fn continue_cover_rect(r: Rect) -> Rect {
 }
 
 /// Crisp 2 px cover outline at 300 dpi (1 px at 167 dpi).
+/// Thickness of the reading progress bar under a library cover.
+const PROGRESS_BAR_MM: f32 = 0.8;
+/// A finished book's title, a shade lighter than unread and in-progress ones.
+const FINISHED_TITLE: u8 = 0x30;
+
+/// A solid check circle in the bottom-right corner of a finished book's
+/// cover, with a paper ring so it shows on dark covers.
+fn draw_finished_badge(cx: &mut DrawCx, cover: Rect) {
+    let t = cx.theme;
+    let size = t.mm(4.0);
+    let inset = t.mm(1.0);
+    let badge = Rect::new(cover.right() - inset - size, cover.bottom() - inset - size, size, size);
+    let r = size as f32 / 2.0;
+    let (x, y) = (badge.x as f32 + r, badge.y as f32 + r);
+    cx.canvas.fill_circle(x, y, r + (2 * t.border) as f32, PAPER);
+    cx.canvas.fill_circle(x, y, r, INK);
+    cx.icon(Icon::Check, badge, t.mm(2.4), PAPER);
+}
+
 fn cover_outline(t: &Theme) -> i32 {
     t.mm(0.17).max(1)
 }
@@ -2273,16 +2389,20 @@ impl Screen for Books {
             }
             // While selecting, the cover takes the default grayscale mode; a
             // Ui hint would override the fast tick box drawn over its corner.
+            let finished = self.states.get(&book.id).is_some_and(|s| s.finished);
+            if finished {
+                draw_finished_badge(cx, cover);
+            }
+            let title_style = if finished {
+                t.small.weight(Weight::SemiBold).gray(FINISHED_TITLE)
+            } else {
+                t.small.weight(Weight::SemiBold)
+            };
             if self.is_home() {
                 let y = cover.bottom() + t.mm(1.4);
                 let title_h = t.mm(3.4);
                 let author_h = t.mm(3.2);
-                cx.line(
-                    &book.metadata.title,
-                    t.small.weight(Weight::SemiBold),
-                    Rect::new(cell.x, y, cell.w, title_h),
-                    HAlign::Left,
-                );
+                cx.line(&book.metadata.title, title_style, Rect::new(cell.x, y, cell.w, title_h), HAlign::Left);
                 cx.line(
                     &book.metadata.authors,
                     t.caption.gray(INK2),
@@ -2291,7 +2411,7 @@ impl Screen for Books {
                 );
             } else {
                 let state = self.states.get(&book.id);
-                let bar_h = t.mm(0.5).max(2);
+                let bar_h = t.mm(PROGRESS_BAR_MM).max(2);
                 if let Some(state) = state {
                     if state.finished {
                         // 100% solid bar with a 2 px white gap below the cover outline
@@ -2301,19 +2421,14 @@ impl Screen for Books {
                     } else if !state.position.0.is_empty() {
                         let bar = Rect::new(cover.x, cover.bottom(), cover.w, bar_h);
                         let progress = state.progress.min(10000);
-                        cx.fill(bar, LINE);
+                        cx.fill(bar, crate::ui::theme::INK3);
                         cx.fill(Rect { w: (bar.w as i64 * progress as i64 / 10000) as i32, ..bar }, INK);
                     }
                 }
-                let y = cover.bottom() + t.mm(1.1);
+                let y = cover.bottom() + t.mm(1.4);
                 let title_h = t.mm(3.4);
                 let author_h = t.mm(3.2);
-                cx.line(
-                    &book.metadata.title,
-                    t.small.weight(Weight::SemiBold),
-                    Rect::new(cell.x, y, cell.w, title_h),
-                    HAlign::Left,
-                );
+                cx.line(&book.metadata.title, title_style, Rect::new(cell.x, y, cell.w, title_h), HAlign::Left);
                 cx.line(
                     &book.metadata.authors,
                     t.caption.gray(INK2),
@@ -2453,7 +2568,7 @@ impl Screen for Books {
             match confirm.on_gesture(&g) {
                 // A selection can be large: show "Deleting…" first, then delete
                 // in `run_pending_work` once that frame is on screen.
-                Some(true) if matches!(confirm.target, DeleteRequest::Selection(_)) => confirm.start_working(),
+                Some(true) if matches!(confirm.target, ConfirmRequest::Selection(_)) => confirm.start_working(),
                 Some(true) => {
                     let target = self.confirm.take().unwrap().target;
                     self.delete_target(target, cx);
@@ -2490,7 +2605,7 @@ impl Screen for Books {
                                 self.details = Some(Details::new(cx.theme, self.screen, &book, &self.store.book(&id)));
                             }
                         }
-                        MenuEvent::Chosen(2) => self.mark(&id, true, cx),
+                        MenuEvent::Chosen(2) => self.mark_book(&id, !self.is_finished(&id), cx),
                         MenuEvent::Chosen(index) if index == delete_index => {
                             if let Some(book) = self.book(&id) {
                                 let title: String = book.metadata.title.chars().take(160).collect();
@@ -2499,13 +2614,13 @@ impl Screen for Books {
                                 self.confirm = Some(ConfirmDelete::new(
                                     cx.theme,
                                     self.screen,
-                                    DeleteRequest::Item(Target::Book(id)),
+                                    ConfirmRequest::Item(Target::Book(id)),
                                     "Delete book?",
                                     message,
                                 ));
                             }
                         }
-                        MenuEvent::Chosen(3) => self.mark(&id, false, cx),
+                        MenuEvent::Chosen(3) => self.hide_from_continue(&id, cx),
                         _ => {}
                     },
                     (Target::Folder(path), event) => match event {
@@ -2517,9 +2632,14 @@ impl Screen for Books {
                             self.search.as_mut().unwrap().scope = Scope::Collection(path);
                             self.refresh(cx.theme);
                         }
-                        MenuEvent::Chosen(5) => self.start_name(NameOperation::Create(path), cx.theme),
-                        MenuEvent::Chosen(6) => self.start_name(NameOperation::Rename(path), cx.theme),
-                        MenuEvent::Chosen(7) => self.ask_delete_folder(path, cx),
+                        MenuEvent::Chosen(3) => {
+                            let ids = self.folder_book_ids(&path);
+                            let finished = !ids.iter().all(|id| self.is_finished(id));
+                            self.ask_mark_folder(path, finished, cx);
+                        }
+                        MenuEvent::Chosen(6) => self.start_name(NameOperation::Create(path), cx.theme),
+                        MenuEvent::Chosen(7) => self.start_name(NameOperation::Rename(path), cx.theme),
+                        MenuEvent::Chosen(8) => self.ask_delete_folder(path, cx),
                         _ => {}
                     },
                 }
@@ -3092,10 +3212,12 @@ impl Details {
     }
 }
 
-/// What a library delete confirmation removes.
-enum DeleteRequest {
+/// What a library confirmation sheet acts on once accepted.
+enum ConfirmRequest {
     Item(Target),
     Selection(Vec<Target>),
+    /// Mark every book beneath a folder finished (true) or unfinished.
+    MarkFolder(PathBuf, bool),
 }
 
 /// "Delete book?" with Cancel and Delete. Nothing is removed until Delete.
@@ -3112,6 +3234,18 @@ pub(crate) struct ConfirmDelete<T> {
 }
 impl<T> ConfirmDelete<T> {
     pub(crate) fn new(t: &Theme, screen: Rect, target: T, title: &str, message: String) -> Self {
+        Self::with_action(t, screen, target, title, message, "Delete", Icon::Trash)
+    }
+    /// Like `new`, with another name and icon on the accepting button.
+    pub(crate) fn with_action(
+        t: &Theme,
+        screen: Rect,
+        target: T,
+        title: &str,
+        message: String,
+        action: &str,
+        icon: Icon,
+    ) -> Self {
         let sheet = Sheet::open(title, t.mm(62.0).min(screen.h - t.top_bar), screen, t);
         let c = sheet.content(t);
         let buttons_y = c.bottom() - t.margin - t.button_h;
@@ -3119,7 +3253,7 @@ impl<T> ConfirmDelete<T> {
         let w = (c.w - t.mm(3.0)) / 2;
         let mut cancel = Button::new("Cancel", ButtonKind::Secondary);
         cancel.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
-        let mut delete = Button::new("Delete", ButtonKind::Primary).with_icon(Icon::Trash);
+        let mut delete = Button::new(action, ButtonKind::Primary).with_icon(icon);
         delete.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
         Self { target, sheet, message, text, cancel, delete, working: false }
     }
@@ -3141,11 +3275,11 @@ impl<T> ConfirmDelete<T> {
         self.delete.on_gesture(g).then_some(true)
     }
 }
-impl ConfirmDelete<DeleteRequest> {
+impl ConfirmDelete<ConfirmRequest> {
     fn start_working(&mut self) {
         let count = match &self.target {
-            DeleteRequest::Selection(targets) => targets.len(),
-            DeleteRequest::Item(_) => 1,
+            ConfirmRequest::Selection(targets) => targets.len(),
+            ConfirmRequest::Item(_) | ConfirmRequest::MarkFolder(..) => 1,
         };
         self.message = format!("Deleting {}…", counted(count, "item"));
         self.cancel.enabled = false;
@@ -5352,7 +5486,7 @@ mod tests {
             books.navigate(Some(library.clone()), cx);
             books.open_folder_menu(library.clone(), Point::new(200, 600), &t);
             let rect = books.menu.as_ref().unwrap().1.rect();
-            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 6 * t.row + t.row / 2);
+            let rename = Point::new(rect.center().x, rect.y + t.mm(1.0) + 7 * t.row + t.row / 2);
             tap(&mut books, rename, cx);
             assert!(books.menu.is_some() && books.name_sheet.is_none(), "root rename is disabled");
             let delete = Point::new(rename.x, rename.y + t.row);
@@ -5365,7 +5499,7 @@ mod tests {
             assert!(!books.folder_creatable(&parent) && books.folder_creatable(&library));
             books.open_folder_menu(parent.clone(), Point::new(200, 600), &t);
             let rect = books.menu.as_ref().unwrap().1.rect();
-            let new_row = Point::new(rect.center().x, rect.y + t.mm(1.0) + 5 * t.row + t.row / 2);
+            let new_row = Point::new(rect.center().x, rect.y + t.mm(1.0) + 6 * t.row + t.row / 2);
             tap(&mut books, new_row, cx);
             assert!(books.menu.is_some() && books.name_sheet.is_none(), "New folder is disabled above a root");
             books.menu = None;
@@ -6125,18 +6259,75 @@ mod tests {
         assert_eq!(px(c0.x + 1, c0.y + 1), INK);
         assert_eq!(px(c0.x + 5, c0.y + 5), 200);
         assert_eq!(px(c0.x + 10, c0.bottom() + 2), INK, "in-progress filled portion");
-        assert_eq!(px(c0.right() - 10, c0.bottom() + 2), LINE, "in-progress remaining track");
+        assert_eq!(px(c0.right() - 10, c0.bottom() + 2), crate::ui::theme::INK3, "in-progress remaining track");
+        assert!(books.states.get(&books.books[0].id).is_some_and(|s| !s.finished));
+        let badge = |c: Rect| {
+            let size = t.mm(4.0);
+            let (cx, cy) = (c.right() - t.mm(1.0) - size / 2, c.bottom() - t.mm(1.0) - size / 2);
+            (cx - size / 2 + 2, cy)
+        };
+        let (bx, by) = badge(c0);
+        assert_eq!(px(bx, by), 200, "an unfinished cover has no badge");
         // Book 1 (finished): 2 px white gap below cover outline, then 100% solid INK bar.
         let c1 = books.cover_rect(cells[1].1, &t);
         assert_eq!(px(c1.x + 10, c1.bottom()), PAPER, "2 px white gap above finished bar");
         assert_eq!(px(c1.x + 10, c1.bottom() + 1), PAPER);
         assert_eq!(px(c1.x + 10, c1.bottom() + 4), INK, "finished 100% solid bar");
         assert_eq!(px(c1.right() - 10, c1.bottom() + 4), INK);
+        let (bx, by) = badge(c1);
+        assert_eq!(px(bx, by), INK, "finished cover has a check badge");
         // Book 2 (unread): no bar below the cover.
         let c2 = books.cover_rect(cells[2].1, &t);
         for dy in 0..8 {
             assert_eq!(px(c2.x + 10, c2.bottom() + dy), PAPER, "unread book has no progress bar");
         }
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn finishing_and_unfinishing_books_and_folders() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("mark-finished")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let nested = std::path::PathBuf::from("/books/Fiction/Nested");
+        let ids = books.folder_book_ids(&nested);
+        assert_eq!(ids.len(), 20);
+        let label = |books: &Books| books.menu.as_ref().unwrap().1.items[3].1.clone();
+        with_cx(&t, screen, |cx| {
+            // A partly finished folder offers "Mark all finished"; the book menu follows each book.
+            books.mark_book(&ids[0], true, cx);
+            assert!(store.book(&ids[0]).finished && books.is_finished(&ids[0]));
+            books.open_menu(ids[0].clone(), Point::new(200, 600), &t);
+            assert_eq!(books.menu.as_ref().unwrap().1.items[2].1, "Mark unfinished");
+            books.open_menu(ids[1].clone(), Point::new(200, 600), &t);
+            assert_eq!(books.menu.as_ref().unwrap().1.items[2].1, "Mark finished");
+            books.open_folder_menu(nested.clone(), Point::new(200, 600), &t);
+            assert_eq!(label(&books), "Mark all finished");
+            books.menu = None;
+            // Marking the folder finishes every book in it and its subfolders, and nothing else.
+            books.ask_mark_folder("/books/Fiction".into(), true, cx);
+            assert!(books.confirm.is_some());
+            let request = books.confirm.take().unwrap().target;
+            books.delete_target(request, cx);
+            assert!(books.folder_book_ids("/books/Fiction".as_ref()).iter().all(|id| store.book(id).finished));
+            assert!(!store.book("20").finished, "a book outside the folder is untouched");
+            books.open_folder_menu(nested.clone(), Point::new(200, 600), &t);
+            assert_eq!(label(&books), "Mark all unfinished");
+            books.menu = None;
+            // Unmarking one book turns the folder back to "Mark all finished"; positions stay.
+            let before = store.book(&ids[3]).position.clone();
+            books.mark_book(&ids[3], false, cx);
+            assert!(!store.book(&ids[3]).finished);
+            assert_eq!(store.book(&ids[3]).position, before);
+            books.open_folder_menu(nested.clone(), Point::new(200, 600), &t);
+            assert_eq!(label(&books), "Mark all finished");
+            books.menu = None;
+            books.mark_folder(&nested, false, cx);
+            assert!(ids.iter().all(|id| !store.book(id).finished));
+        });
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
