@@ -479,6 +479,33 @@ documentation without fixes. The 150 ms deadline is unchanged. Results and
 measurement limits:
 [dictionary.md](../../docs/dictionary.md#dictionary-improvements-kindle-verification-and-performance--2026-11-16).
 
+## Compact card, chained lookups and passage bar
+
+`dictionary-selection.py` verifies [dictionary-selection.md](../../docs/dictionary-selection.md)
+Phase 4 on our portrait 1272×1696 Paperwhite, then in landscape. Install the
+latest app first (`scripts/deploy.sh --no-run`) and build both probes as above.
+It reuses `dictionary.py`'s launcher copy and isolated state, with the
+`selection.epub` fixture and the real KOReader dictionaries read-only: a cold
+launch builds the indexes, a warm launch runs the scenario. Touches use the
+simulator's logical coordinates; landscape ones are injected at
+`(y, 1695 - x)`.
+
+```sh
+python3 scripts/perf/dictionary-selection.py \
+  --probe /tmp/probe --preload /tmp/probe.so --output /tmp/selection
+```
+
+It asserts that closing (at depth 0 and 1, top card, Russian card), the dismissed
+passage bar, collapse and a cached Back give back the earlier framebuffer
+byte for byte, and that a swipe in a definition starts no search. The output
+holds captures, the debug log and `selection-results.json`: per labelled touch
+the SEND_UPDATE count, first and last request time after release and the union
+of the updated rectangles (later requests in a window include settling
+redraws, so use the first), worker timers and RSS. The probe cannot keep a finger
+down, so the pressed-word invert and long-press chaining are simulator-only.
+It removes nothing itself: delete `/mnt/us/verso/dictionary-performance-check`
+afterwards.
+
 ## Word-form lookups
 
 `wordforms.py` measures base-form lookups with the installed Russian pack
