@@ -521,9 +521,16 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
             } else if let Some(i) = stack.iter().rposition(|f| f.name == tag.name) {
                 if let Some((start, block, sub)) = stack[i].script
                     && block == out.blocks.len()
-                    && let Some(converted) = script(&out.text[start..], sub)
+                    && start < out.text.len()
                 {
+                    // Digits and signs become Unicode scripts. Words, which
+                    // dictionaries use for labels such as `loyal<sub>synonym</sub>`,
+                    // stay as muted text, split from a word they touch.
                     let old = out.text[start..].to_owned();
+                    let (converted, extra, label) = match script(&old, sub) {
+                        Some(converted) => (converted, Style::default(), false),
+                        None => (old.clone(), Style::MUTED, true),
+                    };
                     let i = out.spans.partition_point(|s| s.end <= start as u32);
                     let spans = out.spans.split_off(i);
                     if let Some(first) = spans.first()
@@ -532,13 +539,20 @@ pub(super) fn parse_field(source: &str, kind: u8, first_k: &mut bool) -> Vec<Blo
                         out.spans.push(Span { end: start as u32, ..first.clone() });
                     }
                     out.text.truncate(start);
+                    if label
+                        && out.text.chars().next_back().is_some_and(char::is_alphabetic)
+                        && old.starts_with(char::is_alphabetic)
+                    {
+                        let previous = out.spans.last().map_or(Style::default(), |s| s.style);
+                        out.push(' ', previous.intersection(spans[0].style.union(extra)));
+                    }
                     let mut offset = start as u32;
                     let mut spans = spans.iter().peekable();
                     for (before, after) in old.chars().zip(converted.chars()) {
                         while spans.peek().is_some_and(|s| s.end <= offset) {
                             spans.next();
                         }
-                        out.push(after, spans.peek().unwrap().style);
+                        out.push(after, spans.peek().unwrap().style.union(extra));
                         offset += before.len_utf8() as u32;
                     }
                 }
@@ -674,8 +688,16 @@ mod tests {
         assert_eq!(style_at(&b, "e"), Style::default());
         assert_eq!(
             lines(&parse("a<sup><b>1</b></sup> 10<sup>-18</sup> <sup>Q?</sup> 1<sup>st</sup> x<sub>i</sub>", b'h')),
-            "a¹ 10⁻¹⁸ Q? 1st xi"
+            "a¹ 10⁻¹⁸ Q? 1st x i"
         );
+        let b = parse("<kref>loyal</kref><sub><c c='rosybrown'>synonym</c></sub> 1<sup>st</sup> H<sub>2</sub>O", b'x');
+        validate(&b);
+        assert_eq!(lines(&b), "loyal synonym 1st H₂O");
+        assert_eq!(style_at(&b, "loyal"), Style::LINK);
+        assert_eq!(style_at(&b, " synonym"), Style::default());
+        assert!(style_at(&b, "synonym").contains(Style::MUTED));
+        assert!(style_at(&b, "st").contains(Style::MUTED));
+        assert_eq!(style_at(&b, "₂"), Style::default());
         assert_eq!(lines(&parse("&NotEqualTilde; &#x416; &unknown; &lt;b&gt;", b'h')), "≂̸ Ж &unknown; <b>");
     }
     #[test]
