@@ -33,8 +33,10 @@ def main():
     state = OUT / 'saved-state'
     env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
     resume = ['--tap', '200,550']
-    # Centre tap → Reader Menu → Highlights.
-    listing = [*resume, '--tap', '636,848', '--tap', '487,1584']
+    # The saved highlight now covers the whole first page (drags snap to
+    # pages), so a centre tap would open it; turn to the next page, then
+    # centre tap → Reader Menu → Highlights.
+    listing = [*resume, '--tap', '636,30', '--tap', '636,848', '--tap', '487,1584']
     for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,400'],
                         'jump': [*listing, '--tap', '400,400', '--tap', '300,1500']}.items():
         subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps], env=env, check=True, timeout=30)
@@ -107,7 +109,7 @@ def notes(passage, resume):
     run('note-editor', [*add_note, '--text', first], OUT / 'scratch-state', fresh=True)
     state = OUT / 'notes-state'
     run('note-saved', [*add_note, '--text', first, '--edit', 'submit'], state, fresh=True)
-    listing = [*resume, '--tap', '636,848', '--tap', '487,1584']
+    listing = [*resume, '--tap', '636,30', '--tap', '636,848', '--tap', '487,1584']
     edit = [*listing, '--tap', '400,400', '--tap', '300,1337', '--edit', 'clear', '--text',
             'An edited note that is long enough to wrap across more than one line of the note box, with ünïcödé.']
     run('notes-list', listing, state)
