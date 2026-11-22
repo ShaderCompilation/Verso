@@ -18,6 +18,17 @@ pub struct VersoCreRect {
     pub bottom: c_int,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VersoCrePageInfo {
+    pub page: c_int,
+    pub progress: c_int,
+    pub text_offset: std::os::raw::c_longlong,
+    pub has_images: c_int,
+    pub position_len: c_int,
+    pub link_rects: c_int,
+}
+
 unsafe extern "C" {
     pub fn verso_cre_select(
         doc: *mut VersoCreDoc,
@@ -95,6 +106,14 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     pub fn verso_cre_position(doc: *mut VersoCreDoc, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_page_info(
+        doc: *mut VersoCreDoc,
+        skip_pos: *const c_char,
+        pos_buf: *mut c_char,
+        pos_len: c_int,
+        out: *mut VersoCrePageInfo,
+    ) -> c_int;
+    pub fn verso_cre_page_position(doc: *mut VersoCreDoc, buf: *mut c_char, len: c_int) -> c_int;
     pub fn verso_cre_restore(doc: *mut VersoCreDoc, position: *const c_char) -> c_int;
     pub fn verso_cre_progress(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_text_offset(doc: *mut VersoCreDoc, position: *const c_char) -> std::os::raw::c_longlong;
@@ -123,4 +142,5 @@ unsafe extern "C" {
     pub fn verso_cre_font_count() -> c_int;
     pub fn verso_cre_font_file(index: c_int, buf: *mut c_char, len: c_int) -> c_int;
     pub fn verso_cre_font_name(index: c_int, buf: *mut c_char, len: c_int) -> c_int;
+    pub fn verso_cre_fonts_clear();
 }

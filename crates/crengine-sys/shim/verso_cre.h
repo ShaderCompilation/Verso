@@ -12,6 +12,14 @@ extern "C" {
 
 typedef struct VersoCreDoc VersoCreDoc;
 typedef struct VersoCreRect { int left, top, right, bottom; } VersoCreRect;
+typedef struct VersoCrePageInfo {
+    int page;
+    int progress;
+    long long text_offset;
+    int has_images;
+    int position_len;
+    int link_rects;
+} VersoCrePageInfo;
 
 /* Resolve a word (0), extend geometry (1), extract a full range and clipped
  * geometry (2), or geometry only (3).
@@ -116,6 +124,16 @@ int verso_cre_get_prop(VersoCreDoc *doc, const char *key, char *buf, int buf_len
 
 /* Reader API. String getters return full UTF-8 byte length, excluding NUL. */
 int verso_cre_position(VersoCreDoc *doc, char *buf, int len);
+/* Snapshot of the current page's metadata in a single getBookmark() + single
+ * page-range scan: page number, position XPointer, progress, text offset,
+ * image presence, and internal link rectangles (cached for verso_cre_page_links
+ * with non-NULL rects). When `skip_pos` is non-NULL and matches the current
+ * position while text offsets are not yet built, skips counting offsets
+ * (setting progress = -1, text_offset = -1). Returns 0 on success, -1 on error. */
+int verso_cre_page_info(VersoCreDoc *doc, const char *skip_pos, char *pos_buf, int pos_len,
+                        VersoCrePageInfo *out);
+/* Copies the cached XPointer from the last verso_cre_page_info call. */
+int verso_cre_page_position(VersoCreDoc *doc, char *buf, int len);
 int verso_cre_restore(VersoCreDoc *doc, const char *position);
 int verso_cre_progress(VersoCreDoc *doc);
 /* Characters of book text before `position` (an XPointer, e.g. a TOC entry's),
@@ -132,6 +150,7 @@ int verso_cre_embedded_fonts(VersoCreDoc *doc);
 int verso_cre_font_count(void);
 int verso_cre_font_name(int index, char *buf, int len);
 int verso_cre_font_file(int index, char *buf, int len);
+void verso_cre_fonts_clear(void);
 
 
 int verso_cre_annotation_clear(VersoCreDoc *doc);

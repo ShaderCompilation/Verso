@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
 use super::{
-    Document, FontFace, Layout, Link, Metadata, Note, Paths, Position, SearchBatch, SearchHit, SearchStatus, Selection,
-    SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
+    Document, FontFace, Layout, Link, Metadata, Note, PageInfo, Paths, Position, SearchBatch, SearchHit, SearchStatus,
+    Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
 };
 
 /// Upper limit for crengine's on-disk document cache.
@@ -167,14 +167,17 @@ impl CreEngine {
     }
 
     pub fn fonts(&self) -> Vec<FontFace> {
-        (0..unsafe { sys::verso_cre_font_count() })
+        let count = unsafe { sys::verso_cre_font_count() };
+        let faces = (0..count)
             .filter_map(|i| {
                 let name = read_string(|buf, len| unsafe { sys::verso_cre_font_name(i, buf, len) }).ok()?;
                 let file =
                     read_string(|buf, len| unsafe { sys::verso_cre_font_file(i, buf, len) }).ok().map(Into::into);
                 Some(FontFace { name, file })
             })
-            .collect()
+            .collect();
+        unsafe { sys::verso_cre_fonts_clear() };
+        faces
     }
 
     /// Opens and lays out a book. Slow for big books (seconds on the Kindle).
@@ -270,8 +273,12 @@ impl CreDocument {
 }
 
 fn read_string(f: impl Fn(*mut c_char, c_int) -> c_int) -> Result<String> {
-    let len = f(std::ptr::null_mut(), 0);
+    let mut stack = [0u8; 256];
+    let len = f(stack.as_mut_ptr().cast(), stack.len() as c_int);
     anyhow::ensure!((0..=1_048_576).contains(&len), "engine string getter failed");
+    if (len as usize) < stack.len() {
+        return Ok(String::from_utf8(stack[..len as usize].to_vec())?);
+    }
     let mut buf = vec![0u8; len as usize + 1];
     anyhow::ensure!(f(buf.as_mut_ptr().cast(), buf.len() as c_int) == len, "engine string changed");
     buf.pop();
@@ -356,8 +363,70 @@ impl Document for CreDocument {
         Ok(SearchBatch { hits, searched_pages: searched.max(0) as usize, pages: self.page_count(), status })
     }
 
-    fn position(&mut self) -> Result<Position> {
-        Ok(Position(read_string(|buf, len| unsafe { sys::verso_cre_position(self.raw, buf, len) })?))
+    fn page_info(&mut self) -> Result<PageInfo> {
+        let skip_pos = if !self.counted {
+            self.known_progress.as_ref().and_then(|(p, _)| CString::new(p.0.as_str()).ok())
+        } else {
+            None
+        };
+        let mut pos_buf = [0u8; 512];
+        let mut raw = sys::VersoCrePageInfo::default();
+        let rc = unsafe {
+            sys::verso_cre_page_info(
+                self.raw,
+                skip_pos.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+                pos_buf.as_mut_ptr().cast(),
+                pos_buf.len() as c_int,
+                &mut raw,
+            )
+        };
+        anyhow::ensure!(rc == 0, "couldn't read page info");
+        anyhow::ensure!((0..=1_048_576).contains(&raw.position_len), "invalid page position length");
+        let position = if (raw.position_len as usize) < pos_buf.len() {
+            Position(String::from_utf8(pos_buf[..raw.position_len as usize].to_vec())?)
+        } else {
+            let mut buf = vec![0u8; raw.position_len as usize + 1];
+            let n = unsafe { sys::verso_cre_page_position(self.raw, buf.as_mut_ptr().cast(), buf.len() as c_int) };
+            anyhow::ensure!(n == raw.position_len, "page position changed");
+            buf.pop();
+            Position(String::from_utf8(buf)?)
+        };
+        let page = raw.page.max(0) as usize;
+        let (progress, offset) = if page == 0 {
+            (0, Some(0))
+        } else if raw.progress < 0 {
+            (self.known_progress.as_ref().map_or(0, |(_, p)| *p), None)
+        } else {
+            self.counted = true;
+            let progress = if let Some((kp, saved)) = &self.known_progress
+                && position == *kp
+            {
+                *saved
+            } else {
+                raw.progress.clamp(0, 10000) as u32
+            };
+            (progress, u64::try_from(raw.text_offset).ok())
+        };
+        let links = if (1..=10000).contains(&raw.link_rects) {
+            let n = raw.link_rects;
+            let mut rects = vec![sys::VersoCreRect::default(); n as usize];
+            let mut ids = vec![0; n as usize];
+            let copied =
+                unsafe { sys::verso_cre_page_links(self.raw, raw.page, rects.as_mut_ptr(), ids.as_mut_ptr(), n) };
+            if copied == n {
+                ids.into_iter()
+                    .zip(rects)
+                    .map(|(id, r)| {
+                        (id as usize, crate::geom::Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(PageInfo { page, position, progress, offset, has_images: raw.has_images > 0, links })
     }
 
     fn go_to_position(&mut self, p: &Position) -> Result<()> {
@@ -367,40 +436,6 @@ impl Document for CreDocument {
             "saved position isn't in this book"
         );
         Ok(())
-    }
-
-    fn progress(&mut self) -> u32 {
-        // The first page is the start, and a saved position keeps the progress
-        // saved with it (both depend only on the text). Anything else counts
-        // the whole book's text once, ~45–70 ms for a 1200-page book.
-        if self.current_page() == 0 {
-            return 0;
-        }
-        if self.known_progress.is_some() {
-            let here = self.position().ok();
-            if let Some((position, progress)) = &self.known_progress
-                && here.as_ref() == Some(position)
-            {
-                return *progress;
-            }
-        }
-        self.counted = true;
-        unsafe { sys::verso_cre_progress(self.raw) }.clamp(0, 10000) as u32
-    }
-
-    fn text_offset(&mut self) -> Option<u64> {
-        if self.current_page() == 0 {
-            return Some(0);
-        }
-        // Like `progress`, don't count the whole book just for the saved page.
-        if !self.counted && self.known_progress.is_some() {
-            let here = self.position().ok();
-            if self.known_progress.as_ref().is_some_and(|(position, _)| here.as_ref() == Some(position)) {
-                return None;
-            }
-        }
-        self.counted = true;
-        u64::try_from(unsafe { sys::verso_cre_text_offset(self.raw, std::ptr::null()) }).ok()
     }
 
     fn text_offsets(&mut self, positions: &[Position]) -> Option<(Vec<Option<u64>>, u64)> {
@@ -445,10 +480,6 @@ impl Document for CreDocument {
             language: self.prop(c"language"),
             publisher_fonts: unsafe { sys::verso_cre_embedded_fonts(self.raw) } > 0,
         }
-    }
-
-    fn has_images(&mut self) -> bool {
-        (unsafe { sys::verso_cre_images(self.raw) }) > 0
     }
 
     fn set_typography(&mut self, t: &Typography, dpi: u32, layout: &PageLayout) -> Result<()> {
@@ -529,6 +560,48 @@ impl CreDocument {
     pub fn remember_progress(&mut self, position: Position, progress: u32) {
         self.known_progress = (!position.0.is_empty()).then_some((position, progress));
     }
+
+    #[cfg(test)]
+    pub fn position(&mut self) -> Result<Position> {
+        Ok(Position(read_string(|buf, len| unsafe { sys::verso_cre_position(self.raw, buf, len) })?))
+    }
+
+    #[cfg(test)]
+    pub fn progress(&mut self) -> u32 {
+        if self.current_page() == 0 {
+            return 0;
+        }
+        if self.known_progress.is_some() {
+            let here = self.position().ok();
+            if let Some((position, progress)) = &self.known_progress
+                && here.as_ref() == Some(position)
+            {
+                return *progress;
+            }
+        }
+        self.counted = true;
+        unsafe { sys::verso_cre_progress(self.raw) }.clamp(0, 10000) as u32
+    }
+
+    #[cfg(test)]
+    pub fn text_offset(&mut self) -> Option<u64> {
+        if self.current_page() == 0 {
+            return Some(0);
+        }
+        if !self.counted && self.known_progress.is_some() {
+            let here = self.position().ok();
+            if self.known_progress.as_ref().is_some_and(|(position, _)| here.as_ref() == Some(position)) {
+                return None;
+            }
+        }
+        self.counted = true;
+        u64::try_from(unsafe { sys::verso_cre_text_offset(self.raw, std::ptr::null()) }).ok()
+    }
+
+    #[cfg(test)]
+    pub fn has_images(&mut self) -> bool {
+        (unsafe { sys::verso_cre_images(self.raw) }) > 0
+    }
     pub fn annotation_clear(&mut self) {
         unsafe {
             sys::verso_cre_annotation_clear(self.raw);
@@ -566,6 +639,7 @@ impl CreDocument {
     }
     /// The internal links on `page`, as (link number, screen rectangle) for
     /// each piece of link text. Empty when the engine can't list them.
+    #[cfg(test)]
     pub fn page_links(&mut self, page: usize) -> Vec<(usize, crate::geom::Rect)> {
         let Ok(page) = c_int::try_from(page) else { return Vec::new() };
         let n = unsafe { sys::verso_cre_page_links(self.raw, page, std::ptr::null_mut(), std::ptr::null_mut(), 0) };

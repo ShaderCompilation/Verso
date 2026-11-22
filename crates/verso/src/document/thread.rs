@@ -11,8 +11,9 @@ use crate::page_layout::PageLayout;
 use crate::platform::Waker;
 use anyhow::Result;
 use std::cell::RefCell;
+use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,161 @@ use std::time::{Duration, Instant};
 const SEARCH_SLICE: Duration = Duration::from_millis(60);
 /// Hitless progress replies are sent at most this often.
 const SEARCH_PROGRESS: Duration = Duration::from_millis(300);
+/// Maximum buffers kept in a page pixel pool (capped further by byte budget).
+const POOL_MAX_BUFFERS: usize = 4;
+/// Byte budget for pooled page buffers (matches `PageCache::DEFAULT_MAX_BYTES`:
+/// 4 buffers on Gray8 PW6, 3 buffers on Color32 Colorsoft).
+const POOL_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+struct PixelPoolInner {
+    bytes: usize,
+    max_buffers: usize,
+    closed: bool,
+    buffers: Vec<Vec<u8>>,
+}
+
+/// Bounded pool returning evicted `Page::pixels` buffers back to `verso-book`
+/// so steady-state page renders avoid allocating and memsetting 2–8.6 MB per
+/// turn and dropping them on the UI thread's glibc arena.
+pub(crate) struct PixelPool {
+    inner: Mutex<PixelPoolInner>,
+}
+
+impl PixelPool {
+    fn new(bytes: usize) -> Arc<Self> {
+        let max_buffers = POOL_MAX_BYTES.checked_div(bytes).map_or(0, |n| n.clamp(1, POOL_MAX_BUFFERS));
+        Arc::new(Self {
+            inner: Mutex::new(PixelPoolInner {
+                bytes,
+                max_buffers,
+                closed: false,
+                buffers: Vec::with_capacity(max_buffers),
+            }),
+        })
+    }
+
+    fn take(self: &Arc<Self>) -> PixelBuf {
+        let (reused, bytes) = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            (inner.buffers.pop(), inner.bytes)
+        };
+        let data = match reused {
+            Some(buf) if buf.len() == bytes => buf,
+            _ => vec![255; bytes],
+        };
+        PixelBuf { data, pool: Some(Arc::clone(self)) }
+    }
+
+    fn put(&self, buf: Vec<u8>) {
+        // Drop any rejected buffer outside the lock.
+        let discarded = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if !inner.closed && buf.len() == inner.bytes && inner.buffers.len() < inner.max_buffers {
+                inner.buffers.push(buf);
+                None
+            } else {
+                Some(buf)
+            }
+        };
+        drop(discarded);
+    }
+
+    /// Marks the pool closed and frees all pooled buffers on the calling thread
+    /// (run on `verso-book` before `release_freed_memory()` so idle Library RSS
+    /// does not retain page buffers).
+    fn close(&self) {
+        let buffers = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.closed = true;
+            std::mem::take(&mut inner.buffers)
+        };
+        drop(buffers);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).buffers.len()
+    }
+}
+
+/// Page pixel buffer that recycles its backing allocation into `PixelPool` on drop.
+pub struct PixelBuf {
+    data: Vec<u8>,
+    pool: Option<Arc<PixelPool>>,
+}
+
+impl PixelBuf {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+impl Deref for PixelBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl AsRef<[u8]> for PixelBuf {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl From<Vec<u8>> for PixelBuf {
+    fn from(data: Vec<u8>) -> Self {
+        Self { data, pool: None }
+    }
+}
+
+impl Clone for PixelBuf {
+    fn clone(&self) -> Self {
+        Self { data: self.data.clone(), pool: None }
+    }
+}
+
+impl PartialEq for PixelBuf {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl PartialEq<Vec<u8>> for PixelBuf {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.data == *other
+    }
+}
+
+impl PartialEq<[u8]> for PixelBuf {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.data.as_slice() == other
+    }
+}
+
+impl std::fmt::Debug for PixelBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PixelBuf").field("len", &self.data.len()).field("pooled", &self.pool.is_some()).finish()
+    }
+}
+
+impl Drop for PixelBuf {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take()
+            && !self.data.is_empty()
+        {
+            pool.put(std::mem::take(&mut self.data));
+        }
+    }
+}
+
+fn pixel_bytes((w, h): (u32, u32), color: ColorMode) -> usize {
+    let bpp = match color {
+        ColorMode::Gray8 => 1,
+        ColorMode::Color32 => 4,
+    };
+    w as usize * h as usize * bpp
+}
 
 #[derive(Clone, Debug)]
 pub struct Page {
@@ -27,7 +183,7 @@ pub struct Page {
     pub number: usize,
     /// `Gray8` (1 byte/px) or `Color32` (4 bytes/px, opaque RGBA).
     pub color: ColorMode,
-    pub pixels: Vec<u8>,
+    pub pixels: PixelBuf,
     pub position: Position,
     pub progress: u32,
     /// Characters of text before the page, when known (see `Document::text_offset`).
@@ -253,6 +409,7 @@ impl Worker {
                 };
                 send(Reply::Fonts(engine.fonts()));
                 let mut doc: Option<CreDocument> = None;
+                let mut pool: Option<Arc<PixelPool>> = None;
                 // The open book's file and page size, for the pre-layout record.
                 let mut open_book: Option<(PathBuf, Layout)> = None;
                 let mut generation = 0;
@@ -423,6 +580,9 @@ impl Worker {
                             }
                             Command::Open { generation: g, path, layout, typography, page, position, progress } => {
                                 generation = g;
+                                if let Some(old) = pool.take() {
+                                    old.close();
+                                }
                                 if doc.take().is_some() {
                                     release_freed_memory();
                                 }
@@ -438,6 +598,7 @@ impl Worker {
                                 {
                                     log::warn!("{e}");
                                 }
+                                pool = Some(PixelPool::new(pixel_bytes(dimensions, color)));
                                 doc = Some(d);
                                 opened = true;
                             }
@@ -453,9 +614,10 @@ impl Worker {
                             }
                             Command::Page { generation: g, number } => {
                                 if g == generation
-                                    && let Some(d) = &mut doc
+                                    && let (Some(d), Some(p)) = (&mut doc, &pool)
                                 {
-                                    match render(d, g, number, dimensions, color, annotation_revision, &annotations) {
+                                    match render(d, g, number, dimensions, color, p, annotation_revision, &annotations)
+                                    {
                                         Ok(page) => send(Reply::Page(page)),
                                         Err(e) => {
                                             send(Reply::PageFailed { generation: g, number, message: format!("{e:#}") })
@@ -466,7 +628,7 @@ impl Worker {
                             }
                             Command::Position { generation: g, position, jump } => {
                                 if g == generation
-                                    && let Some(d) = &mut doc
+                                    && let (Some(d), Some(p)) = (&mut doc, &pool)
                                 {
                                     d.go_to_position(&position)?;
                                     let number = d.current_page();
@@ -478,6 +640,7 @@ impl Worker {
                                             number,
                                             dimensions,
                                             color,
+                                            p,
                                             annotation_revision,
                                             &annotations,
                                         )?,
@@ -486,7 +649,11 @@ impl Worker {
                                 return Ok(());
                             }
                             Command::Close => {
-                                if doc.take().is_some() {
+                                let had_book = doc.take().is_some();
+                                if let Some(old) = pool.take() {
+                                    old.close();
+                                }
+                                if had_book {
                                     release_freed_memory();
                                 }
                                 open_book = None;
@@ -494,7 +661,13 @@ impl Worker {
                             }
                             Command::Prelayout { layout, typography, page } => {
                                 // Its cache file is final before another process may touch it.
-                                doc = None;
+                                let had_book = doc.take().is_some();
+                                if let Some(old) = pool.take() {
+                                    old.close();
+                                }
+                                if had_book {
+                                    release_freed_memory();
+                                }
                                 open_book = None;
                                 let own = own.clone();
                                 prelayout.start(&Job { layout, typography, page, dpi }, move |event| {
@@ -512,7 +685,7 @@ impl Worker {
                             }
                             Command::Start | Command::Shutdown => return Ok(()),
                         }
-                        if let Some(d) = &mut doc {
+                        if let (Some(d), Some(p)) = (&mut doc, &pool) {
                             let pages = d.page_count();
                             let current = d.current_page();
                             let metadata = d.metadata();
@@ -532,6 +705,7 @@ impl Worker {
                                 current,
                                 dimensions,
                                 color,
+                                p,
                                 annotation_revision,
                                 &annotations,
                             )?));
@@ -556,6 +730,9 @@ impl Worker {
                     if let Err(e) = result {
                         send(Reply::Error { generation, message: format!("{e:#}") });
                     }
+                }
+                if let Some(old) = pool.take() {
+                    old.close();
                 }
                 prelayout.shutdown();
             })
@@ -621,82 +798,86 @@ fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<C
     }
     c
 }
+#[allow(clippy::too_many_arguments)]
 fn render(
     d: &mut CreDocument,
     generation: u64,
     number: usize,
     (w, h): (u32, u32),
     color: ColorMode,
+    pool: &Arc<PixelPool>,
     revision: u64,
     annotations: &[Annotation],
 ) -> Result<Arc<Page>> {
     let started = std::time::Instant::now();
     let last = d.page_count().saturating_sub(1);
     d.go_to_page(number.min(last));
-    let pixels = match color {
-        ColorMode::Gray8 => {
-            let mut pixels = vec![255; w as usize * h as usize];
-            d.draw(&mut pixels, w as usize)?;
-            pixels
-        }
-        ColorMode::Color32 => {
-            let mut pixels = vec![255; w as usize * h as usize * 4];
-            d.draw_rgba(&mut pixels, w as usize * 4)?;
-            pixels
-        }
-    };
-    let current = d.current_page();
-    let mut geometry = Vec::new();
-    let mut geometry_cache = std::collections::HashMap::<(&str, &str), Vec<Rect>>::new();
-    for index in d.annotation_page(current) {
-        let Some(a) = annotations.get(index) else { continue };
-        let key = (a.range.start.0.as_str(), a.range.end.0.as_str());
-        let rects = if let Some(rects) = geometry_cache.get(&key) {
-            rects.clone()
-        } else {
-            let Some(selection) = d.select(number, &SelectionQuery::Geometry(a.range.clone())).ok().flatten() else {
-                continue;
-            };
-            geometry_cache.insert(key, selection.rects.clone());
-            selection.rects
-        };
-        geometry.push((index, rects));
+    let mut pixels = pool.take();
+    match color {
+        ColorMode::Gray8 => d.draw(pixels.as_mut_slice(), w as usize)?,
+        ColorMode::Color32 => d.draw_rgba(pixels.as_mut_slice(), w as usize * 4)?,
     }
-    let union = crate::annotations::paint_union(geometry.iter().flat_map(|(_, rects)| rects.iter().copied()));
-    let painted = match color {
-        ColorMode::Gray8 => Paint::prepare(union, &pixels, w, h),
-        // Color canvases tint highlights directly via `Canvas::highlight_rect`,
-        // so skip preparing gray patches.
-        ColorMode::Color32 => {
-            let bounds = Rect::new(0, 0, w as i32, h as i32);
-            union
-                .into_iter()
-                .filter_map(|r| r.intersect(&bounds))
-                .map(|rect| Paint { rect, pixels: Vec::new() })
-                .collect()
+    let info = d.page_info()?;
+    let (geometry, painted) = if annotations.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let mut geometry = Vec::new();
+        let mut geometry_cache = std::collections::HashMap::<(&str, &str), Vec<Rect>>::new();
+        for index in d.annotation_page(info.page) {
+            let Some(a) = annotations.get(index) else { continue };
+            let key = (a.range.start.0.as_str(), a.range.end.0.as_str());
+            let rects = if let Some(rects) = geometry_cache.get(&key) {
+                rects.clone()
+            } else {
+                let Some(selection) = d.select(info.page, &SelectionQuery::Geometry(a.range.clone())).ok().flatten()
+                else {
+                    continue;
+                };
+                geometry_cache.insert(key, selection.rects.clone());
+                selection.rects
+            };
+            geometry.push((index, rects));
         }
+        let painted = if geometry.is_empty() {
+            Vec::new()
+        } else {
+            let union = crate::annotations::paint_union(geometry.iter().flat_map(|(_, rects)| rects.iter().copied()));
+            match color {
+                ColorMode::Gray8 => Paint::prepare(union, &pixels, w, h),
+                // Color canvases tint highlights directly via `Canvas::highlight_rect`,
+                // so skip preparing gray patches.
+                ColorMode::Color32 => {
+                    let bounds = Rect::new(0, 0, w as i32, h as i32);
+                    union
+                        .into_iter()
+                        .filter_map(|r| r.intersect(&bounds))
+                        .map(|rect| Paint { rect, pixels: Vec::new() })
+                        .collect()
+                }
+            }
+        };
+        log::debug!(
+            "annotation geometry: page={} revision={} ranges={} rects={}",
+            info.page,
+            revision,
+            geometry.len(),
+            geometry.iter().map(|(_, r)| r.len()).sum::<usize>()
+        );
+        (geometry, painted)
     };
-    log::debug!(
-        "annotation geometry: page={} revision={} ranges={} rects={}",
-        current,
-        revision,
-        geometry.len(),
-        geometry.iter().map(|(_, r)| r.len()).sum::<usize>()
-    );
-    let position = d.position()?;
     let page = Page {
         generation,
-        number: d.current_page(),
+        number: info.page,
         color,
         pixels,
-        position,
-        progress: d.progress(),
-        offset: d.text_offset(),
-        images: d.has_images(),
+        position: info.position,
+        progress: info.progress,
+        offset: info.offset,
+        images: info.has_images,
         annotation_revision: revision,
         painted,
         annotations: geometry,
-        links: d.page_links(current),
+        links: info.links,
     };
     log::info!("page {} rendered in {:?}", page.number + 1, started.elapsed());
     Ok(Arc::new(page))
@@ -758,5 +939,44 @@ mod tests {
         let mut pending = None;
         assert!(matches!(coalesce(layout(1), &rx, &mut pending), Command::Layout { generation: 2, .. }));
         assert!(matches!(pending, Some(Command::Page { number: 9, .. })));
+    }
+    #[test]
+    fn pixel_pool_reuses_dropped_buffers_caps_count_and_clears_on_close() {
+        let pool = PixelPool::new(1024);
+        let a = pool.take();
+        let ptr = a.as_ptr();
+        assert_eq!(a.len(), 1024);
+        assert_eq!(pool.len(), 0);
+        // Cloning detaches from the pool so it does not double-return.
+        let cloned = a.clone();
+        drop(cloned);
+        assert_eq!(pool.len(), 0);
+
+        drop(a);
+        assert_eq!(pool.len(), 1);
+        let b = pool.take();
+        assert_eq!(b.as_ptr(), ptr, "dropped buffer should be recycled without reallocating");
+        assert_eq!(pool.len(), 0);
+
+        // Dropping more buffers than POOL_MAX_BUFFERS caps the pool.
+        let extra: Vec<_> = (0..POOL_MAX_BUFFERS + 2).map(|_| pool.take()).collect();
+        drop(b);
+        drop(extra);
+        assert_eq!(pool.len(), POOL_MAX_BUFFERS);
+
+        // Close frees queued buffers immediately and rejects late returns.
+        let held = pool.take();
+        assert_eq!(pool.len(), POOL_MAX_BUFFERS - 1);
+        pool.close();
+        assert_eq!(pool.len(), 0);
+        drop(held);
+        assert_eq!(pool.len(), 0);
+
+        // Byte budget caps large Color32 buffers below POOL_MAX_BUFFERS while
+        // keeping Gray8 at POOL_MAX_BUFFERS.
+        let gray_pool = PixelPool::new(pixel_bytes((1272, 1696), ColorMode::Gray8));
+        let color_pool = PixelPool::new(pixel_bytes((1272, 1696), ColorMode::Color32));
+        assert_eq!(gray_pool.inner.lock().unwrap().max_buffers, 4);
+        assert_eq!(color_pool.inner.lock().unwrap().max_buffers, 3);
     }
 }

@@ -42,6 +42,8 @@ struct VersoCreDoc {
     std::vector<int> link_ids;
     lString32 link_target, link_label;
     lString8 link_note, link_rule;
+    // Cached UTF-8 XPointer from the last verso_cre_page_info call.
+    lString8 page_position;
 };
 
 // Literal matching that ignores case, Unicode encoding/compatibility forms,
@@ -72,14 +74,17 @@ static void set_str(LVDocView *v, const char *name, const char *value) {
     v->propsApply(props);
 }
 
-static int copy_utf8(const lString32 &value, char *buf, int len) {
-    lString8 text = UnicodeToUtf8(value);
+static int copy_lstring8(const lString8 &text, char *buf, int len) {
     if (buf && len > 0) {
         int n = std::min(text.length(), len - 1);
         memcpy(buf, text.c_str(), n);
         buf[n] = 0;
     }
     return text.length();
+}
+
+static int copy_utf8(const lString32 &value, char *buf, int len) {
+    return copy_lstring8(UnicodeToUtf8(value), buf, len);
 }
 
 static void collect_toc(LVTocItem *item, std::vector<LVTocItem *> &out) {
@@ -236,11 +241,6 @@ static lString32 block_text_after(ldomXPointerEx p, int want) {
 
 // The longest note shown in a sheet; a longer target is a place to jump to.
 static const int NOTE_MAX_CHARS = 6000;
-
-static ldomNode *link_anchor(ldomNode *n) {
-    while (n && (!n->isElement() || n->getNodeId() != el_a)) n = n->getParentNode();
-    return n;
-}
 
 // The element an internal link points at. crengine rewrites EPUB links to
 // "#id" (ids prefixed per file) in its single DOM; other links have no target.
@@ -498,14 +498,73 @@ static int classify(ldomNode *a, ldomNode *t, ldomNode *note, const lString32 &l
     return 2;
 }
 
+// Walks a page's DOM range once to check for images and/or collect internal
+// links in document order (matching LVDocView::getCurrentPageLinks, including
+// an <a> wrapping the page's first text node).
+static void scan_page_range(const LVRef<ldomXRange> &range, bool *has_images, std::vector<ldomNode *> *anchors) {
+    if (has_images) *has_images = false;
+    if (anchors) anchors->clear();
+    if (range.isNull()) return;
+    class PageScanner : public ldomNodeCallback {
+        bool *has_images;
+        std::vector<ldomNode *> *anchors;
+        std::vector<ldomNode *> seen;
+        bool checked_first_text = false;
+        void add_anchor(ldomNode *elem) {
+            if (!elem || !elem->hasChildren()) return;
+            for (ldomNode *prev : seen)
+                if (prev == elem) return;
+            seen.push_back(elem);
+            anchors->push_back(link_target(elem) ? elem : NULL);
+        }
+    public:
+        PageScanner(bool *img, std::vector<ldomNode *> *a) : has_images(img), anchors(a) {}
+        virtual void onText(ldomXRange *r) {
+            if (!anchors || checked_first_text) return;
+            ldomNode *node = r->getStart().getNode();
+            while (node && !node->isElement()) node = node->getParentNode();
+            while (node && node->getNodeId() != el_a) node = node->getParentNode();
+            if (node) add_anchor(node);
+            checked_first_text = true;
+        }
+        virtual bool onElement(ldomXPointerEx *ptr) {
+            ldomNode *elem = ptr->getNode();
+            lUInt16 id = elem->getNodeId();
+            if (has_images && (id == el_img || id == el_image))
+                *has_images = true;
+            if (anchors && id == el_a)
+                add_anchor(elem);
+            return true;
+        }
+    };
+    PageScanner scanner(has_images, anchors);
+    range->forEach(&scanner);
+}
+
+static void collect_link_rects(LVDocView *v, const std::vector<ldomNode *> &anchors,
+                               std::vector<VersoCreRect> &rects, std::vector<int> &ids) {
+    rects.clear();
+    ids.clear();
+    for (size_t i = 0; i < anchors.size(); ++i) {
+        if (!anchors[i]) continue;
+        LVArray<lvRect> segments;
+        ldomXRange(anchors[i], true).getSegmentRects(segments);
+        for (int s = 0; s < segments.length(); ++s) {
+            lvPoint a = segments[s].topLeft();
+            lvPoint b = segments[s].bottomRight();
+            if (v->docToWindowPoint(a) && v->docToWindowPoint(b, true) && b.x > a.x && b.y > a.y) {
+                VersoCreRect r;
+                r.left = a.x; r.top = a.y; r.right = b.x; r.bottom = b.y;
+                rects.push_back(r);
+                ids.push_back((int)i);
+            }
+        }
+    }
+}
+
 // The links on the current page that point inside the book.
 static void current_links(LVDocView *v, std::vector<ldomNode *> &out) {
-    ldomXRangeList list;
-    v->getCurrentPageLinks(list);
-    for (int i = 0; i < list.length(); ++i) {
-        ldomNode *a = link_anchor(list[i]->getStart().getNode());
-        out.push_back(a && link_target(a) ? a : NULL);
-    }
+    scan_page_range(v->getPageDocumentRange(-1), nullptr, &out);
 }
 
 extern "C" {
@@ -617,7 +676,8 @@ int verso_cre_select(VersoCreDoc *doc, int page, int mode, int x, int y,
         doc->selection_start.clear(); doc->selection_end.clear(); doc->selection_text.clear();
         LVDocView *v = doc->view;
         if (page < 0 || page >= v->getPageCount() || mode < 0 || mode > 3) return -1;
-        v->goToPage(page, false, true, false);
+        if (v->getCurPage() != page)
+            v->goToPage(page, false, true, false);
         LVRef<ldomXRange> visible = v->getPageDocumentRange(page);
         if (visible.isNull()) return 0;
         ldomXRange range;
@@ -1027,6 +1087,9 @@ int verso_cre_get_prop(VersoCreDoc *doc, const char *key, char *buf, int buf_len
 int verso_cre_position(VersoCreDoc *doc, char *buf, int len) {
     GUARD(-1, { return copy_utf8(doc->view->getBookmark().toString(), buf, len); })
 }
+int verso_cre_page_position(VersoCreDoc *doc, char *buf, int len) {
+    GUARD(-1, { return copy_lstring8(doc->page_position, buf, len); })
+}
 int verso_cre_restore(VersoCreDoc *doc, const char *position) {
     GUARD(-1, {
         ldomXPointer pos = doc->view->getDocument()->createXPointer(Utf8ToUnicode(position));
@@ -1070,6 +1133,39 @@ long long verso_cre_text_length(VersoCreDoc *doc) {
     GUARD(-1, {
         if (doc->offsets.empty()) collect_offsets(doc->view->getDocument()->getRootNode(), doc);
         return (long long)doc->text_length;
+    })
+}
+int verso_cre_page_info(VersoCreDoc *doc, const char *skip_pos, char *pos_buf, int pos_len,
+                        VersoCrePageInfo *out) {
+    GUARD(-1, {
+        if (!doc || !out) return -1;
+        LVDocView *v = doc->view;
+        int page = v->getCurPage();
+        ldomXPointer bm = v->getBookmark();
+        doc->page_position = UnicodeToUtf8(bm.toString());
+        out->page = page;
+        out->position_len = copy_lstring8(doc->page_position, pos_buf, pos_len);
+        if (page == 0) {
+            out->progress = 0;
+            out->text_offset = 0;
+        } else if (skip_pos && doc->offsets.empty()
+                   && strcmp(doc->page_position.c_str(), skip_pos) == 0) {
+            out->progress = -1;
+            out->text_offset = -1;
+        } else {
+            long long off = text_offset(doc, bm);
+            out->text_offset = off;
+            out->progress = (off >= 0 && doc->text_length > 0)
+                ? std::min(10000, (int)(off * 10000 / (long long)doc->text_length))
+                : 0;
+        }
+        bool has_images = false;
+        std::vector<ldomNode *> anchors;
+        scan_page_range(v->getPageDocumentRange(-1), &has_images, &anchors);
+        out->has_images = has_images ? 1 : 0;
+        collect_link_rects(v, anchors, doc->link_rects, doc->link_ids);
+        out->link_rects = (int)doc->link_rects.size();
+        return 0;
     })
 }
 int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,
@@ -1130,25 +1226,55 @@ int verso_cre_images(VersoCreDoc *doc) {
 int verso_cre_embedded_fonts(VersoCreDoc *doc) {
     GUARD(0, { return doc->view->getDocument()->getEmbeddedFontList().length(); })
 }
+struct CachedFont {
+    lString8 name;
+    lString8 file;
+    bool has_file;
+};
+static std::vector<CachedFont> cached_fonts;
+
 int verso_cre_font_count(void) {
-    GUARD(0, { lString32Collection faces; fontMan->getFaceList(faces); return faces.length(); })
+    GUARD(0, {
+        cached_fonts.clear();
+        lString32Collection faces;
+        fontMan->getFaceList(faces);
+        cached_fonts.reserve(faces.length());
+        for (int i = 0; i < faces.length(); ++i) {
+            CachedFont entry;
+            entry.name = UnicodeToUtf8(faces[i]);
+            lString8 file;
+            int face_index;
+            int family;
+            bool math;
+            bool emojis;
+            entry.has_file = fontMan->getFontFileNameAndFaceIndex(
+                faces[i], false, false, file, face_index, family, math, emojis);
+            if (entry.has_file) entry.file = file;
+            cached_fonts.push_back(std::move(entry));
+        }
+        return (int)cached_fonts.size();
+    })
 }
 int verso_cre_font_name(int index, char *buf, int len) {
     GUARD(-1, {
-        lString32Collection faces; fontMan->getFaceList(faces);
-        if (index < 0 || index >= faces.length()) return -1;
-        return copy_utf8(faces[index], buf, len);
+        if (index < 0 || index >= (int)cached_fonts.size()) return -1;
+        return copy_lstring8(cached_fonts[index].name, buf, len);
     })
 }
 
 int verso_cre_font_file(int index, char *buf, int len) {
     GUARD(-1, {
-        lString32Collection faces; fontMan->getFaceList(faces);
-        if (index < 0 || index >= faces.length()) return -1;
-        lString8 file; int face_index; int family; bool math; bool emojis;
-        if (!fontMan->getFontFileNameAndFaceIndex(faces[index], false, false, file, face_index, family, math, emojis)) return -1;
-        return copy_utf8(Utf8ToUnicode(file), buf, len);
+        if (index < 0 || index >= (int)cached_fonts.size() || !cached_fonts[index].has_file) return -1;
+        return copy_lstring8(cached_fonts[index].file, buf, len);
     })
+}
+
+void verso_cre_fonts_clear(void) {
+    try {
+        cached_fonts.clear();
+        cached_fonts.shrink_to_fit();
+    } catch (...) {
+    }
 }
 int verso_cre_page_links(VersoCreDoc *doc, int page, VersoCreRect *rects, int *links, int capacity) {
     GUARD(-1, {
@@ -1157,24 +1283,11 @@ int verso_cre_page_links(VersoCreDoc *doc, int page, VersoCreRect *rects, int *l
             doc->link_rects.clear();
             doc->link_ids.clear();
             if (page < 0 || page >= v->getPageCount()) return -1;
-            v->goToPage(page, false, true, false);
+            if (v->getCurPage() != page)
+                v->goToPage(page, false, true, false);
             std::vector<ldomNode *> anchors;
             current_links(v, anchors);
-            for (size_t i = 0; i < anchors.size(); ++i) {
-                if (!anchors[i]) continue;
-                LVArray<lvRect> segments;
-                ldomXRange(anchors[i], true).getSegmentRects(segments);
-                for (int s = 0; s < segments.length(); ++s) {
-                    lvPoint a = segments[s].topLeft();
-                    lvPoint b = segments[s].bottomRight();
-                    if (v->docToWindowPoint(a) && v->docToWindowPoint(b, true) && b.x > a.x && b.y > a.y) {
-                        VersoCreRect r;
-                        r.left = a.x; r.top = a.y; r.right = b.x; r.bottom = b.y;
-                        doc->link_rects.push_back(r);
-                        doc->link_ids.push_back((int)i);
-                    }
-                }
-            }
+            collect_link_rects(v, anchors, doc->link_rects, doc->link_ids);
         } else {
             int n = std::min((int)doc->link_rects.size(), capacity);
             std::copy_n(doc->link_rects.begin(), n, rects);
@@ -1189,7 +1302,8 @@ int verso_cre_link(VersoCreDoc *doc, int page, int link) {
         doc->link_target.clear(); doc->link_label.clear(); doc->link_note.clear(); doc->link_rule.clear();
         LVDocView *v = doc->view;
         if (page < 0 || page >= v->getPageCount()) return -1;
-        v->goToPage(page, false, true, false);
+        if (v->getCurPage() != page)
+            v->goToPage(page, false, true, false);
         std::vector<ldomNode *> anchors;
         current_links(v, anchors);
         if (link < 0 || link >= (int)anchors.size()) return -1;

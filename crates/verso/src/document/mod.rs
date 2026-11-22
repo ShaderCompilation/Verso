@@ -13,6 +13,16 @@ use crate::page_layout::PageLayout;
 
 pub use crengine::{CreDocument, CreEngine};
 
+/// Current page's metadata collected in a single engine snapshot.
+pub struct PageInfo {
+    pub page: usize,
+    pub position: Position,
+    pub progress: u32,
+    pub offset: Option<u64>,
+    pub has_images: bool,
+    pub links: Vec<(usize, crate::geom::Rect)>,
+}
+
 /// Page layout settings, in pixels.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
@@ -183,20 +193,14 @@ pub trait Document {
     fn search_start(&mut self, query: &str) -> Result<()>;
     /// Continues the search for about `budget`, returning only the new hits.
     fn search_step(&mut self, budget: std::time::Duration) -> Result<SearchBatch>;
-    fn position(&mut self) -> Result<Position>;
+    fn page_info(&mut self) -> Result<PageInfo>;
     fn go_to_position(&mut self, position: &Position) -> Result<()>;
-    /// Text offset in ten-thousandths; independent of page count.
-    fn progress(&mut self) -> u32;
-    /// Characters of text before the current page; independent of layout.
-    /// None when not known cheaply (the saved page right after opening).
-    fn text_offset(&mut self) -> Option<u64>;
     /// Text offsets of `positions` (e.g. chapter starts) and the book's
     /// text length. None when the book has no text.
     fn text_offsets(&mut self, positions: &[Position]) -> Option<(Vec<Option<u64>>, u64)>;
     fn toc(&mut self) -> Result<Vec<TocEntry>>;
     fn metadata(&mut self) -> Metadata;
     fn set_typography(&mut self, t: &Typography, dpi: u32, layout: &PageLayout) -> Result<()>;
-    fn has_images(&mut self) -> bool;
 
     fn page_count(&mut self) -> usize;
     /// 0-based.
@@ -282,6 +286,13 @@ mod tests {
         let position = doc.position().unwrap();
         let progress = doc.progress();
         assert!(!position.0.is_empty());
+        let info = doc.page_info().unwrap();
+        assert_eq!(info.page, 5);
+        assert_eq!(info.position, position);
+        assert_eq!(info.progress, progress);
+        assert_eq!(info.offset, doc.text_offset());
+        assert_eq!(info.has_images, doc.has_images());
+        assert_eq!(info.links, doc.page_links(5));
         let toc = doc.toc().unwrap();
         assert!(!toc.is_empty());
         assert!(toc.windows(2).all(|w| w[0].page <= w[1].page));
@@ -292,7 +303,13 @@ mod tests {
         assert_eq!(doc.current_page(), 5);
         let metadata = doc.metadata();
         assert!(!metadata.title.is_empty());
-        assert!(!engine.fonts().is_empty());
+        let fonts = engine.fonts();
+        assert!(!fonts.is_empty());
+        assert_eq!(
+            fonts.iter().map(|f| (&f.name, &f.file)).collect::<Vec<_>>(),
+            engine.fonts().iter().map(|f| (&f.name, &f.file)).collect::<Vec<_>>(),
+            "repeated font enumeration returns identical snapshot"
+        );
         assert!(doc.go_to_position(&Position("/no-such-element[999]".into())).is_err());
         doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &PageLayout::default())
             .unwrap();
@@ -312,12 +329,20 @@ mod tests {
         // A saved position keeps its saved progress; other pages are counted.
         reopened.remember_progress(position.clone(), 4321);
         reopened.go_to_position(&position).unwrap();
+        let saved_info = reopened.page_info().unwrap();
+        assert_eq!(saved_info.page, 5);
+        assert_eq!(saved_info.position, position);
+        assert_eq!(saved_info.progress, 4321);
+        assert_eq!(saved_info.offset, None, "page_info doesn't count text on saved page");
         assert_eq!(reopened.current_page(), 5);
         assert_eq!(reopened.progress(), 4321);
         assert_eq!(reopened.text_offset(), None, "the saved page isn't counted on open");
         reopened.go_to_page(6);
-        assert!(reopened.progress().abs_diff(progress) < 1000, "other pages are counted");
-        let six = reopened.text_offset().expect("counted pages have an offset");
+        let next_info = reopened.page_info().unwrap();
+        assert!(next_info.progress.abs_diff(progress) < 1000, "other pages are counted");
+        let six = next_info.offset.expect("counted pages have an offset");
+        assert_eq!(reopened.progress(), next_info.progress);
+        assert_eq!(reopened.text_offset(), Some(six));
         reopened.go_to_page(7);
         assert!(reopened.text_offset().unwrap() > six, "offsets grow page by page");
         // Chapter starts: in order, within the book, independent of layout.
@@ -379,10 +404,16 @@ mod tests {
         out.finish().unwrap();
 
         let mut doc = engine.open(&path, layout, None).unwrap();
-        let mut rgba = vec![0u8; layout.width as usize * layout.height as usize * 4];
+        // Dirty sentinel bytes prove draw_rgba and draw clear the full buffer
+        // so recycled buffers never need an extra memset.
+        let mut rgba = vec![0xAAu8; layout.width as usize * layout.height as usize * 4];
         doc.draw_rgba(&mut rgba, layout.width as usize * 4).unwrap();
         let pixels = rgba.as_chunks::<4>().0;
         assert!(pixels.iter().all(|p| p[3] == 255), "all pixels must be opaque");
+        assert_eq!(pixels[0], [255, 255, 255, 255], "top-left margin cleared to white");
+        let info = doc.page_info().unwrap();
+        assert!(info.has_images, "page_info detects embedded image");
+        assert!(!info.links.is_empty(), "page_info detects internal link");
         let reds = pixels.iter().filter(|p| p[0] > 160 && p[1] < 80 && p[2] < 80).count();
         let blues = pixels.iter().filter(|p| p[2] > 160 && p[0] < 80 && p[1] < 100).count();
         let greens = pixels.iter().filter(|p| p[1] > 150 && p[0] < 60 && p[2] < 80).count();
@@ -391,8 +422,9 @@ mod tests {
         assert!(greens > 2000, "expected green image pixels, got {greens}");
 
         // Compare against the 8-bit gray path: same page still draws cleanly.
-        let mut gray = vec![255u8; layout.width as usize * layout.height as usize];
+        let mut gray = vec![0xAAu8; layout.width as usize * layout.height as usize];
         doc.draw(&mut gray, layout.width as usize).unwrap();
+        assert_eq!(gray[0], 255, "top-left margin cleared to white on Gray8");
         assert!(gray.iter().filter(|&&v| v < 200).count() > 2000);
         drop(doc);
         let _ = std::fs::remove_file(&path);
@@ -510,7 +542,9 @@ mod tests {
         let mut found = Vec::new();
         let mut notes = std::collections::BTreeMap::new();
         for page in 0..doc.page_count() {
+            doc.go_to_page(page);
             let links = doc.page_links(page);
+            assert_eq!(doc.page_info().unwrap().links, links, "page_info links match page_links on page {page}");
             assert!(links.iter().all(|(_, r)| r.w > 0 && r.h > 0 && r.right() <= 600 && r.bottom() <= 800));
             let mut ids: Vec<_> = links.iter().map(|(id, _)| *id).collect();
             ids.dedup();
