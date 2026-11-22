@@ -66,7 +66,7 @@ def scenes(s):
     menu = [*page2, *s.tap(cx, cy)]
     # The top-right corner bookmarks the page; the menu's ribbon is then filled.
     bookmark = [*page2, *s.tap(s.w - s.mm(4), s.mm(4))]
-    # The menu's bottom row: Contents, Highlights, Text, Layout.
+    # The menu's bottom row: Contents, Notes, Text, Layout.
     column = (s.w - 2 * margin) / 4
     hello_x = (max(s.mm(7), (s.w - s.mm(107)) / 2) if s.w > s.h else s.mm(7)) + s.mm(8)
     menu_button = lambda i: s.tap(margin + (i + 0.5) * column, s.h - margin - s.mm(10) / 2)
@@ -78,6 +78,8 @@ def scenes(s):
         'menu': ('one', {}, menu),
         'bookmark': ('one', {}, bookmark),
         'bookmark-menu': ('one', {}, [*bookmark, *s.tap(cx, cy)]),
+        # The Notes list with the bookmark: it has to fit 6" screens too.
+        'notes': ('one', {}, [*bookmark, *s.tap(cx, cy), *menu_button(1)]),
         'text': ('one', {}, [*menu, *menu_button(2)]),
         'layout': ('one', {}, [*menu, *menu_button(3)]),
         'drawer': ('one', {}, [*page2, *s.swipe(cx, 2, cx, s.h * 0.55)]),

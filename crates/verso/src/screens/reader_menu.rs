@@ -13,7 +13,8 @@ pub enum MenuEvent {
     Search,
     /// The ribbon: toggle the bookmark on the page. The menu stays open.
     Bookmark,
-    Highlights,
+    /// Highlights and bookmarks.
+    Notes,
     Text,
     /// Page layout: margins and reader bars.
     Layout,
@@ -38,7 +39,7 @@ pub struct ReaderMenu {
     prev: IconButton,
     next: IconButton,
     contents: Button,
-    highlights: Button,
+    notes: Button,
     text: Button,
     layout: Button,
     outside: bool,
@@ -83,12 +84,12 @@ impl ReaderMenu {
         next.place_at(Point::new(screen.w - m - t.target / 2, progress.rect().center().y), t);
         let gap = t.mm(2.4);
         let width = (screen.w - 2 * m - 3 * gap) / 4;
-        let mut buttons = ["Contents", "Highlights", "Text", "Layout"].into_iter().enumerate().map(|(i, label)| {
+        let mut buttons = ["Contents", "Notes", "Text", "Layout"].into_iter().enumerate().map(|(i, label)| {
             let mut b = Button::new(label, ButtonKind::Secondary);
             b.place(Rect::new(m + i as i32 * (width + gap), buttons_y, width, t.button_h), t);
             b
         });
-        let [contents, highlights, text, layout] = std::array::from_fn(|_| buttons.next().unwrap());
+        let [contents, notes, text, layout] = std::array::from_fn(|_| buttons.next().unwrap());
         Self {
             top_panel,
             handle,
@@ -104,7 +105,7 @@ impl ReaderMenu {
             prev,
             next,
             contents,
-            highlights,
+            notes,
             text,
             layout,
             outside: false,
@@ -154,7 +155,7 @@ impl ReaderMenu {
     }
     #[cfg(test)]
     pub fn button_rects(&self) -> [Rect; 4] {
-        [self.contents.rect(), self.highlights.rect(), self.text.rect(), self.layout.rect()]
+        [self.contents.rect(), self.notes.rect(), self.text.rect(), self.layout.rect()]
     }
     /// `percent` is the book percentage of the slider's page, once that page
     /// is on screen (while scrubbing elsewhere, only the page number shows).
@@ -193,7 +194,7 @@ impl ReaderMenu {
         self.prev.draw(cx);
         self.next.draw(cx);
         self.contents.draw(cx);
-        self.highlights.draw(cx);
+        self.notes.draw(cx);
         self.text.draw(cx);
         self.layout.draw(cx);
     }
@@ -209,7 +210,7 @@ impl ReaderMenu {
                 self.prev.is_pressed(),
                 self.next.is_pressed(),
                 self.contents.is_pressed(),
-                self.highlights.is_pressed(),
+                self.notes.is_pressed(),
                 self.text.is_pressed(),
                 self.layout.is_pressed(),
             ],
@@ -247,8 +248,8 @@ impl ReaderMenu {
         if self.contents.on_gesture(g) {
             return Some(MenuEvent::Contents);
         }
-        if self.highlights.on_gesture(g) {
-            return Some(MenuEvent::Highlights);
+        if self.notes.on_gesture(g) {
+            return Some(MenuEvent::Notes);
         }
         if self.text.on_gesture(g) {
             return Some(MenuEvent::Text);
@@ -295,7 +296,7 @@ mod tests {
         for (w, h, dpi) in [(600, 800, 167), (800, 600, 167), (1072, 1448, 300), (1860, 2480, 300)] {
             let t = Theme::for_dpi(dpi);
             let menu = ReaderMenu::new(&t, Rect::new(0, 0, w, h), "Book", 10, 100);
-            for (rect, label) in menu.button_rects().into_iter().zip(["Contents", "Highlights", "Text", "Layout"]) {
+            for (rect, label) in menu.button_rects().into_iter().zip(["Contents", "Notes", "Text", "Layout"]) {
                 let (style, pad) = crate::ui::widgets::button::fit_label(&mut text, label, t.button, rect.w, &t);
                 let width = text.width(label, style);
                 assert!(width <= (rect.w - 2 * pad) as f32, "{w}x{h}: {label} is {width} px in {rect:?}");
@@ -362,9 +363,9 @@ mod tests {
         assert!(matches!(menu.on_gesture(&swipe, true), Some(MenuEvent::QuickSettings)));
         // Tapping the handle area doesn't count as outside.
         assert!(tap(&mut menu, handle).is_none());
-        let [contents, highlights, text, layout] = menu.button_rects();
+        let [contents, notes, text, layout] = menu.button_rects();
         assert!(matches!(tap(&mut menu, contents.center()), Some(MenuEvent::Contents)));
-        assert!(matches!(tap(&mut menu, highlights.center()), Some(MenuEvent::Highlights)));
+        assert!(matches!(tap(&mut menu, notes.center()), Some(MenuEvent::Notes)));
         assert!(matches!(tap(&mut menu, text.center()), Some(MenuEvent::Text)));
         assert!(matches!(tap(&mut menu, layout.center()), Some(MenuEvent::Layout)));
         // The page between the bars closes the menu.

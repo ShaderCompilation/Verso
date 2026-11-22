@@ -856,8 +856,9 @@ impl Reader {
     fn open_highlights(&mut self, ids: Option<Vec<usize>>, cx: &mut EventCx) {
         self.selection.clear();
         self.extension = None;
+        let here = self.shown.as_ref().filter(|p| p.generation == self.cache.generation).map(|p| p.number);
         self.overlay =
-            Overlay::Highlights(Box::new(annotations::View::new(cx.theme, self.screen, &self.annotations, ids)));
+            Overlay::Highlights(Box::new(annotations::View::new(cx.theme, self.screen, &self.annotations, ids, here)));
         cx.redraw();
     }
     /// A new record for the current selection (not yet added or saved).
@@ -937,12 +938,12 @@ impl Reader {
                 }
             }
             Event::Remove(i) => {
-                if let Some(a) = self.annotations.collection.records.get(i) {
-                    let id = a.id.clone();
-                    self.annotations.collection.remove(&id);
-                    self.annotations.save();
-                    self.annotations.resolve(self.cache.generation, &self.worker);
-                    self.open_highlights(None, cx);
+                if self.annotations.remove(i, self.cache.generation, &self.worker) {
+                    // A removed bookmark's mark goes when the list closes,
+                    // which draws the page again.
+                    if let Overlay::Highlights(view) = &mut self.overlay {
+                        view.after_remove(&self.annotations, cx.theme);
+                    }
                 }
             }
             Event::Preview(path) => self.annotations.start_import(path),
@@ -1490,7 +1491,7 @@ impl Reader {
                     }
                     Some(MenuEvent::Search) => self.open_search(None, cx),
                     Some(MenuEvent::Bookmark) => self.toggle_bookmark(false, true, cx),
-                    Some(MenuEvent::Highlights) => self.open_highlights(None, cx),
+                    Some(MenuEvent::Notes) => self.open_highlights(None, cx),
                     Some(MenuEvent::Text) => self.text(cx.theme),
                     Some(MenuEvent::Layout) => {
                         self.overlay = Overlay::Layout(Box::new(LayoutView::new(

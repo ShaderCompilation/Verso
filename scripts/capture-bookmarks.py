@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Page bookmarks, Phase 2 (docs/bookmarks.md): the mark, the menu's ribbon,
-the corner tap and its setting, and the remove-with-note question.
+"""Page bookmarks, Phases 2 and 3 (docs/bookmarks.md): the mark, the menu's
+ribbon, the corner tap and its setting, the remove-with-note question, and the
+Notes list (filter, details, a note, jumping back and removing).
 
 Run cargo build first. Outputs go to gitignored screenshots/bookmarks/, each
 scene with isolated state. Taps come from the theme's millimetre sizes, as in
@@ -30,6 +31,22 @@ def steps(s):
     # The ribbon sits left of Search, the Sun and the battery (13.5 mm).
     ribbon = s.tap(s.w - s.mm(5 + 13.5 + 22.5), s.mm(13) / 2)
     return page2, corner, menu, ribbon
+
+
+def notes_taps(s):
+    """The menu's Notes button and, in the Notes list: the filter's
+    segments, the first row, and the details' buttons."""
+    margin, target, gap = s.mm(5), s.mm(9), s.mm(3)
+    notes = s.tap(margin + 1.5 * (s.w - 2 * margin) / 4, s.h - s.mm(9.5))
+    filter_y = s.mm(13) + s.mm(2) + target + gap + target / 2
+    segment = lambda i: s.tap(margin + (i + 0.5) * (s.w - 2 * margin) / 3, filter_y)
+    row = s.tap(s.w / 2, filter_y + target / 2 + gap + s.mm(15) / 2)
+    width = (s.w - 2 * margin - gap) / 2
+    left, right = margin + width / 2, s.w - margin - width / 2
+    buttons_y = s.h - s.mm(11) - gap - target / 2
+    note_y = buttons_y - target - gap
+    return {'notes': notes, 'segment': segment, 'row': row, 'jump': s.tap(left, buttons_y),
+            'remove': s.tap(right, buttons_y), 'note': s.tap(left, note_y)}
 
 
 def run(name, device, settings, script, state=None, screen=None):
@@ -113,7 +130,36 @@ def main():
     run('confirm-menu', 'pw6', {}, [*resume, *menu, *ribbon], state=state)
     run('confirmed', 'pw6', {}, [*resume, *corner, *remove], state=state)
     assert records(state) == []
+    notes(portrait, page2, corner, menu)
     print(OUT)
+
+
+def notes(s, page2, corner, menu):
+    """Phase 3: the Notes list, its filter, a bookmark's details and note,
+    jumping to the bookmark and back, and removing it from the list."""
+    n = notes_taps(s)
+    cy = s.h / 2
+    page3 = [*page2, *corner, *s.swipe(s.w * 0.8, cy, s.w * 0.2, cy)]
+    listing = [*page3, *menu, *n['notes']]
+    state = run('notes-list', 'pw6', {}, listing)
+    assert len(records(state)) == 1
+    run('notes-bookmarks', 'pw6', {}, [*listing, *n['segment'](2)])
+    run('notes-highlights', 'pw6', {}, [*listing, *n['segment'](1)])
+    details = [*listing, *n['row']]
+    run('notes-details', 'pw6', {}, details)
+    state = run('notes-note', 'pw6', {}, [*details, *n['note'], '--text', 'Opening image', '--edit', 'submit'])
+    saved = records(state)
+    assert len(saved) == 1 and saved[0]['kind'] == 'bookmark' and saved[0]['note'] == 'Opening image', saved
+    # Jumping shows page 2 with the way back to page 3.
+    run('notes-jump', 'pw6', {}, [*details, *n['jump']])
+    state = run('notes-removed', 'pw6', {}, [*details, *n['remove']])
+    assert records(state) == []
+    # The list on a 6" screen in both orientations.
+    for name, screen, settings in [('notes-basic-167', devices.Screen(600, 800, 167), {}),
+                                   ('notes-landscape-basic-167', devices.Screen(800, 600, 167),
+                                    {'orientation': 'landscape'})]:
+        p2, c, m, _ = steps(screen)
+        run(name, 'basic-167', settings, [*p2, *c, *m, *notes_taps(screen)['notes']])
 
 
 if __name__ == '__main__':

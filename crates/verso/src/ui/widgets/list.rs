@@ -41,6 +41,8 @@ pub struct Row {
     pub value: Option<String>,
     pub accessory: Accessory,
     pub lead: Lead,
+    /// A small picture before the label (not tappable), on the label's line.
+    pub icon: Option<Icon>,
     /// Grayer text for a row that is still tappable (unlike `enabled`).
     pub dim: bool,
     pub enabled: bool,
@@ -54,6 +56,7 @@ impl Row {
             value: None,
             accessory: Accessory::None,
             lead: Lead::None,
+            icon: None,
             dim: false,
             enabled: true,
         }
@@ -86,6 +89,11 @@ impl Row {
 
     pub fn rank(mut self, rank: Option<usize>) -> Self {
         self.lead = Lead::Rank(rank);
+        self
+    }
+
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
         self
     }
 
@@ -283,7 +291,14 @@ impl List {
                 cx.line(value, t.body.gray(fg2), Rect::new(right - w, r.y, w, r.h), HAlign::Right);
                 label_right = right - w - t.mm(3.0);
             }
-            let text = Rect::new(left, r.y, label_right - left, r.h);
+            let mut text = Rect::new(left, r.y, label_right - left, r.h);
+            let label_line =
+                if row.sub.is_some() { text.split_top(r.h / 2 + t.mm(0.4)).0.moved(0, t.mm(1.2)) } else { text };
+            if let Some(icon) = row.icon {
+                cx.icon(icon, Rect::new(left, label_line.y, t.icon_small, label_line.h), t.icon_small, fg);
+                let shift = t.icon_small + t.mm(2.0);
+                text = Rect::new(text.x + shift, text.y, text.w - shift, text.h);
+            }
             match &row.sub {
                 None => cx.line(&row.label, t.body.gray(fg), text, HAlign::Left),
                 Some(sub) => {

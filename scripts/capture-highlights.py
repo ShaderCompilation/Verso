@@ -37,8 +37,10 @@ def main():
     # pages), so a centre tap would open it; turn to the next page, then
     # centre tap → Reader Menu → Highlights.
     listing = [*resume, '--tap', '636,30', '--tap', '636,848', '--tap', '487,1584']
-    for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,400'],
-                        'jump': [*listing, '--tap', '400,400', '--tap', '300,1500']}.items():
+    # Notes list rows (15 mm each) start under the All · Highlights ·
+    # Bookmarks filter: the first is centred at y 548, then 726 and 903.
+    for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,548'],
+                        'jump': [*listing, '--tap', '400,548', '--tap', '300,1500']}.items():
         subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps], env=env, check=True, timeout=30)
     # Import only original fixture text. An edited source quotation must stay
     # readable/removable as unresolved; removing a valid import retains its ID.
@@ -56,9 +58,9 @@ def main():
     before = source.read_bytes()
     importing = [*listing, '--tap', '338,230']
     for name, steps in {'preview': importing, 'imported': [*importing, '--tap', '300,1500'],
-                        'imported-note': [*listing, '--tap', '400,650'],
-                        'unresolved': [*listing, '--tap', '400,900'],
-                        'removed-import': [*listing, '--tap', '400,650', '--tap', '900,1500'],
+                        'imported-note': [*listing, '--tap', '400,726'],
+                        'unresolved': [*listing, '--tap', '400,903'],
+                        'removed-import': [*listing, '--tap', '400,726', '--tap', '900,1500'],
                         'duplicates-after-removal': importing,
                         # Editing the path hides the old counts; a missing file
                         # reports an import error, never "Retry saving".
@@ -110,10 +112,10 @@ def notes(passage, resume):
     state = OUT / 'notes-state'
     run('note-saved', [*add_note, '--text', first, '--edit', 'submit'], state, fresh=True)
     listing = [*resume, '--tap', '636,30', '--tap', '636,848', '--tap', '487,1584']
-    edit = [*listing, '--tap', '400,400', '--tap', '300,1337', '--edit', 'clear', '--text',
+    edit = [*listing, '--tap', '400,548', '--tap', '300,1337', '--edit', 'clear', '--text',
             'An edited note that is long enough to wrap across more than one line of the note box, with ünïcödé.']
     run('notes-list', listing, state)
-    run('note-details', [*listing, '--tap', '400,400'], state)
+    run('note-details', [*listing, '--tap', '400,548'], state)
     run('note-edit', edit, state)
     run('note-edit-hidden-keyboard', [*edit, '--edit', 'dismiss'], state)
     run('note-edited', [*edit, '--edit', 'submit'], state)
@@ -132,7 +134,7 @@ def notes(passage, resume):
         assert expected in md, (expected, md)
     print(exports[0])
     # Deleting the note keeps the highlight.
-    run('note-deleted', [*listing, '--tap', '400,400', '--tap', '900,1337'], state)
+    run('note-deleted', [*listing, '--tap', '400,548', '--tap', '900,1337'], state)
     record = json.loads((state / 'annotations' / (json.loads(manifest.read_text())['records'][0] + '.json')).read_text())
     assert record['note'] is None and len(json.loads(manifest.read_text())['records']) == 1
     # Landscape: tapping the highlight opens details; the editor and the

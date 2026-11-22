@@ -9,14 +9,14 @@ use crate::{
         thread::{Command, OpeningRequest, Reply, Resolved, Worker},
     },
     geom::Rect,
-    gfx::HAlign,
+    gfx::{HAlign, Icon},
     platform::TextInput,
     screens::EventCx,
     ui::{
         gesture::Gesture,
         theme::{INK2, PAPER, Theme},
         widget::DrawCx,
-        widgets::{Button, ButtonKind, Keyboard, List, ListEvent, Pager, Row, TextArea, TextField, TopBar},
+        widgets::{Button, ButtonKind, Keyboard, List, ListEvent, Pager, Row, Segmented, TextArea, TextField, TopBar},
     },
 };
 use std::path::PathBuf;
@@ -273,6 +273,39 @@ impl State {
         self.save();
         Ok(true)
     }
+    /// Removes saved entry `index` and starts saving. A page bookmark leaves
+    /// the resolution as it is (nothing painted changes, so no page is
+    /// rendered again); a highlight, or any entry while a resolution runs,
+    /// starts a fresh one.
+    pub fn remove(&mut self, index: usize, generation: u64, worker: &Worker) -> bool {
+        self.remove_with(index, generation, &mut |c| worker.send(c))
+    }
+    fn remove_with(&mut self, index: usize, generation: u64, send: &mut dyn FnMut(Command)) -> bool {
+        let Some(a) = self.collection.records.get(index) else { return false };
+        if a.kind == Kind::Bookmark && !self.resolving && self.resolved.len() == self.collection.records.len() {
+            self.remove_resolved(&[index]);
+            self.save();
+        } else {
+            let id = a.id.clone();
+            self.collection.remove(&id);
+            self.save();
+            self.resolve_with(generation, send);
+        }
+        true
+    }
+    /// The page of each saved entry in the current layout, by saved index;
+    /// None while locating and for unresolved entries.
+    pub fn pages(&self) -> Vec<Option<usize>> {
+        let mut pages = vec![None; self.collection.records.len()];
+        if !self.resolving {
+            for e in &self.resolved {
+                if let Some(p) = pages.get_mut(e.index) {
+                    *p = e.page;
+                }
+            }
+        }
+        pages
+    }
     /// Entry indices in reading order; unresolved entries (and all entries,
     /// until a resolution completes) follow in saved order.
     pub fn ordered(&self) -> Vec<usize> {
@@ -473,10 +506,20 @@ enum Mode {
     Import,
     Note(NoteTarget),
 }
+/// A bookmark's opening words for its row and details, or what stands in
+/// for them on a page without text.
+fn bookmark_label(opening: &str) -> String {
+    let words = opening.split_whitespace().collect::<Vec<_>>().join(" ");
+    if words.is_empty() { "A page without text".into() } else { format!("{words}…") }
+}
+/// The Notes list's filter segments, in order.
+const FILTERS: [&str; 3] = ["All", "Highlights", "Bookmarks"];
 pub(super) struct View {
     top: TopBar,
     list: List,
     pager: Pager,
+    /// All · Highlights · Bookmarks; hidden for a tapped overlap subset.
+    filter: Segmented,
     ids: Vec<usize>,
     /// True when opened for a tapped overlap subset rather than the full list.
     subset: bool,
@@ -495,13 +538,19 @@ pub(super) struct View {
     keyboard: Keyboard,
     screen: Rect,
     body: Rect,
+    /// The list's rows: below the filter, down to the export status line.
+    list_rect: Rect,
+    /// The page shown when the list opened: the list starts near it.
+    here: Option<usize>,
     detail_body: Rect,
     detail_pages: Vec<String>,
     preview_path: Option<PathBuf>,
 }
 impl View {
-    pub fn new(t: &Theme, screen: Rect, state: &State, ids: Option<Vec<usize>>) -> Self {
-        let mut top = TopBar::new("Highlights & notes", true);
+    /// The Notes list, or (`ids`) just the highlights under a tap. It opens
+    /// on the pager page holding the entry nearest page `here`.
+    pub fn new(t: &Theme, screen: Rect, state: &State, ids: Option<Vec<usize>>, here: Option<usize>) -> Self {
+        let mut top = TopBar::new("Notes", true);
         top.place(screen, t);
         let mut pager = Pager::new(1);
         pager.place(Rect::new(t.margin, screen.bottom() - t.mm(11.0), screen.w - 2 * t.margin, t.mm(11.0)), t);
@@ -536,6 +585,8 @@ impl View {
             y - import.rect().bottom() - t.mm(5.0),
         );
         let detail_body = Rect { h: note_y - body.y - t.mm(2.0), ..body };
+        let mut filter = Segmented::texts(&FILTERS, 0);
+        filter.place(Rect::new(t.margin, body.y, body.w, t.target));
         let mut field = TextField::new("KOReader metadata path");
         field.place(Rect::new(t.margin, body.y, body.w, t.target));
         if let Some(w) = &state.service {
@@ -566,12 +617,47 @@ impl View {
             keyboard,
             screen,
             body,
+            list_rect: Rect::default(),
+            here,
             detail_body,
             detail_pages: vec![],
             preview_path: None,
+            filter,
         };
+        v.place_list(t);
         v.refresh(state, ids, t);
+        v.show_here(state);
         v
+    }
+    /// The rows' area: under the filter (or right under the buttons for a
+    /// subset, which has none), leaving room for the export status line,
+    /// whose path can wrap once.
+    fn place_list(&mut self, t: &Theme) {
+        let top = if self.subset { self.body.y } else { self.filter.rect().bottom() + t.mm(3.0) };
+        let bottom = self.pager.rect().y - 2 * t.small.line_height() as i32 - t.mm(2.0);
+        self.list_rect = Rect::new(self.body.x, top, self.body.w, bottom - top);
+    }
+    /// Turns the list to the pager page holding the entry nearest the page
+    /// the list was opened from: the last one starting on or before it, or
+    /// else the first after it.
+    fn show_here(&mut self, state: &State) {
+        let pages = state.pages();
+        let located: Vec<(usize, usize)> =
+            self.ids.iter().enumerate().filter_map(|(k, &i)| pages.get(i).copied().flatten().map(|p| (k, p))).collect();
+        let row = self.here.and_then(|here| {
+            located.iter().rev().find(|(_, p)| *p <= here).or_else(|| located.first()).map(|(k, _)| *k)
+        });
+        let page = self.list.paging().page_of(row.unwrap_or(0));
+        self.pager.set(page, self.list.paging().pages());
+        self.list.page = self.pager.page;
+    }
+    /// Back to the full list after an entry was removed (indices shifted, so
+    /// a tapped overlap subset no longer applies), keeping the filter.
+    pub fn after_remove(&mut self, state: &State, t: &Theme) {
+        self.subset = false;
+        self.place_list(t);
+        self.mode = Mode::List;
+        self.refresh(state, None, t);
     }
     pub fn detail(&mut self, index: usize) {
         self.mode = Mode::Detail(index);
@@ -608,7 +694,20 @@ impl View {
         self.refresh(state, ids, t);
     }
     pub fn refresh(&mut self, state: &State, ids: Option<Vec<usize>>, t: &Theme) {
-        self.ids = ids.unwrap_or_else(|| state.ordered());
+        let records = &state.collection.records;
+        let kind = match self.filter.selected {
+            1 => Some(Kind::Highlight),
+            2 => Some(Kind::Bookmark),
+            _ => None,
+        };
+        self.ids = ids.unwrap_or_else(|| {
+            state
+                .ordered()
+                .into_iter()
+                .filter(|&i| kind.is_none_or(|k| records.get(i).is_some_and(|a| a.kind == k)))
+                .collect()
+        });
+        let pages = state.pages();
         self.list.rows = self
             .ids
             .iter()
@@ -617,29 +716,31 @@ impl View {
                     // A fresh resolution batch clears earlier results; until it
                     // finishes, no row is known to be unresolved.
                     let status = if state.resolving {
-                        " · Locating…"
-                    } else if state.resolved.iter().any(|e| e.index == *i && e.page.is_some()) {
-                        ""
+                        "Locating…".to_string()
+                    } else if let Some(page) = pages.get(*i).copied().flatten() {
+                        format!("p. {}", page + 1)
                     } else {
-                        " · Unresolved"
+                        "Unresolved".to_string()
                     };
                     let one_line = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-                    let sub = match a.note.as_deref() {
+                    let mut chapter = a.chapter.trim().to_string();
+                    if a.note.is_some() && chapter.chars().count() > 24 {
                         // Keep a long chapter title from hiding the note.
-                        Some(note) => {
-                            let mut chapter: String = a.chapter.chars().take(24).collect();
-                            if chapter.len() < a.chapter.len() {
-                                chapter = format!("{}…", chapter.trim_end());
-                            }
-                            format!("{chapter}{status} · Note: {}", one_line(note))
-                        }
-                        None => format!("{}{status}", a.chapter),
+                        chapter = format!("{}…", chapter.chars().take(24).collect::<String>().trim_end());
+                    }
+                    let mut sub: Vec<String> = [chapter, status].into_iter().filter(|s| !s.is_empty()).collect();
+                    if let Some(note) = a.note.as_deref() {
+                        sub.push(format!("Note: {}", one_line(note)));
+                    }
+                    let (icon, label) = match a.kind {
+                        Kind::Highlight => (Icon::Highlighter, one_line(&a.quotation)),
+                        Kind::Bookmark => (Icon::BookmarkFilled, bookmark_label(&a.quotation)),
                     };
-                    Row::new(one_line(&a.quotation)).sub(sub)
+                    Row::new(label).sub(sub.join(" · ")).icon(icon)
                 })
             })
             .collect();
-        self.list.place(self.body, t.row + t.mm(9.0), 0);
+        self.list.place(self.list_rect, t.row2, 0);
         self.pager.set(self.pager.page, self.list.paging().pages());
     }
     /// The editor's quotation line, note box and (with the keyboard hidden)
@@ -660,7 +761,7 @@ impl View {
     pub fn draw(&mut self, cx: &mut DrawCx, state: &State) {
         let t = cx.theme;
         cx.canvas.fill(PAPER);
-        self.top.title = if self.editing_note() { "Note" } else { "Highlights & notes" }.into();
+        self.top.title = if self.editing_note() { "Note" } else { "Notes" }.into();
         self.top.draw(cx);
         match &self.mode {
             Mode::List => {
@@ -673,18 +774,22 @@ impl View {
                 self.export.label = if state.exporting { "Exporting…" } else { "Export" }.into();
                 self.export.enabled = state.can_export();
                 self.export.draw(cx);
+                if !self.subset {
+                    self.filter.draw(cx);
+                }
                 self.list.page = self.pager.page;
                 self.list.draw(cx);
                 self.pager.draw(cx);
                 if self.ids.is_empty() {
+                    let empty = match self.filter.selected {
+                        1 => "No highlights yet",
+                        2 => "No bookmarks yet",
+                        _ => "No highlights or bookmarks yet",
+                    };
                     cx.paragraph(
-                        state.load_error.as_deref().unwrap_or(if state.ready {
-                            "No highlights yet"
-                        } else {
-                            "Loading highlights…"
-                        }),
+                        state.load_error.as_deref().unwrap_or(if state.ready { empty } else { "Loading notes…" }),
                         t.body,
-                        self.body,
+                        self.list_rect,
                         HAlign::Left,
                     );
                 }
@@ -698,9 +803,9 @@ impl View {
                 if let Some(status) = status {
                     let r = Rect::new(
                         t.margin,
-                        self.body.bottom() + t.mm(1.0),
-                        self.body.w,
-                        self.pager.rect().y - self.body.bottom() - t.mm(1.0),
+                        self.list_rect.bottom() + t.mm(1.0),
+                        self.list_rect.w,
+                        self.pager.rect().y - self.list_rect.bottom() - t.mm(1.0),
                     );
                     cx.paragraph(&status, t.small.gray(INK2), r, HAlign::Left);
                 }
@@ -708,11 +813,20 @@ impl View {
             &Mode::Detail(index) => {
                 if let Some(a) = state.collection.records.get(index) {
                     if self.detail_pages.is_empty() {
+                        let page = state.pages().get(index).copied().flatten().map(|p| format!("p. {}", p + 1));
+                        let place: Vec<&str> = [Some(a.chapter.trim()), page.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .filter(|s| !s.is_empty())
+                            .collect();
                         let text = format!(
                             "{}\n{}\n\n{}{}{}",
-                            a.chapter,
+                            place.join(" · "),
                             a.created,
-                            a.quotation,
+                            match a.kind {
+                                Kind::Highlight => a.quotation.clone(),
+                                Kind::Bookmark => format!("Bookmark · {}", bookmark_label(&a.quotation)),
+                            },
                             a.note.as_ref().map(|_| "\n\nNote\n").unwrap_or(""),
                             a.note.as_deref().unwrap_or("")
                         );
@@ -722,7 +836,8 @@ impl View {
                     if let Some(text) = self.detail_pages.get(self.pager.page) {
                         cx.paragraph(text, t.body, self.detail_body, HAlign::Left);
                     }
-                    self.primary.label = "Jump to passage".into();
+                    self.primary.label =
+                        if a.kind == Kind::Bookmark { "Jump to page" } else { "Jump to passage" }.into();
                     self.primary.enabled = state.resolved.iter().any(|e| e.index == index && e.page.is_some());
                     self.primary.draw(cx);
                     self.remove.enabled = !state.pending;
@@ -856,8 +971,9 @@ impl View {
                     Some(Event::CancelImport)
                 }
                 Mode::Detail(_) => {
+                    // Back to the list page the entry was opened from.
                     self.mode = Mode::List;
-                    self.pager.set(0, self.list.paging().pages());
+                    self.pager.set(self.list.page, self.list.paging().pages());
                     None
                 }
                 Mode::Note(NoteTarget::New(_)) => Some(Event::Close),
@@ -879,6 +995,11 @@ impl View {
                 }
                 if self.export.on_gesture(g) {
                     return Some(Event::Export);
+                }
+                if !self.subset && self.filter.on_gesture(g).is_some() {
+                    self.refresh(state, None, t);
+                    self.show_here(state);
+                    return None;
                 }
                 self.pager.on_gesture(g);
                 if let Gesture::Swipe { dir, .. } = g {
@@ -1310,7 +1431,7 @@ mod tests {
         for (w, h) in [(1072, 1448), (1448, 1072), (1272, 1696), (1696, 1272)] {
             let t = Theme::for_dpi(300);
             let screen = Rect::new(0, 0, w, h);
-            let mut view = View::new(&t, screen, &state, None);
+            let mut view = View::new(&t, screen, &state, None, None);
             view.detail(0);
             view.edit_note(NoteTarget::Existing(0), &state, &t);
             assert!(view.editing_note() && view.keyboard.visible);
@@ -1337,11 +1458,89 @@ mod tests {
         }
     }
     #[test]
+    fn the_notes_list_mixes_kinds_in_reading_order_filters_them_and_opens_near_the_page() {
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        let state = with_bookmarks();
+        let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
+        // 6" screens in both orientations, and the 300 dpi presets.
+        for (w, h, dpi) in [(600, 800, 167), (800, 600, 167), (1072, 1448, 300), (1696, 1272, 300)] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut view = View::new(&t, screen, &state, None, Some(6));
+            assert_eq!(view.ids, vec![0, 1, 3, 4, 2], "{w}x{h}: reading order, both kinds");
+            assert!(view.import.rect().bottom() < view.filter.rect().y, "{w}x{h}");
+            assert!(view.filter.rect().bottom() < view.list_rect.y, "{w}x{h}");
+            assert!(view.list_rect.bottom() < view.pager.rect().y, "{w}x{h}");
+            let per_page = view.list.paging().range(0).len();
+            assert!(per_page >= 2, "{w}x{h}: {per_page} rows a page");
+            // Opens on the pager page with the last entry on or before p. 7
+            // (page 6), the highlight that follows the page's bookmarks.
+            assert_eq!(view.pager.page, view.list.paging().page_of(4), "{w}x{h}");
+            let mut canvas = Canvas::new(w as u32, h as u32);
+            view.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()), &state);
+            assert_eq!(View::new(&t, screen, &state, None, Some(0)).pager.page, 0, "before every entry");
+        }
+        let t = Theme::for_dpi(300);
+        let mut view = View::new(&t, Rect::new(0, 0, 1072, 1448), &state, None, None);
+        let rows = &view.list.rows;
+        assert_eq!((rows[0].icon, rows[1].icon), (Some(Icon::Highlighter), Some(Icon::BookmarkFilled)));
+        assert_eq!(rows[0].label, "Quote h0");
+        assert_eq!(rows[1].label, "Quote b0…", "a bookmark shows its opening words");
+        assert_eq!(rows[1].sub.as_deref(), Some("Chapter · p. 5"));
+        // The filter, from its segments' taps.
+        let tap = |view: &mut View, segment: usize| {
+            let r = view.filter.rect();
+            let p = crate::geom::Point::new(r.x + r.w * (2 * segment as i32 + 1) / 6, r.center().y);
+            view.gesture(&Gesture::Down(p), &state, &t);
+            view.gesture(&Gesture::Tap(p), &state, &t)
+        };
+        assert!(tap(&mut view, 2).is_none());
+        assert_eq!(view.ids, vec![1, 3, 4]);
+        tap(&mut view, 1);
+        assert_eq!(view.ids, vec![0, 2]);
+        tap(&mut view, 0);
+        assert_eq!(view.ids.len(), 5);
+        // A tapped overlap subset has no filter; removing returns to the full list.
+        let mut subset = View::new(&t, Rect::new(0, 0, 1072, 1448), &state, Some(vec![2]), None);
+        assert_eq!(subset.list_rect.y, subset.body.y, "no room kept for a filter");
+        subset.after_remove(&state, &t);
+        assert_eq!((subset.ids.len(), subset.list_rect.y > subset.filter.rect().bottom()), (5, true));
+        // Unresolved and textless bookmarks.
+        let mut state = with_bookmarks();
+        state.collection.records[1].quotation.clear();
+        state.resolved.retain(|e| e.index != 3);
+        state.resolved.push(Resolved { index: 3, page: None });
+        let view = View::new(&t, Rect::new(0, 0, 1072, 1448), &state, None, None);
+        assert_eq!(view.list.rows[1].label, "A page without text");
+        assert_eq!(view.list.rows[4].sub.as_deref(), Some("Chapter · Unresolved"));
+    }
+    #[test]
+    fn removing_a_bookmark_from_the_list_keeps_the_resolution_and_a_highlight_starts_one() {
+        let mut state = with_bookmarks();
+        let mut sent = vec![];
+        let revision = state.revision;
+        assert!(state.remove_with(1, 1, &mut |c| sent.push(c)));
+        assert!(sent.is_empty() && state.pending && state.revision == revision, "no new resolution");
+        assert_eq!(state.collection.manifest.records, ["h0", "h1", "b1", "b2"]);
+        assert_eq!(state.ordered(), vec![0, 2, 3, 1]);
+        assert_eq!(state.pages(), vec![Some(2), Some(6), Some(6), Some(6)]);
+        state.pending = false;
+        assert!(state.remove_with(0, 1, &mut |c| sent.push(c)));
+        assert!(matches!(sent.pop(), Some(Command::Resolve { .. })), "a highlight is painted: resolve again");
+        assert!(state.pages().iter().all(Option::is_none), "pages are unknown while locating");
+        // While locating, a bookmark's removal resolves again too: the
+        // running batch's indices no longer match.
+        state.pending = false;
+        assert!(state.remove_with(1, 1, &mut |c| sent.push(c)));
+        assert!(matches!(sent.pop(), Some(Command::Resolve { .. })));
+        assert!(!state.remove_with(9, 1, &mut |c| sent.push(c)));
+    }
+    #[test]
     fn full_list_opened_while_loading_populates_when_loaded_while_subset_stays_narrow() {
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1072, 1448);
         let mut state = State::default();
-        let mut full = View::new(&t, screen, &state, None);
+        let mut full = View::new(&t, screen, &state, None, None);
         assert!(full.ids.is_empty(), "empty while loading");
 
         let mut loaded = Collection::default();
@@ -1353,7 +1552,7 @@ mod tests {
         assert_eq!(full.ids, vec![0, 1], "full list populates once the collection loads");
         assert_eq!(full.list.rows.len(), 2);
 
-        let mut subset = View::new(&t, screen, &state, Some(vec![1]));
+        let mut subset = View::new(&t, screen, &state, Some(vec![1]), None);
         subset.refresh_keep(&state, &t);
         assert_eq!(subset.ids, vec![1], "overlap subset stays narrowed across refreshes");
     }
