@@ -5,16 +5,16 @@ use crate::{
         sets::Set,
         worker::{Match, State, Worker},
     },
-    geom::Rect,
+    geom::{Point, Rect},
     gfx::{
-        HAlign, Icon, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, TextRenderer, TextStyle,
-        Weight,
+        HAlign, Icon, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, StyledWordHit,
+        TextRenderer, TextStyle, Weight,
     },
     platform::{RefreshMode, TextInput},
     screens::EventCx,
     ui::{
         gesture::Gesture,
-        theme::{INK, INK2, LINE, PAPER, Theme},
+        theme::{INK, INK2, LINE, PAPER, SHADOW, Theme},
         widget::{DrawCx, Press, PressEvent},
         widgets::{Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
     },
@@ -28,6 +28,10 @@ const NO_RESULT: &str = "No definition found. Edit the word above, or switch dic
 const FIRST_DRAW_WAIT: std::time::Duration = std::time::Duration::from_millis(12);
 /// Nesting levels that indent; deeper blocks stay at the last level.
 const MAX_DEPTH: u8 = 4;
+/// Earlier lookups Back can return to in a chain of looked-up words.
+const HISTORY: usize = 24;
+/// The most recent of them keep their reply, so Back shows them at once.
+const CACHED: usize = 6;
 
 /// The renderer's flags for a dictionary span style.
 fn span_style(style: Style) -> SpanStyle {
@@ -135,6 +139,44 @@ pub enum LookupEvent {
     Set(String),
 }
 
+/// A finished reply, kept so Back can show it again without the worker.
+struct Snapshot {
+    revision: u64,
+    matches: Vec<Match>,
+    state: State,
+    active_set: String,
+    set_known: bool,
+    catalog: Vec<Dictionary>,
+    sources: Vec<Source>,
+    warnings: Vec<String>,
+    sets: Vec<Set>,
+}
+
+/// An earlier lookup in a chain: Back returns to its word, dictionary and
+/// page.
+struct Visit {
+    query: String,
+    selected: Option<String>,
+    page: usize,
+    snapshot: Option<Box<Snapshot>>,
+}
+
+/// A touch on the definition, which looks up the word under it on release.
+struct WordPress {
+    at: Point,
+    /// The word, found by the next draw (which has the text renderer):
+    /// `None` until then, `Some(None)` when no word is there.
+    hit: Option<Option<StyledWordHit>>,
+    long: bool,
+    /// Released before a draw found the word: that draw looks it up.
+    released: bool,
+}
+
+/// Whether two queries are the same word, ignoring case.
+fn same_query(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
 struct Picker {
     sets: bool,
     list: List,
@@ -171,6 +213,18 @@ pub struct Lookup {
     sets: Vec<Set>,
     revision: u64,
     picker: Option<Picker>,
+    /// Earlier lookups of a chain, newest last. Depth 0 (empty) is the
+    /// word from the book.
+    history: Vec<Visit>,
+    /// The page to show once the definition is laid out, after Back.
+    restore_page: Option<usize>,
+    /// The worker's session (which `open` reads) is this lookup's query.
+    /// Not after Back restored a cached reply: switching dictionaries then
+    /// asks again.
+    session_live: bool,
+    word_press: Option<WordPress>,
+    /// ← at depth 1 and deeper.
+    back: IconButton,
     /// The tappable query in the header row, which opens query editing.
     heading: Rect,
     heading_press: Press,
@@ -257,6 +311,11 @@ impl Lookup {
             sets: vec![],
             revision,
             picker: None,
+            history: Vec::new(),
+            restore_page: None,
+            session_live: true,
+            word_press: None,
+            back: IconButton::new(Icon::ArrowLeft),
             heading: Rect::default(),
             heading_press: Press::default(),
             expand: IconButton::new(Icon::Expand),
@@ -300,7 +359,12 @@ impl Lookup {
     /// Whether the book selection's handles can be dragged beside the card:
     /// only on the plain card, not while picking a dictionary or typing.
     pub fn allows_handles(&self) -> bool {
-        self.picker.is_none() && !self.keyboard.visible
+        self.picker.is_none() && !self.keyboard.visible && self.history.is_empty()
+    }
+    /// How many looked-up words lead back to the book's word.
+    #[cfg(test)]
+    pub(crate) fn depth(&self) -> usize {
+        self.history.len()
     }
     /// The middle of an action strip button (Highlight, Note, Search, Extend).
     #[cfg(test)]
@@ -338,8 +402,9 @@ impl Lookup {
     fn edit_row(&self) -> bool {
         self.keyboard.visible || !self.pending && self.state == State::NoResult
     }
+    /// The book-selection actions, only for the book's own word.
     fn actions_shown(&self) -> bool {
-        self.picker.is_none() && !self.keyboard.visible
+        self.picker.is_none() && !self.keyboard.visible && self.history.is_empty()
     }
     /// Places everything for the current mode. Cheap, and called before
     /// each gesture and draw, since replies, the keyboard and the picker
@@ -365,7 +430,17 @@ impl Lookup {
             Rect::default()
         });
         let end = if expandable { self.expand.rect().x } else { self.close.rect().x };
-        self.heading = Rect::new(c.x, header.y, (end - gap - c.x).max(0), header.h);
+        let mut start = c.x;
+        if !self.history.is_empty() && self.picker.is_none() && !typing {
+            // Inset like the mockup's bordered square, so its edge lines up
+            // with the switcher's ‹ below.
+            let back = Rect::new(c.x, cy - side / 2, side, side);
+            self.back.place(back);
+            start = back.right() + gap;
+        } else {
+            self.back.place(Rect::default());
+        }
+        self.heading = Rect::new(start, header.y, (end - gap - start).max(0), header.h);
         let mut y = header.bottom();
         // Switcher: ‹ · name · i / N ▾ · ›
         if !typing && self.picker.is_none() {
@@ -473,13 +548,116 @@ impl Lookup {
         }
         pages.is_complete() || !had_next && self.pager.page + 1 < pages.pages().len()
     }
+    /// Looks up the field's text. A different word is a step in the chain,
+    /// which Back returns from.
     fn submit(&mut self, rescan: bool) {
-        self.query = self.field.value().into();
+        let query = self.field.value().to_owned();
+        if !same_query(&query, &self.query) {
+            self.push_history();
+        }
+        self.query = query;
         self.repeat(rescan);
+    }
+    /// Looks up a word tapped in the definition, unless it is the word shown.
+    fn look_up_word(&mut self, query: String) {
+        if same_query(&query, &self.query) {
+            return;
+        }
+        self.push_history();
+        self.field.edit(&TextInput::Clear);
+        self.field.edit(&TextInput::Insert(query.clone()));
+        self.query = query;
+        self.repeat(false);
+    }
+    /// Remembers the current lookup before the chain moves on, with its
+    /// reply when finished. Only the newest `CACHED` visits keep theirs.
+    fn push_history(&mut self) {
+        let snapshot = (self.complete && !self.pending).then(|| {
+            Box::new(Snapshot {
+                revision: self.revision,
+                matches: self.matches.clone(),
+                state: self.state.clone(),
+                active_set: self.active_set.clone(),
+                set_known: self.set_known,
+                catalog: self.catalog.clone(),
+                sources: self.sources.clone(),
+                warnings: self.warnings.clone(),
+                sets: self.sets.clone(),
+            })
+        });
+        self.history.push(Visit {
+            query: self.query.clone(),
+            selected: self.selected.clone(),
+            page: self.pager.page,
+            snapshot,
+        });
+        if self.history.len() > HISTORY {
+            self.history.remove(0);
+        }
+        let mut cached = self.history.iter().filter(|v| v.snapshot.is_some()).count();
+        for visit in &mut self.history {
+            if cached <= CACHED {
+                break;
+            }
+            if visit.snapshot.take().is_some() {
+                cached -= 1;
+            }
+        }
+    }
+    /// Returns to the previous word of the chain: at once from its kept
+    /// reply while the dictionaries are unchanged, otherwise by asking again
+    /// for the same dictionary and page.
+    fn go_back(&mut self) {
+        let Some(visit) = self.history.pop() else { return };
+        if self.pending || !self.complete {
+            // A reply still coming is for the word being left.
+            self.worker.cancel();
+        }
+        self.word_press = None;
+        self.picker = None;
+        self.field.edit(&TextInput::Clear);
+        self.field.edit(&TextInput::Insert(visit.query.clone()));
+        self.query = visit.query;
+        self.restore_page = Some(visit.page);
+        match visit.snapshot.filter(|s| s.revision == self.worker.revision()) {
+            Some(s) => {
+                let s = *s;
+                self.revision = s.revision;
+                self.matches = s.matches;
+                self.state = s.state;
+                self.active_set = s.active_set;
+                self.set_known = s.set_known;
+                self.catalog = s.catalog;
+                self.sources = s.sources;
+                self.warnings = s.warnings;
+                self.sets = s.sets;
+                self.selected = visit.selected;
+                self.pending = false;
+                self.complete = true;
+                self.preparing = None;
+                self.first_frame = false;
+                self.session_live = false;
+                self.pages = None;
+                self.layout_error = None;
+                self.pager.set(0, 1);
+                self.pager.incomplete = true;
+                self.field.focused = false;
+                self.keyboard.visible = false;
+            }
+            None => {
+                self.repeat(false);
+                if let Some(dictionary) = visit.selected {
+                    // Opening queues behind the search, in its session.
+                    self.worker.open(&dictionary);
+                    self.selected = Some(dictionary);
+                }
+            }
+        }
     }
     /// Runs the last submitted query again, leaving any unsubmitted field edit.
     fn repeat(&mut self, rescan: bool) {
         self.request = self.worker.lookup_in(self.query.clone(), rescan, self.selection.clone());
+        self.session_live = true;
         self.pending = true;
         self.complete = false;
         self.first_frame = true;
@@ -518,11 +696,17 @@ impl Lookup {
             self.warnings.extend(self.catalog.iter().filter(|d| !d.disabled).filter_map(|d| d.error.clone()));
             self.active_set = reply.active_set;
             self.set_known = true;
+            // A final count must never replace a dictionary selected since the
+            // first publication, or throw away its pagination/page. A chosen
+            // dictionary the finished search no longer has (Back after a
+            // rescan) gives way to the worker's choice.
+            let gone = self
+                .selected
+                .as_ref()
+                .is_some_and(|s| reply.complete && !reply.matches.iter().any(|m| &m.dictionary == s));
             self.matches = reply.matches;
             self.sets = reply.sets;
-            // A final count must never replace a dictionary selected since the
-            // first publication, or throw away its pagination/page.
-            if (self.selected.is_none() || self.selected == reply.selected)
+            if (self.selected.is_none() || self.selected == reply.selected || gone)
                 && let Some(state) = reply.state
             {
                 let changed = self.selected != reply.selected || self.state != state || self.pending;
@@ -559,8 +743,17 @@ impl Lookup {
         if self.selected.as_ref() == Some(&matched.dictionary) {
             return;
         }
-        self.selected = Some(matched.dictionary.clone());
-        self.worker.open(&matched.dictionary);
+        let dictionary = matched.dictionary.clone();
+        if !self.session_live {
+            // Back showed a kept reply; the worker's session is another word.
+            self.request = self.worker.lookup_in(self.query.clone(), false, self.selection.clone());
+            self.session_live = true;
+            self.complete = false;
+            self.revision = self.worker.revision();
+        }
+        self.worker.open(&dictionary);
+        self.selected = Some(dictionary);
+        self.restore_page = None;
         self.pending = true;
         self.pages = None;
         self.layout_error = None;
@@ -712,6 +905,10 @@ impl Lookup {
         if self.sheet.on_gesture(g) || self.close.on_gesture(g) {
             return Some(LookupEvent::Close);
         }
+        if self.back.on_gesture(g) {
+            self.go_back();
+            return None;
+        }
         if self.expand.on_gesture(g) {
             self.expanded = !self.expanded;
             return None;
@@ -797,6 +994,7 @@ impl Lookup {
         if extend.on_gesture(g) {
             return Some(LookupEvent::Extend);
         }
+        self.word_gesture(g, t);
         if self.paged {
             self.pager.on_gesture(g);
         }
@@ -806,7 +1004,62 @@ impl Lookup {
         }
         None
     }
-    /// The query (or "Look up word" while typing), then ⤢ and ×.
+    /// Touches on the definition: a tap, or a long press released in
+    /// place, looks up the word under the finger, which shows inverted while
+    /// it is down. Moving away or swiping (which turns pages) lets go.
+    fn word_gesture(&mut self, g: &Gesture, t: &Theme) {
+        match *g {
+            Gesture::Down(p) => {
+                let touchable = self.body.contains(p) && self.pages.is_some() && self.layout_error.is_none();
+                self.word_press = touchable.then_some(WordPress { at: p, hit: None, long: false, released: false });
+            }
+            Gesture::LongPress(_) => {
+                if let Some(press) = &mut self.word_press {
+                    press.long = true;
+                }
+            }
+            // Before a long press, Move means the finger left the tap slop.
+            Gesture::Move(p) => {
+                if self.word_press.as_ref().is_some_and(|w| !w.long || w.at.distance(p) > t.mm(3.0) as f32) {
+                    self.word_press = None;
+                }
+            }
+            Gesture::Tap(_) | Gesture::End(_) => {
+                let Some(mut press) = self.word_press.take() else { return };
+                if matches!(g, Gesture::End(_)) && !press.long {
+                    return;
+                }
+                match press.hit {
+                    Some(Some(hit)) => self.look_up_word(hit.query),
+                    Some(None) => {}
+                    None => {
+                        press.released = true;
+                        self.word_press = Some(press);
+                    }
+                }
+            }
+            Gesture::Swipe { .. } | Gesture::Cancel(_) => self.word_press = None,
+        }
+    }
+    /// Finds the pressed word on the page drawn last, and looks it up if the
+    /// finger already lifted.
+    fn resolve_word(&mut self, cx: &mut DrawCx) {
+        let Some(press) = &mut self.word_press else { return };
+        if press.hit.is_none() {
+            press.hit = Some(self.pages.as_mut().and_then(|pages| {
+                cx.text.hit_test_styled_page(pages, self.pager.page, self.body, press.at, cx.theme.mm(2.0))
+            }));
+        }
+        if press.released {
+            let hit = press.hit.take().flatten();
+            self.word_press = None;
+            if let Some(hit) = hit {
+                self.look_up_word(hit.query);
+            }
+        }
+    }
+    /// The query (or "Look up word" while typing), then ⤢ and ×. Deeper in
+    /// a chain: ← first, and the previous word beside the query.
     fn draw_header(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
         let r = self.heading;
@@ -815,19 +1068,36 @@ impl Lookup {
         } else {
             let label = if self.query.trim().is_empty() { "Look up a word" } else { self.query.as_str() };
             let style = t.dictionary_headword;
-            let (gap, icon) = (t.mm(1.5), t.icon_small);
-            let w = (cx.text.width(label, style).ceil() as i32).min((r.w - gap - icon).max(0));
+            let gap = t.mm(1.5);
+            // Beside the query: ✎ at the book's word, "← previous" deeper.
+            let crumb = self.history.last().map(|v| format!("← {}", v.query));
+            let crumb_style = t.small;
+            let after = match &crumb {
+                Some(crumb) => (cx.text.width(crumb, crumb_style).ceil() as i32 + 2).min(r.w / 3),
+                None if self.picker.is_none() => t.icon_small,
+                None => 0,
+            };
+            let w = (cx.text.width(label, style).ceil() as i32).min((r.w - gap - after).max(0));
             let pressed = self.heading_press.is_down();
             let (fg, quiet) = if pressed { (PAPER, PAPER) } else { (INK, INK2) };
             if pressed {
-                let pill = Rect::new(r.x - t.mm(1.0), r.y + t.mm(0.6), w + gap + icon + t.mm(2.0), r.h - t.mm(1.2));
+                let pill = Rect::new(r.x - t.mm(1.0), r.y + t.mm(0.6), w + gap + after + t.mm(2.0), r.h - t.mm(1.2));
                 cx.canvas.fill_rounded_rect(pill, t.radius, INK);
                 cx.hint(pill, RefreshMode::Fast);
             }
             cx.line(label, style.gray(fg), Rect::new(r.x, r.y, w + 2, r.h), HAlign::Left);
-            if self.picker.is_none() {
-                cx.icon(Icon::Pencil, Rect::new(r.x + w + gap, r.y, icon, r.h), icon, quiet);
+            let beside = Rect::new(r.x + w + gap, r.y, after, r.h);
+            match &crumb {
+                Some(crumb) => cx.line(crumb, crumb_style.gray(quiet), beside, HAlign::Left),
+                None if self.picker.is_none() => cx.icon(Icon::Pencil, beside, t.icon_small, quiet),
+                None => {}
             }
+        }
+        if self.back.rect().w > 0 {
+            if !self.back.is_pressed() {
+                cx.canvas.stroke_rounded_rect(self.back.rect(), t.radius, t.border as f32, LINE);
+            }
+            self.back.draw(cx);
         }
         if self.expand.rect().w > 0 {
             self.expand.draw(cx);
@@ -882,6 +1152,8 @@ impl Lookup {
             return;
         }
         let started = std::time::Instant::now();
+        // After Back, lay out as far as the page that was showing.
+        let target = if self.pending { 0 } else { self.restore_page.take().unwrap_or(0) };
         let (mut result, mut bytes);
         loop {
             let blocks = content(&self.state, self.pending, &self.warnings, t);
@@ -897,6 +1169,7 @@ impl Lookup {
                     pages.repage(paged_h)?;
                     cx.text.paginate_styled_until(&mut pages, 1)?;
                 }
+                cx.text.paginate_styled_until(&mut pages, target + 1)?;
                 Ok((pages, paged))
             });
             // Long status text in a compact card with Manage and the query
@@ -916,7 +1189,8 @@ impl Lookup {
         match result {
             Ok((pages, paged)) => {
                 self.paged = paged;
-                self.pager.set(0, pages.pages().len());
+                let count = pages.pages().len();
+                self.pager.set(target.min(count.saturating_sub(1)), count);
                 self.pager.incomplete = !pages.is_complete();
                 self.pages = Some(pages);
             }
@@ -938,6 +1212,9 @@ impl Lookup {
     }
     pub fn draw(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
+        self.place(t);
+        // On the page the finger touched, before a reply replaces it.
+        self.resolve_word(cx);
         self.place(t);
         self.sheet.draw(cx);
         // Drawing the cached book page takes long enough that a warm lookup
@@ -986,6 +1263,13 @@ impl Lookup {
             }
             log::debug!("dictionary page draw: {:?}", started.elapsed());
         }
+        if let Some(WordPress { hit: Some(Some(hit)), .. }) = &self.word_press {
+            for r in &hit.rects {
+                let r = r.inset_xy(-t.mm(0.5), 0);
+                cx.canvas.invert_rect(r);
+                cx.hint(r, RefreshMode::Fast);
+            }
+        }
         if let Some(error) = &self.layout_error {
             cx.text.draw(cx.canvas, error, t.body, self.body, HAlign::Left);
         }
@@ -996,6 +1280,7 @@ impl Lookup {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionAction {
     Dismiss,
     Dictionary,
@@ -1004,64 +1289,135 @@ pub enum SelectionAction {
     Note,
     Extend,
 }
+
+/// The bar's cells, left to right; the first is the primary action.
+const SELECTION_ACTIONS: [(Icon, &str, SelectionAction); 5] = [
+    (Icon::Highlighter, "Highlight", SelectionAction::Highlight),
+    (Icon::Pencil, "Note", SelectionAction::Note),
+    (Icon::Search, "Search", SelectionAction::Search),
+    (Icon::BookOpen, "Dict", SelectionAction::Dictionary),
+    (Icon::Extend, "Extend", SelectionAction::Extend),
+];
+
+/// The actions for a selected passage: a floating card of five cells beside
+/// the selection, in the pop-up menu's style, leaving the page open.
 pub struct SelectionActions {
-    sheet: Sheet,
-    highlight: Button,
-    note: Button,
-    extend: Button,
-    search: Button,
-    dictionary: Button,
+    rect: Rect,
+    cells: [Rect; 5],
+    pressed: Option<usize>,
+    press: Press,
+    /// A touch started outside the card.
+    outside: bool,
 }
 impl SelectionActions {
-    /// Two columns in portrait; landscape uses three, so the sheet stays low
-    /// and leaves the selection visible.
-    pub fn new(t: &Theme, screen: Rect) -> Self {
-        let cols = if screen.w > screen.h { 3 } else { 2 };
-        let rows = (5 + cols - 1) / cols;
-        let gap = t.mm(3.0);
-        let sheet = Sheet::open("Selection", t.mm(22.0) + rows * t.target + (rows - 1) * gap, screen, t);
-        let body = sheet.content(t);
-        let width = (body.w - (cols - 1) * gap) / cols;
-        let place = |b: &mut Button, i: i32| {
-            b.place(
-                Rect::new(body.x + (i % cols) * (width + gap), body.y + (i / cols) * (t.target + gap), width, t.target),
-                t,
-            )
+    /// Below `selection` (the passage's bounding box) if there's room,
+    /// otherwise above it, leaving room for the handles; a passage that
+    /// fills the page gets the bar at the bottom margin.
+    pub fn new(t: &Theme, screen: Rect, selection: Rect) -> Self {
+        let m = t.margin;
+        let w = (screen.w - 2 * m).min(t.mm(105.0));
+        let h = t.mm(11.5);
+        let clearance = t.mm(4.5);
+        let x = (selection.center().x - w / 2).clamp(screen.x + m, screen.right() - m - w);
+        let (below, above) = (selection.bottom() + clearance, selection.y - clearance - h);
+        let y = if below + h <= screen.bottom() - m {
+            below
+        } else if above >= screen.y + m {
+            above
+        } else {
+            screen.bottom() - m - h
         };
-        let mut search = Button::new("Search in book", ButtonKind::Secondary);
-        let mut dictionary = Button::new("Dictionary", ButtonKind::Primary);
-        let mut highlight = Button::new("Highlight", ButtonKind::Primary);
-        let mut note = Button::new("Add note", ButtonKind::Secondary);
-        let mut extend = Button::new("Extend selection", ButtonKind::Secondary);
-        for (i, b) in [&mut search, &mut dictionary, &mut highlight, &mut note, &mut extend].into_iter().enumerate() {
-            place(b, i as i32);
-        }
-        Self { sheet, search, dictionary, highlight, note, extend }
+        let rect = Rect::new(x, y, w, h);
+        let inner = rect.inset(t.border);
+        let cell_w = inner.w / 5;
+        let cells = std::array::from_fn(|i| {
+            let x = inner.x + i as i32 * cell_w;
+            // The last cell takes the rounding remainder.
+            let w = if i == 4 { inner.right() - x } else { cell_w };
+            Rect::new(x, inner.y, w, inner.h)
+        });
+        Self { rect, cells, pressed: None, press: Press::default(), outside: false }
+    }
+    #[cfg(test)]
+    pub(crate) fn rect(&self) -> Rect {
+        self.rect
+    }
+    /// The area the bar covers, including its shadow.
+    pub fn bounds(&self, t: &Theme) -> Rect {
+        self.rect.union(&self.rect.moved(t.mm(1.0), t.mm(1.0)))
+    }
+    /// Where each action is, for tests.
+    #[cfg(test)]
+    pub(crate) fn cell(&self, action: SelectionAction) -> Rect {
+        let i = SELECTION_ACTIONS.iter().position(|(_, _, a)| *a == action).expect("an action of the bar");
+        self.cells[i]
+    }
+    fn radius(t: &Theme) -> f32 {
+        t.mm(2.2) as f32
     }
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<SelectionAction> {
-        if self.sheet.on_gesture(g) {
-            Some(SelectionAction::Dismiss)
-        } else if self.highlight.on_gesture(g) {
-            Some(SelectionAction::Highlight)
-        } else if self.note.on_gesture(g) {
-            Some(SelectionAction::Note)
-        } else if self.extend.on_gesture(g) {
-            Some(SelectionAction::Extend)
-        } else if self.search.on_gesture(g) {
-            Some(SelectionAction::Search)
-        } else if self.dictionary.on_gesture(g) {
-            Some(SelectionAction::Dictionary)
-        } else {
-            None
+        if let Gesture::Down(p) = *g {
+            self.outside = !self.rect.contains(p);
+            self.pressed = self.cells.iter().position(|r| r.contains(p));
         }
+        if self.outside {
+            // Any touch that starts outside dismisses the selection when it ends.
+            return g.ends_touch().then_some(SelectionAction::Dismiss);
+        }
+        let i = self.pressed?;
+        let event = match self.press.on_gesture(g, self.cells[i]) {
+            Some(PressEvent::Tap | PressEvent::LongPressEnd) => Some(SELECTION_ACTIONS[i].2),
+            _ => None,
+        };
+        if !self.press.is_down() {
+            self.pressed = None;
+        }
+        event
+    }
+    /// Fills a cell, rounding only the corners that lie in the card's.
+    fn fill_cell(cx: &mut DrawCx, i: usize, r: Rect, gray: u8) {
+        let t = cx.theme;
+        if i != 0 && i != 4 {
+            cx.fill(r, gray);
+            return;
+        }
+        let radius = Self::radius(t) - t.border as f32;
+        cx.canvas.fill_rounded_rect(r, radius, gray);
+        let c = (radius.ceil() as i32).min(r.w / 2).min(r.h / 2);
+        let x = if i == 0 { r.right() - c } else { r.x };
+        cx.fill(Rect::new(x, r.y, c, c), gray);
+        cx.fill(Rect::new(x, r.bottom() - c, c, c), gray);
     }
     pub fn draw(&self, cx: &mut DrawCx) {
-        self.sheet.draw(cx);
-        self.search.draw(cx);
-        self.dictionary.draw(cx);
-        self.highlight.draw(cx);
-        self.note.draw(cx);
-        self.extend.draw(cx);
+        let t = cx.theme;
+        let (r, radius) = (self.rect, Self::radius(t));
+        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), radius, SHADOW);
+        cx.canvas.fill_rounded_rect(r, radius, PAPER);
+        let label_style = t.caption.weight(Weight::SemiBold);
+        let (icon, gap) = (t.icon_small, t.mm(0.9));
+        let label_h = label_style.line_height().ceil() as i32;
+        for (i, ((glyph, label, _), cell)) in SELECTION_ACTIONS.iter().zip(self.cells).enumerate() {
+            let primary = i == 0;
+            let pressed = self.pressed == Some(i) && self.press.is_down();
+            // Pressed cells invert, like buttons.
+            let fg = if primary != pressed {
+                Self::fill_cell(cx, i, cell, INK);
+                PAPER
+            } else {
+                INK
+            };
+            if pressed {
+                cx.hint(cell, RefreshMode::Fast);
+            }
+            if i > 1 {
+                cx.fill(Rect::new(cell.x - t.hairline / 2, cell.y, t.hairline, cell.h), LINE);
+            }
+            let top = cell.y + (cell.h - icon - gap - label_h) / 2;
+            cx.icon(*glyph, Rect::new(cell.x, top, cell.w, icon), icon, fg);
+            let text = Rect::new(cell.x + t.mm(0.5), top + icon + gap, cell.w - t.mm(1.0), label_h);
+            cx.line(label, label_style.gray(fg), text, HAlign::Center);
+        }
+        cx.canvas.stroke_rounded_rect(r, radius, t.border as f32, INK);
     }
 }
 

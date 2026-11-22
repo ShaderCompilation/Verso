@@ -398,6 +398,15 @@ fn picker_and_typing_expand_temporarily_and_actions_are_direct() {
     assert!(!lookup.keyboard.visible);
     wait(&mut lookup, &t, screen);
     assert_eq!(lookup.state, State::NoResult);
+    // The edited word is a step of the chain: no book actions.
+    assert_eq!(lookup.depth(), 1);
+    lookup.place(&t);
+    assert!(lookup.actions_divider.is_none());
+    // A miss for the book's own word keeps the actions.
+    worker.flush().unwrap();
+    let mut lookup = Lookup::new("nothing", worker.clone(), &t, screen, Some(word), Default::default());
+    wait(&mut lookup, &t, screen);
+    assert_eq!(lookup.state, State::NoResult);
     lookup.place(&t);
     assert!(lookup.edit_row() && lookup.rect(&t) == compact);
     // With the incomplete-search notice (the fixture's broken dictionary)
@@ -474,4 +483,310 @@ fn the_pager_shows_only_for_definitions_longer_than_a_page() {
     drop(lookup);
     drop(worker);
     let _ = fs::remove_dir_all(root);
+}
+
+/// A store with one small dictionary per (word, definition).
+fn words(entries: &[(&str, &str)]) -> (std::path::PathBuf, Store) {
+    let root = std::env::temp_dir().join(format!(
+        "verso-chain-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let store = Store::at(root.clone());
+    store.save_dictionary_folders(&[]).unwrap();
+    fs::create_dir_all(store.dictionary_dir()).unwrap();
+    for (i, (word, definition)) in entries.iter().enumerate() {
+        let mut idx = word.as_bytes().to_vec();
+        idx.push(0);
+        idx.extend_from_slice(&0u32.to_be_bytes());
+        idx.extend_from_slice(&(definition.len() as u32).to_be_bytes());
+        let path = store.dictionary_dir().join(format!("{i:02}"));
+        fs::write(path.with_extension("idx"), &idx).unwrap();
+        fs::write(path.with_extension("dict"), definition).unwrap();
+        fs::write(path.with_extension("ifo"), format!("StarDict's dict ifo file\nversion=2.4.2\nbookname=Words {i}\nwordcount=1\nidxfilesize={}\nsametypesequence=m\n", idx.len())).unwrap();
+    }
+    (root, store)
+}
+
+/// Draws the lookup; returns the refresh hints it asked for.
+fn draw_hints(lookup: &mut Lookup, t: &Theme, screen: Rect, text: &mut TextRenderer) -> Vec<crate::platform::Update> {
+    let mut canvas = Canvas::new(screen.w as u32, screen.h as u32);
+    canvas.fill(crate::ui::theme::PAPER);
+    let mut hints = vec![];
+    lookup.draw(&mut DrawCx::new(&mut canvas, text, &mut IconRenderer::default(), t, &mut hints));
+    hints
+}
+
+/// Where `word` is on the definition's current page.
+fn find_word(lookup: &mut Lookup, word: &str, text: &mut TextRenderer) -> crate::geom::Point {
+    let body = lookup.body;
+    let page = lookup.pager.page;
+    let pages = lookup.pages.as_mut().expect("laid out");
+    for y in (body.y..body.bottom()).step_by(8) {
+        for x in (body.x..body.right()).step_by(8) {
+            let p = crate::geom::Point::new(x, y);
+            if text.hit_test_styled_page(pages, page, body, p, 0).is_some_and(|hit| hit.query == word) {
+                return p;
+            }
+        }
+    }
+    panic!("{word} is not on the page");
+}
+
+#[test]
+fn words_in_a_definition_look_up_on_tap_or_long_press_but_not_on_swipes() {
+    let (root, store) = words(&[("box", "A container, often a crate."), ("crate", "A wooden box.")]);
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
+    let mut text = TextRenderer::new();
+    let mut lookup = Lookup::new("box", worker.clone(), &t, screen, None, Default::default());
+    wait(&mut lookup, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    let crate_at = find_word(&mut lookup, "crate", &mut text);
+    // Down shows the word inverted with a fast refresh on the next draw.
+    cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Down(crate_at), cx));
+    let hints = draw_hints(&mut lookup, &t, screen, &mut text);
+    let Some(WordPress { hit: Some(Some(hit)), .. }) = &lookup.word_press else { panic!("no pressed word") };
+    assert_eq!(hit.query, "crate");
+    assert!(
+        hit.rects
+            .iter()
+            .all(|r| hints.iter().any(|h| h.mode == crate::platform::RefreshMode::Fast && h.rect.contains(r.center())))
+    );
+    // Sliding away lets go; the swipe turns pages, never looks up.
+    let away = crate::geom::Point::new(crate_at.x + t.mm(15.0), crate_at.y);
+    cx(&t, screen, |cx| {
+        lookup.on_gesture(&Gesture::Move(away), cx);
+        assert!(lookup.word_press.is_none());
+        lookup.on_gesture(&Gesture::Swipe { dir: Direction::Left, from: crate_at, to: away }, cx);
+    });
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!((lookup.depth(), lookup.query.as_str()), (0, "box"));
+    // A quick tap, released before any draw: the next draw finds the word.
+    tap(&mut lookup, crate_at, &t, screen);
+    assert_eq!(lookup.depth(), 0);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!((lookup.depth(), lookup.query.as_str()), (1, "crate"));
+    wait(&mut lookup, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    // Depth 1: ← and the previous word in the header, no book actions.
+    assert!(lookup.back.rect().w > 0 && lookup.heading.x > lookup.back.rect().right());
+    assert!(lookup.actions_divider.is_none() && !lookup.allows_handles());
+    capture(&mut lookup, &t, screen, "chained");
+    // Tapping the word shown (its headword) is no new step.
+    let headword = find_word(&mut lookup, "crate", &mut text);
+    tap(&mut lookup, headword, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!(lookup.depth(), 1);
+    // A long press released in place looks up too, once the word is found.
+    let box_at = find_word(&mut lookup, "box", &mut text);
+    cx(&t, screen, |cx| {
+        lookup.on_gesture(&Gesture::Down(box_at), cx);
+        lookup.on_gesture(&Gesture::LongPress(box_at), cx);
+    });
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    let jitter = crate::geom::Point::new(box_at.x + 2, box_at.y + 1);
+    cx(&t, screen, |cx| {
+        lookup.on_gesture(&Gesture::Move(jitter), cx);
+        lookup.on_gesture(&Gesture::End(jitter), cx);
+    });
+    assert_eq!((lookup.depth(), lookup.query.as_str()), (2, "box"));
+    assert_eq!(lookup.history.last().unwrap().query, "crate");
+    // × closes straight to the book at any depth.
+    let close = lookup.close.rect().center();
+    assert!(matches!(tap(&mut lookup, close, &t, screen), Some(LookupEvent::Close)));
+    worker.flush().unwrap();
+    drop(lookup);
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn back_restores_the_dictionary_and_page_at_once_or_asks_again_after_a_rescan() {
+    let (root, store) = fixture();
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
+    let mut text = TextRenderer::new();
+    let mut lookup = Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default());
+    wait(&mut lookup, &t, screen);
+    lookup.cycle(1);
+    wait(&mut lookup, &t, screen);
+    let chosen = lookup.selected.clone();
+    assert!(chosen.is_some());
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    let swipe = Gesture::Swipe { dir: Direction::Left, from: screen.center(), to: screen.center() };
+    for _ in 0..2 {
+        cx(&t, screen, |cx| lookup.on_gesture(&swipe, cx));
+        draw_hints(&mut lookup, &t, screen, &mut text);
+    }
+    assert_eq!(lookup.pager.page, 2);
+    let depth0_body = lookup.body_full.h;
+    // Looking up the same word again, in any case, is no step.
+    lookup.look_up_word("BOXES".into());
+    assert_eq!(lookup.depth(), 0);
+    assert!(!lookup.pending);
+    // A manual edit is a step like a tapped word.
+    cx(&t, screen, |cx| {
+        lookup.start_editing();
+        lookup.on_text_input(&TextInput::Clear, cx);
+        lookup.on_text_input(&TextInput::Insert("box".into()), cx);
+        lookup.on_text_input(&TextInput::Submit, cx);
+    });
+    assert_eq!(lookup.depth(), 1);
+    wait(&mut lookup, &t, screen);
+    lookup.place(&t);
+    assert!(lookup.body_full.h > depth0_body + t.mm(8.0), "the hidden action strip gives the entry its room");
+    assert_eq!(lookup.rect(&t).h, (1696 * 46 / 100).max(t.mm(64.0)), "the card stays compact");
+    // Back with the reply kept: shown at once, same dictionary and page.
+    let request = lookup.request;
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    assert_eq!((lookup.depth(), lookup.query.as_str()), (0, "boxes"));
+    assert!(!lookup.pending && lookup.complete && lookup.request == request, "no worker round trip");
+    assert_eq!(lookup.selected, chosen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!(lookup.pager.page, 2);
+    assert!(lookup.actions_divider.is_some() && lookup.back.rect().w == 0);
+    // Switching dictionaries after that asks the worker again for this word.
+    lookup.cycle(1);
+    wait(&mut lookup, &t, screen);
+    assert_ne!(lookup.selected, chosen);
+    assert!(matches!(&lookup.state, State::Definition { entries, .. } if entries[0].headword == "boxes"));
+    lookup.cycle(-1);
+    wait(&mut lookup, &t, screen);
+    assert_eq!(lookup.selected, chosen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    for _ in 0..2 {
+        cx(&t, screen, |cx| lookup.on_gesture(&swipe, cx));
+        draw_hints(&mut lookup, &t, screen, &mut text);
+    }
+    // After a dictionary change the kept reply is stale: Back asks again,
+    // then restores the dictionary and the page.
+    lookup.look_up_word("box".into());
+    wait(&mut lookup, &t, screen);
+    worker.edit(crate::dictionary::sets::Edit::MoveDictionary {
+        set: crate::dictionary::sets::DEFAULT.into(),
+        dictionary: "13.ifo".into(),
+        position: 13,
+    });
+    cx(&t, screen, |cx| lookup.receive(cx));
+    wait(&mut lookup, &t, screen);
+    lookup.place(&t);
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    assert!(lookup.pending, "asked again");
+    wait(&mut lookup, &t, screen);
+    assert_eq!(lookup.selected, chosen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!(lookup.pager.page, 2);
+    worker.flush().unwrap();
+    drop(lookup);
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn history_keeps_24_steps_and_the_newest_6_replies() {
+    let root = std::env::temp_dir().join(format!("verso-history-{}", std::process::id()));
+    let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
+    let t = Theme::for_dpi(300);
+    let mut lookup = Lookup::new("w0", worker.clone(), &t, Rect::new(0, 0, 1272, 1696), None, Default::default());
+    for i in 1..=30 {
+        // Pretend each word's reply arrived.
+        lookup.pending = false;
+        lookup.complete = true;
+        lookup.look_up_word(format!("w{i}"));
+    }
+    assert_eq!(lookup.depth(), 24);
+    assert_eq!(lookup.history[0].query, "w6", "the oldest steps go first");
+    let kept: Vec<_> = lookup.history.iter().map(|v| v.snapshot.is_some()).collect();
+    assert_eq!(kept.iter().filter(|k| **k).count(), 6);
+    assert!(kept[18..].iter().all(|k| *k), "the newest replies are kept");
+    worker.cancel();
+    drop(lookup);
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
+    for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167), (800, 600, 167)] {
+        let t = Theme::for_dpi(dpi);
+        let screen = Rect::new(0, 0, w, h);
+        let clearance = t.mm(4.5);
+        let line = |y| Rect::new(w / 4, y, w / 2, t.mm(4.0));
+        let upper = line(h / 4);
+        let lower = line(h - t.mm(20.0));
+        let whole = Rect::new(t.mm(4.0), t.mm(8.0), w - t.mm(8.0), h - t.mm(12.0));
+        for (selection, placement) in [(upper, "below"), (lower, "above"), (whole, "docked")] {
+            let mut bar = SelectionActions::new(&t, screen, selection);
+            let r = bar.rect();
+            assert!(r.w <= t.mm(105.0) && r.w <= w - 2 * t.margin, "{w}×{h}");
+            assert!(r.x >= t.margin && r.right() <= w - t.margin && r.y >= t.margin && r.bottom() <= h - t.margin);
+            match placement {
+                "below" => assert_eq!(r.y, selection.bottom() + clearance),
+                "above" => assert_eq!(r.bottom(), selection.y - clearance),
+                _ => assert_eq!(r.bottom(), h - t.margin),
+            }
+            if placement != "docked" {
+                assert!(r.inset(-clearance + 1).intersect(&selection).is_none(), "the handles stay clear");
+                assert!((r.center().x - selection.center().x).abs() <= 1, "centred on the passage");
+            }
+            let actions = [
+                SelectionAction::Highlight,
+                SelectionAction::Note,
+                SelectionAction::Search,
+                SelectionAction::Dictionary,
+                SelectionAction::Extend,
+            ];
+            for action in actions {
+                let cell = bar.cell(action);
+                assert!(cell.w >= t.target && cell.h >= t.target, "{w}×{h}: touch targets");
+                let p = cell.center();
+                bar.on_gesture(&Gesture::Down(p));
+                assert_eq!(bar.on_gesture(&Gesture::Tap(p)), Some(action));
+            }
+            let outside = crate::geom::Point::new(r.x + r.w / 2, if r.y > h / 2 { t.mm(2.0) } else { h - t.mm(2.0) });
+            assert_eq!(bar.on_gesture(&Gesture::Down(outside)), None);
+            assert_eq!(bar.on_gesture(&Gesture::Tap(outside)), Some(SelectionAction::Dismiss));
+        }
+        // Drawn: the primary cell is ink, with its label in paper.
+        let mut bar = SelectionActions::new(&t, screen, upper);
+        let mut canvas = Canvas::new(w as u32, h as u32);
+        canvas.fill(crate::ui::theme::PAPER);
+        let (mut text, mut icons, mut hints) = (TextRenderer::new(), IconRenderer::default(), vec![]);
+        bar.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+        let gray = |canvas: &Canvas, p: crate::geom::Point| canvas.gray_data()[(p.y * w + p.x) as usize];
+        let highlight = bar.cell(SelectionAction::Highlight);
+        assert_eq!(
+            gray(&canvas, crate::geom::Point::new(highlight.x + 3, highlight.center().y)),
+            crate::ui::theme::INK
+        );
+        let shadow = crate::geom::Point::new(bar.rect().center().x, bar.rect().bottom() + t.mm(0.5));
+        assert_eq!(gray(&canvas, shadow), crate::ui::theme::SHADOW);
+        if (w, h) == (1272, 1696) {
+            save_capture(&canvas, w, h, "passage-bar");
+        }
+        let note = bar.cell(SelectionAction::Note).center();
+        bar.on_gesture(&Gesture::Down(note));
+        let mut pressed = vec![];
+        bar.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut pressed));
+        assert!(pressed.iter().any(|u| u.mode == crate::platform::RefreshMode::Fast && u.rect.contains(note)));
+    }
+}
+
+fn save_capture(canvas: &Canvas, w: i32, h: i32, name: &str) {
+    let Some(folder) = std::env::var_os("VERSO_DICTIONARY_CAPTURES") else { return };
+    let folder = std::path::PathBuf::from(folder);
+    fs::create_dir_all(&folder).unwrap();
+    image::save_buffer(
+        folder.join(format!("{w}x{h}-{name}.png")),
+        canvas.gray_data(),
+        w as u32,
+        h as u32,
+        image::ColorType::L8,
+    )
+    .unwrap();
 }

@@ -140,6 +140,10 @@ impl IconButton {
         self.rect = rect;
     }
 
+    pub fn is_pressed(&self) -> bool {
+        self.press.is_down()
+    }
+
     /// Places a target-sized button centred on `center`.
     pub fn place_at(&mut self, center: crate::geom::Point, theme: &Theme) {
         self.rect = Rect::centered(center, theme.target, theme.target);

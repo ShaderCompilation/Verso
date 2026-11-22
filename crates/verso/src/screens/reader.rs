@@ -459,10 +459,14 @@ impl Reader {
             language: self.book_language(),
         }
     }
+    /// Where the selection is on the page: the box around its rectangles.
+    fn selected_rect(&self) -> Option<Rect> {
+        self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)))
+    }
     pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
         self.dictionary_prepare_at = None;
         let service = self.dictionary_service().clone();
-        let word = self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)));
+        let word = self.selected_rect();
         let selection = self.dictionary_selection();
         self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service, cx.theme, self.screen, word, selection)));
         cx.redraw();
@@ -475,10 +479,16 @@ impl Reader {
             if text.split_whitespace().count() == 1 {
                 self.lookup(&text, cx);
             } else {
-                self.overlay = Overlay::SelectionActions(Box::new(SelectionActions::new(cx.theme, self.screen)));
-                cx.redraw();
+                self.open_passage_actions(cx);
             }
         }
+    }
+    /// The floating bar beside the selected passage; centred when its
+    /// rectangles are unknown.
+    fn open_passage_actions(&mut self, cx: &mut EventCx) {
+        let passage = self.selected_rect().unwrap_or_else(|| Rect::centered(self.screen.center(), 0, 0));
+        self.overlay = Overlay::SelectionActions(Box::new(SelectionActions::new(cx.theme, self.screen, passage)));
+        cx.redraw();
     }
     fn display(&mut self, page: Arc<Page>, cx: &mut EventCx) {
         let layout_changed = self.laying_out;
@@ -1222,22 +1232,27 @@ impl Reader {
         if self.pending_turn && matches!(g, Gesture::LongPress(_)) {
             self.commit_turn(cx);
         }
-        // A selection handle beside the dictionary card: the card closes and
-        // the drag adjusts the selection, which reopens the card for a single
-        // word or offers the passage actions on release.
-        if let Overlay::Lookup(lookup) = &self.overlay
-            && lookup.allows_handles()
-            && matches!(g, Gesture::Down(p) if !lookup.rect(cx.theme).contains(p))
-            && self.selection.adjusting(g, cx.theme)
-        {
-            if let Some(worker) = &self.dictionary {
+        // A selection handle beside the dictionary card or the passage bar:
+        // the overlay closes and the drag adjusts the selection, which
+        // reopens the card for a single word or the bar for a passage on
+        // release.
+        let beside = match &self.overlay {
+            Overlay::Lookup(lookup) => {
+                lookup.allows_handles() && matches!(g, Gesture::Down(p) if !lookup.rect(cx.theme).contains(p))
+            }
+            Overlay::SelectionActions(bar) => matches!(g, Gesture::Down(p) if !bar.bounds(cx.theme).contains(p)),
+            _ => false,
+        };
+        if beside && self.selection.adjusting(g, cx.theme) {
+            if matches!(self.overlay, Overlay::Lookup(_))
+                && let Some(worker) = &self.dictionary
+            {
                 worker.cancel();
             }
             self.overlay = Overlay::None;
             cx.redraw();
         }
-        if (matches!(self.overlay, Overlay::None)
-            || matches!(self.overlay, Overlay::SelectionActions(_)) && self.selection.adjusting(g, cx.theme))
+        if matches!(self.overlay, Overlay::None)
             && let Some(context) = self.selection_context()
             && self.selection.on_gesture(g, context, &self.worker, cx)
         {
@@ -2673,6 +2688,73 @@ mod tests {
         // Elsewhere outside the card, a tap closes it and drops the selection.
         open(&mut r);
         tap(&mut r, Point::new(500, 300));
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(r.selection.selected.is_none());
+    }
+
+    #[test]
+    fn the_passage_bar_floats_beside_the_passage_and_yields_its_handles() {
+        use crate::{
+            document::{Selection, TextRange},
+            geom::{Point, Rect},
+        };
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("passage-bar");
+        r.pages = 10;
+        r.target = 2;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 2));
+        let lines = [Rect::new(60, 200, 480, 30), Rect::new(60, 230, 200, 30)];
+        let open = |r: &mut Reader| {
+            r.selection.clear();
+            r.selection.selected = Some(Selection {
+                range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+                text: "two words".into(),
+                rects: lines.to_vec(),
+                start_page: 2,
+                start_visible: true,
+                end_visible: true,
+            });
+            test_cx(&theme, |cx| r.open_passage_actions(cx));
+            let Overlay::SelectionActions(bar) = &r.overlay else { panic!("no passage bar") };
+            bar.rect()
+        };
+        let tap = |r: &mut Reader, p: Point| {
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(p), cx);
+                r.on_gesture(Gesture::Tap(p), cx);
+            })
+        };
+        let bar = open(&mut r);
+        assert_eq!(bar.y, lines[1].bottom() + theme.mm(4.5), "below the passage, clear of its handles");
+        // The end handle beside the bar closes it and drags the selection.
+        let handle = Point::new(lines[1].right(), lines[1].bottom() + theme.mm(1.2));
+        assert!(!bar.contains(handle));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(handle), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::None));
+        assert!(r.selection.adjusting(Gesture::Move(handle), &theme), "the handle was grabbed");
+        let to = Point::new(400, 300);
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Move(to), cx);
+            r.on_gesture(Gesture::End(to), cx);
+        });
+        assert!(
+            commands.try_iter().any(|c| matches!(c, Command::Select { query: SelectionQuery::Extend { .. }, .. })),
+            "the drag extends the selection"
+        );
+        // Dict looks the passage up.
+        open(&mut r);
+        let dict = match &r.overlay {
+            Overlay::SelectionActions(bar) => bar.cell(SelectionAction::Dictionary).center(),
+            _ => unreachable!(),
+        };
+        tap(&mut r, dict);
+        assert!(matches!(r.overlay, Overlay::Lookup(_)));
+        // A tap elsewhere dismisses the bar and the selection.
+        open(&mut r);
+        tap(&mut r, Point::new(300, 700));
         assert!(matches!(r.overlay, Overlay::None));
         assert!(r.selection.selected.is_none());
     }
