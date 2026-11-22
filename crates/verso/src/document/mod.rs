@@ -26,7 +26,7 @@ pub struct Layout {
 
 /// How the engine shapes text: a trade between layout speed and typography.
 /// Layout time for a 1220-page book on the Kindle: full 2.9 s, light 2.5 s,
-/// FreeType 0.94 s (docs/research/book-open-2026-11-17.md).
+/// FreeType 0.94 s (docs/archive/book-open-2026-11-17.md).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextShaping {

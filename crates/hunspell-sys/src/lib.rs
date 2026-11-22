@@ -50,7 +50,7 @@ pub mod ffi {
 /// The largest `.aff` or `.dic` [`Hunspell::open`] accepts. Hunspell parses
 /// the whole `.dic` into memory, about 4 times its size (Polish: 4.7 MB file,
 /// 19 MB RAM on the desktop); this keeps a stray huge file from exhausting
-/// the Kindle's memory. Phase 4 of docs/universal-languages.md sets the final
+/// the Kindle's memory. Phase 4 of docs/archive/universal-languages.md sets the final
 /// limit from Kindle measurements.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 

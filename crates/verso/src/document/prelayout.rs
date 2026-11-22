@@ -1,4 +1,4 @@
-//! Background pre-layout (docs/prelayout.md). While the library is idle, a
+//! Background pre-layout (docs/reader.md). While the library is idle, a
 //! separate `verso --prelayout` process opens and closes the books the reader
 //! is likely to open next, so crengine's cache holds their layout and their
 //! first open is as fast as a reopen. The process can be killed at any moment

@@ -5,7 +5,7 @@ the source of Verso's Russian word-form pack (`ru.vwf`). opencorpora.org no
 longer serves it (a bare nginx page on 2026-11-17, the export URL returns
 404), so this copy is the only reproducible source. Build the pack with
 `scripts/build-wordforms.sh`; see
-[docs/word-forms-languages.md](../../../docs/word-forms-languages.md).
+[docs/archive/word-forms-languages.md](../../../docs/archive/word-forms-languages.md).
 
 | | |
 |---|---|

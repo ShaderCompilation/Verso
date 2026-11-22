@@ -2,7 +2,7 @@
 //! `.aff`/`.dic` pair in the Hunspell folder, or one level of subfolders,
 //! named for its language (`de_DE.aff` is German). Every stem Hunspell finds
 //! is an authoritative lemma; there are no rule guesses. See
-//! docs/universal-languages.md.
+//! docs/archive/universal-languages.md.
 use super::{Analyzer, Candidates};
 use crate::dictionary::languages::{language_scripts, normalize_language};
 use hunspell_sys::{Encoding, Hunspell};

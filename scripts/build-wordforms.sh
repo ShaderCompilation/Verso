@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the Russian word-form pack (ru.vwf) from the kept OpenCorpora export
 # with the host's vwf-build, then runs the quality list against it. Works
-# offline. See docs/word-forms-languages.md.
+# offline. See docs/archive/word-forms-languages.md.
 #
 # Output: target/wordforms/ru.vwf. Does nothing when the source, the builder
 # and this script are unchanged.

@@ -3,7 +3,7 @@
 crengine draws SVG (`<svg>` in a book, `<img src="x.svg">`) through LunaSVG.
 Its `lvimg.cpp` expects KOReader's *extended* LunaSVG, which adds hooks for
 `<text>` and `<image>` (crengine supplies the fonts and decodes the images).
-Why this is vendored and what it costs: [docs/svg-covers.md](../../../docs/svg-covers.md).
+Why this is vendored and what it costs: [docs/archive/svg-covers.md](../../../docs/archive/svg-covers.md).
 
 ## Where it came from
 

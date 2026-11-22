@@ -1,7 +1,7 @@
 //! The book's language, detected once from a sample of its own text with
 //! whatlang. EPUB language tags are often missing or wrong (conversion tools
 //! stamp `en` on books in any language), so a reliable detection beats the
-//! tag. See docs/universal-languages.md.
+//! tag. See docs/archive/universal-languages.md.
 use super::epub;
 use crate::dictionary::languages::normalize_language;
 use anyhow::{Context, Result, ensure};

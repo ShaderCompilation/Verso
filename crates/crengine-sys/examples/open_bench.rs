@@ -1,6 +1,6 @@
 //! Times one book open the way the app does it: parse, layout, first draw,
 //! progress, the next page and close (which writes the cache). Used for
-//! docs/research/book-open-2026-11-17.md.
+//! docs/archive/book-open-2026-11-17.md.
 //!
 //!   open_bench CACHE_DIR BOOK.epub [PAGE]
 //!

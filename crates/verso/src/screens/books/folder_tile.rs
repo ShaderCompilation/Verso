@@ -1,5 +1,5 @@
 //! Folder tiles in Collections show covers of the folder's books
-//! (docs/folder-previews.md). Each mode draws inside the tile rectangle the
+//! (docs/archive/folder-previews.md). Each mode draws inside the tile rectangle the
 //! folder icon uses, so names, the pressed outline and the selection tick
 //! keep their places.
 use super::*;

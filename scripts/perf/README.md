@@ -1,7 +1,7 @@
 # Kindle performance probes
 
-Sources used for the [2026-11-11 comparison](../../docs/research/performance.md).
-The [2026-11-12 repeat](../../docs/research/performance-2026-11-12.md) reuses the
+Sources used for the [2026-11-11 comparison](../../docs/archive/performance-2026-11-11.md).
+The [2026-11-12 repeat](../../docs/archive/performance-2026-11-12.md) reuses the
 probe and KOReader wrapper, with updated sampling for slower startup and the
 new Home → library path. Its report records run order, boundaries and corrections.
 These are measurement components, not a deploy command. Running a reader still
@@ -9,7 +9,7 @@ requires the launcher and device-readiness checks in `AGENTS.md`.
 
 ## Current performance audit
 
-The [2026-11-16 pass](../../docs/research/performance-2026-11-16.md) reuses these
+The [2026-11-16 pass](../../docs/archive/performance-2026-11-16.md) reuses these
 components for current bottleneck attribution. Build both probes below, install
 the latest release with `scripts/deploy.sh --no-run` **before** measuring, verify
 its hash, and run one device workload at a time. The captures record the executed
@@ -148,7 +148,7 @@ presentation and saving. Thread/process CPU uses the device's previously measure
 100 Hz accounting. The analyzer uses nearest-rank p95. Draw/diff totals measure
 elapsed time inside `App::frame`, including scheduling; they are not CPU time.
 Request latency starts at injected touch release and ends at SEND_UPDATE; it is
-not optical response. See [results](../../docs/research/redraw-optimization.md).
+not optical response. See [results](../../docs/archive/redraw-optimization.md).
 
 ## Build
 
@@ -312,7 +312,7 @@ Use fresh output directories. This uses only original project EPUB fixtures,
 never production state. It records decoded grayscale SHA-256, changed pixel
 count and maximum difference for 13 scenes in `screens.csv`; PNG container bytes
 can differ with the grayscale encoder. See the
-[buffer-memory report](../../docs/research/buffer-memory.md) for results and the
+[buffer-memory report](../../docs/archive/buffer-memory.md) for results and the
 distinction between payload allocation and measured process memory.
 
 ## Position persistence comparison
@@ -360,7 +360,7 @@ and progress values and hashes are saved.
 successful writes per timed run, and reports the persistence thread's CPU.
 Compare normal and rapid groups separately; process CPU includes the worker.
 Memory snapshots from one launch per build are diagnostic, not independent
-memory repetitions. See the [persistence report](../../docs/research/position-persistence.md).
+memory repetitions. See the [persistence report](../../docs/archive/position-persistence.md).
 
 ## Home startup comparison
 
@@ -373,7 +373,7 @@ the seed; `--summary seeded` uses that seed for warm launches. Use
 pre-Home baseline). `--mode lifecycle` runs real sleep/wake on Home and in the
 reader, exact reopen, close to Home and exit; it returns the device to awake.
 `--large` needs a fixture whose cover keys match the app's key formula; see the
-[report](../../docs/research/home-startup.md#method-and-boundaries).
+[report](../../docs/archive/home-startup-2026-11-11.md#method-and-boundaries).
 
 ```sh
 python3 scripts/perf/startup.py after /tmp/after/verso --large /tmp/large \
@@ -481,7 +481,7 @@ measurement limits:
 
 ## Compact card, chained lookups and passage bar
 
-`dictionary-selection.py` verifies [dictionary-selection.md](../../docs/dictionary-selection.md)
+`dictionary-selection.py` verifies [dictionary-selection.md](../../docs/archive/dictionary-selection.md)
 Phase 4 on our portrait 1272×1696 Paperwhite, then in landscape. Install the
 latest app first (`scripts/deploy.sh --no-run`) and build both probes as above.
 It reuses `dictionary.py`'s launcher copy and isolated state, with the
@@ -533,7 +533,7 @@ wf --name wf-all --word людей --language und --cache-state "$COLD_STATE"
 `rus` selects the Russian set (five dictionaries), `und` Default (all 13).
 Afterwards remove the `wf-*` folders.
 
-For Hunspell ([Phase 4](../../docs/universal-languages.md#phase-4-results--2026-11-22)),
+For Hunspell ([Phase 4](../../docs/archive/universal-languages.md#phase-4-results--2026-11-22)),
 install the dictionaries in `/mnt/us/verso/data/hunspell/` and add
 `--hunspell de_DE.aff,de_DE.dic` (those files are copied into the run's
 isolated state, so only they are loaded), a one-word book of an inflected form
@@ -548,7 +548,7 @@ lines and the searches) and `memory_after_close`. Results:
 
 ## Background pre-layout
 
-`prelayout.py` checks [background pre-layout](../../docs/prelayout.md) through the
+`prelayout.py` checks [background pre-layout](../../docs/reader.md) through the
 launcher. Each launch uses isolated state under `/mnt/us/verso/prelayout-check`:
 a fresh copy of the real library data and an empty book cache
 (`VERSO_CACHE`). Scenarios (`--scenario`, repeatable; all by default):

@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 crengine-sys = { path = "../crengine-sys" }
-# Base forms from user-installed Hunspell dictionaries (docs/universal-languages.md).
+# Base forms from user-installed Hunspell dictionaries (docs/archive/universal-languages.md).
 hunspell-sys = { path = "../hunspell-sys" }
 cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
 env_logger = { version = "0.11.11", default-features = false, features = ["auto-color", "humantime"] }
@@ -33,7 +33,7 @@ qrcode = { version = "0.14", default-features = false }
 sha2 = "0.10"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 unicode-segmentation = "1.13.3"
-# Book language detection from its text (docs/universal-languages.md).
+# Book language detection from its text (docs/archive/universal-languages.md).
 whatlang = "0.18.0"
 unicode-normalization = "0.1"
 caseless = "0.2.2"

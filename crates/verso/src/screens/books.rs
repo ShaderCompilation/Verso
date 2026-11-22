@@ -43,7 +43,7 @@ use thumbnails::{CoverSpec, Fit, Thumbnails};
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 /// Untouched this long with the library settled, books likely to be opened
-/// next are laid out in the background (docs/prelayout.md).
+/// next are laid out in the background (docs/reader.md).
 const PRELAYOUT_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Idle time on Home before the library's first page is prepared.
 const WARM_IDLE: std::time::Duration = std::time::Duration::from_secs(1);

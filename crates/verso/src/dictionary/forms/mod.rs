@@ -3,7 +3,7 @@
 //! against real headwords. English is built in; other languages read a
 //! word-form pack (`<lang>.vwf`) from the word-forms folder, and any other
 //! language a Hunspell dictionary the user installed. See
-//! docs/word-forms-languages.md and docs/universal-languages.md.
+//! docs/archive/word-forms-languages.md and docs/archive/universal-languages.md.
 mod english;
 mod hunspell;
 mod table;
