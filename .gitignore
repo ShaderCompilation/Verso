@@ -3,3 +3,4 @@
 .DS_Store
 /testbooks
 /screenshots
+__pycache__/
