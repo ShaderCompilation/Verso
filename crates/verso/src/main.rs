@@ -4,6 +4,8 @@
 //! grayscale PNG at device size and exits. `--screen books|settings|transfer|gallery` picks the
 //! start screen; `--tap x,y`, `--press x,y` (finger down, not lifted) and
 //! `--swipe x1,y1,x2,y2` (all repeatable, played in order) run first.
+//! `--device basic-167|basic-300|pw5|pw6|oasis3|colorsoft|scribe` picks the
+//! simulated Kindle, with or without a window (platform/sim_device.rs).
 
 #[cfg(all(feature = "desktop", feature = "kindle"))]
 compile_error!("Enable exactly one backend: `desktop` (default) or `kindle`.");
@@ -68,6 +70,7 @@ struct Options {
     screen: Option<String>,
     screenshot: Option<std::path::PathBuf>,
     script: Vec<ScriptStep>,
+    device: Option<String>,
 }
 
 fn parse_args() -> Result<Options> {
@@ -89,6 +92,7 @@ fn parse_args() -> Result<Options> {
         match arg.as_str() {
             "--screen" => opts.screen = Some(args.next().context("--screen needs a name")?),
             "--screenshot" => opts.screenshot = Some(args.next().context("--screenshot needs a file name")?.into()),
+            "--device" => opts.device = Some(args.next().context("--device needs a name, e.g. pw6")?),
             "--text" => {
                 opts.script.push(ScriptStep::Text(TextInput::Insert(args.next().context("--text needs text")?)))
             }
@@ -210,8 +214,8 @@ fn run() -> Result<i32> {
     let started = Instant::now();
     let opts = if cfg!(feature = "desktop") { parse_args()? } else { Options::default() };
     let mut platform = match &opts.screenshot {
-        Some(path) => platform::open_headless(path, opts.script.clone())?,
-        None => platform::open()?,
+        Some(path) => platform::open_headless(path, opts.script.clone(), opts.device.as_deref())?,
+        None => platform::open(opts.device.as_deref())?,
     };
     // One Store for every screen, so they share preferences and the dictionary service.
     let store = store::Store::new();

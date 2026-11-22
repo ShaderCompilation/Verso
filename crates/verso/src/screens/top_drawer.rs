@@ -151,7 +151,7 @@ impl DrawerLayout {
         }
         y += t.mm(if wide { 1.7 } else { 2.0 });
         let tile_h = t.mm(13.4);
-        let per_row = tile_columns(t, content_w, tiles, wide);
+        let per_row = tile_columns(t, content_w, tiles);
         let mut rects = Vec::with_capacity(tiles);
         let mut left = tiles;
         while left > 0 {
@@ -186,11 +186,11 @@ impl DrawerLayout {
     }
 }
 
-/// Tiles per row: three in portrait (5 = 3 + 2, 6 = 3 × 2); one row in
-/// landscape unless the tiles would get too narrow (6" landscape).
-fn tile_columns(t: &Theme, content_w: i32, tiles: usize, wide: bool) -> usize {
-    if !wide || tiles <= 3 {
-        return 3.min(tiles.max(1));
+/// Tiles per row: one row when the tiles stay wide enough (landscape, and
+/// 10.2" portrait), otherwise rows of three (5 = 3 + 2, 6 = 3 × 2).
+fn tile_columns(t: &Theme, content_w: i32, tiles: usize) -> usize {
+    if tiles <= 3 {
+        return tiles.max(1);
     }
     let gap = t.mm(if tiles >= 6 { 1.7 } else { 2.0 });
     let w = (content_w - gap * (tiles as i32 - 1)) / tiles as i32;

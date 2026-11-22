@@ -1,8 +1,10 @@
 //! Desktop simulator: shows the Kindle screen in a window.
 //!
 //! - The window keeps the panel's aspect ratio and scales to fit (start size
-//!   set by `VERSO_SIM_SCALE`, default 0.5). Screen size and density can be
-//!   changed with `VERSO_SIM_SIZE=1072x1448` and `VERSO_SIM_DPI=300`.
+//!   set by `VERSO_SIM_SCALE`, default 0.5). `--device <name>` or
+//!   `VERSO_SIM_DEVICE` picks a Kindle model (sim_device.rs); its screen size
+//!   and density can be changed with `VERSO_SIM_SIZE=1072x1448` and
+//!   `VERSO_SIM_DPI=300`, its lights with `VERSO_SIM_LIGHT=none|white|warm`.
 //! - `VERSO_SIM_BATTERY=82` shows a battery at 82%; `82+` is charging.
 //! - The left mouse button acts as a finger.
 //! - Keys: Q / Esc quit · S sleep/wake · V toggle refresh visualisation ·
@@ -25,6 +27,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowId};
 
+use super::sim_device::SimDevice;
 use super::{
     DeviceInfo, Event, Frontlight, Orientation, Platform, RefreshMode, TextInput, Touch, TouchPhase, Update, Waker,
 };
@@ -40,17 +43,18 @@ pub struct Desktop {
     native: (u32, u32),
     event_loop: EventLoop<()>,
     sim: Sim,
-    light: Frontlight,
+    device: SimDevice,
 }
 
 impl Desktop {
-    pub fn open() -> Result<Self> {
-        let (width, height, dpi) = sim_screen()?;
-        let scale = env_number("VERSO_SIM_SCALE", 0.5)?;
-        let info = DeviceInfo { name: "Simulator".into(), width, height, dpi };
+    pub fn open(device: SimDevice) -> Result<Self> {
+        let (width, height, dpi) = (device.width, device.height, device.dpi);
+        let info = DeviceInfo { name: format!("Simulator ({})", device.name), width, height, dpi };
 
         let mut event_loop = EventLoop::<()>::with_user_event().build().context("can't open a window (no display?)")?;
-        let mut sim = Sim::new(width as usize, height as usize, scale);
+        let mut sim = Sim::new(width as usize, height as usize, device.scale);
+        sim.title = format!("Verso simulator · {}", device.label());
+        sim.light = device.initial_light();
         // Let winit create the window.
         let start = Instant::now();
         while sim.surface.is_none() {
@@ -65,13 +69,7 @@ impl Desktop {
             }
         }
         log::info!("simulator keys: Q/Esc quit · S sleep/wake · V refresh visualisation · P screenshot");
-        Ok(Self {
-            info,
-            native: (width, height),
-            event_loop,
-            sim,
-            light: Frontlight { brightness: 12, warmth: Some(0) },
-        })
+        Ok(Self { info, native: (width, height), event_loop, sim, device })
     }
 }
 
@@ -96,17 +94,20 @@ impl Platform for Desktop {
         }
     }
     fn frontlight(&mut self) -> Option<Frontlight> {
-        Some(self.light)
+        self.sim.light
     }
     fn set_frontlight(&mut self, light: Frontlight) -> Result<()> {
-        self.light = light;
-        self.sim.light = light;
+        self.sim.light = self.device.accept_light(light);
         self.sim.dirty = true;
         Ok(())
     }
 
     fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    fn session_details(&self) -> Vec<String> {
+        vec![self.device.details()]
     }
 
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {
@@ -206,7 +207,9 @@ struct Sim {
     flashes: Vec<Update>,
     flash_until: Option<Instant>,
     asleep: bool,
-    light: Frontlight,
+    /// `None`: the device has no frontlight.
+    light: Option<Frontlight>,
+    title: String,
     dirty: bool,
     error: Option<anyhow::Error>,
 }
@@ -228,7 +231,8 @@ impl Sim {
             flashes: Vec::new(),
             flash_until: None,
             asleep: false,
-            light: Frontlight { brightness: 12, warmth: Some(0) },
+            light: None,
+            title: "Verso simulator".into(),
             dirty: true,
             error: None,
         }
@@ -236,7 +240,7 @@ impl Sim {
 
     fn create_window(&mut self, el: &ActiveEventLoop) -> Result<()> {
         let size = LogicalSize::new(self.width as f64 * self.start_scale, self.height as f64 * self.start_scale);
-        let attrs = Window::default_attributes().with_title("Verso simulator").with_inner_size(size);
+        let attrs = Window::default_attributes().with_title(&self.title).with_inner_size(size);
         let window = Rc::new(el.create_window(attrs)?);
         window.set_ime_allowed(true);
         let context = softbuffer::Context::new(window.clone()).map_err(|e| anyhow!("softbuffer: {e}"))?;
@@ -309,8 +313,10 @@ impl Sim {
                 if self.asleep {
                     (r, gr, b) = (r / 4, gr / 4, b / 3 + 20);
                 }
-                let dim = 0.75 + self.light.brightness as f32 / 96.0;
-                let warm = self.light.warmth.unwrap_or(0) as f32 / 24.0;
+                // Without a frontlight, the paper looks like a dimly lit one.
+                let (dim, warm) = self
+                    .light
+                    .map_or((0.85, 0.0), |l| (0.75 + l.brightness as f32 / 96.0, l.warmth.unwrap_or(0) as f32 / 24.0));
                 r = (r as f32 * dim) as u32;
                 gr = (gr as f32 * dim * (1.0 - warm * 0.06)) as u32;
                 b = (b as f32 * dim * (1.0 - warm * 0.18)) as u32;
@@ -458,33 +464,4 @@ pub(super) fn sim_battery() -> Option<super::Battery> {
     let charging = value.ends_with('+');
     let percent = value.trim_end_matches('+').parse::<u8>().ok()?.min(100);
     Some(super::Battery { percent, charging })
-}
-
-/// The simulated screen: width, height and dpi, from VERSO_SIM_SIZE and
-/// VERSO_SIM_DPI (default: the Kindle Paperwhite's 1272x1696 at 300 dpi).
-pub(super) fn sim_screen() -> Result<(u32, u32, u32)> {
-    let (width, height) = match std::env::var("VERSO_SIM_SIZE") {
-        Ok(s) => parse_size(&s).with_context(|| format!("VERSO_SIM_SIZE={s:?}, expected e.g. 1272x1696"))?,
-        Err(_) => (1272, 1696),
-    };
-    let dpi = env_number("VERSO_SIM_DPI", 300.0)? as u32;
-    Ok((width, height, dpi))
-}
-
-fn parse_size(s: &str) -> Option<(u32, u32)> {
-    let (w, h) = s.split_once('x')?;
-    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
-    (w > 0 && h > 0).then_some((w, h))
-}
-
-fn env_number(name: &str, default: f64) -> Result<f64> {
-    match std::env::var(name) {
-        Ok(s) => s
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|v| *v > 0.0)
-            .with_context(|| format!("{name}={s:?} isn't a positive number")),
-        Err(_) => Ok(default),
-    }
 }

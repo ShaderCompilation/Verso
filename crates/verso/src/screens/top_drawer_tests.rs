@@ -117,6 +117,22 @@ fn small_screens_scale_and_narrow_landscape_rows_wrap() {
 }
 
 #[test]
+fn scribe_portrait_keeps_the_tiles_in_one_row() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1860, 2480);
+    for tiles in [5, 6] {
+        let l = DrawerLayout::new(&t, screen, 2, tiles, false, false);
+        check_layout(&t, &l, screen);
+        assert_eq!(rows(&l).len(), 1, "{tiles} tiles in one row on 10.2\"");
+        assert!(mm(&t, l.tiles[0].w) >= MIN_ROW_TILE_MM);
+        assert!(l.panel.h * 100 / screen.h < 25, "{}", l.panel.h);
+    }
+    // The Paperwhite's portrait rows of three stay.
+    let l = DrawerLayout::new(&t, Rect::new(0, 0, 1272, 1696), 2, 5, false, false);
+    assert_eq!(rows(&l).iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
+}
+
+#[test]
 fn no_frontlight_reading_leaves_out_the_slider_rows() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);

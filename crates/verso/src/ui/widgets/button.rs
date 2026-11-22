@@ -2,7 +2,7 @@
 //! Pressed means inverted, refreshed with `Fast`; it acts when the finger lifts.
 
 use crate::geom::Rect;
-use crate::gfx::{HAlign, Icon};
+use crate::gfx::{HAlign, Icon, TextRenderer, TextStyle};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK3, LINE, PAPER, Theme};
@@ -14,6 +14,28 @@ pub enum ButtonKind {
     Primary,
     /// Black outline.
     Secondary,
+}
+
+/// The style and side padding for a button label in a button `width` wide.
+/// A label that doesn't fit first gives up some padding, then shrinks to
+/// 85% (four buttons on a 6" screen), before it's cut short.
+pub fn fit_label(
+    text: &mut TextRenderer,
+    label: &str,
+    mut style: TextStyle,
+    width: i32,
+    t: &Theme,
+) -> (TextStyle, i32) {
+    let w = text.width(label, style);
+    let mut pad = t.mm(2.0);
+    if w > (width - 2 * pad) as f32 {
+        pad = t.mm(1.0);
+        let fit = (width - 2 * pad) as f32 / w.max(1.0);
+        if fit < 1.0 {
+            style.size = (style.size * fit.max(0.85)).floor();
+        }
+    }
+    (style, pad)
 }
 
 pub struct Button {
@@ -106,7 +128,8 @@ impl Button {
         };
         let style = t.button.gray(fg);
         let Some(icon) = self.icon else {
-            cx.line(&self.label, style, r.inset_xy(t.mm(2.0), 0), HAlign::Center);
+            let (style, pad) = fit_label(cx.text, &self.label, style, r.w, t);
+            cx.line(&self.label, style, r.inset_xy(pad, 0), HAlign::Center);
             return;
         };
         // Icon and label, centred together.

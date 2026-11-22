@@ -806,12 +806,15 @@ impl Books {
     /// Shared by `refresh` and Home's off-thread warm-up so prefetched cover
     /// sizes match the browsing grid pixel-for-pixel.
     fn browsing_grid(&self, count: usize, t: &Theme) -> Grid {
+        Self::browsing_grid_for(self.screen, count, t)
+    }
+    fn browsing_grid_for(screen: Rect, count: usize, t: &Theme) -> Grid {
         let top = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM) + t.mm(LIBRARY_HEADER_H_MM) + t.mm(LIBRARY_HEADER_GAP_MM);
-        let bottom = self.screen.bottom() - t.margin;
-        let (cols, rows) = library_grid_dims(self.screen, t);
+        let bottom = screen.bottom() - t.margin;
+        let (cols, rows) = library_grid_dims(screen, t);
         let (gap_x, gap_y) = library_grid_gaps(cols, t);
         let mut grid = Grid::new(count, cols, rows);
-        grid.place(Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (bottom - top).max(t.target)), gap_x, gap_y);
+        grid.place(Rect::new(t.margin, top, screen.w - 2 * t.margin, (bottom - top).max(t.target)), gap_x, gap_y);
         grid
     }
     /// A book's cover in grid cell `cell`. Every cell's cover has the size
@@ -1893,21 +1896,32 @@ const LIBRARY_HEADER_GAP_MM: f32 = 2.9;
 
 /// Grid dimensions for Library and Search: 4 × 3 on Paperwhite portrait,
 /// 6 × 2 in landscape, and 3 × 3 on narrow 6" portrait screens (< 100 mm).
+/// Larger screens (10.2" Scribe) get more columns of about the same cover
+/// width and as many rows as fit at about the same cover height.
 fn library_grid_dims(screen: Rect, t: &Theme) -> (usize, usize) {
-    if screen.w > screen.h {
-        (6, 2)
+    let landscape = screen.w > screen.h;
+    let content_w = screen.w - 2 * t.margin;
+    let (cols, min_rows) = if landscape {
+        ((content_w / t.mm(22.0)).clamp(6, 8) as usize, 2)
     } else if screen.w < t.mm(100.0) {
         (3, 3)
     } else {
-        (4, 3)
-    }
+        ((content_w / t.mm(24.5)).clamp(4, 8) as usize, 3)
+    };
+    let (gap_x, gap_y) = library_grid_gaps(cols, t);
+    let cell_w = (content_w - gap_x * (cols as i32 - 1)) / cols as i32;
+    let cell_h = cell_w * 3 / 2 + t.mm(LIBRARY_BOOK_LABELS_MM) + gap_y;
+    let top = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM) + t.mm(LIBRARY_HEADER_H_MM) + t.mm(LIBRARY_HEADER_GAP_MM);
+    let grid_h = screen.h - top - t.margin + gap_y;
+    let rows = ((grid_h + cell_h / 2) / cell_h.max(1)).max(min_rows) as usize;
+    (cols, rows)
 }
 
 fn library_grid_gaps(cols: usize, t: &Theme) -> (i32, i32) {
     let gap_x = match cols {
-        6 => t.mm(2.6),
         3 => t.mm(2.8),
-        _ => t.mm(3.4),
+        4 | 5 => t.mm(3.4),
+        _ => t.mm(2.6),
     };
     (gap_x, t.mm(2.0))
 }
@@ -2184,6 +2198,20 @@ fn path_tail(text: &mut crate::gfx::TextRenderer, path: &str, style: crate::gfx:
     }
     format!("…{}", &path[chars[low]..])
 }
+/// The title style on a cover drawn without an image: 10 pt Literata, or
+/// smaller on small covers (6" grids), so no word of the title breaks
+/// mid-word. Never below 5.5 pt.
+fn cover_title_style(text: &mut crate::gfx::TextRenderer, title: &str, width: i32, t: &Theme) -> TextStyle {
+    let mut style = TextStyle { family: Family::Serif, ..t.heading };
+    let longest = title.split_whitespace().map(|word| text.width(word, style)).fold(0.0, f32::max);
+    // A little slack for hinting at the smaller size.
+    let room = width as f32 * 0.97;
+    if longest > room {
+        style.size = (style.size * room / longest).floor().max(t.pt(5.5));
+    }
+    style
+}
+
 fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &mut Thumbnails) {
     if let Some(cover) = cache.load(store, book, rect.w, rect.h, Fit::Cover) {
         cover.blit(cx.canvas, rect);
@@ -2192,9 +2220,9 @@ fn draw_cover(cx: &mut DrawCx, book: &Book, rect: Rect, store: &Store, cache: &m
     }
     let t = cx.theme;
     cx.canvas.stroke_rounded_rect(rect, t.radius, t.border as f32, INK);
-    let inset = t.mm(2.0).min(rect.w / 8);
+    let inset = t.mm(2.0).min(rect.w / 12);
     let title = Rect::new(rect.x + inset, rect.y + rect.h / 8, rect.w - 2 * inset, rect.h * 3 / 5);
-    let style = crate::gfx::TextStyle { family: Family::Serif, ..t.heading };
+    let style = cover_title_style(cx.text, &book.metadata.title, title.w, t);
     cx.paragraph(&book.metadata.title, style, title, HAlign::Center);
     cx.hline(rect.y + rect.h * 3 / 4, rect.x + rect.w * 2 / 5, rect.x + rect.w * 3 / 5, t.hairline, INK);
     cx.line(
@@ -3444,6 +3472,50 @@ fn detail_pages(
 mod tests {
     use super::*;
     use crate::library::selection_tests::book;
+
+    #[test]
+    fn library_grid_columns_follow_the_screen_size() {
+        let cases = [
+            ((600, 800, 167), (3, 3)),
+            ((800, 600, 167), (6, 2)),
+            ((1072, 1448, 300), (3, 3)),
+            ((1448, 1072, 300), (6, 2)),
+            ((1236, 1648, 300), (4, 3)),
+            ((1272, 1696, 300), (4, 3)),
+            ((1696, 1272, 300), (6, 2)),
+            ((1860, 2480, 300), (6, 4)),
+            ((2480, 1860, 300), (8, 3)),
+        ];
+        for ((w, h, dpi), want) in cases {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            assert_eq!(library_grid_dims(screen, &t), want, "{w}x{h} @ {dpi}");
+            // Covers stay about the Paperwhite's size: never tiny, never huge.
+            let grid = Books::browsing_grid_for(screen, 12, &t);
+            let cover = grid_cover_rect(&grid, grid.cells()[0].1, &t);
+            let cover_mm = cover.w as f32 * 25.4 / t.dpi;
+            assert!((12.0..=26.0).contains(&cover_mm), "{w}x{h}: cover {cover_mm} mm wide");
+        }
+    }
+
+    #[test]
+    fn small_text_covers_shrink_the_title_instead_of_breaking_words() {
+        let mut text = crate::gfx::TextRenderer::new();
+        let t = Theme::for_dpi(167);
+        // A 3 × 3 grid cover on the 6" 167 dpi Basic, inside its insets.
+        let width = 76;
+        for title in ["Footnotes fixture", "Selection fixture", "Internationalization"] {
+            let style = cover_title_style(&mut text, title, width, &t);
+            assert!(style.size >= t.pt(5.5) && style.size <= t.heading.size, "{title}");
+            if style.size > t.pt(5.5) {
+                for word in title.split_whitespace() {
+                    assert!(text.width(word, style) <= width as f32, "{title}: {word} at {}", style.size);
+                }
+            }
+        }
+        // Short titles keep the full 10 pt.
+        assert_eq!(cover_title_style(&mut text, "Dune", width, &t).size, t.heading.size);
+    }
     fn browsing_books(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store) -> Books {
         // The stubbed library worker never scans or saves, so synthetic
         // fixtures cannot be rewritten mid-test by its startup pass.

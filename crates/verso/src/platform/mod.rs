@@ -27,6 +27,8 @@ mod power;
 #[cfg(any(feature = "kindle", test))]
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod process;
+#[cfg(feature = "desktop")]
+mod sim_device;
 pub mod ssh;
 pub mod wifi;
 
@@ -233,20 +235,29 @@ pub enum ScriptStep {
 
 /// A platform without a window that plays `script`, saves what's on its
 /// "screen" to `path` as a PNG after every update, and then quits.
-pub fn open_headless(path: &std::path::Path, script: Vec<ScriptStep>) -> Result<Box<dyn Platform>> {
+/// `device`: the simulator preset from `--device`.
+pub fn open_headless(
+    path: &std::path::Path,
+    script: Vec<ScriptStep>,
+    device: Option<&str>,
+) -> Result<Box<dyn Platform>> {
     #[cfg(feature = "desktop")]
-    return Ok(Box::new(headless::Headless::new(path, script)?));
+    return Ok(Box::new(headless::Headless::new(path, script, sim_device::SimDevice::from_env(device)?)?));
     #[cfg(feature = "kindle")]
     {
-        let _ = (path, script);
+        let _ = (path, script, device);
         anyhow::bail!("screenshots only work in the simulator")
     }
 }
 
-/// Opens the platform this binary was built for.
-pub fn open() -> Result<Box<dyn Platform>> {
+/// Opens the platform this binary was built for. `device`: the simulator
+/// preset from `--device` (the Kindle ignores it).
+pub fn open(device: Option<&str>) -> Result<Box<dyn Platform>> {
     #[cfg(feature = "desktop")]
-    return Ok(Box::new(desktop::Desktop::open()?));
+    return Ok(Box::new(desktop::Desktop::open(sim_device::SimDevice::from_env(device)?)?));
     #[cfg(feature = "kindle")]
-    return Ok(Box::new(kindle::Kindle::open()?));
+    {
+        let _ = device;
+        Ok(Box::new(kindle::Kindle::open()?))
+    }
 }

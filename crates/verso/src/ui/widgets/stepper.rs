@@ -62,6 +62,12 @@ impl Stepper {
         self.rect
     }
 
+    /// The smaller side, the value and the larger side.
+    #[cfg(test)]
+    pub fn parts(&self) -> (Rect, Rect, Rect) {
+        self.sides()
+    }
+
     fn sides(&self) -> (Rect, Rect, Rect) {
         let (less, rest) = self.rect.split_left(self.side_w);
         let (more, middle) = rest.split_right(self.side_w);

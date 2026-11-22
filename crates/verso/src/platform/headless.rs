@@ -1,7 +1,7 @@
 //! A simulator without a window, for screenshots: plays scripted touches,
 //! saves the screen as a PNG after every update, then quits.
-//! Screen size, density and battery follow the simulator's VERSO_SIM_SIZE,
-//! VERSO_SIM_DPI and VERSO_SIM_BATTERY.
+//! The device follows the simulator's `--device` preset and its overrides
+//! (sim_device.rs); the battery follows VERSO_SIM_BATTERY.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::desktop::{sim_battery, sim_screen};
+use super::desktop::sim_battery;
+use super::sim_device::SimDevice;
 use super::{DeviceInfo, Event, Frontlight, Orientation, Platform, ScriptStep, Touch, TouchPhase, Update, Waker};
 use crate::geom::Point;
 use crate::gfx::{Canvas, save_gray_png};
@@ -26,16 +27,17 @@ pub struct Headless {
     out: PathBuf,
     wake_tx: std::sync::mpsc::Sender<()>,
     wake_rx: std::sync::mpsc::Receiver<()>,
-    light: Frontlight,
+    light: Option<Frontlight>,
+    device: SimDevice,
     busy: bool,
     barrier: bool,
     barrier_since: Instant,
 }
 
 impl Headless {
-    pub fn new(out: &Path, script: Vec<ScriptStep>) -> Result<Self> {
-        let (width, height, dpi) = sim_screen()?;
-        let info = DeviceInfo { name: "Headless simulator".into(), width, height, dpi };
+    pub fn new(out: &Path, script: Vec<ScriptStep>, device: SimDevice) -> Result<Self> {
+        let (width, height, dpi) = (device.width, device.height, device.dpi);
+        let info = DeviceInfo { name: format!("Headless simulator ({})", device.name), width, height, dpi };
         // Touch times are made up: each step a second after the last, so
         // nothing counts as a double tap or a long-press by accident.
         let mut t = Instant::now();
@@ -87,7 +89,8 @@ impl Headless {
             out: out.to_owned(),
             wake_tx,
             wake_rx,
-            light: Frontlight { brightness: 12, warmth: Some(0) },
+            light: device.initial_light(),
+            device,
             busy: false,
             barrier: false,
             barrier_since: Instant::now(),
@@ -109,15 +112,19 @@ impl Platform for Headless {
         })
     }
     fn frontlight(&mut self) -> Option<Frontlight> {
-        Some(self.light)
+        self.light
     }
     fn set_frontlight(&mut self, value: Frontlight) -> Result<()> {
-        self.light = value;
+        self.light = self.device.accept_light(value);
         Ok(())
     }
 
     fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    fn session_details(&self) -> Vec<String> {
+        vec![self.device.details()]
     }
 
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {

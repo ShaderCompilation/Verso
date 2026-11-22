@@ -73,7 +73,10 @@ impl LayoutView {
         let inner_w = screen.w - 2 * t.margin;
         let controls = Rect::new(screen.x + t.margin, screen.bottom() - pad - controls_h, inner_w, controls_h);
         let area = Rect::new(controls.x, body.y + pad, inner_w, controls.y - pad - body.y - pad);
-        let column_rects = controls.columns(columns, t.mm(8.0));
+        // 6" landscape: a narrower gap, so each column keeps room for its
+        // labels and full-size controls.
+        let narrow = columns == 2 && inner_w < t.mm(125.0);
+        let column_rects = controls.columns(columns, t.mm(if narrow { 4.0 } else { 8.0 }));
         let rows: [Rect; 7] = std::array::from_fn(|i| {
             let column = column_rects[i / per_column];
             Rect::new(column.x, column.y + (i % per_column) as i32 * row_h, column.w, row_h)
@@ -85,18 +88,26 @@ impl LayoutView {
         let scale = (area.w as f32 / screen.w as f32).min(half as f32 / tallest as f32).min(1.0);
         let sketch_w = (screen.w as f32 * scale) as i32;
         let sketch = Rect::new(area.center().x - sketch_w / 2, area.y, sketch_w, area.h);
-        let control_w = t.mm(50.0).min(rows[0].w - t.mm(26.0));
-        let control = |i: usize| {
+        // Labels are at most about 21.2 mm wide (8.5 pt "Chapter marks").
+        let label_gap = t.mm(if narrow { 1.5 } else { 2.0 });
+        let control_w = t.mm(50.0).min(rows[0].w - t.mm(if narrow { 23.5 } else { 26.0 }));
+        let control = |i: usize, w: i32| {
             let r = rows[i];
-            Rect::new(r.right() - control_w, r.y + (r.h - t.target) / 2, control_w, t.target)
+            Rect::new(r.right() - w, r.y + (r.h - t.target) / 2, w, t.target)
         };
+        // "Progress line" is shorter than the longest label, so its three
+        // segments get a little more room when columns are narrow.
+        let progress_w = if narrow { control_w + t.mm(2.5) } else { control_w };
+        // The value ("20 mm") keeps 12 mm; the sides give way down to a
+        // touch target.
+        let side_w = t.mm(12.0).min((control_w - t.mm(12.0)) / 2).max(t.target.min(control_w / 3));
         let bars = [layout.top.on, layout.bottom.on].map(Toggle::new);
         let mut progress = Segmented::texts(&["Off", "Top", "Bottom"], line_index(layout.progress));
-        progress.place(control(2));
+        progress.place(control(2, progress_w));
         let margins = std::array::from_fn(|k| {
             let label = |text: &str| SideLabel { text: text.into(), style: t.heading };
             let mut stepper = Stepper::new(label("−"), label("+"), "");
-            stepper.place(control(4 + k), t.mm(12.0));
+            stepper.place(control(4 + k, control_w), side_w);
             stepper
         });
         let spacing = [1.0, 1.2, 1.4][typography.spacing.min(2)];
@@ -113,7 +124,7 @@ impl LayoutView {
             scale,
             target: t.target,
             rows,
-            label_w: rows[0].w - control_w - t.mm(2.0),
+            label_w: rows[0].w - control_w - label_gap,
             bars,
             marks: Toggle::new(layout.chapter_marks),
             progress,
@@ -443,14 +454,43 @@ mod tests {
         view.on_gesture(&Gesture::Tap(p), t, data)
     }
     fn views() -> Vec<(Theme, LayoutView)> {
-        [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167), (800, 600, 167)]
-            .into_iter()
-            .map(|(w, h, dpi)| {
-                let t = Theme::for_dpi(dpi);
-                let view = LayoutView::new(&t, Rect::new(0, 0, w, h), &PageLayout::default(), &Typography::default());
-                (t, view)
-            })
-            .collect()
+        [
+            (1272, 1696, 300),
+            (1696, 1272, 300),
+            (600, 800, 167),
+            (800, 600, 167),
+            (1448, 1072, 300),
+            (1860, 2480, 300),
+            (2480, 1860, 300),
+        ]
+        .into_iter()
+        .map(|(w, h, dpi)| {
+            let t = Theme::for_dpi(dpi);
+            let view = LayoutView::new(&t, Rect::new(0, 0, w, h), &PageLayout::default(), &Typography::default());
+            (t, view)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn controls_hold_their_text_on_every_screen() {
+        let mut text = crate::gfx::TextRenderer::new();
+        for (t, view) in views() {
+            let size = (view.screen.w, view.screen.h);
+            for label in LABELS {
+                assert!(text.width(label, t.body) <= view.label_w as f32, "{size:?}: {label} cut short");
+            }
+            for stepper in &view.margins {
+                let (less, value, more) = stepper.parts();
+                assert!(less.w >= t.target && more.w >= t.target, "{size:?}: stepper sides {less:?} {more:?}");
+                assert!(text.width("20 mm", t.button) <= value.w as f32, "{size:?}: value {value:?}");
+                assert!(stepper.rect().x > view.rows[4].x + view.label_w, "{size:?}: stepper over its label");
+            }
+            // Segment labels may shrink to 80% before they're cut.
+            let segment = view.progress.rect().w / 3 - 2 * t.mm(1.0);
+            assert!(text.width("Bottom", t.button) * 0.8 <= segment as f32, "{size:?}: progress {segment}");
+            assert!(view.progress.rect().right() <= view.rows[2].right());
+        }
     }
 
     #[test]

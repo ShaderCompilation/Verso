@@ -31,7 +31,9 @@ impl TextSheet {
             .enumerate()
             .map(|(i, n)| (Rect::new(t.margin, top + i as i32 * t.mm(11.5), screen.w - 2 * t.margin, t.mm(11.5)), n))
             .collect();
-        let x = t.margin + t.mm(32.0);
+        // Controls start after the labels, and stay at most 72 mm wide on
+        // large screens (10.2", landscape) instead of stretching edge to edge.
+        let x = (t.margin + t.mm(32.0)).max(screen.w - t.margin - t.mm(72.0));
         let control =
             |i: usize| Rect::new(x, rows[i].0.y + (rows[i].0.h - t.button_h) / 2, screen.w - t.margin - x, t.button_h);
         let mut size = Stepper::new(
@@ -201,6 +203,22 @@ impl FontList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controls_stay_compact_on_large_screens() {
+        let t = Theme::for_dpi(300);
+        for screen in [Rect::new(0, 0, 1860, 2480), Rect::new(0, 0, 2480, 1860), Rect::new(0, 0, 1696, 1272)] {
+            let sheet = TextSheet::new(&t, screen, &Typography::default());
+            for control in [sheet.size.rect(), sheet.spacing.rect()] {
+                assert!(control.w <= t.mm(72.0), "{screen:?}: {control:?}");
+                assert_eq!(control.right(), screen.w - t.margin, "{screen:?}");
+            }
+        }
+        // 6" screens keep the labels' 32 mm and give the rest to the controls.
+        let t = Theme::for_dpi(167);
+        let sheet = TextSheet::new(&t, Rect::new(0, 0, 600, 800), &Typography::default());
+        assert_eq!(sheet.size.rect().x, t.margin + t.mm(32.0));
+    }
 
     #[test]
     fn text_sheet_holds_only_the_four_typography_rows() {

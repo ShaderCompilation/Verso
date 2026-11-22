@@ -242,6 +242,22 @@ mod tests {
     }
 
     #[test]
+    fn button_labels_fit_whole_on_six_inch_and_large_screens() {
+        let mut text = crate::gfx::TextRenderer::new();
+        for (w, h, dpi) in [(600, 800, 167), (800, 600, 167), (1072, 1448, 300), (1860, 2480, 300)] {
+            let t = Theme::for_dpi(dpi);
+            let menu = ReaderMenu::new(&t, Rect::new(0, 0, w, h), "Book", 10, 100);
+            for (rect, label) in menu.button_rects().into_iter().zip(["Contents", "Highlights", "Text", "Layout"]) {
+                let (style, pad) = crate::ui::widgets::button::fit_label(&mut text, label, t.button, rect.w, &t);
+                let width = text.width(label, style);
+                assert!(width <= (rect.w - 2 * pad) as f32, "{w}x{h}: {label} is {width} px in {rect:?}");
+                assert!(style.size >= (t.button.size * 0.85).floor(), "{w}x{h}: {label}");
+                assert!(rect.h >= t.target.min(t.button_h), "{w}x{h}");
+            }
+        }
+    }
+
+    #[test]
     fn panel_is_slimmer_and_holds_four_equal_buttons_in_both_orientations() {
         let t = Theme::for_dpi(300);
         for (screen, mm) in [(Rect::new(0, 0, 1272, 1696), 36.5), (Rect::new(0, 0, 1696, 1272), 35.0)] {
