@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
 # Save a PNG of what the Kindle screen shows right now (read-only: reads /dev/fb0 over SSH).
-# Usage: scripts/kindle-screenshot.sh [output.png]
-# Default output: screenshots/kindle/<timestamp>.png (gitignored). Needs python3, no extra packages.
+# Usage: scripts/kindle-screenshot.sh [output.png | output-dir]
+# A path ending in "/" (or naming an existing directory) gets a <timestamp>.png inside it;
+# other paths are used as the file name. Paths are relative to where you run the script.
+# Default output: screenshots/user/<timestamp>.png in the repo (gitignored). Needs python3, no extra packages.
 set -euo pipefail
 
+from="$PWD"
 cd "$(dirname "$0")/.."
-out="${1:-screenshots/kindle/$(date +%Y%m%d-%H%M%S).png}"
+arg="${1:-}"
+if [[ "$arg" == /* ]]; then
+  dir="$arg"
+elif [[ -n "$arg" ]]; then
+  dir="$from/$arg"
+fi
+if [[ -z "$arg" ]]; then
+  out="screenshots/user/$(date +%Y%m%d-%H%M%S).png"
+elif [[ "$arg" == */ || -d "$dir" ]]; then
+  mkdir -p "${dir%/}"
+  out="$(cd "${dir%/}" && pwd)/$(date +%Y%m%d-%H%M%S).png"
+else
+  out="$dir"
+fi
 mkdir -p "$(dirname "$out")"
 
 ssh -o ConnectTimeout=5 kindle 'head -c 2157312 /dev/fb0' | python3 -c '
