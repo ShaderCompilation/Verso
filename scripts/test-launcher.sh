@@ -132,10 +132,14 @@ EOF
 # adds one, and turns the hyph folder into a file.
 install_files() {
     d="$1"
-    mkdir -p "${d}/verso/fonts" "${d}/verso/cre" "${d}/extensions/verso" "${d}/documents"
+    mkdir -p "${d}/verso/fonts" "${d}/verso/cre" "${d}/verso/tools" "${d}/extensions/verso" "${d}/documents"
     echo "user settings" >"${d}/verso/settings.json"
     echo "a book" >"${d}/documents/book.epub"
     echo "user font" >"${d}/verso/fonts/Mine.ttf"
+    if [ -f "${HERE}/../dist/kindle/verso/tools/report.sh" ]; then
+        cp "${HERE}/../dist/kindle/verso/tools/report.sh" "${d}/verso/tools/report.sh"
+        chmod 755 "${d}/verso/tools/report.sh"
+    fi
     if [ "$2" = 1 ]; then
         make_app 0.1.0 >"${d}/verso/verso"
         cp "${W}/launcher-1.sh" "${d}/verso/verso.sh"
@@ -189,9 +193,9 @@ if [ -n "${VERSO_TEST_STAGE:-}" ]; then
     exit
 fi
 
-# Every file under $1 with its checksum, leaving out the log and update/.
+# Every file under $1 with its checksum, leaving out the log, update/ and reports/.
 snapshot() {
-    (cd "$1" && find . -type f ! -path './verso/update/*' ! -name 'verso.log*' | sort |
+    (cd "$1" && find . -type f ! -path './verso/update/*' ! -path './verso/reports/*' ! -name 'verso.log*' | sort |
         while IFS= read -r f; do echo "${f} $(cksum <"${f}")"; done)
 }
 
@@ -340,6 +344,40 @@ installed_is 1
 ui_restored_once
 no_update_state
 ! grep -q 'iptables\|preventScreenSaver' "${W}/calls" || fail "touched the firewall or keep-awake"
+grep -q "Verso ended: bye (code 0)" "${R}/verso/verso.log" || fail "clean exit not logged as bye"
+[ -z "$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null)" ] || fail "clean exit created a crash report"
+
+begin "crash report on signal exit"
+fresh
+echo crash >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0"
+ui_restored_once
+grep -q "Verso ended: crash (SIGSEGV, code 139)" "${R}/verso/verso.log" || fail "SIGSEGV not logged by name"
+crash_file="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | head -n 1)"
+[ -n "${crash_file}" ] || fail "no crash report created on SIGSEGV"
+grep -q "Ended: crash (SIGSEGV, code 139)" "${crash_file}" || fail "crash report missing Ended line"
+
+begin "crash report on panic exit"
+fresh
+echo panic >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0"
+ui_restored_once
+grep -q "Verso ended: panic (SIGABRT, code 134)" "${R}/verso/verso.log" || fail "panic not classified"
+crash_file="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | head -n 1)"
+[ -n "${crash_file}" ] || fail "no crash report created on panic"
+grep -q "Ended: panic (SIGABRT, code 134)" "${crash_file}" || fail "panic report missing Ended line"
+grep -q "panicked at" "${crash_file}" || fail "panic report missing panic message"
+
+begin "crash report rotation keeps newest 5"
+fresh
+for i in 1 2 3 4 5 6 7; do
+    echo crash >"${W}/queue-0.1.0"
+    launch
+done
+n_reports="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | wc -l | tr -d ' ')"
+[ "${n_reports}" = 5 ] || fail "expected 5 crash reports after 7 crashes, got ${n_reports}"
 
 begin "Wi-Fi transfer left on"
 fresh

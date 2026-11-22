@@ -126,6 +126,11 @@ pub struct SystemSettings {
     go_back_button: Button,
     offer: Option<OfferSheet>,
     go_back_sheet: Option<GoBackSheet>,
+    // Problem report (on the Device tab)
+    report_label_y: Option<i32>,
+    report_button: Button,
+    report_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
+    report_sheet: Option<ReportSheet>,
     // Advanced: text shaping, then (below, or on the right in landscape)
     // the developer section.
     dev_top: i32,
@@ -204,8 +209,8 @@ impl SystemSettings {
         // Landscape is too short for the developer section below the rest.
         let mut sleep =
             Segmented::texts(&["Book cover", "Amazon"], usize::from(settings.sleep_screen == SleepScreen::Amazon));
-        sleep.place(Rect::new(device_left.x, body + t.mm(8.0), device_left.w, t.button_h));
-        let wifi_top = sleep.rect().bottom() + t.mm(20.0);
+        sleep.place(Rect::new(device_left.x, body + t.mm(7.0), device_left.w, t.button_h));
+        let wifi_top = sleep.rect().bottom() + t.mm(14.0);
         let wifi = Self::read_wifi();
         let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
         wifi_toggle.enabled = wifi.is_some();
@@ -215,13 +220,13 @@ impl SystemSettings {
         transfer.place(Rect::new(device_left.right() - transfer_w, wifi_top + t.mm(9.0), transfer_w, t.button_h), t);
         // Updates: below Wi-Fi, or on the right in landscape.
         let landscape = device_right != device_left;
-        let update_top = if landscape { body } else { wifi_top + t.mm(23.0) };
+        let update_top = if landscape { body } else { wifi_top + t.mm(20.0) };
         let u = device_right;
         let mut check_button = Button::new("Check for updates", ButtonKind::Secondary);
         let check_w = t.mm(40.0).min(u.w / 2);
-        check_button.place(Rect::new(u.right() - check_w, update_top + t.mm(8.0), check_w, t.button_h), t);
-        let version = Rect::new(u.x, update_top + t.mm(8.0), u.w - check_w, t.button_h);
-        let update_note_h = if landscape { t.mm(16.0) } else { t.mm(11.0) };
+        check_button.place(Rect::new(u.right() - check_w, update_top + t.mm(7.0), check_w, t.button_h), t);
+        let version = Rect::new(u.x, update_top + t.mm(7.0), u.w - check_w, t.button_h);
+        let update_note_h = if landscape { t.mm(16.0) } else { t.mm(10.0) };
         let mut auto_check = Toggle::new(settings.check_updates);
         auto_check.place(u.right(), Self::auto_check_top(update_top, update_note_h, t) + t.mm(4.0), t);
         let updates = store.updates();
@@ -239,6 +244,19 @@ impl SystemSettings {
             Rect { y: check_button.rect().bottom() + t.mm(2.0), ..check_button.rect() }
         };
         go_back_button.place(go_back_rect, t);
+        // Problem report: below Wi-Fi on the left in landscape, or below Updates in portrait.
+        let report_top = if landscape {
+            wifi_top + t.mm(21.0)
+        } else {
+            Self::auto_check_top(update_top, update_note_h, t) + t.mm(14.0)
+        };
+        let (report_label_y, report_btn_y) = if report_top + t.mm(7.0) + t.button_h <= content.bottom() {
+            (Some(report_top), report_top + t.mm(7.0))
+        } else {
+            (None, report_top.min(content.bottom() - t.button_h))
+        };
+        let mut report_button = Button::new("Create problem report", ButtonKind::Secondary);
+        report_button.place(Rect::new(device_left.x, report_btn_y, device_left.w, t.button_h), t);
         // Advanced: text shaping on the left, the developer section below
         // it or on the right.
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
@@ -302,6 +320,10 @@ impl SystemSettings {
             go_back_button,
             offer: None,
             go_back_sheet: None,
+            report_label_y,
+            report_button,
+            report_rx: None,
+            report_sheet: None,
             dev_top,
             shaping,
             shaping_note_h,
@@ -668,6 +690,10 @@ impl SystemSettings {
         );
         self.transfer.draw(cx);
         self.draw_updates(cx);
+        if let Some(y) = self.report_label_y {
+            cx.section_label("Problem report", Rect::new(c.x, y, c.w, t.mm(7.0)));
+        }
+        self.report_button.draw(cx);
     }
 
     // ---- Updates (on the Device tab) ----
@@ -675,7 +701,7 @@ impl SystemSettings {
     /// The "Check automatically" row: below the section label, the version
     /// row and the check's note.
     fn auto_check_top(update_top: i32, note_h: i32, t: &Theme) -> i32 {
-        update_top + t.mm(8.0) + t.button_h + note_h + t.mm(2.0)
+        update_top + t.mm(7.0) + t.button_h + note_h + t.mm(1.5)
     }
 
     fn refresh_update_status(&mut self) {
@@ -773,10 +799,30 @@ impl SystemSettings {
             self.wifi_pending = Some(on);
         }
         self.updates_gesture(g, cx);
+        if self.report_rx.is_none() && self.report_button.on_gesture(g) {
+            self.start_report();
+        }
         if let Some(PressEvent::Tap) = self.version_press.on_gesture(g, self.version) {
             self.tap_version(cx);
         }
         Action::None
+    }
+
+    fn start_report(&mut self) {
+        self.report_button.enabled = false;
+        self.report_button.label = "Creating report…".into();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let data = self.store.root();
+        let waker = self.waker.clone();
+        self.report_rx = Some(rx);
+        std::thread::Builder::new()
+            .name("verso-report".into())
+            .spawn(move || {
+                let res = crate::report::create_report(&data);
+                let _ = tx.send(res);
+                waker.wake();
+            })
+            .ok();
     }
 }
 
@@ -922,9 +968,18 @@ impl Screen for SystemSettings {
         if let Some(sheet) = &self.go_back_sheet {
             sheet.draw(cx);
         }
+        if let Some(sheet) = &self.report_sheet {
+            sheet.draw(cx);
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
+        if let Some(sheet) = &mut self.report_sheet {
+            if sheet.on_gesture(&g) {
+                self.report_sheet = None;
+            }
+            return Action::None;
+        }
         if let Some(sheet) = &mut self.go_back_sheet {
             if sheet.on_gesture(&g) == Some(false) {
                 self.go_back_sheet = None;
@@ -970,6 +1025,33 @@ impl Screen for SystemSettings {
     /// Called when the folder picker closes (show its addition) and when
     /// the update check finishes.
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Some(rx) = &self.report_rx {
+            match rx.try_recv() {
+                Ok(res) => {
+                    self.report_rx = None;
+                    self.report_button.enabled = true;
+                    self.report_button.label = "Create problem report".into();
+                    match res {
+                        Ok(filename) => {
+                            self.report_sheet = Some(ReportSheet::new(cx.theme, self.screen, filename));
+                        }
+                        Err(e) => {
+                            log::error!("creating problem report: {e:#}");
+                            cx.toast("Couldn't create problem report", None);
+                        }
+                    }
+                    cx.redraw();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.report_rx = None;
+                    self.report_button.enabled = true;
+                    self.report_button.label = "Create problem report".into();
+                    cx.toast("Couldn't create problem report", None);
+                    cx.redraw();
+                }
+            }
+        }
         if self.updates.revision() != self.update_status.revision {
             self.refresh_update_status();
             if self.tab == Tab::Device {
@@ -1018,9 +1100,9 @@ impl Screen for SystemSettings {
             || self.ssh_pending.is_some()
             || self.go_back_sheet.as_ref().is_some_and(|s| s.exit().is_some())
     }
-    /// Scripted screenshots wait for a running update check.
+    /// Scripted screenshots wait for a running update check or report build.
     fn busy(&self) -> bool {
-        self.update_status.checking
+        self.update_status.checking || self.report_rx.is_some()
     }
     fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
         // "Going back…" is on screen: the launcher does the rest.
@@ -1056,6 +1138,40 @@ impl Screen for SystemSettings {
             cx.redraw();
         }
         Action::None
+    }
+}
+
+/// Confirmation sheet showing where a manually created problem report was saved.
+struct ReportSheet {
+    sheet: Sheet,
+    filename: String,
+    body: Rect,
+    ok: Button,
+}
+
+impl ReportSheet {
+    fn new(t: &Theme, screen: Rect, filename: String) -> Self {
+        let sheet = Sheet::open("Problem report saved", t.mm(64.0).min(screen.h), screen, t);
+        let c = sheet.content(t);
+        let mut ok = Button::new("OK", ButtonKind::Primary);
+        ok.place(Rect::new(c.x, c.bottom() - t.margin - t.button_h, c.w, t.button_h), t);
+        let body = Rect { h: (ok.rect().y - c.y - t.mm(3.0)).max(0), ..c };
+        Self { sheet, filename, body, ok }
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        self.sheet.draw(cx);
+        let text = format!(
+            "Saved to:\nverso/reports/{}\n\nConnect your Kindle over USB (or use Wi-Fi transfer) to copy it and attach it to a bug report. Book names have been removed.",
+            self.filename,
+        );
+        cx.paragraph(&text, t.small.gray(INK2), self.body, HAlign::Left);
+        self.ok.draw(cx);
+    }
+
+    fn on_gesture(&mut self, g: &Gesture) -> bool {
+        self.sheet.on_gesture(g) || self.ok.on_gesture(g)
     }
 }
 

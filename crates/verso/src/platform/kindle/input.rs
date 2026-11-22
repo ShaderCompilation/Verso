@@ -107,6 +107,7 @@ pub struct TouchInput {
     grabbed: bool,
     file: File,
     path: String,
+    device_name: String,
     x_range: (i32, i32),
     y_range: (i32, i32),
     map: Mapping,
@@ -139,14 +140,6 @@ impl TouchInput {
             let name = device_name(fd);
             let x = abs_info(fd, ABS_MT_POSITION_X)?;
             let y = abs_info(fd, ABS_MT_POSITION_Y)?;
-            log::info!(
-                "touchscreen {} ({name}): x {}..{}, y {}..{}",
-                path.display(),
-                x.minimum,
-                x.maximum,
-                y.minimum,
-                y.maximum
-            );
             // Exclusive grab: the paused Kindle UI must not collect our taps.
             // The kernel releases it automatically if we exit or crash.
             // SAFETY: EVIOCGRAB takes an int argument by value.
@@ -158,6 +151,7 @@ impl TouchInput {
                 grabbed: true,
                 file,
                 path: path.display().to_string(),
+                device_name: name,
                 x_range: (x.minimum, x.maximum),
                 y_range: (y.minimum, y.maximum),
                 map,
@@ -170,6 +164,21 @@ impl TouchInput {
             return Ok(input);
         }
         bail!("no multi-touch screen found in /dev/input")
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "{} ({}), x {}..{}, y {}..{}, swap={}, mirror_x={}, mirror_y={}",
+            self.path,
+            self.device_name,
+            self.x_range.0,
+            self.x_range.1,
+            self.y_range.0,
+            self.y_range.1,
+            self.map.swap_axes,
+            self.map.mirror_x,
+            self.map.mirror_y,
+        )
     }
 
     pub fn set_orientation(&mut self, orientation: Orientation) {

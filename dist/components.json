@@ -1,6 +1,6 @@
 [
   { "id": "app", "install": "verso", "required": true, "description": "Verso" },
-  { "id": "launcher", "install": "verso", "required": true, "description": "Launcher script" },
+  { "id": "launcher", "install": "verso", "required": true, "description": "Launcher and report scripts" },
   { "id": "kual", "install": "extensions/verso", "required": true, "description": "KUAL menu entry" },
   { "id": "tools", "install": "verso/bin", "required": true, "description": "mDNS responder and SSH server" },
   { "id": "crengine-data", "install": "verso/data/cre", "required": true, "description": "Book style sheets and hyphenation patterns" },

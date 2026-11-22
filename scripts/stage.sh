@@ -20,13 +20,16 @@ copy() {
         echo "stage.sh: $2 is missing; build it first (scripts/package.sh or scripts/deploy.sh do)" >&2
         exit 1
     fi
-    mkdir -p "$STAGE/$1"
-    cp -R "$2" "$STAGE/$1/${3:-$(basename "$2")}"
+    local dst="$STAGE/$1/${3:-$(basename "$2")}"
+    mkdir -p "$(dirname "$dst")"
+    cp -R "$2" "$dst"
 }
 
 rm -rf "$STAGE"
 copy app "$KINDLE/verso"
 copy launcher dist/kindle/verso/verso.sh
+copy launcher dist/kindle/verso/tools/report.sh tools/report.sh
+copy launcher scripts/collect-diagnostics.sh tools/collect-diagnostics.sh
 copy kual dist/kindle/extensions/verso/config.xml
 copy kual dist/kindle/extensions/verso/menu.json
 copy tools "$KINDLE/verso-mdns"

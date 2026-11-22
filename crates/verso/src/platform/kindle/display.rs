@@ -13,6 +13,45 @@ use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
 use crate::platform::{Orientation, RefreshMode, Update};
 
+/// Static display & FBInk facts logged in the startup session header.
+pub struct DisplaySession {
+    pub fbink_version: String,
+    pub device_name: String,
+    pub codename: String,
+    pub platform: String,
+    pub device_id: u16,
+    pub view_width: u32,
+    pub view_height: u32,
+    pub view_hori_origin: u8,
+    pub view_vert_origin: u8,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub stride: u32,
+    pub bpp: u32,
+    pub pixel_format: String,
+    pub has_color_panel: bool,
+    pub dpi: u32,
+    pub is_mtk: bool,
+    pub inverted: bool,
+}
+
+fn pixel_format_name(fmt: fb::FBINK_PXFMT_INDEX_T) -> String {
+    match fmt {
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_UNKNOWN => "UNKNOWN".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_Y4 => "Y4".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_Y8 => "Y8".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_BGR565 => "BGR565".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_RGB565 => "RGB565".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_BGR24 => "BGR24".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_RGB24 => "RGB24".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_BGRA => "BGRA".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_RGBA => "RGBA".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_BGR32 => "BGR32".into(),
+        fb::FBINK_PXFMT_INDEX_E_FBINK_PXFMT_RGB32 => "RGB32".into(),
+        other => format!("PXFMT({other})"),
+    }
+}
+
 pub struct Display {
     fd: i32,
     cfg: fb::FBInkConfig,
@@ -26,6 +65,7 @@ pub struct Display {
     pub orientation: Orientation,
     pub dpi: u32,
     pub name: String,
+    pub session: DisplaySession,
     inverted: bool,
     /// How to turn raw touch coordinates into screen coordinates.
     pub touch_swap_axes: bool,
@@ -55,27 +95,49 @@ impl Display {
 
             let text = |chars: &[std::ffi::c_char]| CStr::from_ptr(chars.as_ptr()).to_string_lossy().into_owned();
             let name = text(&st.device_name);
-            log::info!(
-                "FBInk {}: {} ({}, {}), view {}x{}, screen {}x{}, stride {}, {} bpp, {} dpi, mtk={}, inverted={}, touch swap={} mirror x={} y={}",
-                CStr::from_ptr(fb::fbink_version()).to_string_lossy(),
-                name,
-                text(&st.device_codename),
-                text(&st.device_platform),
-                st.view_width,
-                st.view_height,
-                st.screen_width,
-                st.screen_height,
-                st.scanline_stride,
-                st.bpp,
-                st.screen_dpi,
-                st.is_mtk,
-                st.inverted_grayscale,
-                st.touch_swap_axes,
-                st.touch_mirror_x,
-                st.touch_mirror_y,
-            );
+            let session = DisplaySession {
+                fbink_version: CStr::from_ptr(fb::fbink_version()).to_string_lossy().into_owned(),
+                device_name: name.clone(),
+                codename: text(&st.device_codename),
+                platform: text(&st.device_platform),
+                device_id: st.device_id,
+                view_width: st.view_width,
+                view_height: st.view_height,
+                view_hori_origin: st.view_hori_origin,
+                view_vert_origin: st.view_vert_origin,
+                screen_width: st.screen_width,
+                screen_height: st.screen_height,
+                stride: st.scanline_stride,
+                bpp: st.bpp,
+                pixel_format: pixel_format_name(st.pixel_format),
+                has_color_panel: st.has_color_panel,
+                dpi: st.screen_dpi as u32,
+                is_mtk: st.is_mtk,
+                inverted: st.inverted_grayscale,
+            };
 
             let fail = |msg: String| -> Result<Self> {
+                log::error!(
+                    "FBInk {}: {} ({}, {}, id={:#06x}), view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, {} dpi, mtk={}, inverted={}",
+                    session.fbink_version,
+                    session.device_name,
+                    session.codename,
+                    session.platform,
+                    session.device_id,
+                    session.view_width,
+                    session.view_height,
+                    session.view_hori_origin,
+                    session.view_vert_origin,
+                    session.screen_width,
+                    session.screen_height,
+                    session.stride,
+                    session.bpp,
+                    session.pixel_format,
+                    session.has_color_panel,
+                    session.dpi,
+                    session.is_mtk,
+                    session.inverted,
+                );
                 fb::fbink_close(fd);
                 bail!(msg)
             };
@@ -103,6 +165,7 @@ impl Display {
                 orientation: Orientation::Portrait,
                 dpi: st.screen_dpi as u32,
                 name,
+                session,
                 inverted: st.inverted_grayscale,
                 touch_swap_axes: st.touch_swap_axes,
                 touch_mirror_x: st.touch_mirror_x,

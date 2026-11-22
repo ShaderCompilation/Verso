@@ -75,11 +75,7 @@ impl Kindle {
             sleeping: false,
             native_sleep: false,
             status: None,
-            power_files: {
-                let files = super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply"));
-                log::info!("battery from {}", if files.is_some() { "sysfs" } else { "powerd" });
-                files
-            },
+            power_files: super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply")),
         })
     }
 
@@ -214,6 +210,32 @@ impl Platform for Kindle {
         &self.info
     }
 
+    fn session_details(&self) -> Vec<String> {
+        let s = &self.display.session;
+        vec![
+            format!("fbink: {}", s.fbink_version),
+            format!("device: {} ({}, {}, id={:#06x})", s.device_name, s.codename, s.platform, s.device_id),
+            format!(
+                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, {} dpi, mtk={}, inverted={}",
+                s.view_width,
+                s.view_height,
+                s.view_hori_origin,
+                s.view_vert_origin,
+                s.screen_width,
+                s.screen_height,
+                s.stride,
+                s.bpp,
+                s.pixel_format,
+                s.has_color_panel,
+                s.dpi,
+                s.is_mtk,
+                s.inverted,
+            ),
+            format!("touch: {}", self.touch.summary()),
+            format!("battery: {}", if self.power_files.is_some() { "sysfs" } else { "powerd" }),
+        ]
+    }
+
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {
         self.display.orientation = orientation;
         self.touch.set_orientation(orientation);
@@ -345,7 +367,15 @@ fn spawn_frontlight_read(waker: Waker) -> Option<std::sync::mpsc::Receiver<Optio
     let (tx, rx) = std::sync::mpsc::channel();
     match std::thread::Builder::new().name("verso-frontlight".into()).spawn(move || {
         let started = Instant::now();
-        let value = read_frontlight();
+        let fl = property("flIntensity");
+        let amber = property("currentAmberLevel");
+        log::info!(
+            "session frontlight: flIntensity={}, currentAmberLevel={}",
+            if fl.is_some() { "yes" } else { "no" },
+            if amber.is_some() { "yes" } else { "no" },
+        );
+        let value =
+            fl.map(|b| Frontlight { brightness: b.clamp(0, 24) as u8, warmth: amber.map(|v| v.clamp(0, 24) as u8) });
         log::debug!("frontlight read off-thread in {} us: {value:?}", started.elapsed().as_micros());
         let _ = tx.send(value);
         waker.wake();

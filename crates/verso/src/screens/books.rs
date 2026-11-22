@@ -263,6 +263,9 @@ pub struct Books {
     notice_rect: Rect,
     notice_press: Press,
     offer: Option<OfferSheet>,
+    /// Unseen crash report from the previous run, shown in Home's notice spot.
+    crash_notice: Option<crate::report::CrashNotice>,
+    crash_sheet: Option<CrashSheet>,
     /// Background pre-layout should run at the next idle moment: set on start,
     /// on returning from a book, on settings and library changes and on sleep.
     prelayout_due: bool,
@@ -348,6 +351,7 @@ impl Books {
         // drawn at once (two small files).
         let updates = store.updates();
         let update_status = updates.status();
+        let crash_notice = crate::report::newest_unseen_crash(&store.root());
         let thumbnails = Thumbnails::new(store.clone());
         let mut s = Self {
             screen,
@@ -426,6 +430,8 @@ impl Books {
             notice_rect: Rect::default(),
             notice_press: Press::default(),
             offer: None,
+            crash_notice,
+            crash_sheet: None,
             prelayout_due: true,
             last_input: std::time::Instant::now(),
             warm_due: true,
@@ -2010,8 +2016,8 @@ fn smart_counts(folders: usize, books: usize) -> String {
     }
 }
 
-/// "Verso 0.3.0 is available · Update ›": one line in its reserved spot.
-fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
+/// One-line notice bar in Home's reserved spot (crash notice or update notice).
+fn draw_notice_bar(cx: &mut DrawCx, message_text: &str, action: &str, r: Rect, pressed: bool) {
     let t = cx.theme;
     let (text, accent) = if pressed {
         cx.canvas.fill_rounded_rect(r, t.radius, INK);
@@ -2025,7 +2031,6 @@ fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
     let tight = r.w < t.mm(60.0);
     let inner = r.inset_xy(t.mm(if tight { 2.0 } else { 3.0 }), 0);
     let (msg_style, act_style) = if tight { (t.small, t.small.weight(Weight::SemiBold)) } else { (t.body, t.button) };
-    let action = "Update";
     let action_w = cx.text.width(action, act_style).ceil() as i32;
     let chevron = Rect::new(inner.right() - t.icon_small, inner.y, t.icon_small, inner.h);
     let label = Rect::new(chevron.x - t.mm(1.0) - action_w, inner.y, action_w + 1, inner.h);
@@ -2033,7 +2038,46 @@ fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
     cx.icon(Icon::ChevronRight, chevron, t.icon_small, accent);
     let gap = t.mm(if tight { 1.5 } else { 3.0 });
     let message = Rect { w: (label.x - gap - inner.x).max(0), ..inner };
-    cx.line(&format!("Verso {} is available", offer.version), msg_style.gray(text), message, HAlign::Left);
+    cx.line(message_text, msg_style.gray(text), message, HAlign::Left);
+}
+
+/// "Verso 0.3.0 is available · Update ›": one line in its reserved spot.
+fn draw_notice(cx: &mut DrawCx, offer: &Offer, r: Rect, pressed: bool) {
+    draw_notice_bar(cx, &format!("Verso {} is available", offer.version), "Update", r, pressed);
+}
+
+/// Explanation sheet shown when tapping Home's crash notice.
+struct CrashSheet {
+    sheet: Sheet,
+    notice: crate::report::CrashNotice,
+    body: Rect,
+    ok: Button,
+}
+
+impl CrashSheet {
+    fn new(t: &Theme, screen: Rect, notice: crate::report::CrashNotice) -> Self {
+        let sheet = Sheet::open("Verso closed unexpectedly", t.mm(68.0).min(screen.h), screen, t);
+        let c = sheet.content(t);
+        let mut ok = Button::new("OK", ButtonKind::Primary);
+        ok.place(Rect::new(c.x, c.bottom() - t.margin - t.button_h, c.w, t.button_h), t);
+        let body = Rect { h: (ok.rect().y - c.y - t.mm(3.0)).max(0), ..c };
+        Self { sheet, notice, body, ok }
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        self.sheet.draw(cx);
+        let text = format!(
+            "A crash report was saved to:\n{}\n\nConnect your Kindle over USB (or use Wi-Fi transfer) to copy it and attach it to a bug report. For full device details, use Settings → Device → Create problem report.",
+            self.notice.display_path(),
+        );
+        cx.paragraph(&text, t.small.gray(INK2), self.body, HAlign::Left);
+        self.ok.draw(cx);
+    }
+
+    fn on_gesture(&mut self, g: &Gesture) -> bool {
+        self.sheet.on_gesture(g) || self.ok.on_gesture(g)
+    }
 }
 
 /// The dot on the Settings icon while an update is available.
@@ -2472,10 +2516,18 @@ impl Screen for Books {
                     Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (self.notice_rect.y - top).max(t.target));
                 cx.paragraph("Open a book from Library to start reading", t.body.gray(INK2), area, HAlign::Center);
             }
-            if self.selection.is_none()
-                && let Some(offer) = &self.notice
-            {
-                draw_notice(cx, offer, self.notice_rect, self.notice_press.is_down());
+            if self.selection.is_none() {
+                if self.crash_notice.is_some() {
+                    draw_notice_bar(
+                        cx,
+                        "Verso closed unexpectedly. A report was saved.",
+                        "Details",
+                        self.notice_rect,
+                        self.notice_press.is_down(),
+                    );
+                } else if let Some(offer) = &self.notice {
+                    draw_notice(cx, offer, self.notice_rect, self.notice_press.is_down());
+                }
             }
             let subtitle = self.library_card_subtitle();
             draw_library_card(cx, self.library_card, &subtitle, self.library_card_press.is_down());
@@ -2505,6 +2557,9 @@ impl Screen for Books {
         if let Some(offer) = &self.offer {
             offer.draw(cx);
         }
+        if let Some(sheet) = &self.crash_sheet {
+            sheet.draw(cx);
+        }
         if !self.thumbnails.requests.is_empty() {
             self.library.repair(std::mem::take(&mut self.thumbnails.requests));
         }
@@ -2533,7 +2588,16 @@ impl Screen for Books {
         // Library controls own their press/capture state, including gestures
         // that return no action. Reader gestures invalidate independently.
         cx.redraw();
-        if let Some(offer) = &mut self.offer {
+        if let Some(sheet) = &mut self.crash_sheet {
+            if sheet.on_gesture(&g) {
+                if let Some(done) = self.crash_sheet.take()
+                    && let Err(e) = crate::report::dismiss_crash(&self.store.root(), &done.notice.filename)
+                {
+                    log::warn!("dismissing crash notice: {e:#}");
+                }
+                self.crash_notice = None;
+            }
+        } else if let Some(offer) = &mut self.offer {
             if let Some(event) = offer.on_gesture(&g) {
                 let offer = self.offer.take().unwrap();
                 offer.apply(&event, &self.updates);
@@ -2694,10 +2758,14 @@ impl Screen for Books {
             }
             if self.is_home()
                 && self.selection.is_none()
-                && let Some(offer) = &self.notice
+                && (self.crash_notice.is_some() || self.notice.is_some())
                 && let Some(PressEvent::Tap) = self.notice_press.on_gesture(&g, self.notice_rect)
             {
-                self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
+                if let Some(crash) = self.crash_notice.clone() {
+                    self.crash_sheet = Some(CrashSheet::new(cx.theme, self.screen, crash));
+                } else if let Some(offer) = &self.notice {
+                    self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
+                }
                 return Action::None;
             }
             if let Some(search) = &mut self.search {

@@ -11,6 +11,14 @@
 			"params": "/mnt/us/verso/verso.sh",
 			"status": false,
 			"internal": "status Starting Verso"
+		},
+		{
+			"name": "Create problem report",
+			"priority": 2,
+			"action": "/bin/sh",
+			"params": "/mnt/us/verso/tools/report.sh report",
+			"status": true,
+			"internal": "status Creating problem report"
 		}
 		]
 	}

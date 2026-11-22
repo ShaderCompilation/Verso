@@ -486,6 +486,29 @@ watch_start() {
     done
 }
 
+# Signal number to name for standard Linux signals.
+signal_name() {
+    case "$1" in
+        1) echo SIGHUP ;;
+        2) echo SIGINT ;;
+        3) echo SIGQUIT ;;
+        4) echo SIGILL ;;
+        5) echo SIGTRAP ;;
+        6) echo SIGABRT ;;
+        7) echo SIGBUS ;;
+        8) echo SIGFPE ;;
+        9) echo SIGKILL ;;
+        10) echo SIGUSR1 ;;
+        11) echo SIGSEGV ;;
+        12) echo SIGUSR2 ;;
+        13) echo SIGPIPE ;;
+        14) echo SIGALRM ;;
+        15) echo SIGTERM ;;
+        31) echo SIGSYS ;;
+        *) echo "SIG$1" ;;
+    esac
+}
+
 # Runs Verso until it exits; RC is its exit status. A version on trial
 # counts an attempt first (a power loss during it counts too).
 run_verso() {
@@ -522,7 +545,33 @@ run_verso() {
         WATCHER=""
     fi
     VERSO_PID=""
-    log "Verso exited with code ${RC}"
+    EXIT_KIND=crash
+    EXIT_SIG=""
+    if [ "${RC}" -gt 128 ] && [ "${RC}" -le 192 ]; then
+        EXIT_SIG="$(signal_name $((RC - 128)))"
+    fi
+    case "${RC}" in
+        0 | "${EXIT_INSTALL}" | "${EXIT_GO_BACK}" | "${EXIT_RESTART}")
+            EXIT_KIND=bye
+            ;;
+        *)
+            if tail -c +"$((LOG_SIZE + 1))" "${LOG}" 2>/dev/null | grep -E -q 'panicked at|panic:'; then
+                EXIT_KIND=panic
+            fi
+            ;;
+    esac
+    if [ -n "${EXIT_SIG}" ]; then
+        EXIT_DESC="${EXIT_KIND} (${EXIT_SIG}, code ${RC})"
+    else
+        EXIT_DESC="${EXIT_KIND} (code ${RC})"
+    fi
+    log "Verso ended: ${EXIT_DESC}"
+    if [ "${EXIT_KIND}" = crash ] || [ "${EXIT_KIND}" = panic ]; then
+        if [ -f "${APP_DIR}/tools/report.sh" ]; then
+            CRASH_FILE="$(VERSO_STORAGE_ROOT="${ROOT}" sh "${APP_DIR}/tools/report.sh" crash "${EXIT_DESC}" 2>>"${LOG}")"
+            [ -n "${CRASH_FILE}" ] && log "saved crash report: ${CRASH_FILE}"
+        fi
+    fi
 }
 
 # Pause the Kindle UI, the same way KOReader does on this firmware.

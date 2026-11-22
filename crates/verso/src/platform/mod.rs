@@ -198,6 +198,11 @@ pub trait Platform {
 
     fn info(&self) -> &DeviceInfo;
 
+    /// Platform-specific lines included in the startup session header block.
+    fn session_details(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Turns the screen; `info()` then reports the new size. The next frame
     /// must redraw everything.
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()>;

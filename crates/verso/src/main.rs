@@ -22,6 +22,7 @@ mod logging;
 mod page_layout;
 mod platform;
 mod reader;
+mod report;
 mod screens;
 mod store;
 mod transfer;
@@ -205,7 +206,7 @@ fn run() -> Result<i32> {
         println!("{}", library::covers::benchmark(&store, &store.library()));
         return Ok(0);
     }
-    log::info!("Verso {} starting", env!("CARGO_PKG_VERSION"));
+    log::info!("Verso {} ({}) starting", env!("CARGO_PKG_VERSION"), env!("VERSO_GIT_COMMIT"));
     let started = Instant::now();
     let opts = if cfg!(feature = "desktop") { parse_args()? } else { Options::default() };
     let mut platform = match &opts.screenshot {
@@ -219,7 +220,22 @@ fn run() -> Result<i32> {
         platform.set_orientation(orientation)?;
     }
     let info = platform.info().clone();
-    log::info!("screen: {} {}x{} @ {} dpi, {orientation:?}", info.name, info.width, info.height, info.dpi);
+    let mut session = format!(
+        "=== Verso session ===\nversion: {} ({})\norientation: {:?}\nscreen: {} {}x{} @ {} dpi",
+        env!("CARGO_PKG_VERSION"),
+        env!("VERSO_GIT_COMMIT"),
+        orientation,
+        info.name,
+        info.width,
+        info.height,
+        info.dpi,
+    );
+    for line in platform.session_details() {
+        session.push('\n');
+        session.push_str(&line);
+    }
+    session.push_str("\n=== end session ===");
+    log::info!("{session}");
 
     let theme = ui::theme::Theme::for_dpi(info.dpi);
     let bounds = geom::Rect::new(0, 0, info.width as i32, info.height as i32);
