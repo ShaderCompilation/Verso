@@ -190,6 +190,16 @@ fn relayout_screens(
     }
 }
 
+/// The launcher's exit code for a Kindle Verso doesn't support (already said
+/// on screen; the launcher saves a problem report), or `e` itself.
+fn unsupported(e: anyhow::Error) -> Result<i32> {
+    if e.downcast_ref::<platform::Unsupported>().is_none() {
+        return Err(e);
+    }
+    log::error!("{e:#}");
+    Ok(verso_update::launcher::EXIT_UNSUPPORTED)
+}
+
 /// Runs Verso; the exit code for the launcher (0, or one a screen asked for).
 fn run() -> Result<i32> {
     if std::env::var("VERSO_SEARCH_BENCH").as_deref() == Ok("1") {
@@ -232,12 +242,7 @@ fn run() -> Result<i32> {
     };
     let mut platform = match opened {
         Ok(platform) => platform,
-        // Already said on screen; the launcher saves a problem report.
-        Err(e) if e.downcast_ref::<platform::Unsupported>().is_some() => {
-            log::error!("{e:#}");
-            return Ok(verso_update::launcher::EXIT_UNSUPPORTED);
-        }
-        Err(e) => return Err(e),
+        Err(e) => return unsupported(e),
     };
     let platform_us = started.elapsed().as_micros();
     // One Store for every screen, so they share preferences and the dictionary service.
@@ -348,6 +353,10 @@ fn run() -> Result<i32> {
                     started.elapsed()
                 );
                 first_frame = false;
+                // The Kindle's touchscreen opened while this frame drew.
+                if let Err(e) = platform.finish_startup() {
+                    return unsupported(e);
+                }
                 // Fonts load now rather than alongside the first frame.
                 worker.start();
                 // An SSH server left running (or started by KOReader) gets its

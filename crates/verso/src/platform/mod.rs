@@ -310,6 +310,13 @@ pub trait Platform {
         DeviceModel::default()
     }
 
+    /// Finishes what opening started in the background (the Kindle's
+    /// touchscreen), once the first frame is on its way. An `Unsupported`
+    /// error has already been shown on screen.
+    fn finish_startup(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Platform-specific lines included in the startup session header block.
     fn session_details(&self) -> Vec<String> {
         Vec::new()

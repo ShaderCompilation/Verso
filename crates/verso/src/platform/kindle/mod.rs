@@ -2,8 +2,10 @@
 //!
 //! `poll` waits on the touchscreen fd, optional Oasis/Voyage button fd and an
 //! `eventfd` `Waker` shared with background workers, the `lipc-wait-event`
-//! `powerd` listener (`PowerEvents`) and the one-shot startup frontlight thread
-//! (`verso-frontlight`). Battery and cable state read `/sys/class/power_supply`
+//! `powerd` listener (`PowerEvents`, thread `verso-power`) and the one-shot
+//! startup frontlight thread (`verso-frontlight`). Opening the touchscreen
+//! takes ~80 ms in the kernel, so `verso-input-init` does it while the first
+//! frame draws; `finish_startup` (or the first call needing input) joins it. Battery and cable state read `/sys/class/power_supply`
 //! directly (<1 ms) with a cached `battStateInfo` `lipc` fallback. Native
 //! Amazon sleep handoff signals `verso.sh` via acknowledged `SIGUSR1`/`SIGUSR2`
 //! so the launcher remains the sole owner of Amazon UI process state.
@@ -16,7 +18,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::kindle_profiles::{self, Lights};
 use super::{Battery, DeviceInfo, DeviceModel, Event, Frontlight, Orientation, Platform, Unsupported, Update, Waker};
@@ -39,12 +41,12 @@ pub struct Kindle {
     /// The profile's facts for the session header.
     profile_line: String,
     display: Display,
-    touch: TouchInput,
-    /// Page-turn buttons; `None` (and never polled) on touch-only Kindles.
-    buttons: Option<Buttons>,
+    /// `None` until `finish_startup` joins `opening`.
+    inputs: Option<Inputs>,
+    opening: Option<std::thread::JoinHandle<Result<Inputs>>>,
     queue: VecDeque<Event>,
     wake_fd: std::sync::Arc<std::os::fd::OwnedFd>,
-    _power: PowerEvents,
+    power: PowerEvents,
     power_rx: std::sync::mpsc::Receiver<Event>,
     frontlight_rx: Option<std::sync::mpsc::Receiver<Option<Frontlight>>>,
     battery_due: Instant,
@@ -53,6 +55,12 @@ pub struct Kindle {
     status: Option<(Instant, Option<super::power::Status>)>,
     /// Battery and cable from sysfs; powerd (`lipc`) when missing.
     power_files: Option<super::power::PowerFiles>,
+}
+
+struct Inputs {
+    touch: TouchInput,
+    /// Page-turn buttons; `None` (and never polled) on touch-only Kindles.
+    buttons: Option<Buttons>,
 }
 
 impl Kindle {
@@ -64,27 +72,21 @@ impl Kindle {
         let id = display.session.device_id;
         let profile = kindle_profiles::lookup(id);
         let probe_buttons = profile.is_none_or(|p| p.page_buttons);
-        let t_in = Instant::now();
-        let (touch, buttons) = match input::open(
-            Mapping {
-                width: display.width,
-                height: display.height,
-                swap_axes: display.touch_swap_axes,
-                mirror_x: display.touch_mirror_x,
-                mirror_y: display.touch_mirror_y,
-                orientation: Orientation::Portrait,
-            },
-            probe_buttons,
-        ) {
-            Ok(inputs) => inputs,
-            Err(e) => {
-                if let Some(Unsupported(reason)) = e.downcast_ref::<Unsupported>() {
-                    display.show_refusal(reason);
-                }
-                return Err(e);
-            }
+        let mapping = Mapping {
+            width: display.width,
+            height: display.height,
+            swap_axes: display.touch_swap_axes,
+            mirror_x: display.touch_mirror_x,
+            mirror_y: display.touch_mirror_y,
+            // `finish_startup` applies the settings' orientation.
+            orientation: Orientation::Portrait,
         };
-        let input_us = t_in.elapsed().as_micros();
+        let opening = std::thread::Builder::new().name("verso-input-init".into()).spawn(move || {
+            let started = Instant::now();
+            let (touch, buttons) = input::open(mapping, probe_buttons)?;
+            log::debug!("startup stage: kindle input open input_us={}", started.elapsed().as_micros());
+            Ok(Inputs { touch, buttons })
+        })?;
         let model = kindle_profiles::model(profile, id, &display.name);
         let lights = Lights::for_profile(profile);
         let profile_line = match profile {
@@ -125,7 +127,7 @@ impl Kindle {
         let power_files = super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply"));
         let power_files_us = t_pf.elapsed().as_micros();
         log::debug!(
-            "startup stage: kindle open display_us={display_us} input_us={input_us} power_events_us={power_events_us} power_files_us={power_files_us} total_us={}",
+            "startup stage: kindle open display_us={display_us} power_events_us={power_events_us} power_files_us={power_files_us} total_us={} (input opening in the background)",
             t0.elapsed().as_micros(),
         );
         Ok(Self {
@@ -134,11 +136,11 @@ impl Kindle {
             lights,
             profile_line,
             display,
-            touch,
-            buttons,
+            inputs: None,
+            opening: Some(opening),
             queue: VecDeque::new(),
             wake_fd,
-            _power: power,
+            power,
             power_rx,
             frontlight_rx,
             battery_due: Instant::now() + Duration::from_secs(60),
@@ -179,11 +181,15 @@ impl Kindle {
     /// Page buttons follow the touchscreen's grab; a failure only costs the
     /// buttons' exclusivity, so it's logged rather than fatal.
     fn grab_buttons(&mut self, grab: bool) {
-        if let Some(buttons) = &mut self.buttons
+        if let Some(buttons) = &mut self.inputs_mut().buttons
             && let Err(e) = buttons.grab(grab)
         {
             log::warn!("{e:#}");
         }
+    }
+
+    fn inputs_mut(&mut self) -> &mut Inputs {
+        self.inputs.as_mut().expect("finish_startup opens the inputs first")
     }
 
     fn take_frontlight(&mut self) -> Option<Option<Frontlight>> {
@@ -231,13 +237,36 @@ impl Platform for Kindle {
         self.system_status()?.usb
     }
 
+    fn finish_startup(&mut self) -> Result<()> {
+        let Some(opening) = self.opening.take() else { return Ok(()) };
+        let started = Instant::now();
+        let opened = opening.join().map_err(|_| anyhow!("the input thread panicked")).and_then(|r| r);
+        let mut inputs = match opened {
+            Ok(inputs) => inputs,
+            Err(e) => {
+                if let Some(Unsupported(reason)) = e.downcast_ref::<Unsupported>() {
+                    self.display.show_refusal(reason);
+                }
+                return Err(e);
+            }
+        };
+        self.power.wait_started()?;
+        inputs.touch.set_orientation(self.display.orientation);
+        log::info!("session touch: {}", inputs.touch.summary());
+        log::info!("session page buttons: {}", inputs.buttons.as_ref().map_or("none".into(), Buttons::summary));
+        log::debug!("startup stage: kindle input ready waited_us={}", started.elapsed().as_micros());
+        self.inputs = Some(inputs);
+        Ok(())
+    }
+
     fn prepare_sleep(&mut self, cover: bool) -> Result<()> {
+        self.finish_startup()?;
         self.sleeping = true;
         self.queue.clear();
         if !cover && !self.native_sleep {
             // Let any in-flight flash finish before Amazon's UI draws its sleep screen.
             self.display.wait_for_complete();
-            self.touch.grab(false)?;
+            self.inputs_mut().touch.grab(false)?;
             self.grab_buttons(false);
             // A missed handoff (no launcher, or one too busy to ack) must not end
             // the session: keep our last frame, stay in charge of the touchscreen
@@ -246,7 +275,7 @@ impl Platform for Kindle {
                 Ok(()) => self.native_sleep = true,
                 Err(e) => {
                     log::warn!("sleep handoff failed, sleeping on Verso's own screen: {e:#}");
-                    self.touch.grab(true)?;
+                    self.inputs_mut().touch.grab(true)?;
                     self.grab_buttons(true);
                 }
             }
@@ -255,17 +284,16 @@ impl Platform for Kindle {
     }
 
     fn resume(&mut self) -> Result<()> {
+        self.finish_startup()?;
         if self.native_sleep {
             // Verso takes the screen back either way: a missed ack only means the
             // next draw may race the launcher's resume, not worth quitting for.
             if let Err(e) = launcher_handoff(false) {
                 log::warn!("wake handoff failed, resuming anyway: {e:#}");
             }
-            self.touch.grab(true)?;
             self.native_sleep = false;
-        } else {
-            self.touch.grab(true)?;
         }
+        self.inputs_mut().touch.grab(true)?;
         self.grab_buttons(true);
         self.queue.clear();
         self.sleeping = false;
@@ -320,15 +348,18 @@ impl Platform for Kindle {
                 s.is_mtk,
                 s.inverted,
             ),
-            format!("touch: {}", self.touch.summary()),
-            format!("page buttons: {}", self.buttons.as_ref().map_or("none".into(), Buttons::summary)),
+            // Touch and page buttons are logged by `finish_startup`.
             format!("battery: {}", if self.power_files.is_some() { "sysfs" } else { "powerd" }),
         ]
     }
 
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()> {
         self.display.orientation = orientation;
-        self.touch.set_orientation(orientation);
+        // Before `finish_startup` (the settings' orientation, ahead of the
+        // first frame), it picks this up from the display.
+        if let Some(inputs) = &mut self.inputs {
+            inputs.touch.set_orientation(orientation);
+        }
         (self.info.width, self.info.height) = orientation.screen_size(self.display.width, self.display.height);
         // Touches and button presses already queued were mapped for the old
         // orientation.
@@ -337,6 +368,7 @@ impl Platform for Kindle {
     }
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {
+        self.finish_startup()?;
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
             // A failed persistence barrier can refuse this exit. Consume the
@@ -373,13 +405,14 @@ impl Platform for Kindle {
                 }
             };
             use std::os::fd::AsRawFd;
+            let inputs = self.inputs.as_mut().expect("finish_startup opened the inputs");
             let mut pfds = [
-                libc::pollfd { fd: self.touch.fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: inputs.touch.fd(), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: self.wake_fd.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: self.buttons.as_ref().map_or(-1, Buttons::fd), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: inputs.buttons.as_ref().map_or(-1, Buttons::fd), events: libc::POLLIN, revents: 0 },
             ];
             // Touch-only Kindles poll just the first two.
-            let count = if self.buttons.is_some() { 3 } else { 2 };
+            let count = if inputs.buttons.is_some() { 3 } else { 2 };
             // SAFETY: `count` initialized pollfds backed by live file descriptors.
             let rc = unsafe { libc::poll(pfds.as_mut_ptr(), count, wait_ms) };
             if rc < 0 {
@@ -411,9 +444,9 @@ impl Platform for Kindle {
                 if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
                     bail!("the touchscreen stopped working (poll flags {:#x})", pfd.revents);
                 }
-                self.touch.read(&mut self.queue)?;
+                inputs.touch.read(&mut self.queue)?;
                 if pfds[2].revents != 0
-                    && let Some(buttons) = &mut self.buttons
+                    && let Some(buttons) = &mut inputs.buttons
                 {
                     // Losing the buttons isn't worth ending the session over:
                     // the touchscreen still turns pages.
@@ -425,7 +458,7 @@ impl Platform for Kindle {
                     };
                     if let Err(e) = read {
                         log::warn!("page buttons stopped working, touch only from now: {e:#}");
-                        self.buttons = None;
+                        inputs.buttons = None;
                     }
                 }
             }
@@ -504,38 +537,44 @@ fn set_property(name: &str, value: u8) -> Result<()> {
     Ok(())
 }
 struct PowerEvents {
-    child: std::process::Child,
+    /// The `lipc-wait-event` child, once `verso-power` has started it.
+    child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
     join: Option<std::thread::JoinHandle<()>>,
     shutdown: std::sync::Arc<AtomicBool>,
+    /// Whether the child started; taken by `wait_started`.
+    started: Option<std::sync::mpsc::Receiver<io::Result<()>>>,
 }
 impl PowerEvents {
+    /// Starts the listener thread, which spawns `lipc-wait-event` itself:
+    /// the fork (~5 ms) stays off the UI thread, and `PR_SET_PDEATHSIG`
+    /// fires when the *thread* that forked the child exits, so that must be
+    /// the thread that lives as long as the listener (never a short-lived one).
     fn start(tx: std::sync::mpsc::Sender<Event>, waker: Waker) -> Result<Self> {
         use std::io::BufRead;
-        use std::os::unix::process::CommandExt;
-        let mut command = std::process::Command::new("lipc-wait-event");
-        command
-            .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,notCharging,battLevelChanged"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        let parent = std::process::id() as libc::pid_t;
-        // SAFETY: only async-signal-safe syscalls run between fork and exec.
-        // The listener must also exit when Verso is killed without running Drop.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::getppid() != parent {
-                    return Err(io::Error::from_raw_os_error(libc::ECHILD));
-                }
-                Ok(())
-            });
-        }
-        let mut child = command.spawn()?;
-        let stdout = child.stdout.take().expect("piped power events");
+        let child = std::sync::Arc::new(std::sync::Mutex::new(None));
         let shutdown = std::sync::Arc::new(AtomicBool::new(false));
-        let stopping = shutdown.clone();
-        let join = std::thread::spawn(move || {
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (slot, stopping) = (child.clone(), shutdown.clone());
+        let join = std::thread::Builder::new().name("verso-power".into()).spawn(move || {
+            let stdout = {
+                // Under the lock, so `drop` either sees the child or stops it starting.
+                let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if stopping.load(Ordering::Relaxed) {
+                    return;
+                }
+                match listener_command().spawn() {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take().expect("piped power events");
+                        *slot = Some(child);
+                        let _ = started_tx.send(Ok(()));
+                        stdout
+                    }
+                    Err(e) => {
+                        let _ = started_tx.send(Err(e));
+                        return;
+                    }
+                }
+            };
             for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
                 log::debug!("powerd: {line}");
                 let Some(e) = super::power::parse(&line) else { continue };
@@ -551,9 +590,41 @@ impl PowerEvents {
                 let _ = tx.send(Event::Quit);
                 waker.wake();
             }
-        });
-        Ok(Self { child, join: Some(join), shutdown })
+        })?;
+        Ok(Self { child, join: Some(join), shutdown, started: Some(started) })
     }
+
+    /// Waits until the listener runs; failing to start it ends startup.
+    fn wait_started(&mut self) -> Result<()> {
+        if let Some(started) = self.started.take() {
+            started.recv().context("the power event thread stopped")?.context("couldn't start lipc-wait-event")?;
+        }
+        Ok(())
+    }
+}
+
+fn listener_command() -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new("lipc-wait-event");
+    command
+        .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,notCharging,battLevelChanged"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: only async-signal-safe syscalls run between fork and exec.
+    // The listener must also exit when Verso is killed without running Drop.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(io::Error::from_raw_os_error(libc::ECHILD));
+            }
+            Ok(())
+        });
+    }
+    command
 }
 
 fn launcher_handoff(native: bool) -> Result<()> {
@@ -582,8 +653,10 @@ fn launcher_handoff(native: bool) -> Result<()> {
 impl Drop for PowerEvents {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(mut child) = self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }

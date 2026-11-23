@@ -42,6 +42,8 @@ pub struct FrameDiff {
     height: i32,
     /// Bytes per pixel of `prev` and the canvas.
     bpp: usize,
+    /// Empty until the first partial frame: startup and page turns are
+    /// full-screen frames that never read it (2 MiB, 8 MiB on color).
     prev: Vec<u8>,
     /// True when the last presented frame bypassed tile diffing and `canvas`
     /// itself still holds that baseline, avoiding a full-buffer copy into
@@ -52,25 +54,29 @@ pub struct FrameDiff {
 }
 
 impl FrameDiff {
+    /// Takes `canvas` as the baseline, copied into `prev` only when a
+    /// partial frame first needs it (`sync_baseline`).
     pub fn new(canvas: &Canvas) -> Self {
-        let mut diff = Self {
+        Self {
             width: canvas.width() as i32,
             height: canvas.height() as i32,
             bpp: canvas.bytes_per_pixel(),
-            prev: vec![0; canvas.width() as usize * canvas.height() as usize * canvas.bytes_per_pixel()],
-            canvas_is_baseline: false,
+            prev: Vec::new(),
+            canvas_is_baseline: true,
             #[cfg(test)]
             full_copies: 0,
-        };
-        diff.commit_full(canvas);
-        diff
+        }
     }
 
     /// Synchronizes the baseline after a known full-screen update, without
     /// comparing tiles. Store exactly the pixels sent to the panel.
     pub fn commit_full(&mut self, canvas: &Canvas) {
         debug_assert_eq!(canvas.bytes_per_pixel(), self.bpp, "the canvas changed mode");
-        canvas.copy_raw(canvas.bounds(), &mut self.prev);
+        if self.prev.is_empty() {
+            self.prev = canvas.raw().to_vec();
+        } else {
+            canvas.copy_raw(canvas.bounds(), &mut self.prev);
+        }
         self.canvas_is_baseline = false;
         #[cfg(test)]
         {
@@ -375,21 +381,24 @@ mod tests {
         for mode in [ColorMode::Gray8, ColorMode::Color32] {
             let mut canvas = Canvas::with_mode(W, H, mode);
             let mut diff = FrameDiff::new(&canvas);
-            assert_eq!(diff.full_copies(), 1);
-            // Back-to-back full-screen frames copy `prev` 0 times.
+            assert!(diff.is_baseline_deferred());
+            // Back-to-back full-screen frames (startup, page turns) neither
+            // copy nor allocate `prev`.
             for value in [17u8, 42, 88] {
                 canvas.set_gray(&vec![value; (W * H) as usize]);
                 diff.mark_canvas_as_baseline();
             }
             assert!(diff.is_baseline_deferred());
-            assert_eq!(diff.full_copies(), 1, "no copies during full-screen bypasses");
+            assert_eq!(diff.full_copies(), 0, "no copies during full-screen bypasses");
+            assert_eq!(diff.prev.capacity(), 0, "no baseline allocated before a partial frame");
             // Before a partial frame mutates `canvas`, sync copies once.
             diff.sync_baseline(&canvas);
             assert!(!diff.is_baseline_deferred());
-            assert_eq!(diff.full_copies(), 2);
+            assert_eq!(diff.full_copies(), 1);
+            assert_eq!(diff.prev.len(), (W * H) as usize * canvas.bytes_per_pixel());
             // A second sync is a no-op.
             diff.sync_baseline(&canvas);
-            assert_eq!(diff.full_copies(), 2);
+            assert_eq!(diff.full_copies(), 1);
             // Mutate one small area and verify the diff finds only that tile against value 88.
             canvas.fill_rect(Rect::new(20, 20, 3, 3), 0);
             let tiles = diff.changed(&canvas);
@@ -404,8 +413,15 @@ mod tests {
 
     fn setup() -> (Canvas, FrameDiff) {
         let canvas = Canvas::new(W, H);
-        let diff = FrameDiff::new(&canvas);
+        let diff = synced(&canvas);
         (canvas, diff)
+    }
+
+    /// A diff whose baseline is `canvas` as it is now, before a test draws.
+    fn synced(canvas: &Canvas) -> FrameDiff {
+        let mut diff = FrameDiff::new(canvas);
+        diff.sync_baseline(canvas);
+        diff
     }
 
     fn bounds() -> Rect {
@@ -416,7 +432,7 @@ mod tests {
     fn a_color_canvas_marks_the_same_tiles_and_sees_single_channels() {
         let mut gray = Canvas::new(W, H);
         let mut color = Canvas::with_mode(W, H, ColorMode::Color32);
-        let (mut gray_diff, mut color_diff) = (FrameDiff::new(&gray), FrameDiff::new(&color));
+        let (mut gray_diff, mut color_diff) = (synced(&gray), synced(&color));
         assert_eq!(color_diff.prev.len(), (W * H * 4) as usize);
         for canvas in [&mut gray, &mut color] {
             canvas.fill_rect(Rect::new(20, 20, 30, 5), 0);
@@ -467,7 +483,7 @@ mod tests {
     fn single_pixels_mark_their_tile_even_at_ragged_edges() {
         // 70 × 37 doesn't divide into 16 px tiles: the last column and row are partial.
         let mut canvas = Canvas::new(70, 37);
-        let mut diff = FrameDiff::new(&canvas);
+        let mut diff = synced(&canvas);
         let dots = [(0, 0), (15, 15), (16, 0), (69, 36), (33, 20), (64, 33)];
         for &(x, y) in &dots {
             canvas.fill_rect(Rect::new(x, y, 1, 1), 0);
@@ -532,7 +548,7 @@ mod tests {
     fn rects_are_clipped_to_the_screen() {
         // 100 px tall: the last tile row is only partly on screen.
         let mut canvas = Canvas::new(40, 100);
-        let mut diff = FrameDiff::new(&canvas);
+        let mut diff = synced(&canvas);
         canvas.fill_rect(Rect::new(0, 98, 2, 2), 0);
         let updates = plan(&diff.changed(&canvas), Rect::new(0, 0, 40, 100), &[], Ui, &[]);
         assert_eq!(updates, vec![Update { rect: Rect::new(0, 96, 16, 4), mode: Ui }]);
@@ -583,8 +599,8 @@ mod tests {
             // Every other frame on a color canvas, where a change can be in one channel.
             let mode = if i % 2 == 0 { ColorMode::Gray8 } else { ColorMode::Color32 };
             let mut canvas = Canvas::with_mode(70, 53, mode);
-            let mut skipping = FrameDiff::new(&canvas);
-            let mut committing = FrameDiff::new(&canvas);
+            let mut skipping = synced(&canvas);
+            let mut committing = synced(&canvas);
             for _ in 0..next(6) {
                 let r = Rect::new(next(80) as i32 - 5, next(60) as i32 - 5, next(20) as i32 + 1, next(20) as i32 + 1);
                 let mut channel = || next(2) as u8 * 255;
@@ -617,7 +633,7 @@ mod tests {
         let (w, h) = (1272, 1696);
         let mut canvas = Canvas::new(w, h);
         let grid = Rect::new(59, 609, 1154, 886);
-        let mut diff = FrameDiff::new(&canvas);
+        let mut diff = synced(&canvas);
         let runs = 50;
         let mut time = |skip: bool| {
             let mut spent = std::time::Duration::ZERO;

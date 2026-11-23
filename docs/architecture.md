@@ -102,8 +102,8 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
 | `verso-net` | `App` (`DrawerWorker`, lazy) | Runs `lipc` Wi-Fi toggles and SSH start/stop off the UI thread. |
 | `transfer` / `web-*` | `transfer::Session` | Active only while Wi-Fi transfer is open: HTTP server (≤8 connection threads), firewall port 80, `verso-mdns`, 10-minute idle stop, 60 s sleep-timeout refresh. |
 | `update-check` / `update-download` | `update::Updates` | One-shot HTTPS manifest check (`ureq` + `rustls`), archive download, hash/signature check and staging. |
-| `lipc-wait-event` | `Kindle::_power` (child) | Streams `com.lab126.powerd` events (`PR_SET_PDEATHSIG(SIGTERM)`). Unexpected exit emits `Event::Quit` so Verso returns cleanly via the launcher. |
-| One-shot helpers | Various | `verso-frontlight` (startup read), `verso-language` (`whatlang`), `verso-koreader` (bulk import), `verso-report` (`report.sh`), `started` (5 s trial marker), `ssh-restart`. |
+| `lipc-wait-event` | `Kindle::power` (child of thread `verso-power`) | Streams `com.lab126.powerd` events (`PR_SET_PDEATHSIG(SIGTERM)`). Unexpected exit emits `Event::Quit` so Verso returns cleanly via the launcher. |
+| One-shot helpers | Various | `verso-input-init` (touch and buttons open during the first frame), `verso-frontlight` (startup read), `verso-language` (`whatlang`), `verso-koreader` (bulk import), `verso-report` (`report.sh`), `started` (5 s trial marker), `ssh-restart`. |
 
 ---
 
