@@ -375,8 +375,9 @@ pub enum Reply {
         generation: u64,
         revision: u64,
         entries: Vec<Resolved>,
-        /// A preview's page bookmarks that resolved (by index into its
-        /// records), with the opening words to store for each.
+        /// The page bookmarks that took their opening words (by index into
+        /// the records): a preview's that resolved, or saved ones that
+        /// awaited them (`Annotation::awaits_opening`).
         openings: Vec<(usize, Opening)>,
         preview: bool,
         /// The `Page::annotation_revision` of pages painted with these
@@ -520,6 +521,18 @@ impl Worker {
                                     {
                                         let i = task.next;
                                         task.next += 1;
+                                        // A bulk-imported page bookmark takes its
+                                        // opening words now and is then checked
+                                        // like any other.
+                                        if !task.preview && task.records[i].awaits_opening() {
+                                            match place(d, &mut task.records[i], &task.fingerprint) {
+                                                Some(o) => task.openings.push((i, o)),
+                                                None => {
+                                                    task.found.push(Resolved { index: i, page: None, last: 0 });
+                                                    continue;
+                                                }
+                                            }
+                                        }
                                         let a = &task.records[i];
                                         // An imported page bookmark has only its
                                         // position: it resolves when the position
@@ -967,6 +980,17 @@ fn same_checks(a: &[Annotation], b: &[Annotation]) -> bool {
         && a.iter().zip(b).all(|(a, b)| {
             a.kind == b.kind && a.range == b.range && a.quotation == b.quotation && a.fingerprint == b.fingerprint
         })
+}
+/// Gives a bookmark awaiting its opening words (`Annotation::awaits_opening`)
+/// the words at its position in the open book, with the book's
+/// `fingerprint`. None, leaving it as it was, when the position isn't in
+/// this book.
+pub(super) fn place(d: &mut CreDocument, a: &mut Annotation, fingerprint: &str) -> Option<Opening> {
+    let o = d.opening_at(&a.range.start, OPENING_CHARS).ok()?;
+    a.range = o.range.clone();
+    a.quotation = o.text.clone();
+    a.fingerprint = fingerprint.to_owned();
+    Some(o)
 }
 /// Whether a saved annotation still holds in the open book. A page bookmark
 /// without text has nothing to compare, so it also needs the book's content

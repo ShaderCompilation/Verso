@@ -289,14 +289,17 @@ KOReader's files.
 - **On book open** (on by default; **Settings → Reading → Check KOReader
   progress**): if `Book.sdr/metadata.epub.lua` has a newer reading position on
   a different page, Verso offers a card with **Go there** and **Stay here**.
-- **Bulk library import** (**Settings → Library → KOReader → Import
-  progress**): scans every indexed book's `.sdr` sidecar and
+- **Bulk library import** (**Settings → Library → KOReader → Import**):
+  scans every indexed book's `.sdr` sidecar and
   `/mnt/us/koreader/history.lua`, previews how many books will update or be
-  marked finished, and imports them in one pass without overwriting newer Verso
-  positions or re-marking books you explicitly unmarked.
-- **Highlights and bookmarks:** open a book and choose **Reader Menu → Notes →
-  Import from KOReader** to preview and import that book's highlights and
-  bookmarks.
+  marked finished and how many new highlights, notes and bookmarks it found,
+  and imports them in one pass without overwriting newer Verso positions or
+  re-marking books you explicitly unmarked. Highlights are placed when each
+  book next opens; a bookmark whose page isn't in the book is dropped.
+- **One book:** open it and choose **Reader Menu → Notes → Import from
+  KOReader** to preview its highlights and bookmarks against the open book.
+  Either import skips what the other already brought over, and what you
+  removed.
 
 ---
 
@@ -324,7 +327,7 @@ via **Check for updates**.
 
 - **Reading:** tap zones, top-right bookmark corner, check KOReader progress.
 - **Display:** orientation, full page refresh interval, folder previews.
-- **Library:** library folders, dictionaries, KOReader bulk progress import.
+- **Library:** library folders, dictionaries, KOReader bulk import.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
   a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.
 - **Advanced:** text shaping, **Run setup again** and **Create problem

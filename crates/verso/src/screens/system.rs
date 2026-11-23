@@ -181,7 +181,7 @@ pub struct SystemSettings {
     dictionaries: Rect,
     dictionary_entry: List,
     koreader_area: Rect,
-    /// "Import progress" from KOReader.
+    /// "Import" progress and highlights from KOReader.
     koreader_entry: List,
     import_sheet: Option<ImportSheet>,
     /// The book open in the reader under Settings, which the import leaves out.
@@ -289,7 +289,7 @@ impl SystemSettings {
             (content, left, Rect { x: half + t.margin, w: content.right() - half - t.margin, ..left })
         };
         let mut dictionary_entry = List::new(vec![Row::new("Dictionaries").sub("Sets, order and folders").chevron()]);
-        let mut koreader_entry = List::new(vec![Row::new("Import progress").sub("Positions and finished books")]);
+        let mut koreader_entry = List::new(vec![Row::new("Import").sub("Progress and highlights")]);
         if landscape {
             dictionary_entry.place(Rect { y: dictionaries.y + label_h, h: t.row2, ..dictionaries }, t.row2, 0);
             koreader_entry.place(Rect { y: koreader_area.y + label_h, h: t.row2, ..koreader_area }, t.row2, 0);

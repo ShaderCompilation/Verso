@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""KOReader progress, Phases 2–3: the card
+"""KOReader progress, Phases 2–3 (and first-time setup Phase 5): the card
 that offers KOReader's newer position when a book opens, in portrait,
 landscape and on a 6" screen; Go there with the way back, Stay here, a page
 turn, the setting off, a position that isn't in the book, and the Settings
 row. Then the bulk import: Settings → Library's KOReader row, the preview
-sheet, Import, and the saved states.
+sheet with highlights, Import, and the saved states and highlights.
 
 Run cargo build first. Outputs go to gitignored screenshots/koreader-progress/,
 each scene with isolated state. Taps come from the theme's millimetre sizes
@@ -25,6 +25,15 @@ OUT = sim.out_dir('koreader-progress')
 KOREADER = '/body[1]/DocFragment[1]/body[1]/p[5]/text()[1].6200'
 MISSING = '/body[1]/DocFragment[9]/body[1]/p[1]/text()[1].0'
 THREE_DAYS = 3 * 24 * 3600
+# A highlight, a note and a page bookmark, for the bulk import.
+ANNOTATIONS = ('    ["annotations"] = {\n'
+               '        [1] = { ["drawer"] = "lighten", ["pos0"] = "/body/DocFragment[1]/body/p[2]/text().0",'
+               ' ["pos1"] = "/body/DocFragment[1]/body/p[2]/text().20", ["text"] = "A highlighted line" },\n'
+               '        [2] = { ["drawer"] = "lighten", ["pos0"] = "/body/DocFragment[1]/body/p[3]/text().0",'
+               ' ["pos1"] = "/body/DocFragment[1]/body/p[3]/text().20", ["text"] = "A noted line",'
+               ' ["note"] = "Worth rereading" },\n'
+               f'        [3] = {{ ["page"] = "{KOREADER}", ["text"] = "in Chapter 1" }},\n'
+               '    },\n')
 
 
 def book(s):
@@ -123,7 +132,7 @@ def main():
     state = OUT / 'state/lost'
     shutil.rmtree(state, ignore_errors=True)
     state.mkdir(parents=True)
-    (state / 'settings.json').write_text(json.dumps({'library_folders': [str(OUT / 'book')]}))
+    (state / 'settings.json').write_text(json.dumps({'library_folders': [str(OUT / 'book')], 'setup_done': True}))
     imported = {'position': MISSING, 'progress': 7800, 'last_opened': int(time.time()),
                 'koreader_seen': {'modified': int(source.stat().st_mtime), 'position': MISSING}}
     run('lost', 'pw6', {}, book(portrait), state=state, book_state=imported)
@@ -192,6 +201,7 @@ def bulk_import():
             path.write_text('return { last_xpointer = os.exit() }\n')
         else:
             path.write_text('return {\n'
+                            f'{ANNOTATIONS if name == "Current.epub" else ""}'
                             f'    ["last_xpointer"] = "{KOREADER}",\n'
                             f'    ["percent_finished"] = {percent},\n'
                             f'    ["summary"] = {{ ["status"] = "{status}" }},\n}}\n')
@@ -238,11 +248,23 @@ def bulk_import():
     assert finished['finished'] and finished['progress'] == 10000, finished
     assert started['progress'] == 1200 and 'koreader_seen' in started, started
     assert not (state / 'books' / f'{ids["Plain.epub"]}.json').exists()
+    annotation_id = next(b['annotation_id'] for b in json.loads((state / 'library.json').read_text())['books']
+                         if b['path'].endswith('/Current.epub'))
+    manifest = json.loads((state / 'annotations' / f'book-{annotation_id}.json').read_text())
+    assert len(manifest['records']) == 3 and len(manifest['sources']) == 3, manifest
     assert not (state / 'books' / f'{ids["Broken.epub"]}.json').exists()
     home = json.loads((state / 'home.json').read_text())
     assert home['books'][0]['book']['id'] == ids['Current.epub'], 'Continue reading is the current KOReader book'
-    # Home after the import, and the same import again: up to date.
+    # Home after the import, then the book opened: its bookmark takes its
+    # opening words and keeps its import identity.
     run('import-home', 'pw6', {}, [], state=state, books=library, env_extra=env)
+    run('import-opened', 'pw6', {}, s.tap(s.mm(5) + s.mm(13), s.mm(36)), state=state, books=library, env_extra=env)
+    annotations = state / 'annotations'
+    manifest = json.loads((annotations / f'book-{annotation_id}.json').read_text())
+    records = [json.loads((annotations / f'{r}.json').read_text()) for r in manifest['records']]
+    bookmark = next(r for r in records if r.get('kind') == 'bookmark')
+    assert bookmark['quotation'] and bookmark['fingerprint'], bookmark
+    assert len(records) == 3 and len(manifest['sources']) == 3, manifest
     run('import-again', 'pw6', {}, [*library_tab(s), *import_row(s)], state=state, screen='settings',
         books=library, env_extra=env)
     assert all(p.read_bytes() == b for p, b in checksums.items()), 'KOReader files stay untouched'

@@ -2,6 +2,7 @@
 //! files become visible together when the manifest commits; tombstones retain
 //! import identities after removal. No KOReader files are written.
 pub mod export;
+pub mod import;
 pub mod lua;
 pub mod worker;
 use crate::{
@@ -23,6 +24,8 @@ pub struct Annotation {
     pub kind: Kind,
     pub id: String,
     pub book: String,
+    /// The book's content fingerprint when the record was checked against
+    /// it; empty for a bulk import, which never opens the book.
     pub fingerprint: String,
     pub range: TextRange,
     pub quotation: String,
@@ -107,6 +110,24 @@ pub fn clean_note(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 impl Annotation {
+    /// A bulk-imported page bookmark, holding only KOReader's position: the
+    /// next resolution reads its opening words there, and removes it when
+    /// the position isn't in the book.
+    pub fn awaits_opening(&self) -> bool {
+        self.kind == Kind::Bookmark && self.fingerprint.is_empty()
+    }
+    /// The same bookmark at its `opening` words, checked against the book
+    /// with `fingerprint`. A new record (records are immutable); the import
+    /// provenance is kept.
+    pub fn placed(&self, opening: crate::document::Opening, fingerprint: &str) -> Self {
+        Self {
+            id: digest(format!("{}:placed", self.id).as_bytes()),
+            range: opening.range,
+            quotation: opening.text,
+            fingerprint: fingerprint.to_owned(),
+            ..self.clone()
+        }
+    }
     /// The same passage with a different note. Record files are immutable, so
     /// the edit is a new record with a new ID; everything else is kept,
     /// including the import provenance.
@@ -123,6 +144,18 @@ fn valid_id(id: &str) -> bool {
 fn manifest_path(store: &Store, book: &str) -> Result<PathBuf> {
     ensure!(valid_id(book), "invalid annotation book identity");
     Ok(store.annotation_dir().join(format!("book-{book}.json")))
+}
+/// The import identities a book's manifest holds (`Manifest::sources`),
+/// without reading its records. Empty when it has no manifest.
+pub fn sources(store: &Store, book: &str) -> Result<BTreeSet<String>> {
+    let bytes = match std::fs::read(manifest_path(store, book)?) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let manifest: Manifest = serde_json::from_slice(&bytes).context("invalid annotation manifest")?;
+    ensure!(manifest.version == 1, "unsupported annotation manifest version");
+    Ok(manifest.sources)
 }
 impl Collection {
     pub fn load(store: &Store, book: &str) -> Result<Self> {

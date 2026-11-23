@@ -1,10 +1,10 @@
-//! Settings → Library → KOReader → *Import progress*: the sheet that reads
-//! KOReader's data for the whole library, shows what it found and imports it
-//! after the user confirms. The work runs on a
+//! Settings → Library → KOReader → *Import* (progress and highlights): the
+//! sheet that reads KOReader's data for the whole library, shows what it
+//! found and imports it after the user confirms. The work runs on a
 //! [`Job`] thread; nothing is written before *Import*.
 use crate::geom::Rect;
 use crate::gfx::HAlign;
-use crate::koreader::bulk::{Event, Job, Preview, Scan, UNREADABLE_SHOWN};
+use crate::koreader::bulk::{Event, Imported, Job, Preview, Scan, UNREADABLE_SHOWN};
 use crate::platform::Waker;
 use crate::store::Store;
 use crate::ui::gesture::Gesture;
@@ -58,7 +58,7 @@ impl ImportSheet {
         // height under it.
         let full = screen.h - t.top_bar;
         let height = if full - t.mm(80.0) < t.mm(19.0) { full } else { t.mm(80.0) };
-        let sheet = Sheet::open("Import progress from KOReader", height, screen, t);
+        let sheet = Sheet::open("Import from KOReader", height, screen, t);
         let job = Job::scan(store.clone(), open, waker.clone());
         let mut this = Self {
             sheet,
@@ -77,7 +77,7 @@ impl ImportSheet {
     fn place(&mut self, t: &Theme) {
         let acts: &[(&str, ButtonKind, Act)] = match &self.stage {
             Stage::Scanning(..) => &[("Cancel", ButtonKind::Secondary, Act::Cancel)],
-            Stage::Preview(scan) if scan.preview.changes > 0 => {
+            Stage::Preview(scan) if scan.preview.importable() => {
                 &[("Cancel", ButtonKind::Secondary, Act::Cancel), ("Import", ButtonKind::Primary, Act::Import)]
             }
             Stage::Preview(_) | Stage::Failed(_) => &[("OK", ButtonKind::Primary, Act::Close)],
@@ -152,7 +152,7 @@ impl ImportSheet {
                 let Stage::Preview(scan) = std::mem::replace(&mut self.stage, Stage::Importing(0)) else {
                     return None;
                 };
-                self.stage = Stage::Importing(scan.preview.changes);
+                self.stage = Stage::Importing(scan.preview.changes.max(scan.preview.highlight_books));
                 self.job = Some(Job::import(self.store.clone(), *scan, self.waker.clone()));
                 self.place(t);
                 None
@@ -171,19 +171,13 @@ impl ImportSheet {
             match event {
                 Event::Scanning(done, total) => self.stage = Stage::Scanning(done, total),
                 Event::Scanned(scan) => self.stage = Stage::Preview(scan),
-                Event::Imported(imported) => match imported.error {
-                    None => {
-                        outcome = Some(Outcome::Imported(format!(
-                            "Imported KOReader progress for {}",
-                            counted(imported.written, "book")
-                        )))
-                    }
+                Event::Imported(imported) => match &imported.error {
+                    None => outcome = Some(Outcome::Imported(imported_text(&imported))),
                     Some(e) => {
                         log::error!("KOReader import: {e:#}");
                         self.stage = Stage::Failed(format!(
-                            "Imported {} of {}, then couldn't save: {e}.\n\nRun the import again to finish the rest.",
-                            imported.written,
-                            counted(imported.total, "book"),
+                            "{}, then couldn't save: {e}.\n\nRun the import again to finish the rest.",
+                            failed_text(&imported),
                         ));
                     }
                 },
@@ -195,7 +189,7 @@ impl ImportSheet {
             match self.stage {
                 Stage::Scanning(..) => self.stage = Stage::Failed("Couldn't read KOReader data.".into()),
                 Stage::Importing(_) if outcome.is_none() => {
-                    self.stage = Stage::Failed("Couldn't import KOReader progress.".into())
+                    self.stage = Stage::Failed("Couldn't import from KOReader.".into())
                 }
                 _ => {}
             }
@@ -218,14 +212,37 @@ impl ImportSheet {
     }
 }
 
+/// What a finished import says: "Imported KOReader progress for 3 books
+/// and highlights for 2".
+fn imported_text(i: &Imported) -> String {
+    match (i.written, i.highlights_written) {
+        (0, 0) => "Nothing imported from KOReader".into(),
+        (p, 0) => format!("Imported KOReader progress for {}", counted(p, "book")),
+        (0, h) => format!("Imported KOReader highlights for {}", counted(h, "book")),
+        (p, h) => format!("Imported KOReader progress for {} and highlights for {h}", counted(p, "book")),
+    }
+}
+
+/// What a stopped import got through: "Imported 3 of 5 books' progress".
+fn failed_text(i: &Imported) -> String {
+    let mut parts = Vec::new();
+    if i.total > 0 {
+        parts.push(format!("{} of {}' progress", i.written, counted(i.total, "book")));
+    }
+    if i.highlights_total > 0 {
+        parts.push(format!("{} of {}' highlights", i.highlights_written, counted(i.highlights_total, "book")));
+    }
+    format!("Imported {}", parts.join(" and "))
+}
+
 /// The preview: what the import will do, and the note under it.
 fn preview_text(p: &Preview) -> (String, &'static str) {
     let mut lines = Vec::new();
     if p.found() == 0 && p.open_skipped == 0 {
-        if p.unreadable == 0 {
+        if p.unreadable == 0 && p.highlight_books == 0 {
             return (
-                "No KOReader progress found.".into(),
-                "KOReader keeps each book's progress in a .sdr folder beside the book.",
+                "No KOReader progress or highlights found.".into(),
+                "KOReader keeps each book's progress and highlights in a .sdr folder beside the book.",
             );
         }
     } else {
@@ -243,6 +260,14 @@ fn preview_text(p: &Preview) -> (String, &'static str) {
             lines.push(format!("    {count} {what}"));
         }
     }
+    if p.highlight_books > 0 {
+        let kinds: Vec<_> = [(p.highlights, "highlight"), (p.notes, "note"), (p.bookmarks, "bookmark")]
+            .into_iter()
+            .filter(|&(n, _)| n > 0)
+            .map(|(n, noun)| counted(n, noun))
+            .collect();
+        lines.push(format!("{} with new highlights: {}", counted(p.highlight_books, "book"), kinds.join(", ")));
+    }
     if p.unreadable > 0 {
         let names: Vec<_> =
             p.unreadable_books.iter().map(|b| b.file_name().unwrap_or_default().to_string_lossy()).collect();
@@ -250,10 +275,10 @@ fn preview_text(p: &Preview) -> (String, &'static str) {
         let more = if more > 0 { format!(" and {more} more") } else { String::new() };
         lines.push(format!("Couldn't read {}: {}{more}", counted(p.unreadable, "book"), names.join(", ")));
     }
-    let note = if p.changes == 0 {
-        "Nothing to import: Verso already has this progress."
+    let note = if !p.importable() {
+        "Nothing to import: Verso already has all of it."
     } else {
-        "Positions are imported one way; KOReader's files aren't changed."
+        "Imported one way; KOReader's files aren't changed."
     };
     (lines.join("\n"), note)
 }
@@ -275,6 +300,10 @@ fn fullest_preview() -> Preview {
         unreadable: 5,
         unreadable_books: (0..3).map(|i| format!("/mnt/us/documents/A long book title {i}.epub").into()).collect(),
         changes: 133,
+        highlight_books: 37,
+        highlights: 412,
+        notes: 58,
+        bookmarks: 20,
     }
 }
 
@@ -308,9 +337,14 @@ mod tests {
         let (text, note) = preview_text(&full);
         assert!(text.starts_with("KOReader progress found for 147 books:\n    118 not started in Verso\n"), "{text}");
         assert!(text.contains("A long book title 2.epub and 2 more"), "{text}");
+        assert!(text.contains("37 books with new highlights: 412 highlights, 58 notes, 20 bookmarks"), "{text}");
         assert!(note.contains("one way"));
         full.changes = 0;
+        assert!(preview_text(&full).1.contains("one way"), "highlights alone import");
+        full.highlight_books = 0;
         assert!(preview_text(&full).1.starts_with("Nothing to import"));
-        assert_eq!(preview_text(&Preview::default()).0, "No KOReader progress found.");
+        assert_eq!(preview_text(&Preview::default()).0, "No KOReader progress or highlights found.");
+        let only = Preview { highlight_books: 1, notes: 1, ..Default::default() };
+        assert_eq!(preview_text(&only).0, "1 book with new highlights: 1 note");
     }
 }

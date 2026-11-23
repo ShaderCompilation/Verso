@@ -3,7 +3,15 @@
 //! writing anything; the import then writes the changed states in one pass
 //! and rebuilds Home and the opened order once. Both run on a [`Job`]
 //! thread; Settings shows the preview in between.
+//!
+//! The same parse gives each book's new highlights, notes and page bookmarks
+//! (`annotations::import`); the import commits them per book. Their
+//! positions are checked when the book next opens, as for any saved
+//! highlight; a page bookmark takes its opening words then
+//! (`Annotation::awaits_opening`). Nothing else writes a book's annotations
+//! while no reader has it open, and the open book is left out.
 use super::{Found, Sidecar};
+use crate::annotations::{self, Annotation, Collection, Kind};
 use crate::library::LibraryIndex;
 use crate::library::collections::{Collections, normalize};
 use crate::platform::Waker;
@@ -51,8 +59,18 @@ pub struct Preview {
     pub unreadable_books: Vec<PathBuf>,
     /// Books whose state the import changes.
     pub changes: usize,
+    /// Books with new highlights, notes or page bookmarks, and how many of
+    /// each: a highlight with a note counts as a note.
+    pub highlight_books: usize,
+    pub highlights: usize,
+    pub notes: usize,
+    pub bookmarks: usize,
 }
 impl Preview {
+    /// Whether the import would write anything.
+    pub fn importable(&self) -> bool {
+        self.changes > 0 || self.highlight_books > 0
+    }
     /// Books with KOReader progress: a position, counted in one of the four
     /// rows, or only a `complete` status.
     pub fn found(&self) -> usize {
@@ -74,6 +92,8 @@ struct Entry {
 pub struct Scan {
     pub preview: Preview,
     entries: Vec<Entry>,
+    /// New annotation records, by book annotation identity.
+    annotations: Vec<(String, Vec<Annotation>)>,
 }
 
 /// Reads the KOReader data of every available EPUB in `index`, plus
@@ -111,7 +131,7 @@ pub fn scan(
         if cancelled() {
             return None;
         }
-        let found = match super::read_sidecar(&path, cancelled) {
+        let found = match super::read_all(&path, cancelled) {
             Ok(found) => found,
             Err(_) if cancelled() => return None,
             Err(e) => {
@@ -126,10 +146,29 @@ pub fn scan(
         };
         progress(done + 1, total);
         let Some(found) = found else { continue };
+        let records = found.annotations.as_ref().and_then(|table| new_records(store, book, &path, table, cancelled));
+        if cancelled() {
+            return None;
+        }
         if open == Some(book.id.as_str()) {
-            scan.preview.open_skipped += 1;
+            if found.sidecar.is_some() || records.is_some() {
+                scan.preview.open_skipped += 1;
+            }
             continue;
         }
+        if let Some(records) = records {
+            let preview = &mut scan.preview;
+            preview.highlight_books += 1;
+            for a in &records {
+                match (a.kind, a.note.is_some()) {
+                    (Kind::Bookmark, _) => preview.bookmarks += 1,
+                    (Kind::Highlight, true) => preview.notes += 1,
+                    (Kind::Highlight, false) => preview.highlights += 1,
+                }
+            }
+            scan.annotations.push((book.annotation_id.clone(), records));
+        }
+        let Some(found) = found.sidecar else { continue };
         let opened = times.get(&normalize(&book.path)).copied();
         let state = store.book(&book.id);
         let decision = super::import(&state, &found, opened);
@@ -150,21 +189,51 @@ pub fn scan(
         }
     }
     log::info!(
-        "KOReader scan: books={total} found={} changes={} unreadable={} elapsed_ms={}",
+        "KOReader scan: books={total} found={} changes={} highlight_books={} unreadable={} elapsed_ms={}",
         scan.preview.found(),
         scan.preview.changes,
+        scan.preview.highlight_books,
         scan.preview.unreadable,
         started.elapsed().as_millis()
     );
     Some(scan)
 }
 
+/// A book's annotation records new to Verso: None when there are none, or
+/// they can't be read (logged; the book's progress still imports).
+fn new_records(
+    store: &Store,
+    book: &crate::library::Book,
+    path: &Path,
+    table: &crate::annotations::lua::Value,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<Annotation>> {
+    if book.annotation_id.is_empty() {
+        return None;
+    }
+    let found = annotations::sources(store, &book.annotation_id).and_then(|known| {
+        let source = path.display().to_string();
+        annotations::import::records(&book.annotation_id, "", &source, table.table()?, &known, cancelled)
+    });
+    match found {
+        Ok(found) => (!found.records.is_empty()).then_some(found.records),
+        Err(_) if cancelled() => None,
+        Err(e) => {
+            log::warn!("reading KOReader highlights {}: {e:#}", path.display());
+            None
+        }
+    }
+}
+
 /// What the import wrote.
 #[derive(Debug)]
 pub struct Imported {
-    /// Books written, of the books to write.
+    /// Books whose progress was written, of the books to write.
     pub written: usize,
     pub total: usize,
+    /// Books whose highlights were written, of the books to write.
+    pub highlights_written: usize,
+    pub highlights_total: usize,
     /// What stopped the rest. Running the import again finishes them.
     pub error: Option<anyhow::Error>,
 }
@@ -181,6 +250,8 @@ pub fn import(store: &Store, scan: &Scan, index: &LibraryIndex) -> Imported {
         .filter_map(|e| Some((e.id.clone(), super::import(&store.book(&e.id), &e.sidecar, e.opened).state?)))
         .collect();
     let (written, error) = store.save_books(&states);
+    let (highlights_written, highlights_error) = save_annotations(store, &scan.annotations);
+    let error = error.or(highlights_error);
     if written > 0 {
         let counts = store.home_summary().map_or_else(
             || {
@@ -194,12 +265,36 @@ pub fn import(store: &Store, scan: &Scan, index: &LibraryIndex) -> Imported {
         }
     }
     log::info!(
-        "KOReader import: written={written} of {} error={} elapsed_ms={}",
+        "KOReader import: written={written} of {} highlight_books={highlights_written} of {} error={} elapsed_ms={}",
         states.len(),
+        scan.annotations.len(),
         error.is_some(),
         started.elapsed().as_millis()
     );
-    Imported { written, total: states.len(), error }
+    Imported { written, total: states.len(), highlights_written, highlights_total: scan.annotations.len(), error }
+}
+
+/// Adds each book's new records to its collection and commits it (one
+/// manifest swap per book), stopping at the first failure. Records imported
+/// since the scan, by either import, are skipped by their identity.
+fn save_annotations(store: &Store, books: &[(String, Vec<Annotation>)]) -> (usize, Option<anyhow::Error>) {
+    let mut written = 0;
+    for (book, records) in books {
+        let result = Collection::load(store, book).and_then(|mut c| {
+            let before = c.records.len();
+            for a in records {
+                if !a.provenance.as_ref().is_some_and(|p| c.manifest.sources.contains(&p.entry)) {
+                    c.add(a.clone());
+                }
+            }
+            if c.records.len() > before { c.commit(store, book) } else { Ok(()) }
+        });
+        if let Err(e) = result {
+            return (written, Some(e.context(format!("saving highlights for book {book}"))));
+        }
+        written += 1;
+    }
+    (written, None)
 }
 
 /// What a [`Job`] reports.
@@ -300,7 +395,9 @@ mod tests {
 
     /// A library of `n` books in `dir/lib`, Verso's data in `dir/data`.
     fn library(dir: &Path, n: usize) -> (Store, LibraryIndex) {
-        let books = (0..n).map(|i| Book { path: dir.join(format!("lib/{i}.epub")), ..book(i) }).collect();
+        let books = (0..n)
+            .map(|i| Book { path: dir.join(format!("lib/{i}.epub")), annotation_id: format!("a{i}"), ..book(i) })
+            .collect();
         (Store::at(dir.join("data")), LibraryIndex { books, ..Default::default() })
     }
     /// KOReader's metadata file for `book`, saved at `modified` (seconds).
@@ -434,6 +531,58 @@ mod tests {
         assert_eq!(store.book("7").position.0, "/k7");
         let p = run_scan(&store, &index, &history, None).preview;
         assert_eq!((p.up_to_date, p.changes), (6, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn highlights_import_once_whichever_import_runs_first_and_removed_ones_stay_removed() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (store, index) = library(dir.path(), 3);
+        let entries = "annotations = { \
+            { drawer='lighten', pos0='/p/text().0', pos1='/p/text().9', text='Quote', note='Mine' }, \
+            { drawer='lighten', pos0='/q/text().0', pos1='/q/text().5', text='Other' }, \
+            { page='/body/DocFragment[2]', text='in Two' } }";
+        let paths: Vec<_> =
+            index.books.iter().map(|b| sidecar(&b.path, &format!("return {{ {entries} }}"), 2000)).collect();
+        let records = |i: usize| Collection::load(&store, &index.books[i].annotation_id).unwrap().records;
+        // Book 0 was imported in the reader first, keeping only the bookmark.
+        let per_book = |i: usize| {
+            let b = &index.books[i];
+            let known = annotations::sources(&store, &b.annotation_id).unwrap();
+            annotations::import::read(&b.annotation_id, "content", &paths[i], &known, &|| false).unwrap()
+        };
+        let mut c = Collection::load(&store, "a0")?;
+        for a in per_book(0).records.into_iter().filter(|a| a.kind == Kind::Bookmark) {
+            c.add(a);
+        }
+        c.commit(&store, "a0")?;
+
+        // Book 2 is open in the reader: left out.
+        let found = run_scan(&store, &index, Path::new("/nonexistent"), Some("2"));
+        let p = &found.preview;
+        assert_eq!((p.highlight_books, p.highlights, p.notes, p.bookmarks), (2, 2, 2, 1));
+        assert_eq!((p.open_skipped, p.importable()), (1, true));
+        let imported = import(&store, &found, &index);
+        assert_eq!((imported.highlights_written, imported.highlights_total, imported.error.is_none()), (2, 2, true));
+        assert_eq!(records(0).len(), 3, "the highlights joined the bookmark imported before");
+        let lone = &records(1);
+        assert_eq!(lone.len(), 3);
+        let bookmark = lone.iter().find(|a| a.kind == Kind::Bookmark).unwrap();
+        assert!(bookmark.awaits_opening() && bookmark.quotation.is_empty());
+        assert!(records(2).is_empty());
+
+        // The per-book import afterwards finds nothing new.
+        let again = per_book(1);
+        assert_eq!((again.records.len(), again.duplicates), (0, 3));
+        // A removed import stays removed, by either import.
+        let mut c = Collection::load(&store, "a1")?;
+        let id = c.records[0].id.clone();
+        c.remove(&id);
+        c.commit(&store, "a1")?;
+        assert_eq!(per_book(1).records.len(), 0);
+        let p = run_scan(&store, &index, Path::new("/nonexistent"), Some("2")).preview;
+        assert_eq!((p.highlight_books, p.importable()), (0, false));
+        assert_eq!(records(1).len(), 2);
         Ok(())
     }
 
@@ -585,7 +734,10 @@ mod tests {
         let scanned = started.elapsed();
         let imported = import(&store, &found, &index);
         let total = started.elapsed();
-        eprintln!("10,000 books: scan {scanned:?}, scan and import {total:?}, {} written", imported.written);
+        eprintln!(
+            "10,000 books: scan {scanned:?}, scan and import {total:?}, {} written, highlights for {}",
+            imported.written, imported.highlights_written
+        );
         assert_eq!(found.preview.found(), 10_000);
         assert!(imported.error.is_none());
         assert!(total < Duration::from_secs(30), "{total:?}");

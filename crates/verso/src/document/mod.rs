@@ -507,8 +507,31 @@ mod tests {
         };
         assert!(thread::holds(&mut doc, &saved, "original"));
         assert!(!thread::holds(&mut doc, &saved, "changed"));
+        // A bulk-imported bookmark has only its start: placing it reads the
+        // words there (none on a picture page, or the text's) and it holds.
+        let mut awaiting = crate::annotations::Annotation {
+            fingerprint: String::new(),
+            range: TextRange { start: cover.range.start.clone(), end: Position::default() },
+            ..saved.clone()
+        };
+        assert!(awaiting.awaits_opening());
+        assert_eq!(thread::place(&mut doc, &mut awaiting, "original"), Some(cover.clone()));
+        assert!(!awaiting.awaits_opening() && thread::holds(&mut doc, &awaiting, "original"));
+        let first = doc.page_count() - 1;
+        doc.go_to_page(first);
+        let words = doc.page_opening(80).unwrap();
+        let mut awaiting = crate::annotations::Annotation {
+            fingerprint: String::new(),
+            range: TextRange { start: words.range.start.clone(), end: Position::default() },
+            ..saved.clone()
+        };
+        assert_eq!(thread::place(&mut doc, &mut awaiting, "original").map(|o| o.text), Some(words.text.clone()));
+        assert!(thread::holds(&mut doc, &awaiting, "original"));
         saved.range.start = Position("/body/DocFragment[7]/body/div".into());
         assert!(!thread::holds(&mut doc, &saved, "original"), "a start that no longer exists");
+        let mut lost = crate::annotations::Annotation { fingerprint: String::new(), ..saved.clone() };
+        assert_eq!(thread::place(&mut doc, &mut lost, "original"), None, "not in this book");
+        assert!(lost.awaits_opening(), "left as it was");
         let last = doc.page_count() - 1;
         doc.go_to_page(last);
         let text = doc.page_opening(80).unwrap();

@@ -1,9 +1,5 @@
 use crate::{
-    annotations::{
-        Annotation, Collection, Kind, NOTE_LIMIT,
-        export::Export,
-        worker::{self, Preview},
-    },
+    annotations::{Annotation, Collection, Kind, NOTE_LIMIT, export::Export, import::Preview, worker},
     document::{
         Opening,
         thread::{Command, OpeningRequest, Reply, Resolved, Worker},
@@ -480,10 +476,39 @@ impl State {
                 self.resolved = entries;
                 self.painted = painted;
                 self.resolving = false;
+                self.place_imported(openings);
                 return true;
             }
         }
         false
+    }
+    /// Saves the bulk-imported page bookmarks the resolution just placed at
+    /// their opening words, and removes the ones whose position isn't in the
+    /// book (their import identity stays, so they aren't imported again).
+    /// The resolution stays valid: bookmarks aren't painted.
+    fn place_imported(&mut self, openings: Vec<(usize, Opening)>) {
+        let fingerprint = self.fingerprint();
+        let mut changed = false;
+        for (i, opening) in openings {
+            if let Some(old) = self.collection.records.get(i).filter(|a| a.awaits_opening()) {
+                let (id, placed) = (old.id.clone(), old.placed(opening, &fingerprint));
+                changed |= self.collection.replace(&id, placed);
+            }
+        }
+        let lost: Vec<_> = self
+            .resolved
+            .iter()
+            .filter(|e| {
+                e.page.is_none() && self.collection.records.get(e.index).is_some_and(Annotation::awaits_opening)
+            })
+            .map(|e| e.index)
+            .collect();
+        changed |= !lost.is_empty();
+        self.remove_resolved(&lost);
+        if changed {
+            self.save();
+            self.quiet = true;
+        }
     }
     pub fn start_import(&mut self, path: PathBuf) {
         if !self.ready || self.pending || self.resolving {
@@ -1520,6 +1545,41 @@ mod tests {
         assert!(!state.collection.manifest.sources.contains("lost"), "a later import can try it again");
         assert!(state.pending);
         assert!(matches!(sent.pop(), Some(Command::Resolve { preview: false, .. })));
+    }
+    #[test]
+    fn bulk_imported_bookmarks_are_placed_on_open_and_lost_ones_removed() {
+        let mut state = ready(&["h", "placed", "lost", "own"]);
+        for (i, a) in state.collection.records.iter_mut().enumerate().skip(1) {
+            a.kind = Kind::Bookmark;
+            a.range.end = crate::document::Position(String::new());
+            a.quotation.clear();
+            if i < 3 {
+                a.fingerprint.clear();
+            }
+        }
+        let mut sent = vec![];
+        state.resolve_with(1, &mut |c| sent.push(c));
+        let found = [(0, Some(2)), (1, Some(5)), (2, None), (3, None)];
+        assert!(state.receive(Reply::Resolved {
+            generation: 1,
+            revision: state.revision,
+            entries: found.into_iter().map(|(index, page)| Resolved { index, page, last: page.unwrap_or(0) }).collect(),
+            openings: vec![(1, opening("/body/p[3]"))],
+            preview: false,
+            painted: 0,
+        }));
+        let records = &state.collection.records;
+        assert_eq!(records.len(), 3, "the lost import is removed; Verso's own unresolved bookmark stays");
+        let placed = &records[1];
+        assert_ne!(placed.id, "placed", "a new record");
+        assert_eq!(
+            (placed.range.clone(), placed.quotation.as_str()),
+            (opening("/body/p[3]").range, "It was a bright cold")
+        );
+        assert_eq!(records[2].id, "own");
+        assert!(state.collection.manifest.sources.contains("lost"), "not imported again");
+        assert_eq!(state.pages(), [Some(2), Some(5), None]);
+        assert!(state.pending && state.quiet, "saved without a message");
     }
     #[test]
     fn a_new_note_saves_with_its_highlight_and_waits_while_a_save_runs() {

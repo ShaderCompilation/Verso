@@ -116,11 +116,39 @@ pub fn read(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Progress
     })
 }
 
+/// The fields the position is read from.
+const PROGRESS: [&str; 3] = ["last_xpointer", "percent_finished", "summary"];
+
 /// Reads the position fields of a metadata file, skipping everything else
 /// without building it. None when there is no file, or it has neither a
 /// position nor a `complete` status. Works for KOReader's legacy format too:
 /// the fields are top-level in both.
 pub fn read_sidecar(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Sidecar>> {
+    Ok(fields(path, &PROGRESS, cancelled)?.and_then(|(modified, fields)| progress_of(modified, &fields)))
+}
+
+/// What the bulk import reads from a metadata file in one parse.
+pub struct Metadata {
+    pub sidecar: Option<Sidecar>,
+    /// KOReader's modern `annotations` table (none in the legacy format).
+    pub annotations: Option<lua::Value>,
+}
+
+/// The position fields and the `annotations` table of a metadata file.
+/// None when there is no file.
+pub fn read_all(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Metadata>> {
+    let wanted = [PROGRESS.as_slice(), &["annotations"]].concat();
+    let Some((modified, mut fields)) = fields(path, &wanted, cancelled)? else { return Ok(None) };
+    let annotations = fields.remove("annotations");
+    Ok(Some(Metadata { sidecar: progress_of(modified, &fields), annotations }))
+}
+
+/// The `wanted` top-level fields of a metadata file and its modified time.
+fn fields(
+    path: &Path,
+    wanted: &[&str],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<(u64, std::collections::BTreeMap<String, lua::Value>)>> {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if absent(&e) => return Ok(None),
@@ -133,7 +161,10 @@ pub fn read_sidecar(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<
     let modified = seconds(&meta)?;
     let mut bytes = Vec::new();
     file.by_ref().take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    let fields = lua::fields_cancellable(&bytes, &["last_xpointer", "percent_finished", "summary"], cancelled)?;
+    Ok(Some((modified, lua::fields_cancellable(&bytes, wanted, cancelled)?)))
+}
+
+fn progress_of(modified: u64, fields: &std::collections::BTreeMap<String, lua::Value>) -> Option<Sidecar> {
     let percent = match fields.get("percent_finished") {
         Some(lua::Value::Scalar(s)) => s.parse::<f64>().unwrap_or(0.0).clamp(0.0, 1.0),
         _ => 0.0,
@@ -147,15 +178,9 @@ pub fn read_sidecar(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<
         _ => Status::Other,
     };
     let Some(position) = fields.get("last_xpointer").and_then(lua::Value::string).filter(|p| !p.is_empty()) else {
-        return Ok((status == Status::Complete).then_some(Sidecar::Complete { modified, status_day }));
+        return (status == Status::Complete).then_some(Sidecar::Complete { modified, status_day });
     };
-    Ok(Some(Sidecar::Progress(Progress {
-        position: Position(position.to_owned()),
-        percent,
-        status,
-        modified,
-        status_day,
-    })))
+    Some(Sidecar::Progress(Progress { position: Position(position.to_owned()), percent, status, modified, status_day }))
 }
 
 /// When KOReader last opened each file, from its `history.lua` (a list of
