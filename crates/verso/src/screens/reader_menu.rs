@@ -1,5 +1,5 @@
 //! The centre-tap menu. Controls use the shared toolkit.
-use crate::geom::{Point, Rect};
+use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
@@ -64,12 +64,15 @@ impl ReaderMenu {
         let bar = top.rect();
         let battery_w = t.mm(13.5);
         let battery = Rect::new(screen.right() - m - battery_w, bar.center().y - t.target / 2, battery_w, t.target);
+        // Targets placed by their right edge: centring an odd target size
+        // (59 px at 167 dpi) rounds them 1 px into their neighbour.
+        let ending_at = |right: i32| Rect::new(right - t.target, battery.y, t.target, t.target);
         let mut light = IconButton::new(Icon::Sun);
-        light.place_at(Point::new(battery.x - t.target / 2, bar.center().y), t);
+        light.place(ending_at(battery.x));
         let mut search = IconButton::new(Icon::Search);
-        search.place_at(Point::new(light.rect().x - t.target / 2, bar.center().y), t);
+        search.place(ending_at(light.rect().x));
         let mut bookmark = IconButton::new(Icon::Bookmark);
-        bookmark.place_at(Point::new(search.rect().x - t.target / 2, bar.center().y), t);
+        bookmark.place(ending_at(search.rect().x));
         top.trailing = bar.right() - bookmark.rect().x + t.mm(1.0);
         let panel = screen.split_bottom(t.mm(if wide { 35.0 } else { 36.5 })).0;
         let info = Rect::new(m, panel.y + t.mm(if wide { 2.4 } else { 2.7 }), screen.w - 2 * m, t.mm(7.0));
@@ -78,10 +81,11 @@ impl ReaderMenu {
         let scrub_y = (info.bottom() + buttons_y) / 2 - t.mm(3.0);
         let mut progress = Slider::new(0.0, pages.saturating_sub(1) as f32, 1.0, page as f32);
         progress.place(Rect::new(m + t.target, scrub_y, screen.w - 2 * m - 2 * t.target, t.mm(6.0)), t);
+        let chevron_y = progress.rect().center().y - t.target / 2;
         let mut prev = IconButton::new(Icon::ChevronLeft);
-        prev.place_at(Point::new(m + t.target / 2, progress.rect().center().y), t);
+        prev.place(Rect::new(m, chevron_y, t.target, t.target));
         let mut next = IconButton::new(Icon::ChevronRight);
-        next.place_at(Point::new(screen.w - m - t.target / 2, progress.rect().center().y), t);
+        next.place(Rect::new(screen.right() - m - t.target, chevron_y, t.target, t.target));
         let gap = t.mm(2.4);
         let width = (screen.w - 2 * m - 3 * gap) / 4;
         let mut buttons = ["Contents", "Notes", "Text", "Layout"].into_iter().enumerate().map(|(i, label)| {
@@ -281,20 +285,21 @@ fn progress_label(page: usize, pages: usize, percent: Option<u32>) -> String {
     }
 }
 
-/// The menu's bottom panel, for `screens/fit_tests.rs`. Left out until fixed:
-/// at 167 dpi the top panel's bookmark, search, light and battery targets
-/// overlap by 1 px, and the next-page button ends 1 px past the right margin.
+/// The menu's two panels, for `screens/fit_tests.rs`.
 #[cfg(test)]
 pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::Parts;
     let m = ReaderMenu::new(t, screen, "A long book title that will not fit the top bar", 10, 100);
-    let mut buttons = vec![m.prev.rect(), m.progress.bounds()];
+    let mut buttons = vec![m.prev.rect(), m.progress.bounds(), m.next.rect()];
     buttons.extend(m.button_rects());
-    vec![crate::ui::fit::Parts::new("ReaderMenu", m.panel, buttons)]
+    let top = [m.bookmark.rect(), m.search.rect(), m.light.rect(), m.battery];
+    vec![Parts::new("ReaderMenu top", m.top_panel, top), Parts::new("ReaderMenu", m.panel, buttons)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Point;
 
     fn tap(menu: &mut ReaderMenu, p: Point) -> Option<MenuEvent> {
         menu.on_gesture(&Gesture::Down(p), true);
