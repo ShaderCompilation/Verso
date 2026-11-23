@@ -110,7 +110,7 @@ impl Settings {
         }
     }
 }
-pub const DEFAULT_PAGE_FLASH: u32 = 6;
+pub const DEFAULT_PAGE_FLASH: u32 = 0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SleepScreen {
@@ -860,7 +860,13 @@ mod tests {
         // Normal margins and the footer on are exactly the new defaults.
         let mut normal: Settings = serde_json::from_str(r#"{"typography":{"margins":1},"footer":true}"#)?;
         normal.normalize();
-        assert_eq!(normal.page_layout, PageLayout::default());
+        assert_eq!(
+            normal.page_layout,
+            PageLayout {
+                margins: crate::page_layout::Margins { sides: 7, ..Default::default() },
+                ..PageLayout::default()
+            }
+        );
         // Out-of-range margins are clamped.
         let mut wild: Settings = serde_json::from_str(r#"{"page_layout":{"margins":{"sides":1,"top":50}}}"#)?;
         wild.normalize();
@@ -870,14 +876,14 @@ mod tests {
     #[test]
     fn reader_settings_default_and_round_trip() -> Result<()> {
         let mut settings: Settings = serde_json::from_str(r#"{"footer":true}"#)?;
-        assert_eq!((settings.page_flash, settings.tap_zones, settings.bookmark_corner), (6, TapZones::Standard, true));
-        settings.page_flash = 0;
+        assert_eq!((settings.page_flash, settings.tap_zones, settings.bookmark_corner), (0, TapZones::Standard, true));
+        settings.page_flash = 6;
         settings.tap_zones = TapZones::Mirrored;
         settings.bookmark_corner = false;
         let json = serde_json::to_string(&settings)?;
         assert!(json.contains(r#""tap_zones":"mirrored""#), "{json}");
         let restored: Settings = serde_json::from_str(&json)?;
-        assert_eq!((restored.page_flash, restored.tap_zones, restored.bookmark_corner), (0, TapZones::Mirrored, false));
+        assert_eq!((restored.page_flash, restored.tap_zones, restored.bookmark_corner), (6, TapZones::Mirrored, false));
         Ok(())
     }
     #[test]

@@ -167,17 +167,17 @@ instantly from cache.
   - **Spacing:** Tight, Normal or Loose.
   - **Justify:** justified or left-aligned.
 - **Layout** (Reader Menu → **Layout**, full-screen editor applied on close):
-  - **Top bar** (default Off) and **Bottom bar** (default On): three tappable
+  - **Top bar** (default Off) and **Bottom bar** (default On: chapter title, page / total, percent): three tappable
     slots each (left, centre, right). Pick *Nothing* or any of 13 items:
     *Chapter title*, *Chapter and pages left*, *Book title*, *Author*, *Pages
     left in chapter*, *Page in chapter*, *Time left in chapter*, *Percent*,
     *Page / total*, *Time left in book*, *Clock (24 h)*, *Clock (12 h)*,
     *Battery*. Time-left estimates learn your reading pace automatically.
-  - **Progress line:** Off, Top or Bottom, with optional **Chapter marks**.
-  - **Margins:** Side (default 7 mm), Top (6 mm) and Bottom (6 mm), each
+  - **Progress line:** Off, Top or Bottom (default), with optional **Chapter marks**.
+  - **Margins:** Side (default 3 mm), Top (2 mm) and Bottom (2 mm), each
     2–20 mm. Landscape centres the text column to keep line length comfortable.
 - **Refresh interval** (**Settings → Display → Full page refresh**): *Every
-  page*, *Every 6* (default), *Every 12* or *Never*. Chapter starts and images
+  page*, *Every 6*, *Every 12* or *Never* (default). Chapter starts and images
   always flash cleanly; rapid flipping defers periodic flashes so turns stay
   responsive.
 - **Text shaping** (**Settings → Advanced**): *Light* (default, HarfBuzz

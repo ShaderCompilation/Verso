@@ -155,7 +155,7 @@ against the previous frame in **16×16 tiles**:
   and awaits it lazily right before the next framebuffer write, sleep handoff or
   exit.
 - **Periodic cadence (`reader/mod.rs`):** flashes every `page_flash` turns
-  (default 6, `0` = never). Pages with images and TOC chapter starts (`level <= 2`)
+  (default `0` = never). Pages with images and TOC chapter starts (`level <= 2`)
   always request `Full` and reset the counter. Rapid turns (`< 400 ms` apart)
   defer periodic flashes up to `2 × page_flash` turns.
 

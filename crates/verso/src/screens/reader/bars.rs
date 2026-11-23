@@ -195,6 +195,7 @@ mod tests {
         canvas.fill(PAPER);
         let mut layout = PageLayout::default();
         layout.bottom.slots = [None, None, Some(BarItem::Battery)];
+        layout.progress = ProgressLine::Off;
         let data = BarData { pages: 20, battery, ..BarData::default() };
         let geometry = layout.geometry(w as i32, h as i32, t.dpi, 42);
         let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
@@ -231,9 +232,12 @@ mod tests {
 
     #[test]
     fn a_long_chapter_title_keeps_its_pages_left_and_the_percent() {
-        let short = render(&PageLayout::default(), "One").0;
-        let long = render(&PageLayout::default(), &"A very long chapter title ".repeat(8)).0;
-        let g = PageLayout::default().geometry(600, 800, 150.0, 21);
+        let mut layout = PageLayout::default();
+        layout.bottom.slots = [Some(BarItem::ChapterPagesLeft), None, Some(BarItem::Percent)];
+        layout.progress = ProgressLine::Off;
+        let short = render(&layout, "One").0;
+        let long = render(&layout, &"A very long chapter title ".repeat(8)).0;
+        let g = layout.geometry(600, 800, 150.0, 21);
         let bar = g.bottom_bar.unwrap();
         // The percent is untouched; the title is cut short rather than overflowing it.
         let percent = TextRenderer::new().width("25%", Theme::for_dpi(150).caption).ceil() as i32;

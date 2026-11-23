@@ -3414,7 +3414,7 @@ mod tests {
         open_layout(&mut r, &theme);
         edit_layout(&mut r, |l| {
             l.bottom.slots[1] = Some(crate::page_layout::BarItem::PageTotal);
-            l.progress = crate::page_layout::ProgressLine::Bottom;
+            l.progress = crate::page_layout::ProgressLine::Top;
         });
         leave_layout_screen(&mut r, &theme);
         assert!(layouts(&commands).is_empty(), "slot picks keep the layout");
@@ -3438,7 +3438,7 @@ mod tests {
         leave_layout_screen(&mut r, &theme);
         let sent = layouts(&commands);
         assert_eq!(sent.len(), 1);
-        assert_eq!((sent[0].margins.sides, sent[0].margins.top, sent[0].top.on), (9, 9, true));
+        assert_eq!((sent[0].margins.sides, sent[0].margins.top, sent[0].top.on), (5, 9, true));
         assert_eq!(r.cache.generation, 2);
         assert_eq!(r.store.settings().page_layout, sent[0]);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());

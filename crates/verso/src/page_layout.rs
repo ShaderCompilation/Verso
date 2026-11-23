@@ -28,8 +28,11 @@ impl Default for PageLayout {
         // The bottom bar is the footer Verso always had.
         Self {
             top: Bar { on: false, slots: [Some(BarItem::BookTitle), None, Some(BarItem::Clock24)] },
-            bottom: Bar { on: true, slots: [Some(BarItem::ChapterPagesLeft), None, Some(BarItem::Percent)] },
-            progress: ProgressLine::Off,
+            bottom: Bar {
+                on: true,
+                slots: [Some(BarItem::ChapterTitle), Some(BarItem::PageTotal), Some(BarItem::Percent)],
+            },
+            progress: ProgressLine::Bottom,
             chapter_marks: true,
             margins: Margins::default(),
         }
@@ -123,7 +126,7 @@ pub struct Margins {
 }
 impl Default for Margins {
     fn default() -> Self {
-        Self { sides: 7, top: 6, bottom: 6 }
+        Self { sides: 3, top: 2, bottom: 2 }
     }
 }
 
@@ -198,8 +201,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_reproduce_the_old_footer() {
-        let layout = PageLayout::default();
+    fn the_old_margins_reproduce_the_old_footer() {
+        let layout = PageLayout { margins: Margins { sides: 7, top: 6, bottom: 6 }, ..PageLayout::default() };
         let g = layout.geometry(1272, 1696, 300.0, 42);
         let mm = |v: f32| (v * 300.0 / 25.4).round() as i32;
         // Old crengine margins: Normal sides 7 mm, top 6 mm, bottom 12 mm with the footer.
@@ -234,7 +237,7 @@ mod tests {
         assert_eq!(g.side, 218);
         assert_eq!(g.bottom_bar.map(|r| (r.x, r.w)), Some((218, 1696 - 436)));
         // Large type already makes short lines: the margin wins.
-        assert_eq!(layout.geometry(1696, 1272, 300.0, 100).side, 83);
+        assert_eq!(layout.geometry(1696, 1272, 300.0, 100).side, 35);
         // A wide side margin is still the minimum.
         let mut wide = layout.clone();
         wide.margins.sides = 20;
@@ -286,7 +289,7 @@ mod tests {
         assert!(json.contains(r#""clock_12h""#) && json.contains(r#""progress":"top""#), "{json}");
         assert_eq!(serde_json::from_str::<PageLayout>(&json).unwrap(), layout);
         let partial: PageLayout = serde_json::from_str(r#"{"margins":{"top":9}}"#).unwrap();
-        assert_eq!(partial.margins, Margins { sides: 7, top: 9, bottom: 6 });
+        assert_eq!(partial.margins, Margins { sides: 3, top: 9, bottom: 2 });
         assert!(partial.chapter_marks, "marks are on unless saved off");
         let off: PageLayout = serde_json::from_str(r#"{"chapter_marks":false}"#).unwrap();
         assert!(!off.chapter_marks);

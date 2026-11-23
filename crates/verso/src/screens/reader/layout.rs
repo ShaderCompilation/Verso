@@ -595,12 +595,12 @@ mod tests {
         };
         let p = more(&view, 0);
         tap(&mut view, p, &t, &d);
-        let p = less(&view, 1);
+        let p = more(&view, 1);
         tap(&mut view, p, &t, &d);
         let p = more(&view, 2);
         tap(&mut view, p, &t, &d);
-        assert_eq!((view.layout.margins.sides, view.layout.margins.top, view.layout.margins.bottom), (8, 5, 7));
-        assert_eq!(view.margins[0].value, "8 mm");
+        assert_eq!((view.layout.margins.sides, view.layout.margins.top, view.layout.margins.bottom), (4, 3, 3));
+        assert_eq!(view.margins[0].value, "4 mm");
         // Limits hold, and the stepper side greys out there.
         for _ in 0..30 {
             let p = less(&view, 1);
@@ -636,10 +636,10 @@ mod tests {
         let p = Point::new(r.right() - t.mm(3.0), r.center().y);
         view.on_gesture(&Gesture::Down(p), &t, &d);
         view.on_gesture(&Gesture::LongPress(p), &t, &d);
-        assert_eq!(view.layout.margins.sides, 8);
+        assert_eq!(view.layout.margins.sides, 4);
         let at = view.deadline().expect("repeating");
         assert!(view.on_tick(at));
-        assert_eq!(view.layout.margins.sides, 9);
+        assert_eq!(view.layout.margins.sides, 5);
         view.on_gesture(&Gesture::End(p), &t, &d);
         assert!(view.deadline().is_none());
     }
