@@ -6,4 +6,6 @@
 /notes
 .claude/
 .agents/
+/.ignore
+/.zed/
 __pycache__/
