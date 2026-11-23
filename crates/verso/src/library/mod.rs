@@ -9,6 +9,7 @@
 
 pub mod collections;
 pub mod covers;
+pub mod discovery;
 pub mod epub;
 pub mod files;
 pub mod home;

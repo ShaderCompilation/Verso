@@ -39,10 +39,10 @@ fn browse_start() -> PathBuf {
 /// A folder as people know it: relative to the Kindle's storage
 /// ("documents/Tolkien"), or with `~` for the desktop home folder.
 pub fn display_folder(path: &Path) -> String {
-    #[cfg(feature = "kindle")]
-    let base: Option<(PathBuf, &str)> = Some((browse_root(), "Kindle storage"));
+    // On the desktop, `VERSO_STORAGE` plays the Kindle's storage.
+    let base: Option<(PathBuf, &str)> = crate::store::storage_root().map(|root| (root, "Kindle storage"));
     #[cfg(feature = "desktop")]
-    let base: Option<(PathBuf, &str)> = std::env::var_os("HOME").map(|home| (PathBuf::from(home), "~"));
+    let base = base.or_else(|| std::env::var_os("HOME").map(|home| (PathBuf::from(home), "~")));
     display_relative(path, base.as_ref().map(|(p, name)| (p.as_path(), *name)))
 }
 

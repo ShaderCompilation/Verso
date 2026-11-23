@@ -3528,11 +3528,11 @@ fn relayout_stack_from(
     let open = books.open_book_id().map(str::to_owned);
     let mut screens: Vec<Box<dyn Screen>> = vec![Box::new(books)];
     if state.in_settings {
-        let settings = crate::screens::system::SystemSettings::new(t, screen, store.clone(), waker);
+        let settings = crate::screens::system::SystemSettings::new(t, screen, store.clone(), waker.clone());
         screens.push(Box::new(settings.on_display_tab().with_open_book(open)));
     }
     if let Some(setup) = &state.setup {
-        screens.push(Box::new(crate::screens::setup::SetupScreen::resume(t, screen, store, setup)));
+        screens.push(Box::new(crate::screens::setup::SetupScreen::resume(t, screen, store, waker, setup)));
     }
     screens
 }
@@ -4049,7 +4049,7 @@ mod tests {
         let settings = crate::screens::system::SystemSettings::new(&t, portrait, store.clone(), worker.waker());
         // Setup run again over Settings keeps its page.
         let resume = crate::screens::setup::SetupResume { page: 1, note: None };
-        let setup = crate::screens::setup::SetupScreen::resume(&t, portrait, store.clone(), &resume);
+        let setup = crate::screens::setup::SetupScreen::resume(&t, portrait, store.clone(), worker.waker(), &resume);
         let state = snapshot(&[&books, &settings, &setup]);
         assert!(state.in_settings && state.open_book.as_deref() == Some(id.as_str()));
         assert_eq!(state.setup, Some(resume));

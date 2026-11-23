@@ -299,7 +299,13 @@ fn run() -> Result<i32> {
     if home && screens::setup::due(&store.settings()) {
         log::info!("showing first-time setup");
         let note = screens::setup::untested_note(&store, &model);
-        app.push_screen(Box::new(screens::setup::SetupScreen::new(&theme, bounds, store.clone(), note)));
+        app.push_screen(Box::new(screens::setup::SetupScreen::new(
+            &theme,
+            bounds,
+            store.clone(),
+            platform.waker(),
+            note,
+        )));
     } else if screens::untested::due(&store.settings(), &model) {
         log::info!("showing the untested-model notice: {}", model.name);
         app.show_notice(app::Notice::Untested(screens::untested::UntestedSheet::new(

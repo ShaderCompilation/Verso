@@ -20,12 +20,15 @@ pub const UNREADABLE_SHOWN: usize = 3;
 /// Scan progress reaches the screen at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(400);
 
-/// KOReader's `history.lua`: in `$VERSO_KOREADER` (for development), else
-/// in KOReader's folder on the Kindle. The simulator has none by default.
+/// KOReader's folder: `$VERSO_KOREADER` (for development), else its
+/// folder on the Kindle. The simulator has none by default.
+pub fn koreader_dir() -> PathBuf {
+    std::env::var_os("VERSO_KOREADER").map_or_else(|| PathBuf::from("/mnt/us/koreader"), PathBuf::from)
+}
+
+/// KOReader's `history.lua`.
 pub fn history_path() -> PathBuf {
-    std::env::var_os("VERSO_KOREADER")
-        .map_or_else(|| PathBuf::from("/mnt/us/koreader"), PathBuf::from)
-        .join("history.lua")
+    koreader_dir().join("history.lua")
 }
 
 /// What the scan found, as the sheet shows it before *Import*.

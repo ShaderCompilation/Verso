@@ -720,14 +720,26 @@ pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
-pub fn default_library_folders() -> Vec<PathBuf> {
+/// The Kindle's user storage, `/mnt/us`. On the desktop
+/// `$VERSO_STORAGE` stands in for it when set (setup walks it for books and
+/// takes the default folders from it); None otherwise.
+pub fn storage_root() -> Option<PathBuf> {
     #[cfg(feature = "kindle")]
     {
-        vec![PathBuf::from("/mnt/us/documents"), PathBuf::from("/mnt/us/My Library")]
+        Some(PathBuf::from("/mnt/us"))
     }
     #[cfg(feature = "desktop")]
     {
-        vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testbooks")]
+        std::env::var_os("VERSO_STORAGE").map(PathBuf::from)
+    }
+}
+pub fn default_library_folders() -> Vec<PathBuf> {
+    match storage_root() {
+        Some(root) => vec![root.join("documents"), root.join("My Library")],
+        #[cfg(feature = "desktop")]
+        None => vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testbooks")],
+        #[cfg(feature = "kindle")]
+        None => Vec::new(),
     }
 }
 
