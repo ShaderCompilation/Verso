@@ -187,6 +187,21 @@ pub mod fake {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// A port nothing listens on, for the session to bind. It comes from below
+    /// Linux's ephemeral range (32768 up), where binding port 0 never lands, so
+    /// another test's server can't take it before the session binds it. Each
+    /// process starts at its own spot, for suites running side by side.
+    pub fn free_port() -> u16 {
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let base = 10_000 + (std::process::id() % 1_000) as u16 * 10;
+        loop {
+            let port = base + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 10_000;
+            if std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok() {
+                return port;
+            }
+        }
+    }
+
     #[derive(Default)]
     pub struct Net {
         pub wifi: bool,

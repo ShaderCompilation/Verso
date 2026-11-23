@@ -629,9 +629,9 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
 mod tests {
     use super::*;
     use crate::geom::Point;
-    use crate::transfer::fake::{Net, device as fake_device};
+    use crate::transfer::fake::{Net, device as fake_device, free_port};
     use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -648,7 +648,7 @@ mod tests {
         let store = Store::at(dir.path().join("data"));
         store.save_library_folders(vec![books_dir.clone()]).unwrap();
         let net = Arc::new(Mutex::new(Net { wifi: true, address: Some(Ipv4Addr::LOCALHOST), ..Net::default() }));
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = free_port();
         let mut dev = fake_device(&net, dir.path().join("markers"));
         dev.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let theme = Theme::for_dpi(300);
@@ -837,7 +837,7 @@ mod tests {
         let store = Store::at(dir.path().join("data"));
         store.save_library_folders(vec![books_dir.clone()]).unwrap();
         let net = Arc::new(Mutex::new(Net { wifi: true, address: Some(Ipv4Addr::LOCALHOST), ..Net::default() }));
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = free_port();
         let mut dev = fake_device(&net, files_root.clone());
         dev.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let theme = Theme::for_dpi(300);

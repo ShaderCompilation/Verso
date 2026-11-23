@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::device::fake::{Net, device};
+use super::device::fake::{Net, device, free_port};
 use super::*;
 
 const IP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 42);
@@ -46,11 +46,6 @@ impl Fixture {
     fn postponed(&self) -> u32 {
         self.net.lock().unwrap().postponed
     }
-}
-
-/// A port nothing listens on (bound and released, so it's free for a moment).
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 fn wait_for(session: &Session, what: &str, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
@@ -103,7 +98,8 @@ fn starts_everything_and_puts_it_all_back() {
     let postponed = f.postponed();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(f.postponed(), postponed, "and no longer once closed");
-    assert!(request(port).is_err(), "nothing listens after closing");
+    // The server's own state: once released, its port may go to another test.
+    assert!(session.shared.lock().running.server.is_none(), "nothing serves after closing");
     session.close();
     assert!(f.calls().is_empty(), "closing twice does nothing more");
 }
@@ -163,7 +159,6 @@ fn reports_wifi_and_port_failures() {
 fn sleep_stops_everything_but_wifi_and_a_new_start_has_a_new_code() {
     let f = Fixture::new(Net { address: Some(IP), ..Net::default() });
     let device = f.device();
-    let port = device.listen.port();
     let mut session = f.start(device);
     let first = wait_for(&session, "ready", |s| s.phase == Phase::Ready && s.hostname.is_some());
     f.calls();
@@ -174,7 +169,8 @@ fn sleep_stops_everything_but_wifi_and_a_new_start_has_a_new_code() {
     let postponed = f.postponed();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(f.postponed(), postponed, "the Kindle may sleep again once stopped");
-    assert!(request(port).is_err());
+    // The server's own state: once released, its port may go to another test.
+    assert!(session.shared.lock().running.server.is_none(), "the server is stopped");
     assert!(session.idle_deadline().is_none());
 
     session.restart();

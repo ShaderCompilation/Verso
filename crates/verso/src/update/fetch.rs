@@ -376,9 +376,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// A port that refuses connections: a socket is bound to it but never
+    /// listens. A released port could go to another test's server meanwhile.
+    fn refusing_port() -> (std::os::fd::OwnedFd, u16) {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let error = std::io::Error::last_os_error;
+        // SAFETY: socket calls on a descriptor this function opens and owns.
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0, "socket: {}", error());
+            let fd = OwnedFd::from_raw_fd(fd);
+            let mut addr: libc::sockaddr_in = std::mem::zeroed();
+            addr.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+            let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let ptr = &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr;
+            assert_eq!(libc::bind(fd.as_raw_fd(), ptr, len), 0, "bind: {}", error());
+            assert_eq!(libc::getsockname(fd.as_raw_fd(), ptr, &mut len), 0, "getsockname: {}", error());
+            (fd, u16::from_be(addr.sin_port))
+        }
+    }
+
     #[test]
     fn nothing_listening_is_unreachable() {
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_reserved, port) = refusing_port();
         let result = client(1000).get(&format!("http://127.0.0.1:{port}/latest.json"), 100);
         assert!(matches!(result, Err(FetchError::Unreachable(_))), "{result:?}");
     }
