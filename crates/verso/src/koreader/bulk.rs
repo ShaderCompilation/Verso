@@ -3,7 +3,7 @@
 //! writing anything; the import then writes the changed states in one pass
 //! and rebuilds Home and the opened order once. Both run on a [`Job`]
 //! thread; Settings shows the preview in between.
-use super::{Found, Progress, Status};
+use super::{Found, Sidecar};
 use crate::library::LibraryIndex;
 use crate::library::collections::{Collections, normalize};
 use crate::platform::Waker;
@@ -37,6 +37,9 @@ pub struct Preview {
     pub up_to_date: usize,
     /// Books the import marks finished: complete in KOReader, not yet in Verso.
     pub finished: usize,
+    /// Books with no KOReader position, only a `complete` status, that the
+    /// import marks finished (also counted in `finished`).
+    pub complete_only: usize,
     /// The book open in the reader under Settings, left out.
     pub open_skipped: usize,
     /// Sidecars that couldn't be read, and the first few of their books.
@@ -46,9 +49,10 @@ pub struct Preview {
     pub changes: usize,
 }
 impl Preview {
-    /// Books with a KOReader position, counted in one of the four rows.
+    /// Books with KOReader progress: a position, counted in one of the four
+    /// rows, or only a `complete` status.
     pub fn found(&self) -> usize {
-        self.not_started + self.newer_in_koreader + self.newer_in_verso + self.up_to_date
+        self.not_started + self.newer_in_koreader + self.newer_in_verso + self.up_to_date + self.complete_only
     }
 }
 
@@ -56,7 +60,7 @@ impl Preview {
 #[derive(Clone, Debug)]
 struct Entry {
     id: String,
-    progress: Progress,
+    sidecar: Sidecar,
     /// KOReader's last open of the file, from `history.lua`.
     opened: Option<u64>,
 }
@@ -103,7 +107,7 @@ pub fn scan(
         if cancelled() {
             return None;
         }
-        let found = match super::read(&path, cancelled) {
+        let found = match super::read_sidecar(&path, cancelled) {
             Ok(found) => found,
             Err(_) if cancelled() => return None,
             Err(e) => {
@@ -131,13 +135,14 @@ pub fn scan(
             Found::NewerInKoreader => preview.newer_in_koreader += 1,
             Found::UpToDate => preview.up_to_date += 1,
             Found::NewerInVerso => preview.newer_in_verso += 1,
+            Found::CompleteOnly => preview.complete_only += 1,
         }
-        if found.status == Status::Complete && !state.finished {
+        if found.complete() && !state.finished {
             preview.finished += 1;
         }
         if decision.state.is_some() {
             preview.changes += 1;
-            scan.entries.push(Entry { id: book.id.clone(), progress: found, opened });
+            scan.entries.push(Entry { id: book.id.clone(), sidecar: found, opened });
         }
     }
     log::info!(
@@ -169,7 +174,7 @@ pub fn import(store: &Store, scan: &Scan, index: &LibraryIndex) -> Imported {
     let states: Vec<(String, BookState)> = scan
         .entries
         .iter()
-        .filter_map(|e| Some((e.id.clone(), super::import(&store.book(&e.id), &e.progress, e.opened).state?)))
+        .filter_map(|e| Some((e.id.clone(), super::import(&store.book(&e.id), &e.sidecar, e.opened).state?)))
         .collect();
     let (written, error) = store.save_books(&states);
     if written > 0 {
@@ -336,7 +341,7 @@ mod tests {
     #[test]
     fn every_row_then_import_and_run_again() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let (store, mut index) = library(dir.path(), 10);
+        let (store, mut index) = library(dir.path(), 12);
         // 8: not an EPUB. 9: not available.
         index.books[8].path = dir.path().join("lib/8.pdf");
         index.books[9].available = false;
@@ -360,6 +365,11 @@ mod tests {
         store.save_book("7", &verso("/v7", 4000))?;
         sidecar(&path(8), &koreader("/k8", "reading"), 2000);
         sidecar(&path(9), &koreader("/k9", "reading"), 2000);
+        // 10: marked complete in KOReader without a position. 11: the same,
+        // already finished in Verso.
+        sidecar(&path(10), "return { summary = { status = 'complete' } }", 2000);
+        sidecar(&path(11), "return { summary = { status = 'complete' } }", 2000);
+        store.save_book("11", &BookState { finished: true, ..Default::default() })?;
         let history = dir.path().join("history.lua");
         let file = |i: usize| path(i).display().to_string();
         std::fs::write(
@@ -371,16 +381,17 @@ mod tests {
         let mut reports = Vec::new();
         let found = scan(&store, &index, &history, Some("7"), &|| false, &mut |d, t| reports.push((d, t))).unwrap();
         assert_eq!(snapshot(dir.path()), before, "the scan writes nothing");
-        assert_eq!((reports.first(), reports.last()), (Some(&(0, 8)), Some(&(8, 8))), "EPUBs available");
+        assert_eq!((reports.first(), reports.last()), (Some(&(0, 10)), Some(&(10, 10))), "EPUBs available");
         let p = &found.preview;
         assert_eq!(
             (p.not_started, p.newer_in_koreader, p.newer_in_verso, p.up_to_date, p.finished, p.open_skipped),
-            (1, 1, 1, 1, 1, 1)
+            (1, 1, 1, 2, 2, 1)
         );
-        assert_eq!((p.unreadable, p.unreadable_books.clone(), p.changes, p.found()), (1, vec![path(6)], 3, 4));
+        assert_eq!(p.complete_only, 1);
+        assert_eq!((p.unreadable, p.unreadable_books.clone(), p.changes, p.found()), (1, vec![path(6)], 4, 6));
 
         let imported = import(&store, &found, &index);
-        assert_eq!((imported.written, imported.total, imported.error.is_none()), (3, 3, true));
+        assert_eq!((imported.written, imported.total, imported.error.is_none()), (4, 4, true));
         let s = store.book("2");
         assert_eq!((s.position.0.as_str(), s.progress, s.page, s.last_opened), ("/k2", 5000, 0, 5000));
         assert_eq!(s.koreader_seen, Some(crate::koreader::Seen { modified: 6000, position: Position("/k2".into()) }));
@@ -389,6 +400,8 @@ mod tests {
         let s = store.book("4");
         assert_eq!((s.position.0.as_str(), s.finished, s.koreader_seen), ("/v4", true, None));
         assert_eq!(store.book("5").last_opened, 100, "up to date: untouched");
+        let s = store.book("10");
+        assert_eq!((s.finished, s.position.0.as_str(), s.last_opened, s.koreader_seen), (true, "", 0, None));
         assert_eq!(store.book("7").position.0, "/v7", "the open book is left out");
         for i in [0, 1, 6, 8, 9] {
             assert!(store.book(&i.to_string()).position.0.is_empty(), "{i}");
@@ -411,12 +424,12 @@ mod tests {
         // was open is closed now, and its newer KOReader position imported.
         let again = run_scan(&store, &index, &history, None);
         let p = &again.preview;
-        assert_eq!((p.not_started, p.newer_in_koreader, p.newer_in_verso, p.up_to_date), (0, 1, 1, 3));
-        assert_eq!((p.finished, p.changes, p.open_skipped), (0, 1, 0));
+        assert_eq!((p.not_started, p.newer_in_koreader, p.newer_in_verso, p.up_to_date), (0, 1, 1, 5));
+        assert_eq!((p.finished, p.complete_only, p.changes, p.open_skipped), (0, 0, 1, 0));
         assert_eq!(import(&store, &again, &index).written, 1);
         assert_eq!(store.book("7").position.0, "/k7");
         let p = run_scan(&store, &index, &history, None).preview;
-        assert_eq!((p.up_to_date, p.changes), (4, 0));
+        assert_eq!((p.up_to_date, p.changes), (6, 0));
         Ok(())
     }
 

@@ -79,10 +79,37 @@ pub fn modified(path: &Path) -> Result<Option<u64>> {
     }
 }
 
-/// Reads the position fields of a metadata file, skipping everything else
-/// without building it. None when there is no file or it has no position.
-/// Works for KOReader's legacy format too: the fields are top-level in both.
+/// What the bulk import reads from a sidecar (§5).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sidecar {
+    Progress(Progress),
+    /// No position, but `summary.status` is `"complete"`: the book was
+    /// marked finished in KOReader without being read there.
+    Complete,
+}
+impl Sidecar {
+    pub fn complete(&self) -> bool {
+        match self {
+            Sidecar::Progress(p) => p.status == Status::Complete,
+            Sidecar::Complete => true,
+        }
+    }
+}
+
+/// The position of a metadata file, for the check on open (§4). None when
+/// there is no file or it has no position.
 pub fn read(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Progress>> {
+    Ok(match read_sidecar(path, cancelled)? {
+        Some(Sidecar::Progress(p)) => Some(p),
+        Some(Sidecar::Complete) | None => None,
+    })
+}
+
+/// Reads the position fields of a metadata file, skipping everything else
+/// without building it. None when there is no file, or it has neither a
+/// position nor a `complete` status. Works for KOReader's legacy format too:
+/// the fields are top-level in both.
+pub fn read_sidecar(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Sidecar>> {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if absent(&e) => return Ok(None),
@@ -96,9 +123,6 @@ pub fn read(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Progress
     let mut bytes = Vec::new();
     file.by_ref().take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
     let fields = lua::fields_cancellable(&bytes, &["last_xpointer", "percent_finished", "summary"], cancelled)?;
-    let Some(position) = fields.get("last_xpointer").and_then(lua::Value::string).filter(|p| !p.is_empty()) else {
-        return Ok(None);
-    };
     let percent = match fields.get("percent_finished") {
         Some(lua::Value::Scalar(s)) => s.parse::<f64>().unwrap_or(0.0).clamp(0.0, 1.0),
         _ => 0.0,
@@ -109,7 +133,10 @@ pub fn read(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Progress
         Some("abandoned") => Status::Abandoned,
         _ => Status::Other,
     };
-    Ok(Some(Progress { position: Position(position.to_owned()), percent, status, modified }))
+    let Some(position) = fields.get("last_xpointer").and_then(lua::Value::string).filter(|p| !p.is_empty()) else {
+        return Ok((status == Status::Complete).then_some(Sidecar::Complete));
+    };
+    Ok(Some(Sidecar::Progress(Progress { position: Position(position.to_owned()), percent, status, modified })))
 }
 
 /// When KOReader last opened each file, from its `history.lua` (a list of
@@ -196,6 +223,10 @@ pub enum Found {
     UpToDate,
     /// Verso's position is kept.
     NewerInVerso,
+    /// No position in KOReader, only a `complete` status, and not yet
+    /// finished in Verso: marked finished. Already finished, the book is
+    /// `UpToDate`.
+    CompleteOnly,
 }
 
 /// The bulk import's decision for one book.
@@ -210,9 +241,17 @@ pub struct Import {
 /// file from `history.lua`. An imported position replaces Verso's, with
 /// `last_opened` in KOReader's order so Continue reading and Recent follow
 /// it. A `complete` status marks the book finished whatever happens to its
-/// position; nothing is ever unmarked, and `abandoned` is ignored (Verso has
-/// no such state).
-pub fn import(state: &BookState, progress: &Progress, opened: Option<u64>) -> Import {
+/// position, and for a sidecar with no position at all; nothing is ever
+/// unmarked, and `abandoned` is ignored (Verso has no such state).
+pub fn import(state: &BookState, sidecar: &Sidecar, opened: Option<u64>) -> Import {
+    let progress = match sidecar {
+        Sidecar::Progress(p) => p,
+        Sidecar::Complete if state.finished => return Import { found: Found::UpToDate, state: None },
+        Sidecar::Complete => {
+            let next = BookState { finished: true, ..state.clone() };
+            return Import { found: Found::CompleteOnly, state: Some(next) };
+        }
+    };
     let found = if state.position.0.is_empty() {
         Found::NotStarted
     } else if state.position == progress.position
@@ -257,6 +296,9 @@ mod tests {
     }
     fn progress(position: &str, modified: u64) -> Progress {
         Progress { position: Position(position.into()), percent: 0.5, status: Status::Reading, modified }
+    }
+    fn imp(state: &BookState, progress: &Progress, opened: Option<u64>) -> Import {
+        import(state, &Sidecar::Progress(progress.clone()), opened)
     }
     fn state(position: &str, last_opened: u64) -> BookState {
         BookState { position: Position(position.into()), page: 7, progress: 1200, last_opened, ..Default::default() }
@@ -303,6 +345,21 @@ mod tests {
             std::fs::write(&path, text)?;
             assert_eq!(read(&path, &|| false)?, None, "{text}");
         }
+        // Marked complete without a position: only the bulk import uses it.
+        for text in [
+            "return { summary = { status = 'complete' } }",
+            "return { last_xpointer = '', percent_finished = 0.2, summary = { status = 'complete' } }",
+        ] {
+            std::fs::write(&path, text)?;
+            assert_eq!(read(&path, &|| false)?, None, "{text}");
+            assert_eq!(read_sidecar(&path, &|| false)?, Some(Sidecar::Complete), "{text}");
+        }
+        for text in ["return { summary = { status = 'abandoned' } }", "return { summary = { status = 'reading' } }"] {
+            std::fs::write(&path, text)?;
+            assert_eq!(read_sidecar(&path, &|| false)?, None, "{text}");
+        }
+        std::fs::write(&path, "return { last_xpointer = '/c', summary = { status = 'complete' } }")?;
+        assert!(matches!(read_sidecar(&path, &|| false)?, Some(Sidecar::Progress(p)) if p.position.0 == "/c"));
         std::fs::write(&path, "return { last_xpointer = os.getenv('x') }")?;
         assert!(read(&path, &|| false).is_err(), "an unreadable sidecar is an error");
         std::fs::remove_dir_all(dir)?;
@@ -380,6 +437,9 @@ mod tests {
         let mut seen = state("/x", 0);
         seen.koreader_seen = Some(Seen { modified: 0, position: Position("/v".into()) });
         assert_eq!(check(&path, &seen, &never)?, None);
+        // Marked complete without a position: nothing to offer.
+        std::fs::write(&path, "return { summary = { status = 'complete' } }")?;
+        assert_eq!(check(&path, &BookState::default(), &never)?, None);
         std::fs::remove_dir_all(dir)?;
         Ok(())
     }
@@ -389,7 +449,7 @@ mod tests {
         // Verso has no position: imported, with KOReader's time from history.
         let mut p = progress("/k", 100);
         p.percent = 0.62;
-        let i = import(&BookState::default(), &p, Some(90));
+        let i = imp(&BookState::default(), &p, Some(90));
         assert_eq!(i.found, Found::NotStarted);
         let s = i.state.unwrap();
         assert_eq!((s.position.0.as_str(), s.progress, s.page, s.last_opened), ("/k", 6200, 0, 90));
@@ -399,40 +459,61 @@ mod tests {
         let mut hidden = state("/v", 50);
         hidden.hidden_from_continue = true;
         hidden.reading_speed = Some(crate::reader::speed::ReadingSpeed::default());
-        let i = import(&hidden, &p, None);
+        let i = imp(&hidden, &p, None);
         assert_eq!(i.found, Found::NewerInKoreader);
         let s = i.state.unwrap();
         assert_eq!((s.position.0.as_str(), s.page, s.last_opened, s.hidden_from_continue), ("/k", 0, 100, false));
         assert!(s.reading_speed.is_some(), "the rest of the state is kept");
         // Newer in Verso: kept, nothing written.
-        let i = import(&state("/v", 150), &p, Some(90));
+        let i = imp(&state("/v", 150), &p, Some(90));
         assert_eq!((i.found, i.state.is_none()), (Found::NewerInVerso, true));
         // The same position as Verso's, or as the one already dealt with.
-        let i = import(&state("/k", 50), &p, None);
+        let i = imp(&state("/k", 50), &p, None);
         assert_eq!((i.found, i.state.is_none()), (Found::UpToDate, true));
         let mut seen = state("/v", 50);
         seen.koreader_seen = Some(progress("/k", 40).seen());
         // KOReader rewrote the file without moving: still up to date.
-        let i = import(&seen, &progress("/k", 300), None);
+        let i = imp(&seen, &progress("/k", 300), None);
         assert_eq!((i.found, i.state.is_none()), (Found::UpToDate, true));
         // Finished: marked even when the position is kept or up to date.
         let mut done = progress("/k", 100);
         done.status = Status::Complete;
         for verso in [state("/v", 150), state("/k", 50)] {
-            let s = import(&verso, &done, None).state.expect("marked finished");
+            let s = imp(&verso, &done, None).state.expect("marked finished");
             assert!(s.finished);
             assert_eq!(s.position, verso.position);
         }
         let mut finished = state("/v", 150);
         finished.finished = true;
-        assert!(import(&finished, &done, None).state.is_none(), "already finished: nothing to write");
+        assert!(imp(&finished, &done, None).state.is_none(), "already finished: nothing to write");
         // Never unmarked, and abandoned is ignored.
-        let i = import(&finished, &progress("/k", 100), None);
+        let i = imp(&finished, &progress("/k", 100), None);
         assert!(i.state.is_none());
         let mut abandoned = progress("/k", 100);
         abandoned.status = Status::Abandoned;
-        assert!(import(&state("/v", 150), &abandoned, None).state.is_none());
-        let s = import(&BookState::default(), &abandoned, None).state.unwrap();
+        assert!(imp(&state("/v", 150), &abandoned, None).state.is_none());
+        let s = imp(&BookState::default(), &abandoned, None).state.unwrap();
         assert!(!s.finished);
+    }
+
+    #[test]
+    fn a_complete_sidecar_without_a_position_marks_the_book_finished() {
+        // Never opened in Verso: finished, and nothing else changes.
+        let i = import(&BookState::default(), &Sidecar::Complete, Some(90));
+        assert_eq!(i.found, Found::CompleteOnly);
+        let s = i.state.unwrap();
+        assert!(s.finished);
+        assert_eq!((s.position.0.as_str(), s.last_opened, s.koreader_seen), ("", 0, None));
+        // Read in Verso: finished, its position and time kept.
+        let verso = state("/v", 150);
+        let i = import(&verso, &Sidecar::Complete, None);
+        assert_eq!(i.found, Found::CompleteOnly);
+        let s = i.state.unwrap();
+        assert!(s.finished);
+        assert_eq!((s.position.0.as_str(), s.page, s.progress, s.last_opened), ("/v", 7, 1200, 150));
+        // Already finished: up to date, nothing to write.
+        let done = BookState { finished: true, ..verso };
+        let i = import(&done, &Sidecar::Complete, None);
+        assert_eq!((i.found, i.state.is_none()), (Found::UpToDate, true));
     }
 }

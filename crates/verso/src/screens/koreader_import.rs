@@ -275,13 +275,14 @@ mod tests {
             newer_in_verso: 8,
             up_to_date: 3,
             finished: 23,
+            complete_only: 2,
             open_skipped: 1,
             unreadable: 5,
             unreadable_books: (0..3).map(|i| format!("/mnt/us/documents/A long book title {i}.epub").into()).collect(),
             changes: 133,
         };
         let (text, note) = preview_text(&full);
-        assert!(text.starts_with("KOReader progress found for 145 books:\n    118 not started in Verso\n"), "{text}");
+        assert!(text.starts_with("KOReader progress found for 147 books:\n    118 not started in Verso\n"), "{text}");
         assert!(text.contains("A long book title 2.epub and 2 more"), "{text}");
         assert!(note.contains("one way"));
         full.changes = 0;
