@@ -263,24 +263,48 @@ fn counted(count: usize, noun: &str) -> String {
 }
 
 #[cfg(test)]
+fn fullest_preview() -> Preview {
+    Preview {
+        not_started: 118,
+        newer_in_koreader: 15,
+        newer_in_verso: 8,
+        up_to_date: 3,
+        finished: 23,
+        complete_only: 2,
+        open_skipped: 1,
+        unreadable: 5,
+        unreadable_books: (0..3).map(|i| format!("/mnt/us/documents/A long book title {i}.epub").into()).collect(),
+        changes: 133,
+    }
+}
+
+/// The preview with every line, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    let dir = std::env::temp_dir().join("verso-import-fit");
+    let mut sheet = ImportSheet::open(t, screen, Store::at(dir), Waker::new(|| {}), None);
+    sheet.job = None;
+    let mut scan = Scan::default();
+    scan.preview = fullest_preview();
+    sheet.stage = Stage::Preview(Box::new(scan));
+    sheet.place(t);
+    let (main, note) = sheet.text();
+    let w = sheet.body.w;
+    let needed =
+        crate::ui::fit::text_h(text, &main, t.body, w) + t.mm(3.0) + crate::ui::fit::text_h(text, note, t.small, w);
+    let panel = sheet.sheet.rect();
+    assert!(panel.y >= t.top_bar, "ImportSheet at {}x{}: the top bar stays visible", screen.w, screen.h);
+    let buttons = sheet.buttons.iter().map(|(b, _)| b.rect());
+    vec![crate::ui::fit::Parts::new("ImportSheet", panel, buttons).body(sheet.body, needed)]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gfx::{Canvas, IconRenderer, TextRenderer};
 
     #[test]
-    fn the_fullest_preview_fits_every_screen() {
-        let mut full = Preview {
-            not_started: 118,
-            newer_in_koreader: 15,
-            newer_in_verso: 8,
-            up_to_date: 3,
-            finished: 23,
-            complete_only: 2,
-            open_skipped: 1,
-            unreadable: 5,
-            unreadable_books: (0..3).map(|i| format!("/mnt/us/documents/A long book title {i}.epub").into()).collect(),
-            changes: 133,
-        };
+    fn preview_text_names_counts_and_unreadable_books() {
+        let mut full = fullest_preview();
         let (text, note) = preview_text(&full);
         assert!(text.starts_with("KOReader progress found for 147 books:\n    118 not started in Verso\n"), "{text}");
         assert!(text.contains("A long book title 2.epub and 2 more"), "{text}");
@@ -288,27 +312,5 @@ mod tests {
         full.changes = 0;
         assert!(preview_text(&full).1.starts_with("Nothing to import"));
         assert_eq!(preview_text(&Preview::default()).0, "No KOReader progress found.");
-        full.changes = 133;
-        let dir = tempfile::tempdir().unwrap();
-        for (dpi, w, h) in [(300, 1272, 1696), (300, 1696, 1272), (167, 600, 800), (167, 800, 600)] {
-            let t = Theme::for_dpi(dpi);
-            let screen = Rect::new(0, 0, w, h);
-            let mut sheet = ImportSheet::open(&t, screen, Store::at(dir.path().into()), Waker::new(|| {}), None);
-            sheet.job = None;
-            let mut scan = Scan::default();
-            scan.preview = full.clone();
-            sheet.stage = Stage::Preview(Box::new(scan));
-            sheet.place(&t);
-            let mut text = TextRenderer::new();
-            let (main, note) = sheet.text();
-            let (_, main_h) = text.measure(&main, t.body, Some(sheet.body.w as f32));
-            let (_, note_h) = text.measure(note, t.small, Some(sheet.body.w as f32));
-            let needed = main_h.ceil() as i32 + t.mm(3.0) + note_h.ceil() as i32;
-            assert!(needed <= sheet.body.h, "{w}x{h}: {needed} > {}", sheet.body.h);
-            assert_eq!(sheet.buttons.len(), 2);
-            assert!(sheet.sheet.rect().y >= t.top_bar, "{w}x{h}: the top bar stays visible");
-            let (mut canvas, mut icons) = (Canvas::new(w as u32, h as u32), IconRenderer::default());
-            sheet.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]));
-        }
     }
 }

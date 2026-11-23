@@ -261,6 +261,21 @@ impl Card {
     }
 }
 
+/// The card over a full screen, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    let progress = Progress {
+        position: Position("/k".into()),
+        percent: 0.62,
+        status: crate::koreader::Status::Reading,
+        modified: 100,
+        status_day: None,
+    };
+    let card = Card::new(progress, 213, 62, (1, 4), None, t, screen);
+    let (stay, go) = card.buttons();
+    vec![crate::ui::fit::Parts::new("Card", card.rect(), [stay, go])]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,12 +376,5 @@ mod tests {
         assert!(card.rect().contains(stay.center()) && card.rect().contains(go.center()) && stay.right() < go.x);
         let card = Card::new(progress("/k"), 2, 1, (1, 4), None, &t, area);
         assert_eq!(card.detail, "Behind this page");
-        // A 6" screen keeps the margins.
-        let small = Rect::new(0, 0, 600, 800);
-        let t = Theme::for_dpi(167);
-        let card = Card::new(progress("/k"), 2, 1, (1, 4), None, &t, Rect { h: 780, ..small });
-        assert!(card.rect().x >= t.margin && card.rect().right() <= small.w - t.margin);
-        let (stay, _) = card.buttons();
-        assert!(stay.x >= card.rect().x);
     }
 }

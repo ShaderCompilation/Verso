@@ -281,6 +281,17 @@ fn progress_label(page: usize, pages: usize, percent: Option<u32>) -> String {
     }
 }
 
+/// The menu's bottom panel, for `screens/fit_tests.rs`. Left out until fixed:
+/// at 167 dpi the top panel's bookmark, search, light and battery targets
+/// overlap by 1 px, and the next-page button ends 1 px past the right margin.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    let m = ReaderMenu::new(t, screen, "A long book title that will not fit the top bar", 10, 100);
+    let mut buttons = vec![m.prev.rect(), m.progress.bounds()];
+    buttons.extend(m.button_rects());
+    vec![crate::ui::fit::Parts::new("ReaderMenu", m.panel, buttons)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -59,6 +59,11 @@ impl Rect {
         p.x >= self.x && p.x < self.right() && p.y >= self.y && p.y < self.bottom()
     }
 
+    /// True when `other` lies wholly inside this rectangle.
+    pub const fn contains_rect(&self, other: &Rect) -> bool {
+        other.x >= self.x && other.y >= self.y && other.right() <= self.right() && other.bottom() <= self.bottom()
+    }
+
     /// The overlapping part of two rectangles, if any.
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {
         let x = self.x.max(other.x);

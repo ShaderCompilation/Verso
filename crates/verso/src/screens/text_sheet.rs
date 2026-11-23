@@ -209,6 +209,20 @@ impl FontList {
     }
 }
 
+/// The Text sheet and a font list of several pages, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::Parts;
+    let text = TextSheet::new(t, screen, &Typography::default());
+    let fonts: Vec<_> = (0..40).map(|i| FontFace { name: format!("Font {i:02}"), file: None }).collect();
+    let list = FontList::new(t, screen, &fonts, true, "Font 20");
+    vec![
+        Parts::new("TextSheet", text.sheet.rect(), [text.font, text.size.rect(), text.spacing.rect(), text.rows[3].0]),
+        // The list's rows reach the screen edges by design: only the pager is a button here.
+        Parts::new("FontList", list.sheet.rect(), [list.pager.rect()]),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,13 +245,8 @@ mod tests {
 
     #[test]
     fn text_sheet_holds_only_the_four_typography_rows() {
-        let t = Theme::for_dpi(300);
-        for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
-            let sheet = TextSheet::new(&t, screen, &Typography::default());
-            let labels: Vec<_> = sheet.rows.iter().map(|(_, label)| *label).collect();
-            assert_eq!(labels, ["Font", "Size", "Spacing", "Justify"]);
-            assert!(sheet.rows[0].0.y >= screen.bottom() - t.mm(64.0), "{screen:?}");
-            assert!(sheet.rows[3].0.bottom() <= screen.bottom(), "{screen:?}");
-        }
+        let sheet = TextSheet::new(&Theme::for_dpi(300), Rect::new(0, 0, 1272, 1696), &Typography::default());
+        let labels: Vec<_> = sheet.rows.iter().map(|(_, label)| *label).collect();
+        assert_eq!(labels, ["Font", "Size", "Spacing", "Justify"]);
     }
 }

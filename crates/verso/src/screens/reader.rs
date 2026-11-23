@@ -2354,6 +2354,14 @@ impl Screen for Reader {
     }
 }
 
+/// The reader's own sheets, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    let mut samples = end::fit_samples(t, screen);
+    samples.extend(koreader::fit_samples(t, screen));
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,6 +7,8 @@ pub mod contents;
 pub mod dictionaries;
 pub mod dictionary;
 pub mod dictionary_folders;
+#[cfg(test)]
+mod fit_tests;
 pub mod folders;
 pub mod footnote;
 pub mod gallery;

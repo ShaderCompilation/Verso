@@ -1319,14 +1319,16 @@ impl ReportSheet {
         Self { sheet, filename, body, ok }
     }
 
-    fn draw(&self, cx: &mut DrawCx) {
-        let t = cx.theme;
-        self.sheet.draw(cx);
-        let text = format!(
+    fn message(&self) -> String {
+        format!(
             "Saved to:\nverso/reports/{}\n\nConnect your Kindle over USB (or use Wi-Fi transfer) to copy it and attach it to a bug report. Book names have been removed.",
             self.filename,
-        );
-        cx.paragraph(&text, t.small.gray(INK2), self.body, HAlign::Left);
+        )
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        cx.paragraph(&self.message(), cx.theme.small.gray(INK2), self.body, HAlign::Left);
         self.ok.draw(cx);
     }
 
@@ -1367,18 +1369,17 @@ impl ExitPrompt {
         self.exit.enabled = !stopping;
     }
 
+    fn message(&self) -> &'static str {
+        if self.stopping {
+            "Stopping SSH…"
+        } else {
+            "SSH will keep running after Verso closes. Stop it to close remote connections, or exit and leave it running."
+        }
+    }
+
     pub fn draw(&self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
-        cx.paragraph(
-            if self.stopping {
-                "Stopping SSH…"
-            } else {
-                "SSH will keep running after Verso closes. Stop it to close remote connections, or exit and leave it running."
-            },
-            cx.theme.small,
-            self.text,
-            HAlign::Left,
-        );
+        cx.paragraph(self.message(), cx.theme.small, self.text, HAlign::Left);
         self.stop.draw(cx);
         self.exit.draw(cx);
     }
@@ -1398,6 +1399,8 @@ impl ExitPrompt {
         }
     }
 }
+
+const USB_MESSAGE: &str = "Verso keeps your books available while charging. Exit to transfer books from your computer.";
 
 pub struct UsbPrompt {
     sheet: Sheet,
@@ -1419,12 +1422,7 @@ impl UsbPrompt {
 impl Screen for UsbPrompt {
     fn draw(&mut self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
-        cx.paragraph(
-            "Verso keeps your books available while charging. Exit to transfer books from your computer.",
-            cx.theme.small,
-            self.text,
-            HAlign::Left,
-        );
+        cx.paragraph(USB_MESSAGE, cx.theme.small, self.text, HAlign::Left);
         self.exit.draw(cx);
         self.stay.draw(cx);
     }
@@ -1440,6 +1438,23 @@ impl Screen for UsbPrompt {
     }
 }
 
+/// The report, exit and USB sheets, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::{Parts, text_h};
+    let report = ReportSheet::new(t, screen, "report-20261122-123000.txt".into());
+    let exit = ExitPrompt::new(t, screen);
+    let usb = UsbPrompt::new(t, screen);
+    vec![
+        Parts::new("ReportSheet", report.sheet.rect(), [report.ok.rect()])
+            .body(report.body, text_h(text, &report.message(), t.small, report.body.w)),
+        Parts::new("ExitPrompt", exit.sheet.rect(), [exit.stop.rect(), exit.exit.rect()])
+            .body(exit.text, text_h(text, exit.message(), t.small, exit.text.w)),
+        Parts::new("UsbPrompt", usb.sheet.rect(), [usb.exit.rect(), usb.stay.rect()])
+            .body(usb.text, text_h(text, USB_MESSAGE, t.small, usb.text.w)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1451,45 +1466,6 @@ mod tests {
             address: address.map(str::to_owned),
             hostname: hostname.map(str::to_owned),
         }
-    }
-
-    #[test]
-    fn reading_switches_fit_every_screen_and_save() -> anyhow::Result<()> {
-        use crate::geom::Point;
-        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
-        let dir = tempfile::tempdir()?;
-        let store = Store::at(dir.path().to_path_buf());
-        for (dpi, w, h) in [(300, 1272, 1696), (300, 1696, 1272), (167, 600, 800), (167, 800, 600)] {
-            let t = Theme::for_dpi(dpi);
-            let screen = Rect::new(0, 0, w, h);
-            let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
-            let (mut canvas, mut text, mut icons) =
-                (Canvas::new(w as u32, h as u32), TextRenderer::new(), IconRenderer::default());
-            let mut hints = vec![];
-            s.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
-            let (corner, koreader) = (s.corner.rect(), s.koreader.rect());
-            assert!(corner.bottom() < koreader.y, "{w}x{h}: one row after the other");
-            assert!(koreader.bottom() <= s.content.bottom(), "{w}x{h}: {koreader:?}");
-            assert!(corner.y > s.zones.rect().bottom() && corner.x > s.zones_preview.right(), "{w}x{h}");
-            // Off, saved; on again.
-            for on in [false, true] {
-                let p = Point::new(koreader.center().x, koreader.center().y);
-                let mut toast = None;
-                let mut cx = EventCx {
-                    theme: &t,
-                    screen,
-                    now: Instant::now(),
-                    toast: &mut toast,
-                    forced: &mut vec![],
-                    needs_redraw: &mut false,
-                    battery: None,
-                };
-                s.on_gesture(Gesture::Down(p), &mut cx);
-                s.on_gesture(Gesture::Tap(p), &mut cx);
-                assert_eq!(store.settings().koreader_progress, on, "{w}x{h}");
-            }
-        }
-        Ok(())
     }
 
     fn draw(s: &mut SystemSettings, t: &Theme, w: i32, h: i32) {
@@ -1540,13 +1516,19 @@ mod tests {
     }
 
     #[test]
-    fn koreader_import_row_fits_every_screen_and_imports() -> anyhow::Result<()> {
+    fn settings_rows_fit_every_screen_save_and_import() -> anyhow::Result<()> {
+        use crate::geom::Point;
         let dir = tempfile::tempdir()?;
         let store = Store::at(dir.path().join("data"));
-        for (dpi, w, h) in [(300, 1272, 1696), (300, 1696, 1272), (167, 600, 800), (167, 800, 600)] {
+        for (w, h, dpi) in crate::ui::fit::SCREENS {
             let t = Theme::for_dpi(dpi);
             let screen = Rect::new(0, 0, w, h);
             let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
+            draw(&mut s, &t, w, h);
+            let (corner, koreader) = (s.corner.rect(), s.koreader.rect());
+            assert!(corner.bottom() < koreader.y, "{w}x{h}: one row after the other");
+            assert!(koreader.bottom() <= s.content.bottom(), "{w}x{h}: {koreader:?}");
+            assert!(corner.y > s.zones.rect().bottom() && corner.x > s.zones_preview.right(), "{w}x{h}");
             s.tab = Tab::Library;
             draw(&mut s, &t, w, h);
             let (d, k) = (s.dictionaries, s.koreader_area);
@@ -1558,6 +1540,27 @@ mod tests {
             } else {
                 assert_eq!(d.y, k.y, "{w}x{h}: side by side");
             }
+        }
+        let (t, screen) = (Theme::for_dpi(300), Rect::new(0, 0, 1272, 1696));
+
+        // The KOReader progress switch: off, saved; on again.
+        let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
+        draw(&mut s, &t, 1272, 1696);
+        for on in [false, true] {
+            let p = Point::new(s.koreader.rect().center().x, s.koreader.rect().center().y);
+            let mut toast = None;
+            let mut cx = EventCx {
+                theme: &t,
+                screen,
+                now: Instant::now(),
+                toast: &mut toast,
+                forced: &mut vec![],
+                needs_redraw: &mut false,
+                battery: None,
+            };
+            s.on_gesture(Gesture::Down(p), &mut cx);
+            s.on_gesture(Gesture::Tap(p), &mut cx);
+            assert_eq!(store.settings().koreader_progress, on);
         }
 
         // A book with KOReader progress, and one open under Settings.
@@ -1574,7 +1577,6 @@ mod tests {
             std::fs::write(&path, "return { last_xpointer = '/k', percent_finished = 0.25 }")?;
         }
         store.save_library(&crate::library::LibraryIndex { books, ..Default::default() })?;
-        let (t, screen) = (Theme::for_dpi(300), Rect::new(0, 0, 1272, 1696));
         let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {})).with_open_book(Some("1".into()));
         s.tab = Tab::Library;
         let row = Rect { y: s.koreader_area.y + t.mm(8.0), h: t.row2, ..s.koreader_area };

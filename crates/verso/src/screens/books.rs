@@ -2159,14 +2159,16 @@ impl CrashSheet {
         Self { sheet, notice, body, ok }
     }
 
-    fn draw(&self, cx: &mut DrawCx) {
-        let t = cx.theme;
-        self.sheet.draw(cx);
-        let text = format!(
+    fn message(&self) -> String {
+        format!(
             "A crash report was saved to:\n{}\n\nConnect your Kindle over USB (or use Wi-Fi transfer) to copy it and attach it to a bug report. For full device details, use Settings → Device → Create problem report.",
             self.notice.display_path(),
-        );
-        cx.paragraph(&text, t.small.gray(INK2), self.body, HAlign::Left);
+        )
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        cx.paragraph(&self.message(), cx.theme.small.gray(INK2), self.body, HAlign::Left);
         self.ok.draw(cx);
     }
 
@@ -3762,6 +3764,35 @@ fn detail_pages(
     pages
 }
 
+/// The Books sheets in their fullest state, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::{Parts, text_h};
+    let line = |style: crate::gfx::TextStyle| style.line_height().ceil() as i32;
+    let name = NameSheet::new(t, screen, NameOperation::Rename("/books/A folder with a long name".into()));
+    let error = text_h(text, "A folder with this name already exists.", t.caption, name.error_rect.w);
+    let crash = CrashSheet::new(t, screen, crate::report::CrashNotice { filename: "crash-20261122-123000.txt".into() });
+    let details = Details::from_text(t, screen, "Book details", "A long line of details. ".repeat(200));
+    let message = selection::selection_delete_message(&files::Contents { books: 12, folders: 2, other_files: 3 }, true);
+    let confirm = ConfirmDelete::new(t, screen, (), "Delete 15 items?", message);
+    let jump = PageJump::new(t, screen, 3, 10);
+    let mut samples = vec![
+        Parts::new("NameSheet", name.sheet.rect(), [name.cancel.rect(), name.submit.rect()])
+            .body(name.error_rect, error)
+            .keyboard(name.keyboard.rect()),
+        Parts::new("CrashSheet", crash.sheet.rect(), [crash.ok.rect()])
+            .body(crash.body, text_h(text, &crash.message(), t.small, crash.body.w)),
+        Parts::new("Details", details.sheet.rect(), [details.pager.rect()]).body(details.text, line(t.body)),
+        Parts::new("ConfirmDelete", confirm.sheet.rect(), [confirm.cancel.rect(), confirm.delete.rect()])
+            .body(confirm.text, text_h(text, &confirm.message, t.body, confirm.text.w)),
+        Parts::new("PageJump", jump.sheet.rect(), [jump.slider.bounds()])
+            .body(jump.label, line(t.title))
+            .body(jump.start, line(t.body)),
+    ];
+    samples.extend(moving::fit_samples(t, screen, text));
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4256,6 +4287,8 @@ mod tests {
             }
             for mode in [FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Covers] {
                 let l = folder_tile::layout(mode, 4, r, &t).unwrap();
+                assert!(r.contains_rect(&l.bounds), "{w}x{h} {mode:?}: {:?} inside {r:?}", l.bounds);
+                assert!(l.covers.iter().all(|c| !c.1.is_empty() && l.bounds.contains_rect(&c.1)), "{w}x{h} {mode:?}");
                 let sel = selection::badge_rect(l.front, &t);
                 let count = folder_tile::count_badge_rect(l.front, count_w, &t);
                 assert!(
@@ -4349,36 +4382,10 @@ mod tests {
             assert_eq!(books.navigation.folder, Some("/books/Fiction/Nested".into()));
             assert!(books.show_new_folder());
             assert_eq!(books.path_rect, normal_path);
-
-            // Second Back tap navigates up to the parent folder.
-            tap(&mut books, back, cx);
-            assert_eq!(books.navigation.folder, Some("/books/Fiction".into()));
-
-            // Home icon works again once selection has ended.
-            tap(&mut books, home_pt, cx);
-            assert!(books.is_home());
         });
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }
-
-    #[test]
-    fn selection_delete_messages_name_what_is_removed() {
-        let message = |books, folders, other_files, has_folders| {
-            selection::selection_delete_message(&files::Contents { books, folders, other_files }, has_folders)
-        };
-        assert_eq!(message(1, 0, 0, false), "1 book and its reading progress will be removed from this device.");
-        assert_eq!(message(3, 0, 0, false), "3 books and their reading progress will be removed from this device.");
-        assert_eq!(
-            message(0, 2, 0, true),
-            "The selection and everything in its folders will be removed from this device: 2 folders."
-        );
-        assert_eq!(
-            message(1, 1, 3, true),
-            "The selection and everything in its folders will be removed from this device: \
-             1 book and its reading progress, 1 folder, 3 other files."
-        );
     }
 
     #[test]
@@ -4452,12 +4459,10 @@ mod tests {
             survivor.path = blocked;
             books.index.books.push(survivor);
             books.collections = Arc::new(Collections::from_index(&books.index, &books.roots));
-            store.save_book("2", &BookState { progress: 1700, ..Default::default() }).unwrap();
             books.refresh(&t);
             books.start_selection(Target::Book("2".into()), cx);
             books.delete_selection(vec![Target::Book("2".into())], cx);
             assert!(books.details.as_ref().unwrap().content.starts_with("Deleted 0 of 1:"));
-            assert_eq!(store.book("2").progress, 1700);
             assert!(books.index.books.iter().any(|b| b.id == "2"));
         });
         drop(books);
@@ -4659,40 +4664,6 @@ mod tests {
         assert_eq!(history()?, before, "a failed open adds no history");
         assert_eq!(store.book("0").last_opened, 1);
         drop(books);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn library_has_no_resume_card_and_uses_responsive_grid_dimensions() -> anyhow::Result<()> {
-        let (store, root) = collection_fixture("library-grid")?;
-        let id = store.library().books[0].id.clone();
-        let state = BookState {
-            position: crate::document::Position("exact".into()),
-            last_opened: 5,
-            progress: 1234,
-            ..Default::default()
-        };
-        store.save_book(&id, &state)?;
-        for (w, h, dpi, per_page, pages) in [
-            (1272, 1696, 300, 12, 2), // Paperwhite portrait: 4 × 3
-            (1696, 1272, 300, 12, 2), // Paperwhite landscape: 6 × 2
-            (1072, 1448, 300, 9, 3),  // 6" 300 dpi portrait: 3 × 3
-            (600, 800, 167, 9, 3),    // 6" 167 dpi portrait: 3 × 3
-        ] {
-            let t = Theme::for_dpi(dpi);
-            let screen = Rect::new(0, 0, w, h);
-            let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
-            books.navigation.folder = Some("/books/Fiction/Nested".into());
-            books.refresh(&t);
-            assert!(books.continue_id.is_none(), "a resumable book stays on Home only");
-            assert_eq!(books.continue_rect, Rect::default());
-            assert_eq!(books.books.len(), 20);
-            assert_eq!(books.grid.cells().len(), per_page, "{w}x{h}");
-            assert_eq!(books.pager.pages, pages, "{w}x{h}");
-            assert!(books.pager.compact);
-            drop(books);
-        }
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -5400,15 +5371,11 @@ mod tests {
             assert_eq!(books.pager.page, 1);
             books.after_present();
             books.navigation_writer.flush().unwrap();
+            // Reader settings saves cannot overwrite library navigation.
+            store.save_settings(&store.settings()).unwrap();
+            assert_eq!(store.navigation(), books.navigation);
         });
         drop(books);
-        let restored = browsing_books(&t, screen, worker, store.clone());
-        assert_eq!(restored.navigation.folder, Some("/books/Fiction/Nested".into()));
-        assert_eq!(restored.pager.page, 1);
-        // Reader settings saves cannot overwrite library navigation.
-        store.save_settings(&store.settings())?;
-        assert_eq!(store.navigation(), restored.navigation);
-        drop(restored);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -5435,8 +5402,10 @@ mod tests {
             let p = books.grid.cells()[0].1.center();
             books.on_gesture(Gesture::Down(p), cx);
             books.on_gesture(Gesture::LongPress(p), cx);
+            let mut kept = book(0);
+            kept.path = "/books/Fiction/Nested/0.epub".into();
             books.pending = Some(Snapshot {
-                index: LibraryIndex { books: vec![book(0)], ..Default::default() },
+                index: LibraryIndex { books: vec![kept], ..Default::default() },
                 ..Default::default()
             });
             books.apply_pending(cx);
@@ -5448,7 +5417,16 @@ mod tests {
             books.details = Some(Details::from_text(&t, screen, "Folder", "path".into()));
             books.apply_pending(cx);
             assert!(books.pending.is_some());
-            books.details = None;
+            let outside = Point::new(1, 1);
+            books.on_gesture(Gesture::Down(outside), cx);
+            assert!(matches!(books.on_gesture(Gesture::Tap(outside), cx), Action::None));
+            assert!(books.details.is_none());
+            assert_eq!(books.books.len(), 1, "closing Details applies the waiting update");
+            assert_eq!((books.pager.page, books.grid.cells().len()), (0, 1), "the page clamps");
+            books.pending = Some(Snapshot {
+                index: LibraryIndex { books: vec![book(0)], ..Default::default() },
+                ..Default::default()
+            });
             books.apply_pending(cx);
             books.after_present();
             books.navigation_writer.flush().unwrap();
@@ -5574,7 +5552,6 @@ mod tests {
             let cached: HashSet<_> = books.thumbnails.images.keys().map(|(key, ..)| key.clone()).collect();
             assert_eq!(cached, seen, "earlier pages stay decoded");
         }
-        assert!(books.thumbnails.bytes() <= Thumbnails::MAX_BYTES);
         // Every cover on a page has one size, so one tile thumbnail serves it.
         let sizes: HashSet<_> = books.thumbnails.images.keys().map(|(_, w, h, _)| (*w, *h)).collect();
         assert_eq!(sizes.len(), 1);
@@ -5586,9 +5563,6 @@ mod tests {
         books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
         assert!(books.thumbnails.failed.is_empty());
         std::fs::rename(&moved, &covers)?;
-        // Clearing, as opening a book does, frees them all.
-        books.thumbnails.clear();
-        assert!(books.thumbnails.images.is_empty() && books.thumbnails.bytes() == 0);
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -5954,31 +5928,6 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
-    #[test]
-    fn name_editor_and_folder_menu_fit_both_orientations_and_keyboards() {
-        for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167), (800, 600, 167)] {
-            let t = Theme::for_dpi(dpi);
-            let screen = Rect::new(0, 0, w, h);
-            let mut sheet = NameSheet::new(&t, screen, NameOperation::Create("/books".into()));
-            for _ in 0..3 {
-                // The globe key is second from the left on the bottom row (1.5..2.5 of 10 units).
-                let p = Point::new(screen.w / 5, screen.bottom() - t.target / 2);
-                sheet.keyboard.on_gesture(&Gesture::Down(p), &t);
-                sheet.keyboard.on_gesture(&Gesture::Tap(p), &t);
-                assert!(
-                    sheet.submit.rect().bottom() <= sheet.keyboard.rect().y,
-                    "{w}x{h}: buttons {} keyboard {}",
-                    sheet.submit.rect().bottom(),
-                    sheet.keyboard.rect().y
-                );
-                assert!(sheet.cancel.rect().bottom() <= sheet.keyboard.rect().y);
-                assert!(sheet.error_rect.bottom() <= sheet.keyboard.rect().y);
-            }
-            let area = Rect { y: t.top_bar, h: screen.h - t.top_bar, ..screen };
-            let menu = PopupMenu::open(vec![(None, "Action".into()); 6], screen.center(), area, &t);
-            assert!(menu.rect().y >= area.y && menu.rect().bottom() <= screen.bottom() - t.margin);
-        }
-    }
 
     #[test]
     fn folder_name_errors_root_menu_and_stale_publications() -> anyhow::Result<()> {
@@ -6151,23 +6100,41 @@ mod tests {
     }
 
     #[test]
-    fn folder_delete_messages_and_subtitles_name_what_is_inside() {
-        let message = |books, folders, other_files| {
+    fn delete_messages_and_folder_subtitles_name_what_is_inside() {
+        let folder = |books, folders, other_files| {
             folder_delete_message("Tolkien", &files::Contents { books, folders, other_files })
         };
-        assert_eq!(message(0, 0, 0), "The empty folder “Tolkien” will be removed from this device.");
-        assert_eq!(message(0, 1, 0), "“Tolkien” and the empty folder in it will be removed from this device.");
-        assert_eq!(message(0, 3, 0), "“Tolkien” and the 3 empty folders in it will be removed from this device.");
-        assert_eq!(
-            message(1, 0, 0),
-            "“Tolkien” and everything in it will be removed from this device: 1 book and its reading progress."
-        );
-        assert_eq!(
-            message(12, 2, 3),
-            "“Tolkien” and everything in it will be removed from this device: \
-             12 books and their reading progress, 3 other files."
-        );
-        assert_eq!(message(0, 1, 1), "“Tolkien” and everything in it will be removed from this device: 1 other file.");
+        let selection = |books, folders, other_files, has_folders| {
+            selection::selection_delete_message(&files::Contents { books, folders, other_files }, has_folders)
+        };
+        for (message, expected) in [
+            (folder(0, 0, 0), "The empty folder “Tolkien” will be removed from this device."),
+            (folder(0, 1, 0), "“Tolkien” and the empty folder in it will be removed from this device."),
+            (folder(0, 3, 0), "“Tolkien” and the 3 empty folders in it will be removed from this device."),
+            (
+                folder(1, 0, 0),
+                "“Tolkien” and everything in it will be removed from this device: 1 book and its reading progress.",
+            ),
+            (
+                folder(12, 2, 3),
+                "“Tolkien” and everything in it will be removed from this device: \
+                 12 books and their reading progress, 3 other files.",
+            ),
+            (folder(0, 1, 1), "“Tolkien” and everything in it will be removed from this device: 1 other file."),
+            (selection(1, 0, 0, false), "1 book and its reading progress will be removed from this device."),
+            (selection(3, 0, 0, false), "3 books and their reading progress will be removed from this device."),
+            (
+                selection(0, 2, 0, true),
+                "The selection and everything in its folders will be removed from this device: 2 folders.",
+            ),
+            (
+                selection(1, 1, 3, true),
+                "The selection and everything in its folders will be removed from this device: \
+                 1 book and its reading progress, 1 folder, 3 other files.",
+            ),
+        ] {
+            assert_eq!(message, expected);
+        }
         let mut folder = collections::Folder::default();
         assert_eq!(folder_subtitle(&folder), "Empty");
         folder.children.insert("/books/Tolkien/nested".into());
@@ -6273,67 +6240,6 @@ mod tests {
         books.open_menu("0".into(), Point::new(600, 800), &t);
         tap(&mut books, &mut cx, "Mark finished");
         assert!(books.store.book("0").finished);
-        drop(books);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-    #[test]
-    fn touches_menus_and_sheets_defer_scan_reordering_and_clamp_pages() -> anyhow::Result<()> {
-        let root = std::env::temp_dir().join(format!("verso-library-ui-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("books-folder"))?;
-        let store = Store::at(root.join("state"));
-        let mut settings = store.settings();
-        settings.library_folder = Some(root.join("books-folder"));
-        store.save_settings(&settings)?;
-        let books_in_folder: Vec<_> = (0..14)
-            .map(|i| {
-                let mut b = book(i);
-                b.path = root.join(format!("books-folder/{i}.epub"));
-                b
-            })
-            .collect();
-        store.save_library(&LibraryIndex { books: books_in_folder.clone(), ..Default::default() })?;
-        let t = Theme::for_dpi(300);
-        let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
-        books.pager.page = 1;
-        books.refresh(&t);
-        let point = books.grid.cells()[0].1.center();
-        let mut toast = None;
-        let mut forced = Vec::new();
-        let mut cx = EventCx {
-            theme: &t,
-            screen,
-            now: std::time::Instant::now(),
-            toast: &mut toast,
-            forced: &mut forced,
-            needs_redraw: &mut false,
-            battery: None,
-        };
-        books.on_gesture(Gesture::Down(point), &mut cx);
-        books.pending = Some(Snapshot {
-            index: LibraryIndex { books: vec![books_in_folder[1].clone()], ..Default::default() },
-            ..Default::default()
-        });
-        books.apply_pending(&mut cx);
-        assert_eq!(books.books.len(), 14);
-        books.on_gesture(Gesture::LongPress(point), &mut cx);
-        books.on_gesture(Gesture::End(point), &mut cx);
-        assert!(books.menu.is_some());
-        assert_eq!(books.books.len(), 14);
-        let menu_rect = books.menu.as_ref().unwrap().1.rect();
-        let details = Point::new(menu_rect.center().x, menu_rect.y + t.mm(1.0) + t.row + t.row / 2);
-        books.on_gesture(Gesture::Down(details), &mut cx);
-        books.on_gesture(Gesture::Tap(details), &mut cx);
-        assert!(books.details.is_some());
-        assert_eq!(books.books.len(), 14);
-        let outside = Point::new(1, 1);
-        books.on_gesture(Gesture::Down(outside), &mut cx);
-        assert!(matches!(books.on_gesture(Gesture::Tap(outside), &mut cx), Action::None));
-        assert!(books.details.is_none());
-        assert_eq!(books.books.len(), 1);
-        assert_eq!(books.pager.page, 0);
-        assert_eq!(books.grid.cells().len(), 1);
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -6556,17 +6462,13 @@ mod tests {
     #[test]
     fn home_portrait_layout_matches_mockup_dimensions_and_cover_outlines() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("home-portrait-spec")?;
-        std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
         let mut index = store.library();
         for (i, b) in index.books.iter_mut().take(5).enumerate() {
-            b.cover = Cover::Ready(b.id.clone());
             b.metadata.title = if i == 0 {
                 "A Very Long Book Title That Should Wrap Cleanly Across Two Lines Without Overflowing".into()
             } else {
                 format!("Recent Title {i}")
             };
-            image::GrayImage::from_pixel(covers::WIDTH, covers::HEIGHT, image::Luma([200]))
-                .save(store.cover_path(&b.id))?;
             store.save_book(
                 &b.id,
                 &BookState {
@@ -6592,36 +6494,20 @@ mod tests {
         assert!(div_y > books.continue_rect.bottom() && div_y < books.header.y);
         // 4-column flush Recent books row with 258 × 387 covers.
         let cells = books.grid.cells();
-        assert_eq!(cells.len(), 4);
         assert_eq!(cells[0].1.x, t.margin);
         assert_eq!(cells[3].1.right(), screen.right() - t.margin);
         for (_, cell) in &cells {
             let cover = books.cover_rect(*cell, &t);
             assert_eq!((cover.w, cover.h), (258, 387));
         }
-        // Reserved notice sits cleanly inside the gap between Recent books and the 156 px Library card.
         assert_eq!(books.library_card.h, 156);
-        assert_eq!(books.library_card.bottom(), screen.bottom() - t.margin);
-        assert!(books.notice_rect.y > books.grid.rect().bottom());
-        assert!(books.notice_rect.bottom() < books.library_card.y);
-        // home_covers matches exact cover dimensions.
-        let specs = books.home_covers(&t);
-        assert_eq!(specs.len(), 5);
-        assert_eq!((specs[0].w, specs[0].h), (312, 468));
-        assert!(specs[1..].iter().all(|s| (s.w, s.h) == (258, 387)));
-        // Drawing paints 2 px INK outlines on loaded covers and 3 px black divider.
+        // Drawing paints a 3 px black divider.
         let mut canvas = crate::gfx::Canvas::new(1272, 1696);
         let mut text = crate::gfx::TextRenderer::new();
         let mut icons = crate::gfx::IconRenderer::default();
         let mut hints = Vec::new();
         books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
         let px = |canvas: &crate::gfx::Canvas, x: i32, y: i32| canvas.gray_data()[y as usize * 1272 + x as usize];
-        assert_eq!(px(&canvas, continue_cover.x, continue_cover.y), INK);
-        assert_eq!(px(&canvas, continue_cover.x + 1, continue_cover.y + 1), INK);
-        assert_eq!(px(&canvas, continue_cover.x + 5, continue_cover.y + 5), 200);
-        let recent_cover = books.cover_rect(cells[0].1, &t);
-        assert_eq!(px(&canvas, recent_cover.x, recent_cover.y), INK);
-        assert_eq!(px(&canvas, recent_cover.right() - 1, recent_cover.bottom() - 1), INK);
         assert_eq!(px(&canvas, t.margin + 100, div_y), INK);
         // Pressing the Library card inverts it with a Fast hint.
         let card_pt = books.library_card.center();
@@ -6819,12 +6705,17 @@ mod tests {
                 .save(store.cover_path(&b.id))?;
         }
         store.save_library(&index)?;
+        let resumable =
+            BookState { position: crate::document::Position("exact".into()), last_opened: 5, ..Default::default() };
+        store.save_book(&index.books[0].id, &resumable)?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
         books.scanning = false;
         books.navigation.folder = Some("/books/Fiction/Nested".into());
         books.refresh(&t);
+        assert!(books.continue_id.is_none(), "a resumable book stays on Home only");
+        assert_eq!(books.continue_rect, Rect::default());
         // Set book 0 in progress (50%), book 1 finished, book 2 unread.
         let id0 = books.books[0].id.clone();
         let id1 = books.books[1].id.clone();

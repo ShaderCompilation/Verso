@@ -202,21 +202,23 @@ mod tests {
     }
 
     #[test]
-    fn eight_actions_keep_touch_targets_and_route_both_columns() {
+    fn six_and_eight_actions_keep_touch_targets_and_route_both_columns() {
         for (w, h, dpi) in [(1272, 1696, 300), (1696, 1272, 300), (600, 800, 167), (800, 600, 167)] {
             let t = Theme::for_dpi(dpi);
             let area = Rect::new(0, t.top_bar, w, h - t.top_bar);
-            let mut menu = PopupMenu::open(vec![(None, "Action".into()); 8], area.center(), area, &t);
-            assert!(menu.row_h >= t.target, "{w}x{h}: {} < {}", menu.row_h, t.target);
-            assert!(menu.rect().y >= area.y && menu.rect().bottom() <= area.bottom() - t.margin);
-            for (i, rect) in menu.item_rects(&t).into_iter().enumerate() {
-                assert!(rect.w >= t.target);
-                let p = rect.center();
-                menu.on_gesture(&Gesture::Down(p), &t);
-                assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), Some(MenuEvent::Chosen(i)));
-                menu.set_enabled(i, false);
-                menu.on_gesture(&Gesture::Down(p), &t);
-                assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), None);
+            for n in [6, 8] {
+                let mut menu = PopupMenu::open(vec![(None, "Action".into()); n], area.center(), area, &t);
+                assert!(menu.row_h >= t.target, "{w}x{h}: {} < {}", menu.row_h, t.target);
+                assert!(menu.rect().y >= area.y && menu.rect().bottom() <= area.bottom() - t.margin);
+                for (i, rect) in menu.item_rects(&t).into_iter().enumerate() {
+                    assert!(rect.w >= t.target);
+                    let p = rect.center();
+                    menu.on_gesture(&Gesture::Down(p), &t);
+                    assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), Some(MenuEvent::Chosen(i)));
+                    menu.set_enabled(i, false);
+                    menu.on_gesture(&Gesture::Down(p), &t);
+                    assert_eq!(menu.on_gesture(&Gesture::Tap(p), &t), None);
+                }
             }
         }
     }

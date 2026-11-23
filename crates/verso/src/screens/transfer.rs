@@ -57,6 +57,8 @@ pub struct TransferScreen {
 }
 
 /// Confirmation sheet shown when tapping Done during an active upload.
+const STOP_MESSAGE: &str = "A file is still being received. Stopping now will cancel it.";
+
 struct ConfirmStop {
     sheet: Sheet,
     text: Rect,
@@ -80,9 +82,8 @@ impl ConfirmStop {
 
     fn draw(&self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
-        let message = "A file is still being received. Stopping now will cancel it.";
-        let height = cx.text.measure(message, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
-        cx.paragraph(message, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
+        let height = cx.text.measure(STOP_MESSAGE, cx.theme.body, Some(self.text.w as f32)).1.ceil() as i32;
+        cx.paragraph(STOP_MESSAGE, cx.theme.body, Rect { h: height.min(self.text.h), ..self.text }, HAlign::Left);
         self.keep.draw(cx);
         self.stop.draw(cx);
     }
@@ -602,6 +603,26 @@ impl Screen for TransferScreen {
         log::info!("Wi-Fi transfer: leaving to apply edits to Verso's data (exit code {code})");
         Action::ExitWith(code)
     }
+}
+
+/// The stop and restart sheets, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::{Parts, text_h};
+    let stop = ConfirmStop::new(t, screen);
+    let mut samples = vec![
+        Parts::new("ConfirmStop", stop.sheet.rect(), [stop.keep.rect(), stop.stop.rect()])
+            .body(stop.text, text_h(text, STOP_MESSAGE, t.body, stop.text.w)),
+    ];
+    for can_restart in [true, false] {
+        let restart = RestartSheet::new(t, screen, can_restart);
+        let needed = text_h(text, restart.message(), t.body, restart.text.w);
+        samples.push(
+            Parts::new("RestartSheet", restart.sheet.rect(), [restart.later.rect(), restart.restart.rect()])
+                .body(restart.text, needed),
+        );
+    }
+    samples
 }
 
 #[cfg(test)]

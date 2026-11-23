@@ -122,6 +122,22 @@ impl EndSheet {
     }
 }
 
+/// The sheet with and without Next, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    [Some("The Second Book, with a Long Subtitle"), None]
+        .into_iter()
+        .map(|next| {
+            let sheet = EndSheet::new(t, screen, "The First Book", next);
+            let (undo, home, next) = sheet.buttons();
+            let content = sheet.sheet.content(t);
+            let title = Rect::new(content.x, sheet.rect().y + t.mm(HEADER_MM) - t.mm(1.5), content.w, t.mm(TITLE_MM));
+            crate::ui::fit::Parts::new("EndSheet", sheet.rect(), [Some(undo), Some(home), next].into_iter().flatten())
+                .body(title, t.body.line_height().ceil() as i32)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,13 +149,11 @@ mod tests {
     }
 
     #[test]
-    fn the_buttons_fit_every_screen_and_answer() {
-        for (screen, dpi) in [
-            (Rect::new(0, 0, 1272, 1696), 300),
-            (Rect::new(0, 0, 1696, 1272), 300),
-            (Rect::new(0, 0, 600, 800), 167),
-            (Rect::new(0, 0, 800, 600), 167),
-        ] {
+    fn the_buttons_answer_with_next_stacked_or_in_a_row() {
+        // Next has a row of its own at 600x800 and shares the row at 1696x1272.
+        for (screen, dpi, stacked) in
+            [(Rect::new(0, 0, 600, 800), 167, true), (Rect::new(0, 0, 1696, 1272), 300, false)]
+        {
             let t = Theme::for_dpi(dpi);
             for next in [Some("The Second Book"), None] {
                 let mut sheet = EndSheet::new(&t, screen, "The First Book", next);
@@ -148,13 +162,10 @@ mod tests {
                 assert!(r.h < screen.h / 2, "a small sheet: {r:?}");
                 let (undo, home, next_rect) = sheet.buttons();
                 assert_eq!(next_rect.is_some(), next.is_some());
-                for b in [Some(undo), Some(home), next_rect].into_iter().flatten() {
-                    assert!(r.contains(b.center()) && b.x >= t.margin && b.right() <= screen.w - t.margin, "{b:?}");
-                    assert!(b.y >= r.y + t.mm(HEADER_MM + TITLE_MM), "below the title: {b:?}");
-                }
                 assert!(undo.right() < home.x);
                 if let Some(n) = next_rect {
-                    assert!(n.bottom() <= undo.y || n.x > home.right(), "Next beside or above: {n:?}");
+                    assert_eq!(n.bottom() <= undo.y, stacked, "Next above: {n:?}");
+                    assert_eq!(n.x > home.right(), !stacked, "Next beside: {n:?}");
                     assert_eq!(tap(&mut sheet, n.center()), Some(EndEvent::Next));
                 }
                 assert_eq!(tap(&mut sheet, undo.center()), Some(EndEvent::Undo));

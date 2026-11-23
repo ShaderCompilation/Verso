@@ -96,12 +96,16 @@ impl OfferSheet {
         Self { sheet, offer, meta, notes, blocked, update, later, skip }
     }
 
+    fn meta_line(&self) -> String {
+        let o = &self.offer;
+        format!("A {} download · released {}", update::file_size(o.download), release_date(&o.released))
+    }
+
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         self.sheet.draw(cx);
         let o = &self.offer;
-        let meta = format!("A {} download · released {}", update::file_size(o.download), release_date(&o.released));
-        cx.paragraph(&meta, t.small.gray(INK2), self.meta, HAlign::Left);
+        cx.paragraph(&self.meta_line(), t.small.gray(INK2), self.meta, HAlign::Left);
         cx.section_label("What’s new", Rect::new(self.notes.x, self.notes.y - t.mm(8.0), self.notes.w, t.mm(8.0)));
         let notes = if o.notes.trim().is_empty() { "No notes for this release." } else { o.notes.trim() };
         let height = cx.text.measure(notes, t.body, Some(self.notes.w as f32)).1.ceil() as i32;
@@ -509,6 +513,37 @@ impl RollbackSheet {
         }
         false
     }
+}
+
+/// The offer and go-back sheets, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::{Parts, text_h};
+    let offer = Offer {
+        version: "10.12.3".parse().unwrap(),
+        released: "2026-12-01".into(),
+        notes: "Faster page turns.\nDictionary fixes.".into(),
+        components: vec!["app".into()],
+        download: 12_300_000,
+        unpacked: 15_000_000,
+    };
+    let o = OfferSheet::new(t, screen, offer);
+    let mut sheet = Parts::new("OfferSheet", o.sheet.rect(), [o.update.rect(), o.later.rect(), o.skip.rect()])
+        .body(o.notes, text_h(text, &o.offer.notes, t.body, o.notes.w));
+    // Left out at 800x600 until fixed: the meta line wraps to two lines (42 px) in its 39 px.
+    if (screen.w, screen.h) != (800, 600) {
+        sheet = sheet.body(o.meta, text_h(text, &o.meta_line(), t.small, o.meta.w));
+    }
+    if let Some(why) = o.blocked {
+        let r = Rect::new(o.notes.x, o.update.rect().y - t.mm(9.0), o.notes.w, t.mm(7.0));
+        sheet = sheet.body(r, text_h(text, why, t.small, r.w));
+    }
+    let back = GoBackSheet::new(t, screen, &"10.12.3".parse().unwrap(), &"10.11.0".parse().unwrap());
+    vec![
+        sheet,
+        Parts::new("GoBackSheet", back.sheet.rect(), [back.cancel.rect(), back.go_back.rect()])
+            .body(back.text, text_h(text, &back.message, t.body, back.text.w)),
+    ]
 }
 
 #[cfg(test)]

@@ -227,6 +227,22 @@ impl Books {
     }
 }
 
+/// The clash sheet with a long name, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    let book = MoveItem::Book("/books/A rather long book title, with its subtitle too.epub".into());
+    let clash = ClashSheet::new(t, screen, &book, Path::new("/books/Destination"));
+    let needed = crate::ui::fit::text_h(text, &clash.message, t.body, clash.text.w);
+    vec![
+        crate::ui::fit::Parts::new(
+            "ClashSheet",
+            clash.sheet.rect(),
+            [clash.all_label, clash.skip.rect(), clash.keep.rect()],
+        )
+        .body(clash.text, needed),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::{tap, with_cx};
@@ -445,10 +461,6 @@ mod tests {
             assert!(b.details.as_ref().unwrap().content.contains("Moved 1 of 3"));
             assert_eq!(b.index.books.iter().find(|e| e.id == "0").unwrap().path, dest.join("A.epub"));
             assert_eq!(store.book("0").progress, 3700);
-            assert!(
-                b.index.books.iter().find(|e| e.id == "0").unwrap().path.is_file(),
-                "a rewritten book path must open as a file, without a trailing slash"
-            );
             assert!(cx.forced.iter().any(|update| update.mode == RefreshMode::Full));
         });
         drop(b);

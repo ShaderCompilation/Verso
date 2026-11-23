@@ -1570,34 +1570,39 @@ mod tests {
         state.collection.records[0].note = Some("Old\nnote".into());
         let mut text = TextRenderer::new();
         let mut icons = IconRenderer::default();
+        let t = Theme::for_dpi(300);
         for (w, h) in [(1072, 1448), (1448, 1072), (1272, 1696), (1696, 1272)] {
-            let t = Theme::for_dpi(300);
             let screen = Rect::new(0, 0, w, h);
             let mut view = View::new(&t, screen, &state, None, None);
             view.detail(0);
             view.edit_note(NoteTarget::Existing(0), &state, &t);
-            assert!(view.editing_note() && view.keyboard.visible);
-            assert_eq!(view.note.value(), "Old\nnote", "existing text (with its break) is editable");
             let mut canvas = Canvas::new(w as u32, h as u32);
             view.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()), &state);
             let area = view.note.rect();
             assert!(area.h >= 3 * t.body.line_height() as i32, "{w}x{h}: room to type");
             assert!(area.bottom() <= view.keyboard.rect().y, "{w}x{h}: above the keyboard");
-            assert!(matches!(view.input(&TextInput::Insert(" more".into())), (true, None)));
-            assert!(matches!(view.input(&TextInput::Dismiss), (true, None)));
-            assert!(!view.keyboard.visible && view.editing_note(), "Hide keeps the editor");
+            view.input(&TextInput::Dismiss);
             view.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()), &state);
-            assert!(view.note.rect().bottom() <= view.save_note.rect().y);
-            assert!(view.save_note.rect().h >= t.target);
-            assert!(matches!(view.input(&TextInput::Insert("x".into())), (false, None)), "unfocused");
-            view.focus_note(true, &t);
-            match view.input(&TextInput::Submit) {
-                (true, Some(Event::SaveNote(NoteTarget::Existing(0), text))) => assert_eq!(text, "Old\nnote more"),
-                _ => panic!("Submit saves"),
-            }
-            view.close_note(&t);
-            assert!(!view.editing_note() && !view.keyboard.visible);
+            assert!(view.note.rect().bottom() <= view.save_note.rect().y, "{w}x{h}");
+            assert!(view.save_note.rect().h >= t.target, "{w}x{h}");
         }
+        // The flow, once.
+        let mut view = View::new(&t, Rect::new(0, 0, 1072, 1448), &state, None, None);
+        view.detail(0);
+        view.edit_note(NoteTarget::Existing(0), &state, &t);
+        assert!(view.editing_note() && view.keyboard.visible);
+        assert_eq!(view.note.value(), "Old\nnote", "existing text (with its break) is editable");
+        assert!(matches!(view.input(&TextInput::Insert(" more".into())), (true, None)));
+        assert!(matches!(view.input(&TextInput::Dismiss), (true, None)));
+        assert!(!view.keyboard.visible && view.editing_note(), "Hide keeps the editor");
+        assert!(matches!(view.input(&TextInput::Insert("x".into())), (false, None)), "unfocused");
+        view.focus_note(true, &t);
+        match view.input(&TextInput::Submit) {
+            (true, Some(Event::SaveNote(NoteTarget::Existing(0), text))) => assert_eq!(text, "Old\nnote more"),
+            _ => panic!("Submit saves"),
+        }
+        view.close_note(&t);
+        assert!(!view.editing_note() && !view.keyboard.visible);
     }
     #[test]
     fn the_notes_list_mixes_kinds_in_reading_order_filters_them_and_opens_near_the_page() {

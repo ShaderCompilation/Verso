@@ -72,6 +72,16 @@ impl Footnote {
     }
 }
 
+/// A note too long for one page, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    let note = Note { label: "12".into(), html: "<p>A long note that runs on. </p>".repeat(80) };
+    let f = Footnote::new(&note, Position::default(), t, screen, Rect::new(screen.w / 4, screen.h / 3, 20, 20));
+    let v = &f.view;
+    let line = t.body.line_height().ceil() as i32;
+    vec![crate::ui::fit::Parts::new("Footnote", v.sheet.rect(), [v.pager.rect(), f.go_rect()]).body(v.body, line)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -169,9 +169,6 @@ mod tests {
         // A portrait 4 × 3 Library folder tile on the Kindle (1272 × 1696).
         (Theme::for_dpi(300), Rect::new(59, 344, 258, 355))
     }
-    fn inside(outer: Rect, inner: Rect) -> bool {
-        inner.x >= outer.x && inner.y >= outer.y && inner.right() <= outer.right() && inner.bottom() <= outer.bottom()
-    }
 
     #[test]
     fn icon_mode_and_folders_without_previews_draw_the_icon() {
@@ -186,7 +183,7 @@ mod tests {
     fn covers_fill_the_tile_in_a_two_by_two_grid_without_gaps() {
         let (t, r) = tile();
         let l = layout(FolderPreview::Covers, 4, r, &t).unwrap();
-        assert!(inside(r, l.bounds));
+        assert!(r.contains_rect(&l.bounds));
         assert_eq!((l.bounds.w, l.bounds.h), (r.w, r.h), "the whole portrait tile");
         assert_eq!(l.front, l.bounds);
         assert_eq!(l.covers.iter().map(|c| c.0).collect::<Vec<_>>(), [0, 1, 2, 3]);
@@ -211,7 +208,7 @@ mod tests {
         // cropping covers to squares, and stays within four small thumbnails.
         let (t, r) = (Theme::for_dpi(300), Rect::new(59, 609, 363, 402));
         let l = layout(FolderPreview::Covers, 4, r, &t).unwrap();
-        assert!(inside(r, l.bounds) && l.bounds.w < r.w);
+        assert!(r.contains_rect(&l.bounds) && l.bounds.w < r.w);
         assert!((l.bounds.center().x - r.center().x).abs() <= 1);
         for (_, s, _) in &l.covers {
             assert!(s.w * 6 <= s.h * 5, "{s:?} no wider than 5:6");
@@ -249,7 +246,7 @@ mod tests {
     fn stack_draws_same_size_covers_back_to_front_pinned_bottom_left() {
         let (t, r) = tile();
         let l = layout(FolderPreview::Stack, 4, r, &t).unwrap();
-        assert!(inside(r, l.bounds));
+        assert!(r.contains_rect(&l.bounds));
         assert_eq!(l.covers.iter().map(|c| c.0).collect::<Vec<_>>(), [2, 1, 0], "the first book is drawn last");
         let [back, middle, front] = [l.covers[0].1, l.covers[1].1, l.covers[2].1];
         assert!([back, middle].iter().all(|c| (c.w, c.h) == (front.w, front.h)));
@@ -258,7 +255,7 @@ mod tests {
         assert_eq!((back.x - middle.x, middle.y - back.y), (d, d));
         assert_eq!(l.front, front);
         assert_eq!((front.x, front.bottom()), (r.x, r.bottom()), "front cover pins to bottom-left baseline");
-        assert!(l.covers.iter().all(|c| inside(l.bounds, c.1)));
+        assert!(l.covers.iter().all(|c| l.bounds.contains_rect(&c.1)));
         // The front cover is larger than a small thumbnail and decodes the
         // full one; the hidden ones decode small files.
         assert!(front.w as u32 > covers::SMALL_WIDTH);
@@ -320,22 +317,7 @@ mod tests {
         let tab = l.tab.unwrap();
         assert_eq!((tab.x, tab.bottom()), (cover.x, cover.y));
         assert!(tab.w < cover.w / 2);
-        assert!(inside(r, l.bounds) && inside(l.bounds, cover) && inside(l.bounds, tab));
+        assert!(r.contains_rect(&l.bounds) && l.bounds.contains_rect(&cover) && l.bounds.contains_rect(&tab));
         assert_eq!((cover.w * 3 / 2), cover.h);
-    }
-
-    #[test]
-    fn layouts_fit_landscape_and_small_screens() {
-        for (t, r) in [
-            (Theme::for_dpi(300), Rect::new(59, 344, 237, 362)),
-            (Theme::for_dpi(300), Rect::new(59, 344, 296, 272)),
-            (Theme::for_dpi(167), Rect::new(33, 190, 166, 149)),
-        ] {
-            for mode in [FolderPreview::Covers, FolderPreview::Stack, FolderPreview::Latest] {
-                let l = layout(mode, 4, r, &t).unwrap();
-                assert!(inside(r, l.bounds), "{mode:?} inside {r:?}");
-                assert!(l.covers.iter().all(|c| c.1.w > 0 && c.1.h > 0 && inside(l.bounds, c.1)));
-            }
-        }
     }
 }

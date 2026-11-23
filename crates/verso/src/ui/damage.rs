@@ -273,7 +273,7 @@ pub fn plan(tiles: &Tiles, bounds: Rect, hints: &[Update], default: RefreshMode,
         .into_iter()
         .filter_map(|(r, mode)| r.intersect(&bounds).map(|rect| Update { rect, mode }))
         // Skip what a forced refresh of at least the same strength covers anyway.
-        .filter(|u| !forced.iter().any(|f| f.mode >= u.mode && contains(&f.rect, &u.rect)))
+        .filter(|u| !forced.iter().any(|f| f.mode >= u.mode && f.rect.contains_rect(&u.rect)))
         .collect();
     // Clip forced refreshes and drop any covered by a changed update or another
     // forced refresh of at least the same strength (e.g. a Fast→Ui cleanup
@@ -281,11 +281,11 @@ pub fn plan(tiles: &Tiles, bounds: Rect, hints: &[Update], default: RefreshMode,
     let clipped_forced: Vec<Update> =
         forced.iter().filter_map(|f| f.rect.intersect(&bounds).map(|rect| Update { rect, mode: f.mode })).collect();
     for (i, &u) in clipped_forced.iter().enumerate() {
-        let covered_by_changed = updates.iter().any(|other| other.mode >= u.mode && contains(&other.rect, &u.rect));
+        let covered_by_changed = updates.iter().any(|other| other.mode >= u.mode && other.rect.contains_rect(&u.rect));
         let covered_by_forced = clipped_forced.iter().enumerate().any(|(j, other)| {
             j != i
                 && other.mode >= u.mode
-                && contains(&other.rect, &u.rect)
+                && other.rect.contains_rect(&u.rect)
                 && (other.mode > u.mode || other.rect != u.rect || j < i)
         });
         if !covered_by_changed && !covered_by_forced {
@@ -336,10 +336,6 @@ fn same(a: &[u8], b: &[u8]) -> bool {
         }
     }
     ra == rb
-}
-
-fn contains(outer: &Rect, inner: &Rect) -> bool {
-    inner.x >= outer.x && inner.y >= outer.y && inner.right() <= outer.right() && inner.bottom() <= outer.bottom()
 }
 
 #[cfg(test)]

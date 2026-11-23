@@ -72,6 +72,16 @@ impl UntestedSheet {
     }
 }
 
+/// The notice with a long model name, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    let dir = std::env::temp_dir().join("verso-untested-fit");
+    let model = DeviceModel { name: "Kindle Paperwhite Signature Edition (2024)".into(), ..Default::default() };
+    let s = UntestedSheet::new(t, screen, Store::at(dir), &model);
+    let needed = crate::ui::fit::text_h(text, &s.message, t.body, s.text.w);
+    vec![crate::ui::fit::Parts::new("UntestedSheet", s.sheet.rect(), [s.ok.rect()]).body(s.text, needed)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
