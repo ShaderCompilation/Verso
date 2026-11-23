@@ -774,11 +774,32 @@ int verso_cre_annotation_checked_text(VersoCreDoc *doc, char *buf, int len) {
         return text.length();
     })
 }
-int verso_cre_annotation_keep(VersoCreDoc *doc, int id, int painted) {
+// The page an annotation starts on; `last` gets the page a highlight ends on
+// (the start page for a bookmark). An end with no place on screen counts as
+// running to the last page, so callers never miss a page it may paint.
+static int annotation_pages(LVDocView *v, const VersoCreDoc::Annotation &a, int *last) {
+    int page = v->getBookmarkPage(a.start);
+    if (last) {
+        int end = a.painted ? v->getBookmarkPage(a.end) : page;
+        if (end == 0 && a.painted && ldomXPointer(a.end).toPoint().y < 0) end = v->getPageCount() - 1;
+        *last = std::max(page, end);
+    }
+    return page;
+}
+int verso_cre_annotation_keep(VersoCreDoc *doc, int id, int painted, int *last) {
     GUARD(-1, {
         if (doc->checked_start.isNull()) return -1;
         doc->pending_annotations.push_back({id, doc->checked_start, doc->checked_end, painted != 0});
-        return doc->view->getBookmarkPage(doc->checked_start);
+        return annotation_pages(doc->view, doc->pending_annotations.back(), last);
+    })
+}
+int verso_cre_annotation_kept(VersoCreDoc *doc, int index, int *page, int *last) {
+    GUARD(-1, {
+        if (index < 0 || index >= (int)doc->annotations.size()) return -1;
+        const auto &a = doc->annotations[index];
+        int first = annotation_pages(doc->view, a, last);
+        if (page) *page = first;
+        return a.id;
     })
 }
 int verso_cre_annotation_finish(VersoCreDoc *doc) {

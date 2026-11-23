@@ -671,6 +671,12 @@ fn frozen(path: &Path) -> bool {
     true
 }
 
+/// Folders `atomic_bytes` has written to, and whether each takes a
+/// directory fsync. Every page turn saves a record, and on the Kindle's FUSE
+/// storage each check is a round trip, so they are made once per folder.
+static FOLDERS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, bool>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Every record under the data folder is written here (or by `atomic`), so
 /// `Store::freeze` stops all of them at once.
 pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -678,19 +684,35 @@ pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         return Ok(());
     }
     let parent = path.parent().context("record has no parent directory")?;
-    std::fs::create_dir_all(parent)?;
+    let folders = || FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut known = folders().get(parent).copied();
+    if known.is_none() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let mut f = std::fs::File::create(&tmp)?;
+    let mut f = match std::fs::File::create(&tmp) {
+        // Removed since it was last written to.
+        Err(e) if known.is_some() && e.kind() == std::io::ErrorKind::NotFound => {
+            known = None;
+            std::fs::create_dir_all(parent)?;
+            std::fs::File::create(&tmp)?
+        }
+        f => f?,
+    };
     f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     // The FAT/FUSE filesystem on the Kindle may not support directory fsync.
-    match std::fs::File::open(parent)?.sync_all() {
-        Ok(()) => {}
-        Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) => {}
-        Err(e) => return Err(e.into()),
+    let syncs = known.unwrap_or(true)
+        && match std::fs::File::open(parent)?.sync_all() {
+            Ok(()) => true,
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) => false,
+            Err(e) => return Err(e.into()),
+        };
+    if known != Some(syncs) {
+        folders().insert(parent.to_owned(), syncs);
     }
     Ok(())
 }
@@ -964,7 +986,7 @@ mod tests {
         );
     }
     #[test]
-    fn records_survive_interrupted_writes_and_moves() -> Result<()> {
+    fn records_survive_interrupted_writes_removed_folders_and_moves() -> Result<()> {
         let root = std::env::temp_dir().join(format!("verso-store-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let store = Store::at(root.join("data"));
@@ -975,6 +997,9 @@ mod tests {
             last_opened: 42,
             ..BookState::default()
         };
+        store.save_book("abc", &s)?;
+        // Saves remember the folder; one removed since is made again.
+        std::fs::remove_dir_all(store.book_path("abc").parent().unwrap())?;
         store.save_book("abc", &s)?;
         std::fs::write(store.book_path("abc").with_extension("json.tmp"), b"{broken")?;
         assert_eq!(store.book("abc").position, s.position);

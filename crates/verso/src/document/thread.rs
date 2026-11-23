@@ -6,7 +6,9 @@
 //! calls `malloc_trim(0)` so glibc returns freed arenas to the OS. Before any
 //! book open, `prelayout.before_open` kills any idle pre-layout child and
 //! reloads crengine's cache index. Search and annotation resolution run in
-//! bounded slices so user turns stay responsive.
+//! bounded slices so user turns stay responsive. Checked annotations survive a
+//! relayout (crengine keeps them as DOM positions): pages keep painting them,
+//! and resolving the same records again only finds their new pages.
 use super::prelayout::{self, Job, Runner};
 use super::{
     CreDocument, CreEngine, Document, FontFace, Layout, Link, Metadata, Opening, Paths, Position, SearchBatch,
@@ -276,6 +278,8 @@ pub struct SearchRequest {
 pub struct Resolved {
     pub index: usize,
     pub page: Option<usize>,
+    /// The page a highlight ends on (`page` for a bookmark; 0 when unresolved).
+    pub last: usize,
 }
 struct Resolution {
     started: Instant,
@@ -288,6 +292,9 @@ struct Resolution {
     /// A preview's page bookmarks that resolved, with their opening words.
     openings: Vec<(usize, Opening)>,
     preview: bool,
+    /// The records are the ones the last full check accepted in this open
+    /// book: their kept ranges are only located again.
+    reuse: bool,
 }
 pub enum Command {
     /// Checks saved annotations against the current layout. A bookmark on a
@@ -372,6 +379,11 @@ pub enum Reply {
         /// records), with the opening words to store for each.
         openings: Vec<(usize, Opening)>,
         preview: bool,
+        /// The `Page::annotation_revision` of pages painted with these
+        /// records: the revision of the resolution that last checked them.
+        /// Resolving the same records again (after a relayout) only locates
+        /// them, so pages painted since that check stay current.
+        painted: u64,
     },
     Selection {
         request: SelectionRequest,
@@ -473,8 +485,12 @@ impl Worker {
                 let mut dimensions = (0, 0);
                 let mut pending = first;
                 let mut resolution: Option<Resolution> = None;
+                // The records the last full check accepted, painted on pages
+                // as `annotation_revision`. A relayout keeps them: crengine's
+                // kept ranges are DOM positions, valid in any layout.
                 let mut annotations: Vec<Annotation> = vec![];
                 let mut annotation_revision = 0;
+                let mut checked_fingerprint = String::new();
                 // (request, last reply, started, hits so far)
                 let mut search: Option<(SearchRequest, Instant, Instant, usize)> = None;
                 loop {
@@ -486,7 +502,20 @@ impl Worker {
                             Err(mpsc::TryRecvError::Empty) => {
                                 if let (Some(task), Some(d)) = (&mut resolution, &mut doc) {
                                     let started = Instant::now();
-                                    while task.next < task.records.len()
+                                    while task.reuse
+                                        && task.next < task.records.len()
+                                        && started.elapsed() < Duration::from_millis(12)
+                                    {
+                                        match d.annotation_kept(task.next) {
+                                            Some((index, page, last)) => {
+                                                task.next += 1;
+                                                task.found.push(Resolved { index, page: Some(page), last });
+                                            }
+                                            None => task.next = task.records.len(),
+                                        }
+                                    }
+                                    while !task.reuse
+                                        && task.next < task.records.len()
                                         && started.elapsed() < Duration::from_millis(12)
                                     {
                                         let i = task.next;
@@ -504,23 +533,42 @@ impl Worker {
                                             if let (Some(o), Some(_)) = (opening, page) {
                                                 task.openings.push((i, o));
                                             }
-                                            task.found.push(Resolved { index: i, page });
+                                            task.found.push(Resolved { index: i, page, last: page.unwrap_or(0) });
                                             continue;
                                         }
-                                        let page = holds(d, a, &task.fingerprint)
+                                        let pages = holds(d, a, &task.fingerprint)
                                             .then(|| {
                                                 if task.preview {
-                                                    d.go_to_position(&a.range.start).ok().map(|_| d.current_page())
+                                                    d.go_to_position(&a.range.start).ok().map(|_| {
+                                                        let page = d.current_page();
+                                                        (page, page)
+                                                    })
                                                 } else {
                                                     d.annotation_keep(i, a.kind == Kind::Highlight).ok()
                                                 }
                                             })
                                             .flatten();
-                                        task.found.push(Resolved { index: i, page });
+                                        task.found.push(Resolved {
+                                            index: i,
+                                            page: pages.map(|p| p.0),
+                                            last: pages.map_or(0, |p| p.1),
+                                        });
                                     }
                                     if task.next == task.records.len() {
                                         let mut task = resolution.take().unwrap();
-                                        if !task.preview {
+                                        if task.reuse {
+                                            // Already in reading order; the records
+                                            // the check rejected follow, unresolved.
+                                            let mut held = vec![false; task.records.len()];
+                                            for e in &task.found {
+                                                held[e.index] = true;
+                                            }
+                                            task.found.extend(
+                                                (0..held.len())
+                                                    .filter(|&i| !held[i])
+                                                    .map(|index| Resolved { index, page: None, last: 0 }),
+                                            );
+                                        } else if !task.preview {
                                             let order = d.annotation_finish(task.records.len());
                                             let mut ranks = vec![usize::MAX; task.records.len()];
                                             for (rank, index) in order.into_iter().enumerate() {
@@ -529,12 +577,14 @@ impl Worker {
                                             task.found.sort_by_key(|e| ranks[e.index]);
                                             annotation_revision = task.revision;
                                             annotations = task.records;
+                                            checked_fingerprint = task.fingerprint;
                                         }
                                         log::info!(
-                                            "annotation resolution: count={} unresolved={} preview={} elapsed_us={}",
+                                            "annotation resolution: count={} unresolved={} preview={} reused={} elapsed_us={}",
                                             task.found.len(),
                                             task.found.iter().filter(|e| e.page.is_none()).count(),
                                             task.preview,
+                                            task.reuse,
                                             task.started.elapsed().as_micros()
                                         );
                                         send(Reply::Resolved {
@@ -543,6 +593,7 @@ impl Worker {
                                             entries: task.found,
                                             openings: task.openings,
                                             preview: task.preview,
+                                            painted: annotation_revision,
                                         });
                                     }
                                     continue;
@@ -590,8 +641,11 @@ impl Worker {
                     ) {
                         search = None;
                         resolution = None;
-                        annotations.clear();
-                        annotation_revision = 0;
+                        if !matches!(command, Command::Layout { .. }) {
+                            annotations.clear();
+                            annotation_revision = 0;
+                            checked_fingerprint.clear();
+                        }
                     }
                     let mut opened = false;
                     let mut lost = false;
@@ -601,7 +655,9 @@ impl Worker {
                                 if g == generation
                                     && let Some(d) = &mut doc
                                 {
-                                    if !preview {
+                                    let reuse =
+                                        !preview && fingerprint == checked_fingerprint && same_checks(&records, &annotations);
+                                    if !preview && !reuse {
                                         d.annotation_clear();
                                     }
                                     resolution = Some(Resolution {
@@ -614,6 +670,7 @@ impl Worker {
                                         found: vec![],
                                         openings: vec![],
                                         preview,
+                                        reuse,
                                     });
                                 }
                                 return Ok(());
@@ -902,6 +959,14 @@ fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<C
         }
     }
     c
+}
+/// Whether checking `a` would give what checking `b` gave: the same records
+/// in the same order, as far as `holds` reads them.
+fn same_checks(a: &[Annotation], b: &[Annotation]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.kind == b.kind && a.range == b.range && a.quotation == b.quotation && a.fingerprint == b.fingerprint
+        })
 }
 /// Whether a saved annotation still holds in the open book. A page bookmark
 /// without text has nothing to compare, so it also needs the book's content

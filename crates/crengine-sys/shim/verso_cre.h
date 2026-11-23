@@ -161,11 +161,17 @@ int verso_cre_annotation_check(VersoCreDoc *doc, const char *start, const char *
 // Copies the last checked text; returns its full length.
 int verso_cre_annotation_checked_text(VersoCreDoc *doc, char *buf, int len);
 // Adds the last checked range as annotation `id`; returns its page, or -1.
+// `last` (may be NULL) gets the page a painted range ends on, else the same page.
 // Unpainted entries (page bookmarks) count for reading order only:
 // verso_cre_annotation_page never lists them.
-int verso_cre_annotation_keep(VersoCreDoc *doc, int id, int painted);
+int verso_cre_annotation_keep(VersoCreDoc *doc, int id, int painted, int *last);
 int verso_cre_annotation_finish(VersoCreDoc *doc);
 int verso_cre_annotation_order(VersoCreDoc *doc, int index);
+// The `index`-th finished annotation in reading order: returns its id (-1
+// past the end) and its pages in the current layout, as
+// verso_cre_annotation_keep reports them. Kept ranges are DOM positions, so
+// they stay valid across relayouts of the same open book.
+int verso_cre_annotation_kept(VersoCreDoc *doc, int index, int *page, int *last);
 int verso_cre_annotation_page(VersoCreDoc *doc, int page, int *ids, int capacity);
 
 /* Page bookmarks. The current page's opening words: from where the page

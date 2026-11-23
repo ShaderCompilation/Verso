@@ -401,11 +401,11 @@ mod tests {
         assert!(rest.is_empty() || rest.starts_with(char::is_whitespace), "ends on a word boundary: {rest:?}");
         doc.annotation_clear();
         assert!(doc.bookmark_check(&opening.range, &opening.text).unwrap());
-        assert_eq!(doc.annotation_keep(0, false).unwrap(), 5);
+        assert_eq!(doc.annotation_keep(0, false).unwrap(), (5, 5));
         // A highlight of the words after the opening, on the same page.
         let after = TextRange { start: opening.range.end.clone(), end: long.range.end.clone() };
         assert!(doc.annotation_check(&after, rest).unwrap());
-        assert_eq!(doc.annotation_keep(1, true).unwrap(), 5);
+        assert_eq!(doc.annotation_keep(1, true).unwrap(), (5, 5));
         assert_eq!(doc.annotation_finish(2), vec![0, 1], "the page start comes first");
         assert_eq!(doc.annotation_page(5), vec![1], "only highlights are painted");
         assert!(doc.annotation_page(4).is_empty());
@@ -430,15 +430,28 @@ mod tests {
         assert!(doc.opening_at(&missing.start, 80).is_err(), "a position not in this book");
         assert!(doc.opening_at(&Position::default(), 80).is_err());
         assert_eq!(doc.current_page(), 5, "reading the words doesn't turn the page");
-        // A bigger font moves the bookmark to the page now holding its start.
-        doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &PageLayout::default())
-            .unwrap();
+        // A bigger font and wider margins move both to the page now holding
+        // them. The kept ranges, located again without a check, land where
+        // checking them again does, and keep painting.
+        let wide = PageLayout {
+            margins: crate::page_layout::Margins { sides: 14, top: 10, bottom: 10 },
+            ..PageLayout::default()
+        };
+        doc.set_typography(&Typography { size_pt: 19.2, ..Typography::default() }, 150, &wide).unwrap();
+        let kept: Vec<_> = (0..).map_while(|i| doc.annotation_kept(i)).collect();
         doc.annotation_clear();
         assert!(doc.bookmark_check(&opening.range, &opening.text).unwrap());
-        let page = doc.annotation_keep(0, false).unwrap();
+        let (page, _) = doc.annotation_keep(0, false).unwrap();
         assert!(page > 5, "a bigger font pushes the page later: {page}");
+        assert!(doc.annotation_check(&after, rest).unwrap());
+        let (first, last) = doc.annotation_keep(1, true).unwrap();
+        assert_eq!(kept, vec![(0, page, page), (1, first, last)]);
+        assert!(doc.annotation_page(first).contains(&1) && doc.annotation_page(last).contains(&1));
         doc.go_to_position(&opening.range.start).unwrap();
         assert_eq!(doc.current_page(), page);
+        doc.annotation_clear();
+        assert!(doc.bookmark_check(&opening.range, &opening.text).unwrap());
+        doc.annotation_keep(0, false).unwrap();
         doc.annotation_finish(1);
         assert!(doc.annotation_page(page).is_empty());
         let reflowed = doc.opening_at(&opening.range.start, 80).unwrap();
@@ -476,7 +489,7 @@ mod tests {
         assert_eq!((cover.range.end.0.as_str(), cover.text.as_str()), ("", ""), "{cover:?}");
         doc.annotation_clear();
         assert!(doc.bookmark_check(&cover.range, "").unwrap());
-        assert_eq!(doc.annotation_keep(0, false).unwrap(), 0);
+        assert_eq!(doc.annotation_keep(0, false).unwrap(), (0, 0));
         assert!(!doc.bookmark_check(&cover.range, "Some words").unwrap(), "words a picture page never had");
         // With no words to compare, a changed book leaves the bookmark unresolved.
         let mut saved = crate::annotations::Annotation {
@@ -820,7 +833,7 @@ mod tests {
         assert_eq!(geometry.rects, end.rects);
         doc.annotation_clear();
         assert!(doc.annotation_check(&all, &clipped.text).unwrap());
-        assert_eq!(doc.annotation_keep(9, true).unwrap(), 0);
+        assert_eq!(doc.annotation_keep(9, true).unwrap(), (0, last_page), "a highlight reports its last page");
         assert_eq!(doc.annotation_finish(1), vec![9]);
         for page in 0..=last_page {
             assert_eq!(doc.annotation_page(page), vec![9]);

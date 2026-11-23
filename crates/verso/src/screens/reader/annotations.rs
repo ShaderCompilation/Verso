@@ -25,6 +25,9 @@ pub(super) struct State {
     pub service: Option<worker::Worker>,
     pub collection: Collection,
     pub revision: u64,
+    /// The `Page::annotation_revision` of pages painted with the current
+    /// records, from the last resolution (`Reply::Resolved::painted`).
+    pub painted: u64,
     pub resolved: Vec<Resolved>,
     pub ready: bool,
     pub resolving: bool,
@@ -132,6 +135,18 @@ impl State {
             .map(|e| e.index)
             .filter(|&i| self.collection.records.get(i).is_some_and(|a| a.kind == Kind::Bookmark))
             .collect()
+    }
+    /// Whether a page rendered under `revision` paints the current records'
+    /// highlights. Never while a resolution runs: their numbers may change.
+    pub fn paints_current(&self, revision: u64) -> bool {
+        !self.resolving && revision == self.painted
+    }
+    /// Whether a resolved highlight covers `page` in the current layout.
+    pub fn highlighted(&self, page: usize) -> bool {
+        self.resolved.iter().any(|e| {
+            e.page.is_some_and(|first| (first..=e.last).contains(&page))
+                && self.collection.records.get(e.index).is_some_and(|a| a.kind == Kind::Highlight)
+        })
     }
     /// Whether `page` shows the bookmark mark.
     pub fn bookmarked(&self, page: usize) -> bool {
@@ -255,7 +270,7 @@ impl State {
         let index = self.collection.records.len() - 1;
         let at =
             self.resolved.iter().position(|e| e.page.is_none_or(|p| p >= request.page)).unwrap_or(self.resolved.len());
-        self.resolved.insert(at, Resolved { index, page: Some(request.page) });
+        self.resolved.insert(at, Resolved { index, page: Some(request.page), last: request.page });
         None
     }
     /// True when a new highlight or note can be saved now.
@@ -444,7 +459,7 @@ impl State {
         }
     }
     pub fn receive(&mut self, reply: Reply) -> bool {
-        if let Reply::Resolved { revision, entries, openings, preview, .. } = reply {
+        if let Reply::Resolved { revision, entries, openings, preview, painted, .. } = reply {
             if preview {
                 if revision == self.import_id && self.importing {
                     // Imported page bookmarks store the opening words at their
@@ -463,6 +478,7 @@ impl State {
                 }
             } else if revision == self.revision {
                 self.resolved = entries;
+                self.painted = painted;
                 self.resolving = false;
                 return true;
             }
@@ -1216,9 +1232,10 @@ mod tests {
         let reply = |revision, preview| Reply::Resolved {
             generation: 1,
             revision,
-            entries: vec![Resolved { index: 0, page: Some(3) }],
+            entries: vec![Resolved { index: 0, page: Some(3), last: 3 }],
             openings: vec![],
             preview,
+            painted: 0,
         };
         assert!(!state.receive(reply(6, false)));
         assert!(state.resolved.is_empty());
@@ -1242,9 +1259,10 @@ mod tests {
             let resolved = |revision, preview| Reply::Resolved {
                 generation: 1,
                 revision,
-                entries: vec![Resolved { index: 0, page: Some(3) }],
+                entries: vec![Resolved { index: 0, page: Some(3), last: 3 }],
                 openings: vec![],
                 preview,
+                painted: 0,
             };
             if stage >= 1 {
                 state.apply(worker::Reply::Preview(old, Ok(preview.clone())), 1, &mut |c| sent.push(c));
@@ -1314,7 +1332,7 @@ mod tests {
         }
         state.resolved = [(0, 2), (1, 4), (3, 6), (4, 6), (2, 6)]
             .into_iter()
-            .map(|(index, page)| Resolved { index, page: Some(page) })
+            .map(|(index, page)| Resolved { index, page: Some(page), last: page })
             .collect();
         state
     }
@@ -1411,9 +1429,10 @@ mod tests {
         state.receive(Reply::Resolved {
             generation: 1,
             revision: state.revision,
-            entries: (0..count).map(|index| Resolved { index, page: Some(1) }).collect(),
+            entries: (0..count).map(|index| Resolved { index, page: Some(1), last: 1 }).collect(),
             openings: vec![],
             preview: false,
+            painted: 0,
         });
         // The engine couldn't read the page.
         let request = ask(&mut state, 3);
@@ -1471,9 +1490,10 @@ mod tests {
         assert!(state.receive(Reply::Resolved {
             generation: 1,
             revision: id,
-            entries: found.into_iter().map(|(index, page)| Resolved { index, page }).collect(),
+            entries: found.into_iter().map(|(index, page)| Resolved { index, page, last: page.unwrap_or(0) }).collect(),
             openings: vec![(1, opening("/body/p[3]"))],
             preview: true,
+            painted: 0,
         }));
         let counts = state.preview_counts();
         let expected = ImportCounts {
@@ -1656,7 +1676,7 @@ mod tests {
         let mut state = with_bookmarks();
         state.collection.records[1].quotation.clear();
         state.resolved.retain(|e| e.index != 3);
-        state.resolved.push(Resolved { index: 3, page: None });
+        state.resolved.push(Resolved { index: 3, page: None, last: 0 });
         let view = View::new(&t, Rect::new(0, 0, 1072, 1448), &state, None, None);
         assert_eq!(view.list.rows[1].label, "A page without text");
         assert_eq!(view.list.rows[4].sub.as_deref(), Some("Chapter · Unresolved"));

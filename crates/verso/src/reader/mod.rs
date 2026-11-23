@@ -111,6 +111,10 @@ impl PageCache {
         self.pages.clear();
         self.requested.clear();
     }
+    /// Drops the cached pages `stale` picks; their requests can go out again.
+    pub fn evict(&mut self, stale: impl Fn(&Page) -> bool) {
+        self.pages.retain(|_, p| !stale(p));
+    }
     pub fn get(&self, number: usize) -> Option<Arc<Page>> {
         self.pages.get(&number).cloned()
     }

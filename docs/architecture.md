@@ -91,7 +91,7 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
 | Worker | Owner | Responsibility |
 | --- | --- | --- |
 | **Main UI thread** | Process | Owns `Platform`, `App`, `Canvas`, `FrameDiff`, `Screen` stack and `GestureDetector`. Never blocks on engine, disk scan or network I/O. |
-| `verso-book` | `document::thread::Worker` (`Rc`) | **Sole owner of `CreEngine` / `CreDocument`.** Registers fonts on `Command::Start`, opens books, lays out typography, renders pages + neighbor prefetch into a bounded `PixelPool` (≤4 buffers / 32 MiB), resolves TOC, links, selection, incremental search (60 ms slices) and annotations, and calls `malloc_trim(0)` on book close. |
+| `verso-book` | `document::thread::Worker` (`Rc`) | **Sole owner of `CreEngine` / `CreDocument`.** Registers fonts on `Command::Start`, opens books, lays out typography, renders pages + neighbor prefetch into a bounded `PixelPool` (≤4 buffers / 32 MiB), resolves TOC, links, selection, incremental search (60 ms slices) and annotations (a relayout keeps checked ones painted and only re-locates them), and calls `malloc_trim(0)` on book close. |
 | `verso --prelayout` | `document::prelayout::Runner` (child process) | Runs at idle (`nice 19`, `IOPRIO_CLASS_IDLE`, `PR_SET_PDEATHSIG(SIGKILL)`) to pre-populate crengine's `.cr3` cache for up to 8 likely-next books. Killed before any interactive book open, followed by `verso_cre_cache_reload()`. Never writes Verso JSON data. |
 | `verso-library` | Shared via `Weak` in `Store` | Incremental EPUB scanning, metadata/cover extraction, tile thumbnails, `library.json`/`home.json`/`opened.json` rebuilds, folder hierarchy and off-thread Home/Library warm-up. Pauses while reading or during Wi-Fi transfer. |
 | `verso-thumb` | `screens::books::Thumbnails` | Decodes cached cover PNGs (bounded cache: 6 MiB `Gray8`, 18 MiB `Color32`) and prefetches visible/nearby library pages and Home covers. |
@@ -166,7 +166,8 @@ against the previous frame in **16×16 tiles**:
 All user data lives under `/mnt/us/verso/data/` on Kindle (`$XDG_DATA_HOME/verso`
 or `VERSO_DATA` on desktop). Every durable write goes through
 `store::atomic_bytes` (write `<path>.tmp`, `sync_all`, `rename`, sync parent dir
-tolerating `EINVAL`/`ENOSYS` on FAT/FUSE).
+tolerating `EINVAL`/`ENOSYS` on FAT/FUSE; each folder's existence and dir-sync
+support are checked once per run).
 
 ```
 <data>/

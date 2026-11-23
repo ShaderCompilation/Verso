@@ -671,12 +671,23 @@ impl CreDocument {
         Ok(Opening { range: TextRange { start, end: Position(field(1)?) }, text: field(2)? })
     }
     /// Adds the range the last successful check accepted as annotation `id`,
-    /// returning its page. An unpainted entry (a page bookmark) counts for
-    /// reading order but is never listed by [`Self::annotation_page`].
-    pub fn annotation_keep(&mut self, id: usize, painted: bool) -> Result<usize> {
-        let page = unsafe { sys::verso_cre_annotation_keep(self.raw, id.try_into()?, painted.into()) };
+    /// returning its first and last page (the same page unless `painted`).
+    /// An unpainted entry (a page bookmark) counts for reading order but is
+    /// never listed by [`Self::annotation_page`].
+    pub fn annotation_keep(&mut self, id: usize, painted: bool) -> Result<(usize, usize)> {
+        let mut last = 0;
+        let page = unsafe { sys::verso_cre_annotation_keep(self.raw, id.try_into()?, painted.into(), &mut last) };
         anyhow::ensure!(page >= 0, "no checked annotation range");
-        Ok(page as usize)
+        Ok((page as usize, last.max(page) as usize))
+    }
+    /// The `index`-th finished annotation in reading order, as (id, first
+    /// page, last page) in the current layout; None past the end. Finished
+    /// ranges stay valid when the same open book is laid out again.
+    pub fn annotation_kept(&mut self, index: usize) -> Option<(usize, usize, usize)> {
+        let (mut page, mut last) = (0, 0);
+        let id =
+            unsafe { sys::verso_cre_annotation_kept(self.raw, c_int::try_from(index).ok()?, &mut page, &mut last) };
+        (id >= 0).then(|| (id as usize, page.max(0) as usize, last.max(page).max(0) as usize))
     }
     pub fn annotation_finish(&mut self, count: usize) -> Vec<usize> {
         unsafe {

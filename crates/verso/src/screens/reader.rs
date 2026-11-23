@@ -379,10 +379,27 @@ impl Reader {
                 let bookmarked = self.page_bookmarked();
                 if current && self.annotations.receive(reply) {
                     if !preview {
-                        self.annotations.paint_pending = true;
-                        self.cache.reset(self.cache.generation);
-                        self.cache.request(self.target);
-                        self.worker.send(Command::Page { generation: self.cache.generation, number: self.target });
+                        // Pages painted under another revision are rendered
+                        // again only where highlights were or now are; the
+                        // others would come back with the same pixels.
+                        let annotations = &self.annotations;
+                        let stale = |p: &Page| {
+                            p.annotation_revision != annotations.painted
+                                && (!p.annotations.is_empty()
+                                    || !p.painted.is_empty()
+                                    || annotations.highlighted(p.number))
+                        };
+                        self.cache.evict(stale);
+                        let shown = self.shown.as_ref().is_some_and(|p| {
+                            p.generation == self.cache.generation && p.number == self.target && !stale(p)
+                        });
+                        if !shown && self.cache.get(self.target).is_none() {
+                            self.annotations.paint_pending = true;
+                            if self.cache.request(self.target) {
+                                self.worker
+                                    .send(Command::Page { generation: self.cache.generation, number: self.target });
+                            }
+                        }
                         self.prefetch();
                     }
                     if let Overlay::Highlights(view) = &mut self.overlay {
@@ -495,7 +512,7 @@ impl Reader {
                 if page.generation == self.cache.generation
                     && (self.annotations.service.is_none()
                         || self.annotations.resolving
-                        || page.annotation_revision == self.annotations.revision) =>
+                        || page.annotation_revision == self.annotations.painted) =>
             {
                 self.cache.insert(page.clone(), self.target);
                 if page.number == self.target && !self.pending_turn {
@@ -1562,7 +1579,7 @@ impl Reader {
             let ids: Vec<_> = self
                 .shown
                 .as_ref()
-                .filter(|page| page.annotation_revision == self.annotations.revision)
+                .filter(|page| self.annotations.paints_current(page.annotation_revision))
                 .map(|page| {
                     page.annotations
                         .iter()
@@ -5086,10 +5103,12 @@ mod tests {
     }
 
     #[test]
-    fn annotation_replies_without_highlights_draw_no_frame() {
+    fn resolutions_render_again_only_pages_whose_highlights_change() {
         let theme = Theme::for_dpi(150);
-        let (mut r, _) = test_reader("annotation-frames");
+        let (mut r, commands) = test_reader("annotation-frames");
+        r.pages = 3;
         test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 0)), cx));
+        test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 1)), cx));
         let screen = r.screen;
         let redrawn = |r: &mut Reader, reply: Reply| {
             let mut needs_redraw = false;
@@ -5105,22 +5124,58 @@ mod tests {
             r.receive(reply, &mut cx);
             needs_redraw
         };
-        // A resolution that finds nothing for this page renders it again...
-        (r.annotations.revision, r.annotations.resolving) = (1, true);
-        let (generation, revision) = (r.cache.generation, 1);
-        let resolved = Reply::Resolved { generation, revision, entries: vec![], openings: vec![], preview: false };
-        assert!(!redrawn(&mut r, resolved));
+        let rendered = || -> Vec<usize> {
+            commands
+                .try_iter()
+                .filter_map(|c| if let Command::Page { number, .. } = c { Some(number) } else { None })
+                .collect()
+        };
+        let generation = r.cache.generation;
+        let resolve = |r: &mut Reader, entries: Vec<crate::document::thread::Resolved>, painted| {
+            r.annotations.revision += 1;
+            r.annotations.resolving = true;
+            let revision = r.annotations.revision;
+            redrawn(r, Reply::Resolved { generation, revision, entries, openings: vec![], preview: false, painted })
+        };
+        rendered();
+        // Nothing on these pages, before or after: nothing renders or draws again.
+        assert!(!resolve(&mut r, vec![], 1));
+        assert!(rendered().is_empty() && !r.annotations.paint_pending);
+        // A highlight now on the next page renders just that page again.
+        r.annotations.collection.records = vec![crate::annotations::Annotation {
+            version: 1,
+            kind: crate::annotations::Kind::Highlight,
+            id: "h".into(),
+            book: "book".into(),
+            fingerprint: String::new(),
+            range: crate::document::TextRange { start: Position::default(), end: Position::default() },
+            quotation: "words".into(),
+            created: String::new(),
+            chapter: String::new(),
+            note: None,
+            provenance: None,
+        }];
+        let on = |page, last| vec![crate::document::thread::Resolved { index: 0, page: Some(page), last }];
+        assert!(!resolve(&mut r, on(1, 1), 2));
+        assert_eq!(rendered(), vec![1]);
+        assert!(!r.annotations.paint_pending, "the shown page is still right");
+        let mut next = (*test_page(1, 1)).clone();
+        next.annotation_revision = 2;
+        next.annotations = vec![(0, vec![Rect::new(0, 0, 10, 10)])];
+        test_cx(&theme, |cx| r.receive(Reply::Page(Arc::new(next)), cx));
+        // Located again after a relayout (painted under the same revision):
+        // the pages it painted stay.
+        assert!(!resolve(&mut r, on(1, 1), 2));
+        assert!(rendered().is_empty() && r.cache.get(1).is_some());
+        // Spreading onto the shown page renders it again, and draws it.
+        assert!(!resolve(&mut r, on(0, 1), 4));
+        assert_eq!(rendered(), vec![0, 1]);
         assert!(r.annotations.paint_pending);
-        // ...and the same pixels come back.
         let mut page = (*test_page(1, 0)).clone();
-        page.annotation_revision = 1;
-        assert!(!redrawn(&mut r, Reply::Page(Arc::new(page.clone()))));
-        assert_eq!(r.shown.as_ref().map(|p| p.annotation_revision), Some(1));
-        // A highlight on it is drawn.
-        r.annotations.revision = 2;
-        page.annotation_revision = 2;
+        page.annotation_revision = 4;
         page.painted = vec![crate::document::thread::Paint { rect: Rect::new(0, 0, 10, 10), pixels: vec![] }];
         assert!(redrawn(&mut r, Reply::Page(Arc::new(page))));
+        assert!(!r.annotations.paint_pending);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 
