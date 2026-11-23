@@ -160,7 +160,7 @@ pub fn candidates(
     if let Some(last) = recent.first()
         && (last.status.finished || last.status.progress >= NEXT_AFTER_PROGRESS)
         && let Some(book) = by_id(&last.book.id)
-        && let Some(next) = next_in_folder(index, book)
+        && let Some(next) = next_in_folder(index, &book.path)
     {
         picks.push(next);
     }
@@ -187,14 +187,14 @@ pub fn candidates(
         .collect()
 }
 
-/// The book after `book` in its folder, by file name with numbers in order
-/// ("Book 2" before "Book 10").
-fn next_in_folder<'a>(index: &'a LibraryIndex, book: &Book) -> Option<&'a Book> {
-    let folder = book.path.parent()?;
+/// The book after the one at `path` in its folder, by file name with numbers
+/// in order ("Book 2" before "Book 10"). Also the end-of-book sheet's *Next*.
+pub(crate) fn next_in_folder<'a>(index: &'a LibraryIndex, path: &Path) -> Option<&'a Book> {
+    let folder = path.parent()?;
     let mut siblings: Vec<&Book> =
         index.books.iter().filter(|b| b.available && b.error.is_none() && b.path.parent() == Some(folder)).collect();
     siblings.sort_by_cached_key(|b| natural_key(&b.path));
-    let at = siblings.iter().position(|b| b.path == book.path)?;
+    let at = siblings.iter().position(|b| b.path == path)?;
     siblings.get(at + 1).copied()
 }
 

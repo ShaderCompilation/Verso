@@ -16,7 +16,7 @@ use crate::library::{
 };
 use crate::page_layout::PageLayout;
 use crate::platform::{RefreshMode, TextInput};
-use crate::screens::reader::Reader;
+use crate::screens::reader::{Leave, Reader};
 use crate::screens::styled_sheet::StyledSheet;
 use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBook, TopDrawerBookAction};
@@ -1489,6 +1489,7 @@ impl Books {
         self.worker.send(Command::Prelayout { layout, typography, page });
     }
     fn returned(&mut self, cx: &mut EventCx) {
+        let leave = self.reader.as_mut().map_or(Leave::Back, Reader::take_leave);
         self.library.pause(false);
         self.prelayout_due = true;
         self.warm_due = true;
@@ -1514,6 +1515,18 @@ impl Books {
         self.apply_pending(cx);
         self.refresh(cx.theme);
         self.save_navigation();
+        // The end-of-book sheet's Next and Home (docs/finished-books.md §3).
+        match leave {
+            // The old page stays up until the next book's first page.
+            Leave::Next(book) => return self.open_book(*book, cx.theme),
+            Leave::Home if !self.is_home() => {
+                self.open_home(cx);
+                if self.is_home() {
+                    return; // open_home refreshed the screen
+                }
+            }
+            Leave::Home | Leave::Back => {}
+        }
         cx.refresh(self.screen, RefreshMode::Full);
     }
     fn open_menu(&mut self, id: String, anchor: Point, t: &Theme) {

@@ -15,8 +15,22 @@ pub struct Presented {
     pub speed: Option<ReadingSpeed>,
     pub at: u64,
 }
+/// A change to the book's finished label made in the reader
+/// (docs/finished-books.md §3–4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Reached the end: finished at this time (Unix seconds), ending a re-read.
+    Finished(u64),
+    /// *Undo* on the end-of-book sheet: unfinished at this time.
+    Unfinished(u64),
+    /// Reading a finished book again.
+    Rereading,
+}
 enum Command {
     Save(Presented),
+    /// Saved in order with positions, so a page-turn save never writes back
+    /// an older label.
+    Status(Status),
     /// The global reading speed that seeds books opened for the first time.
     Seed(ReadingSpeed),
     /// The book's detected language, saved in order with its positions so
@@ -38,6 +52,9 @@ trait Backend: Send + 'static {
         Ok(())
     }
     fn seen(&mut self, _seen: &crate::koreader::Seen) -> Result<()> {
+        Ok(())
+    }
+    fn status(&mut self, _status: Status) -> Result<()> {
         Ok(())
     }
 }
@@ -123,6 +140,24 @@ impl Backend for StoreBackend {
         self.cached = Some((state, generation));
         Ok(())
     }
+    fn status(&mut self, status: Status) -> Result<()> {
+        let (mut state, generation) = self.take_state();
+        let changed = match status {
+            Status::Finished(at) => state.mark_finished(true, at),
+            Status::Unfinished(at) => state.mark_finished(false, at),
+            Status::Rereading => {
+                let start = state.finished && !state.rereading;
+                state.rereading |= start;
+                start
+            }
+        };
+        if changed {
+            // Home and Library show the new label on return.
+            self.store.save_book_position(&self.id, &state, true)?;
+        }
+        self.cached = Some((state, generation));
+        Ok(())
+    }
 }
 fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<Command>) -> Command {
     while matches!(c, Command::Save(_)) {
@@ -163,6 +198,7 @@ impl Writer {
             .name("verso-position".into())
             .spawn(move || {
                 let mut failed = None;
+                let mut failed_status = None;
                 let mut was_error = false;
                 let mut pending = None;
                 let report = |result: Result<()>, was_error: &mut bool| match &result {
@@ -193,10 +229,19 @@ impl Writer {
                             failed = result.is_err().then_some(p);
                             report(result, &mut was_error);
                         }
+                        Command::Status(status) => {
+                            let result = backend.status(status);
+                            failed_status = result.is_err().then_some(status);
+                            report(result, &mut was_error);
+                        }
                         Command::Flush(done) => {
-                            let result = failed.as_ref().map_or(Ok(()), |p| backend.save(p));
+                            let result = failed
+                                .as_ref()
+                                .map_or(Ok(()), |p| backend.save(p))
+                                .and_then(|()| failed_status.map_or(Ok(()), |s| backend.status(s)));
                             if result.is_ok() {
                                 failed = None;
+                                failed_status = None;
                                 was_error = false;
                                 backend.flush_home();
                             }
@@ -226,6 +271,11 @@ impl Writer {
                             }
                         }
                         Command::Stop => {
+                            if let Some(status) = failed_status.take()
+                                && let Err(e) = backend.status(status)
+                            {
+                                log::error!("saving finished status: {e:#}");
+                            }
                             if failed.is_none() {
                                 backend.flush_home();
                             }
@@ -247,6 +297,12 @@ impl Writer {
     /// Queues the book's detected language; nothing waits for it.
     pub fn save_language(&self, detected: DetectedLanguage) {
         let _ = self.tx.send(Command::Language(detected));
+    }
+    /// Queues a change to the finished label, after the positions before it.
+    /// A failure shows like a failed position save and is retried at the
+    /// next flush.
+    pub fn status(&self, status: Status) {
+        let _ = self.tx.send(Command::Status(status));
     }
     /// Queues the KOReader position dealt with on open; nothing waits for it.
     pub fn save_seen(&self, seen: crate::koreader::Seen) {
@@ -492,6 +548,43 @@ mod tests {
         assert_eq!(after_ext.dictionary_set.as_deref(), Some("french"));
         assert_eq!(after_ext.language.as_ref().map(|l| l.code.as_str()), Some("fr"));
         assert_eq!(after_ext.koreader_seen, Some(seen));
+        Ok(())
+    }
+    #[test]
+    fn status_changes_keep_their_order_with_page_turn_saves() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        let book = crate::library::selection_tests::book(5);
+        store.select_home_book(&book);
+        let writer = Writer::new(store.clone(), book.id.clone(), Waker::new(|| {}));
+        // A turn onto the last page, the mark, and a save of the same page
+        // queued right behind it: the later save keeps the mark.
+        writer.save(presented(8))?;
+        writer.save(presented(9))?;
+        writer.status(Status::Finished(500));
+        writer.save(presented(9))?;
+        writer.flush()?;
+        let state = store.book(&book.id);
+        assert!(state.finished && !state.rereading && state.status_at == 500 && state.page == 9);
+        let home = store.home_summary().unwrap();
+        assert!(home.books.iter().any(|e| e.book.id == book.id && e.status.finished), "Home shows it");
+        // Re-reading is only for a finished book, and doesn't move the date.
+        writer.status(Status::Rereading);
+        writer.save(presented(2))?;
+        writer.flush()?;
+        let state = store.book(&book.id);
+        assert!(state.finished && state.rereading && state.status_at == 500 && state.page == 2);
+        // Finishing again ends the re-read and moves the date; Undo clears it.
+        writer.status(Status::Finished(600));
+        writer.flush()?;
+        let state = store.book(&book.id);
+        assert!(state.finished && !state.rereading && state.status_at == 600);
+        writer.status(Status::Unfinished(700));
+        writer.status(Status::Rereading);
+        writer.save(presented(9))?;
+        writer.flush()?;
+        let state = store.book(&book.id);
+        assert!(!state.finished && !state.rereading && state.status_at == 700 && state.page == 9);
         Ok(())
     }
     #[test]

@@ -1,6 +1,7 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
 mod annotations;
 mod bars;
+mod end;
 mod koreader;
 mod layout;
 mod search;
@@ -25,12 +26,13 @@ use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
 use crate::screens::{Action, EventCx, Screen, TopDrawerBook, TopDrawerBookAction};
 use crate::store::{
     Settings, Store,
-    position::{Presented, Writer},
+    position::{Presented, Status, Writer},
 };
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK, PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::Toast;
+use end::{EndEvent, EndSheet};
 use layout::{LayoutEvent, LayoutView};
 use search::{BarEvent, Origin, SearchBar, SearchEvent, SearchView, Session};
 use selection::SelectionState;
@@ -121,6 +123,29 @@ pub struct Reader {
     mark_fast: bool,
     /// KOReader's newer position for this book, checked on open.
     koreader: koreader::Check,
+    /// The finished label as this reader loaded or last wrote it
+    /// (docs/finished-books.md).
+    finished: bool,
+    rereading: bool,
+    /// A forward page turn was made this session: only the first one can
+    /// start a re-read.
+    turned_forward: bool,
+    /// The next book in the folder, for the end-of-book sheet; looked up
+    /// the first time the sheet opens.
+    next_book: Option<Option<crate::library::Book>>,
+    /// What to show once the book closes (`take_leave`).
+    leave: Leave,
+}
+/// Where the reader goes when it closes.
+#[derive(Default)]
+pub enum Leave {
+    /// Back to Home or the Library, wherever the book was opened from.
+    #[default]
+    Back,
+    /// Home, from the end-of-book sheet.
+    Home,
+    /// The next book in the folder, from the end-of-book sheet.
+    Next(Box<crate::library::Book>),
 }
 /// What the bars show beyond the page itself: chapter offsets, reading
 /// speed, and the clock and battery as of the last reader redraw.
@@ -165,6 +190,8 @@ enum Overlay {
     /// "Remove bookmark and its note?", for a toggle on a page whose
     /// bookmark has a note; true when it came from the menu, which returns.
     RemoveBookmark(Box<ConfirmDelete<bool>>),
+    /// After a forward tap on the last page.
+    End(Box<EndSheet>),
 }
 impl Reader {
     pub fn book_id(&self) -> &str {
@@ -242,6 +269,11 @@ impl Reader {
             next_link: 0,
             mark_fast: false,
             koreader: koreader::Check::default(),
+            finished: false,
+            rereading: false,
+            turned_forward: false,
+            next_book: None,
+            leave: Leave::Back,
         }
     }
     /// The book's saved reading speed and the average carried over from
@@ -263,6 +295,8 @@ impl Reader {
             .flatten()
             .map(|path| crate::annotations::worker::KoreaderCheck { path, state: saved.clone() });
         self.koreader = koreader::Check::new(saved, check.is_some());
+        self.finished = saved.finished;
+        self.rereading = saved.finished && saved.rereading;
         self.annotations.service =
             Some(crate::annotations::worker::Worker::new(self.store.clone(), book, self.worker.waker(), check));
     }
@@ -571,6 +605,9 @@ impl Reader {
             }
             _ => Turn::Jump,
         };
+        if turn == Turn::Forward {
+            self.turned_forward_onto(page.number);
+        }
         if let Some(sample) = self.bars.sampler.shown(cx.now, page.offset, turn) {
             self.bars.speed.add(sample);
             self.bars.unsaved_seed = true;
@@ -620,7 +657,86 @@ impl Reader {
             }
         }
     }
+    /// A page turn: one page back, or forward, or past the last page, which
+    /// opens the end-of-book sheet.
+    fn step(&mut self, step: isize, cx: &mut EventCx) {
+        if step > 0 && self.at_end() {
+            self.open_end(cx);
+        } else {
+            self.go(self.target.saturating_add_signed(step), cx);
+        }
+    }
+    /// The last page is on screen, laid out, with no turn under way.
+    fn at_end(&self) -> bool {
+        !self.laying_out
+            && self.layout_at.is_none()
+            && !self.pending_turn
+            && self.pages > 0
+            && self.target + 1 == self.pages
+            && self.shown.as_ref().is_some_and(|p| p.generation == self.cache.generation && p.number == self.target)
+    }
+    /// A forward page turn showed page `number`. Onto the last page it marks
+    /// the book finished; the session's first one elsewhere in a finished
+    /// book starts a re-read (docs/finished-books.md §3–4). Jumps never
+    /// come here.
+    fn turned_forward_onto(&mut self, number: usize) {
+        let first = !std::mem::replace(&mut self.turned_forward, true);
+        if number + 1 >= self.pages {
+            self.mark_finished();
+        } else if first && self.finished && !self.rereading {
+            self.rereading = true;
+            self.persistence.status(Status::Rereading);
+        }
+    }
+    /// Marks the book finished through the position writer, unless it
+    /// already is (and isn't being re-read).
+    fn mark_finished(&mut self) {
+        if self.finished && !self.rereading {
+            return;
+        }
+        self.finished = true;
+        self.rereading = false;
+        self.persistence.status(Status::Finished(crate::update::unix_now()));
+    }
+    fn open_end(&mut self, cx: &mut EventCx) {
+        self.mark_finished();
+        let next = self.next_book.get_or_insert_with(|| {
+            let path = self.book_path.as_ref()?;
+            crate::document::prelayout::next_in_folder(&self.store.library(), path).cloned()
+        });
+        let next_title = next.as_ref().map(book_title);
+        let title = if self.metadata.title.is_empty() {
+            self.book_path.as_deref().map(file_title).unwrap_or_default()
+        } else {
+            self.metadata.title.clone()
+        };
+        self.overlay = Overlay::End(Box::new(EndSheet::new(cx.theme, self.screen, &title, next_title.as_deref())));
+        cx.redraw();
+    }
+    /// What to show after this reader closed: Home, the Library or the next
+    /// book. Asked once, by the screen that opened the book.
+    pub fn take_leave(&mut self) -> Leave {
+        std::mem::take(&mut self.leave)
+    }
+    /// Closes the book for `leave`, unless saving fails.
+    fn leave_book(&mut self, leave: Leave, cx: &mut EventCx) -> Action {
+        match self.close() {
+            Ok(()) => {
+                self.leave = leave;
+                Action::Pop
+            }
+            Err(e) => {
+                cx.toast(e.to_string(), None);
+                Action::None
+            }
+        }
+    }
     fn go(&mut self, page: usize, cx: &mut EventCx) {
+        self.go_to(page, true, cx);
+    }
+    /// `stepping`: a page turn rather than a jump (the progress slider), for
+    /// reading speed and the end of the book.
+    fn go_to(&mut self, page: usize, stepping: bool, cx: &mut EventCx) {
         if self.laying_out || self.layout_at.is_some() || self.pages == 0 {
             return;
         }
@@ -633,7 +749,7 @@ impl Reader {
         self.jump_destination = None;
         self.target = page;
         self.turn_pending = true;
-        self.bars.stepping = true;
+        self.bars.stepping = stepping;
         if self.batching {
             // Wait until the queued input batch finishes so rapid taps skip
             // intermediate pages rather than drawing or requesting them.
@@ -1302,6 +1418,13 @@ impl Reader {
     }
 }
 /// What the bars show for `page` (or the target page before one is shown).
+/// A book's title for the end-of-book sheet, or its file name.
+fn book_title(book: &crate::library::Book) -> String {
+    if book.metadata.title.is_empty() { file_title(&book.path) } else { book.metadata.title.clone() }
+}
+fn file_title(path: &std::path::Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+}
 fn bar_data<'a>(
     toc: &'a [TocEntry],
     metadata: &'a Metadata,
@@ -1624,7 +1747,7 @@ impl Reader {
                     }
                     Some(MenuEvent::Page(page)) => {
                         let origin = self.back.take().or_else(|| self.here());
-                        self.go(page, cx);
+                        self.go_to(page, false, cx);
                         self.back = origin;
                     }
                     Some(MenuEvent::Chapter(delta)) => {
@@ -1720,6 +1843,35 @@ impl Reader {
                     }
                 }
             }
+            Overlay::End(sheet) => {
+                // A backward page turn closes it and turns back.
+                if let Gesture::Swipe { dir: Direction::Right, .. } = g {
+                    self.overlay = Overlay::None;
+                    cx.redraw();
+                    self.step(-1, cx);
+                    return Action::None;
+                }
+                let before = sheet.visual_state();
+                let event = sheet.on_gesture(&g);
+                if event.is_some() || sheet.visual_state() != before {
+                    cx.redraw();
+                }
+                match event {
+                    Some(EndEvent::Close) => self.overlay = Overlay::None,
+                    Some(EndEvent::Undo) => {
+                        self.overlay = Overlay::None;
+                        self.finished = false;
+                        self.rereading = false;
+                        self.persistence.status(Status::Unfinished(crate::update::unix_now()));
+                    }
+                    Some(EndEvent::Home) => return self.leave_book(Leave::Home, cx),
+                    Some(EndEvent::Next) => {
+                        let leave = self.next_book.clone().flatten().map_or(Leave::Home, |b| Leave::Next(Box::new(b)));
+                        return self.leave_book(leave, cx);
+                    }
+                    None => {}
+                }
+            }
             Overlay::Contents(contents) => {
                 let before = contents.visual_state();
                 let event = contents.on_gesture(&g);
@@ -1775,7 +1927,7 @@ impl Reader {
                     }
                     _ => return Action::None,
                 };
-                self.go(self.target.saturating_add_signed(step), cx);
+                self.step(step, cx);
             }
         }
         Action::None
@@ -1946,6 +2098,7 @@ impl Screen for Reader {
             Overlay::Highlights(view) => view.draw(cx, &self.annotations),
             Overlay::Footnote(note) => note.draw(cx),
             Overlay::RemoveBookmark(confirm) => confirm.draw(cx),
+            Overlay::End(sheet) => sheet.draw(cx),
         }
         if self.laying_out
             || self.layout_at.is_some()
@@ -1971,12 +2124,21 @@ impl Screen for Reader {
         if self.koreader_card_visible() {
             self.koreader_answer(koreader::Answer::Stay, Some(cx));
         }
+        // Over the end-of-book sheet, back closes it and turns back.
+        if matches!(self.overlay, Overlay::End(_)) {
+            if key.step() < 0 {
+                self.overlay = Overlay::None;
+                cx.redraw();
+                self.step(key.step(), cx);
+            }
+            return Action::None;
+        }
         if matches!(self.overlay, Overlay::None)
             && self.selection.selected.is_none()
             && !self.selection.extending
             && self.extension.is_none()
         {
-            self.go(self.target.saturating_add_signed(key.step()), cx);
+            self.step(key.step(), cx);
         }
         Action::None
     }
@@ -4198,6 +4360,255 @@ mod tests {
         drop(r);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    /// A reader on page `at` of a laid-out book with `pages` pages, its
+    /// label loaded from `saved` as on open.
+    fn end_reader(
+        name: &str,
+        pages: usize,
+        at: usize,
+        saved: BookState,
+    ) -> (Reader, std::sync::mpsc::Receiver<Command>) {
+        remove_store(name);
+        let (mut r, commands) = test_reader(name);
+        r.store.save_book("book", &saved).unwrap();
+        r.finished = saved.finished;
+        r.rereading = saved.finished && saved.rereading;
+        r.pages = pages;
+        r.laying_out = false;
+        r.target = at;
+        r.shown = Some(test_page(1, at));
+        (r, commands)
+    }
+    /// Puts `number` on screen as a page turn would, without a tap.
+    fn place(r: &mut Reader, number: usize) {
+        r.target = number;
+        r.shown = Some(test_page(1, number));
+    }
+    fn tap_side(r: &mut Reader, theme: &Theme, forward: bool, next: usize) -> Action {
+        r.cache.insert(test_page(1, next), r.target);
+        let p = crate::geom::Point::new(if forward { 550 } else { 50 }, 400);
+        let mut action = Action::None;
+        test_cx(theme, |cx| {
+            r.on_gesture(Gesture::Down(p), cx);
+            action = r.on_gesture(Gesture::Tap(p), cx);
+        });
+        r.after_present();
+        action
+    }
+    fn saved_state(r: &mut Reader) -> BookState {
+        r.persistence.flush().unwrap();
+        r.store.book("book")
+    }
+
+    #[test]
+    fn jumps_never_mark_the_book_and_a_forward_turn_onto_the_last_page_does() {
+        let theme = Theme::for_dpi(150);
+        let name = "end-jumps";
+        let (mut r, commands) = end_reader(name, 5, 3, BookState::default());
+        let not_marked = |r: &mut Reader, how: &str| {
+            assert_eq!(r.shown.as_ref().unwrap().number, 4, "{how}: on the last page");
+            assert!(!r.finished && !saved_state(r).finished, "{how} doesn't mark");
+            place(r, 3);
+        };
+        // The progress slider, even by one page.
+        r.cache.insert(test_page(1, 4), 3);
+        test_cx(&theme, |cx| r.go_to(4, false, cx));
+        r.after_present();
+        not_marked(&mut r, "the slider");
+        // Contents, search hits, links, footnotes, bookmarks and Go there all
+        // jump to a position: one already laid out, and one the book thread finds.
+        r.cache.insert(test_page(1, 4), 3);
+        test_cx(&theme, |cx| {
+            r.jump_position(Some(4), Position("page-4".into()), cx);
+        });
+        not_marked(&mut r, "a jump to a cached page");
+        r.cache.reset(1);
+        test_cx(&theme, |cx| {
+            r.jump_away(None, Position("page-4".into()), cx);
+            let jump = r.jump;
+            assert!(jump > 0);
+            r.receive(Reply::Jumped { jump, page: test_page(1, 4) }, cx);
+        });
+        not_marked(&mut r, "a jump the book thread finds");
+        // A layout change that lands on the last page.
+        r.laying_out = true;
+        r.target = 4;
+        test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 4)), cx));
+        not_marked(&mut r, "a layout change");
+        // Opening at the saved position on the last page.
+        let (mut opened, _opened_commands) = end_reader("end-jumps-open", 5, 0, BookState::default());
+        opened.shown = None;
+        opened.laying_out = true;
+        test_cx(&theme, |cx| {
+            opened.receive(
+                Reply::Opened {
+                    generation: 1,
+                    metadata: Metadata::default(),
+                    toc: Vec::new(),
+                    pages: 5,
+                    current: 4,
+                    lost: false,
+                },
+                cx,
+            );
+            opened.receive(Reply::Page(test_page(1, 4)), cx);
+        });
+        opened.after_present();
+        not_marked(&mut opened, "the position restored on open");
+
+        // A forward turn onto the last page marks it, with nothing drawn but the page.
+        tap_side(&mut r, &theme, true, 4);
+        assert!(matches!(r.overlay, Overlay::None));
+        let state = saved_state(&mut r);
+        assert!(state.finished && !state.rereading && state.status_at > 0 && state.page == 4);
+        let _ = commands.try_iter().count();
+        drop((r, opened));
+        remove_store(name);
+        remove_store("end-jumps-open");
+    }
+
+    #[test]
+    fn a_tap_past_the_last_page_opens_the_sheet_with_undo_next_and_home() {
+        use crate::geom::Point;
+        let theme = Theme::for_dpi(150);
+        let name = "end-sheet";
+        let (mut r, _commands) = end_reader(name, 5, 4, BookState::default());
+        // Three books in the folder, in natural order: 1, 2, 10.
+        let folder = std::path::Path::new("/books/series");
+        let books: Vec<_> = ["Book 10", "Book 2", "Book 1"]
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                let mut book = crate::library::selection_tests::book(i);
+                book.path = folder.join(format!("{title}.epub"));
+                book.metadata.title = format!("The {title}");
+                book
+            })
+            .collect();
+        let mut elsewhere = crate::library::selection_tests::book(7);
+        elsewhere.path = "/books/Book 3.epub".into();
+        let index = crate::library::LibraryIndex {
+            version: crate::library::LibraryIndex::VERSION,
+            books: [books.clone(), vec![elsewhere]].concat(),
+            empty_folders: vec![],
+        };
+        r.store.save_library(&index).unwrap();
+        r.book_path = Some(folder.join("Book 2.epub"));
+        r.metadata.title = "The Book 2".into();
+        let open = |r: &mut Reader| {
+            tap_side(r, &theme, true, 4);
+            let Overlay::End(sheet) = &r.overlay else { panic!("the sheet opens") };
+            sheet.buttons()
+        };
+
+        // Reached by a jump, so not yet marked: the tap past marks it.
+        let (undo, _, next) = open(&mut r);
+        assert!(next.is_some(), "the folder has a next book");
+        assert_eq!(r.next_book.clone().flatten().map(|b| b.metadata.title), Some("The Book 10".into()));
+        let marked = saved_state(&mut r);
+        assert!(marked.finished && marked.status_at > 0);
+        // Undo unmarks it and closes the sheet.
+        tap_at(&mut r, &theme, undo.center());
+        assert!(matches!(r.overlay, Overlay::None));
+        let undone = saved_state(&mut r);
+        assert!(!undone.finished && !undone.rereading && undone.status_at >= marked.status_at);
+        // Tapping past again marks it again. A tap outside, a backward swipe
+        // and the back button close the sheet; the book stays finished.
+        open(&mut r);
+        assert!(saved_state(&mut r).finished);
+        tap_at(&mut r, &theme, Point::new(300, 100));
+        assert!(matches!(r.overlay, Overlay::None) && r.target == 4);
+        open(&mut r);
+        r.cache.insert(test_page(1, 3), 4);
+        test_cx(&theme, |cx| {
+            r.on_gesture(
+                Gesture::Swipe { dir: Direction::Right, from: Point::new(100, 400), to: Point::new(500, 400) },
+                cx,
+            );
+        });
+        assert!(matches!(r.overlay, Overlay::None) && r.shown.as_ref().unwrap().number == 3, "closed and turned back");
+        place(&mut r, 4);
+        open(&mut r);
+        r.cache.insert(test_page(1, 3), 4);
+        test_cx(&theme, |cx| {
+            r.on_key(KeyAction::PageNext, cx);
+            assert!(matches!(r.overlay, Overlay::End(_)), "forward does nothing over the sheet");
+            r.on_key(KeyAction::PagePrev, cx);
+        });
+        assert!(matches!(r.overlay, Overlay::None) && r.shown.as_ref().unwrap().number == 3);
+        assert!(saved_state(&mut r).finished);
+        // Next closes the book and opens the next one in the folder.
+        place(&mut r, 4);
+        let (_, _, next) = open(&mut r);
+        let mut action = Action::None;
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(next.unwrap().center()), cx);
+            action = r.on_gesture(Gesture::Tap(next.unwrap().center()), cx);
+        });
+        assert!(matches!(action, Action::Pop));
+        assert!(matches!(r.take_leave(), Leave::Next(book) if book.path == folder.join("Book 10.epub")));
+        assert!(matches!(r.take_leave(), Leave::Back), "asked once");
+        drop(r);
+
+        // The last book in the folder: no Next, and Home goes home.
+        let (mut r, _commands) = end_reader(name, 1, 0, BookState::default());
+        r.book_path = Some(folder.join("Book 10.epub"));
+        tap_side(&mut r, &theme, true, 0);
+        let Overlay::End(sheet) = &r.overlay else { panic!("a one-page book's sheet") };
+        let (_, home, next) = sheet.buttons();
+        assert!(next.is_none(), "no next book at the end of the folder");
+        tap_at(&mut r, &theme, home.center());
+        assert!(matches!(r.take_leave(), Leave::Home));
+        assert!(r.store.book("book").finished, "saved on close");
+        drop(r);
+        remove_store(name);
+    }
+
+    #[test]
+    fn turning_pages_in_a_finished_book_rereads_it_until_the_end_again() {
+        let theme = Theme::for_dpi(150);
+        let name = "end-reread";
+        let finished = BookState { finished: true, status_at: 100, ..Default::default() };
+        let (mut r, _commands) = end_reader(name, 5, 1, finished.clone());
+        // Looking around: a backward turn and a jump don't start a re-read.
+        tap_side(&mut r, &theme, false, 0);
+        r.cache.insert(test_page(1, 2), 2);
+        test_cx(&theme, |cx| {
+            r.jump_position(Some(2), Position("page-2".into()), cx);
+        });
+        assert_eq!(r.shown.as_ref().unwrap().number, 2);
+        r.after_present();
+        let state = saved_state(&mut r);
+        assert!(state.finished && !state.rereading);
+        // The first forward turn does, keeping the finished date.
+        tap_side(&mut r, &theme, true, 3);
+        let state = saved_state(&mut r);
+        assert!(state.finished && state.rereading && state.status_at == 100 && state.continues());
+        // The end again ends the re-read and moves the date.
+        tap_side(&mut r, &theme, true, 4);
+        let state = saved_state(&mut r);
+        assert!(state.finished && !state.rereading && state.status_at > 100);
+        let date = state.status_at;
+        // Paging back and on in the same session doesn't start another.
+        tap_side(&mut r, &theme, false, 3);
+        tap_side(&mut r, &theme, false, 2);
+        tap_side(&mut r, &theme, true, 3);
+        let state = saved_state(&mut r);
+        assert!(!state.rereading && state.status_at == date);
+        drop(r);
+        // A session whose first forward turn lands on the last page leaves
+        // a finished book as it was.
+        let (mut r, _commands) = end_reader(name, 5, 3, finished);
+        tap_side(&mut r, &theme, true, 4);
+        tap_side(&mut r, &theme, false, 3);
+        tap_side(&mut r, &theme, false, 2);
+        tap_side(&mut r, &theme, true, 3);
+        let state = saved_state(&mut r);
+        assert!(state.finished && !state.rereading && state.status_at == 100);
+        drop(r);
+        remove_store(name);
     }
 
     #[test]
