@@ -23,15 +23,14 @@ use crate::{
     },
 };
 
-/// "Open at full height" and "Always at the bottom", in the Sets view.
-const CARD_ROWS: usize = 2;
-
 #[derive(Clone)]
 enum View {
     Sets,
     Set(String),
     Languages(String),
     Dictionary(String, String),
+    /// The lookup card's placement.
+    Card,
 }
 enum Field {
     New,
@@ -176,7 +175,7 @@ impl Dictionaries {
     }
     fn set_id(&self) -> &str {
         match &self.view {
-            View::Sets => DEFAULT,
+            View::Sets | View::Card => DEFAULT,
             View::Set(id) | View::Languages(id) | View::Dictionary(id, _) => id,
         }
     }
@@ -201,7 +200,7 @@ impl Dictionaries {
     /// Leave views whose set or dictionary disappeared, e.g. after a rescan.
     fn settle_view(&mut self, cx: &mut EventCx) {
         let view = match &self.view {
-            View::Sets => return,
+            View::Sets | View::Card => return,
             View::Set(set) | View::Languages(set) | View::Dictionary(set, _)
                 if !self.sets.iter().any(|s| s.id == *set) =>
             {
@@ -250,18 +249,6 @@ impl Dictionaries {
         let position = |id: &str| set.dictionaries.iter().position(|p| p.id == id).unwrap_or(usize::MAX);
         self.dictionaries.sort_by_key(|d| position(d.id()));
     }
-    /// The lookup card's switches, after the sets in the Sets view.
-    fn card_rows(&self) -> [Row; CARD_ROWS] {
-        let settings = self.store.settings();
-        [
-            Row::new("Open at full height")
-                .sub("In portrait. Off: a half-height card")
-                .toggle(settings.dictionary_full_height),
-            Row::new("Always at the bottom")
-                .sub("On the right in landscape. Off: away from the word")
-                .toggle(settings.dictionary_at_bottom),
-        ]
-    }
     fn layout(&mut self, t: &Theme) {
         let title = if let Some(editor) = &self.editor {
             match editor.field {
@@ -276,6 +263,7 @@ impl Dictionaries {
                 View::Set(_) => self.current_set().map_or("Dictionary set", |s| &s.name).into(),
                 View::Languages(_) => "Set languages".into(),
                 View::Dictionary(_, _) => "Dictionary".into(),
+                View::Card => "Lookup card".into(),
             }
         };
         self.top = TopBar::new(&title, true);
@@ -289,11 +277,11 @@ impl Dictionaries {
         self.note = Rect::new(c.x, y - t.mm(13.0) - gap, c.w, t.mm(13.0));
         self.pager.place(Rect::new(c.x, self.note.y - t.mm(12.0), c.w, t.mm(11.0)), t);
         let labels: &[&str] = match &self.view {
-            View::Sets => &["New set"],
+            View::Sets => &["New set", "Lookup card"],
             View::Set(id) if id != DEFAULT => &["Rename", "Languages", "Delete"],
             View::Set(_) => &["Rename"],
             View::Languages(_) => &["Edit language codes"],
-            View::Dictionary(_, _) => &[],
+            View::Dictionary(_, _) | View::Card => &[],
         };
         self.toolbar = labels
             .iter()
@@ -327,7 +315,6 @@ impl Dictionaries {
                 .sets
                 .iter()
                 .map(|s| Row::new(&s.name).sub(languages(s)).chevron())
-                .chain(self.card_rows())
                 .chain(self.word_forms.iter().map(|forms| {
                     Row::new(format!("{} word forms", language_name(&forms.language))).sub(match &forms.source {
                         WordFormsSource::BuiltIn => "Built-in".into(),
@@ -402,15 +389,26 @@ impl Dictionaries {
                     rows
                 })
                 .unwrap_or_default(),
+            View::Card => vec![
+                Row::new("Always at the bottom")
+                    .sub("Off: the small card opens away from the word")
+                    .toggle(self.store.settings().dictionary_at_bottom),
+            ],
         };
         self.list.rows = rows;
-        if self.pending {
+        // The card's switch doesn't wait for the catalog.
+        if self.pending && !matches!(self.view, View::Card) {
             for row in &mut self.list.rows {
                 row.enabled = false;
             }
         }
         self.list.slot = t.target;
         self.list.place(self.list_rect, t.row2, 0);
+        if matches!(self.view, View::Card) {
+            // Explains the switch right below it.
+            self.note =
+                Rect::new(self.list_rect.x, self.list_rect.y + t.row2 + t.mm(3.0), self.list_rect.w, t.mm(15.0));
+        }
         self.pager.set(self.list.page, self.list.paging().pages());
         self.list.page = self.pager.page;
     }
@@ -430,7 +428,7 @@ impl Dictionaries {
         }
         match self.view.clone() {
             View::Sets => return Action::Pop,
-            View::Set(_) => self.open(View::Sets, t),
+            View::Set(_) | View::Card => self.open(View::Sets, t),
             View::Dictionary(set, _) | View::Languages(set) => self.open(View::Set(set), t),
         }
         Action::None
@@ -476,6 +474,9 @@ impl Dictionaries {
     }
     fn toolbar(&mut self, index: usize, cx: &mut EventCx) {
         if matches!(self.view, View::Sets) {
+            if index == 1 {
+                return self.open(View::Card, cx.theme);
+            }
             return self.start_editor(Field::New, String::new(), cx.theme);
         }
         let Some(current) = self.current_set() else { return };
@@ -540,26 +541,22 @@ impl Dictionaries {
     fn row(&mut self, index: usize, cx: &mut EventCx) {
         match self.view.clone() {
             View::Sets if index < self.sets.len() => self.open(View::Set(self.sets[index].id.clone()), cx.theme),
-            View::Sets if index < self.sets.len() + CARD_ROWS => {
-                let mut settings = self.store.settings();
-                if index == self.sets.len() {
-                    settings.dictionary_full_height = !settings.dictionary_full_height;
-                } else {
-                    settings.dictionary_at_bottom = !settings.dictionary_at_bottom;
-                }
-                if let Err(e) = self.store.save_settings(&settings) {
-                    log::error!("saving the lookup card setting: {e:#}");
-                    cx.toast("Couldn't save the setting", None);
-                }
-                self.layout(cx.theme);
-            }
             View::Sets => {
-                let Some(forms) = self.word_forms.get(index - self.sets.len() - CARD_ROWS) else { return };
+                let Some(forms) = self.word_forms.get(index - self.sets.len()) else { return };
                 let text = word_forms_details(forms);
                 let name = language_name(&forms.language);
                 self.details = Some(Details::from_text(cx.theme, self.screen, &format!("{name} word forms"), text));
             }
             View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id().into()), cx.theme),
+            View::Card => {
+                let mut settings = self.store.settings();
+                settings.dictionary_at_bottom = !settings.dictionary_at_bottom;
+                if let Err(e) = self.store.save_settings(&settings) {
+                    log::error!("saving the lookup card placement: {e:#}");
+                    cx.toast("Couldn’t save the setting", None);
+                }
+                self.layout(cx.theme);
+            }
             View::Languages(set) => {
                 let code = self.language_choices()[index].0.clone();
                 let Some(mut languages) = self.current_set().map(|s| s.languages.clone()) else { return };
@@ -682,7 +679,11 @@ impl Screen for Dictionaries {
             button.draw(cx);
         }
         self.pager.draw(cx);
-        let note = if self.pending {
+        let card = matches!(self.view, View::Card);
+        let note = if card {
+            "The card opens at the size you last left it: the expand button beside × switches it. \
+             In landscape, the bottom means the right side."
+        } else if self.pending {
             "Checking dictionaries…"
         } else if !self.warnings.is_empty() {
             "Some folders or preferences had problems. Tap here for details."
@@ -694,9 +695,11 @@ impl Screen for Dictionaries {
             "Changes save immediately. Tap a row to manage it."
         };
         cx.paragraph(note, cx.theme.small.gray(INK2), self.note, HAlign::Left);
-        self.rescan.enabled = !self.pending;
-        self.rescan.draw(cx);
-        self.folders.draw(cx);
+        if !card {
+            self.rescan.enabled = !self.pending;
+            self.rescan.draw(cx);
+            self.folders.draw(cx);
+        }
         if let Some(details) = &mut self.details {
             details.draw(cx);
         }
@@ -761,7 +764,7 @@ impl Screen for Dictionaries {
             self.toolbar(i, cx);
             return Action::None;
         }
-        if self.folders.on_gesture(&g) {
+        if !matches!(self.view, View::Card) && self.folders.on_gesture(&g) {
             self.returning = true;
             return Action::Push(Box::new(DictionaryFolders::new(
                 cx.theme,
@@ -770,7 +773,7 @@ impl Screen for Dictionaries {
                 self.waker.clone(),
             )));
         }
-        if !self.pending && self.rescan.on_gesture(&g) {
+        if !self.pending && !matches!(self.view, View::Card) && self.rescan.on_gesture(&g) {
             self.catalog(true);
             self.layout(cx.theme);
         }
@@ -967,36 +970,33 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut s = Dictionaries::new(&t, screen, store.clone(), Waker::new(|| {}), None);
         wait(&mut s, &t);
-        // Default, the lookup card's switches, then the read-only word-form
-        // rows; this store has no packs.
+        // Default, then the read-only word-form rows; this store has no packs.
         let rows: Vec<_> = s.list.rows.iter().map(|r| (r.label.as_str(), r.sub.as_deref())).collect();
         assert_eq!(
             rows,
             [
                 ("Default", Some("Fallback for books without an assigned set")),
-                ("Open at full height", Some("In portrait. Off: a half-height card")),
-                ("Always at the bottom", Some("On the right in landscape. Off: away from the word")),
                 ("English word forms", Some("Built-in")),
                 ("Russian word forms", Some("Couldn’t be read · Tap for details")),
             ]
         );
-        // The switches save the setting the reader opens the card with.
-        row(&mut s, 1, &t);
-        assert!(!store.settings().dictionary_full_height && store.settings().dictionary_at_bottom);
-        row(&mut s, 2, &t);
-        assert!(!store.settings().dictionary_at_bottom);
-        // Russian word forms, first on the second page.
-        (s.pager.page, s.list.page) = (1, 1);
+        // Lookup card: its switch saves the placement the reader reads.
+        let card = s.toolbar[1].rect().center();
+        tap(&mut s, card, &t);
+        assert!(matches!(s.view, View::Card));
         row(&mut s, 0, &t);
+        assert!(!store.settings().dictionary_at_bottom);
+        s.back(&t);
+        assert!(matches!(s.view, View::Sets));
+        row(&mut s, 2, &t);
         assert!(s.details.is_some(), "the error opens in details");
         assert!(matches!(s.view, View::Sets));
         s.details = None;
-        (s.pager.page, s.list.page) = (0, 0);
         crate::dictionary::write_pack(&store.wordforms_dir().join("ru.vwf"), "ru", &[("кошки", &["кошка"])]);
         let rescan = s.rescan.rect().center();
         tap(&mut s, rescan, &t);
         wait(&mut s, &t);
-        assert_eq!(s.list.rows[4].sub.as_deref(), Some("Test pack, 2026-11-17"), "Rescan reopens the pack");
+        assert_eq!(s.list.rows[2].sub.as_deref(), Some("Test pack, 2026-11-17"), "Rescan reopens the pack");
         let new = s.toolbar[0].rect().center();
         tap(&mut s, new, &t);
         submit(&mut s, "English and Russian", &t);
@@ -1217,7 +1217,7 @@ mod tests {
         wait(&mut s, &t);
         let rows: Vec<_> = s.list.rows.iter().map(|r| (r.label.as_str(), r.sub.as_deref().unwrap_or(""))).collect();
         assert_eq!(
-            rows[3..],
+            rows[1..],
             [
                 ("English word forms", "Built-in"),
                 ("French word forms", "Unsupported encoding KOI8-R · use a UTF-8 copy"),

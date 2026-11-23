@@ -560,7 +560,7 @@ impl Reader {
         let word = if settings.dictionary_at_bottom { None } else { self.selected_rect() };
         let selection = self.dictionary_selection();
         let mut lookup = Lookup::new(query, service, cx.theme, self.screen, word, selection);
-        if settings.dictionary_full_height {
+        if settings.dictionary_expanded {
             lookup = lookup.expanded(cx.theme);
         }
         self.overlay = Overlay::Lookup(Box::new(lookup));
@@ -1628,6 +1628,15 @@ impl Reader {
                         if let Err(error) = result {
                             log::error!("saving dictionary set: {error:#}");
                             cx.toast("Couldn’t save the dictionary set for this book", None);
+                        }
+                        return Action::None;
+                    }
+                    if let LookupEvent::Resized(expanded) = event {
+                        let mut settings = self.store.settings();
+                        settings.dictionary_expanded = expanded;
+                        if let Err(error) = self.store.save_settings(&settings) {
+                            log::error!("saving the lookup card size: {error:#}");
+                            cx.toast("Couldn’t save the card size", None);
                         }
                         return Action::None;
                     }
@@ -3553,12 +3562,23 @@ mod tests {
         assert!(matches!(r.overlay, Overlay::None));
         assert!(r.selection.selected.is_none());
         // With both settings off, a compact card stands away from the word.
+        // ⤡ collapses the card, and the next one opens compact.
+        open(&mut r);
+        let p = match &r.overlay {
+            Overlay::Lookup(lookup) => lookup.expand_point(),
+            _ => panic!("no lookup"),
+        };
+        tap(&mut r, p);
+        assert!(!r.store.settings().dictionary_expanded);
+        assert_eq!(open(&mut r).bottom(), 800);
+        assert!(open(&mut r).h < 800 / 2 + 100);
+        // Not kept at the bottom, a compact card stands away from the word.
         let mut settings = r.store.settings();
-        (settings.dictionary_full_height, settings.dictionary_at_bottom) = (false, false);
+        settings.dictionary_at_bottom = false;
         r.store.save_settings(&settings).unwrap();
         let low = Rect::new(100, 600, 120, 30);
         let card = open_at(&mut r, low);
-        assert!(card.y == 0 && card.h < 800 / 2 + 100 && card.intersect(&low).is_none(), "{card:?}");
+        assert!(card.y == 0 && card.intersect(&low).is_none(), "{card:?}");
     }
 
     #[test]

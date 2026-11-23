@@ -137,6 +137,8 @@ pub enum LookupEvent {
     /// sets while the worker hasn't yet said which set the lookup resolves to.
     Manage(Option<String>),
     Set(String),
+    /// ⤢ expanded (true) or collapsed the card; the next lookup opens so.
+    Resized(bool),
 }
 
 /// A finished reply, kept so Back can show it again without the worker.
@@ -352,7 +354,7 @@ impl Lookup {
         lookup.place(t);
         lookup
     }
-    /// Opens expanded, as the full-height setting asks; ⤡ still collapses it.
+    /// Opens expanded, as ⤢ last left the card.
     pub fn expanded(mut self, t: &Theme) -> Self {
         self.expanded = true;
         self.place(t);
@@ -372,6 +374,11 @@ impl Lookup {
     #[cfg(test)]
     pub(crate) fn depth(&self) -> usize {
         self.history.len()
+    }
+    /// The middle of ⤢ (⤡ while expanded).
+    #[cfg(test)]
+    pub(crate) fn expand_point(&self) -> crate::geom::Point {
+        self.expand.rect().center()
     }
     /// The middle of an action strip button (Highlight, Note, Search, Extend).
     #[cfg(test)]
@@ -923,7 +930,7 @@ impl Lookup {
         }
         if self.expand.on_gesture(g) {
             self.expanded = !self.expanded;
-            return None;
+            return Some(LookupEvent::Resized(self.expanded));
         }
         if let Some(p) = &mut self.picker {
             if p.manage.on_gesture(g) {

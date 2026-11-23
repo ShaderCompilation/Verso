@@ -249,10 +249,10 @@ dictionary name to switch matches; tap `⤢` to expand in portrait. **Tap any
 word inside a definition** to look it up recursively (up to 24 levels deep;
 `←` steps back).
 
-The card opens at full height at the bottom (on the right in landscape). In
-**Settings → Library → Dictionaries**, turn off **Open at full height** for a
-half-height card, or **Always at the bottom** to have it open away from the
-word so the word stays visible.
+The card opens expanded at first, then at whatever size you last left it with
+`⤢`. The smaller card stays at the bottom (on the right in landscape); turn
+off **Always at the bottom** in **Dictionaries → Lookup card** to have it open
+away from the word, so the word stays visible.
 
 ---
 

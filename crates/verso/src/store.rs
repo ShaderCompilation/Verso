@@ -67,11 +67,11 @@ pub struct Settings {
     pub untested_seen: Vec<String>,
     /// When a book opens, offer KOReader's newer position. Settings → Reading.
     pub koreader_progress: bool,
-    /// The lookup card opens expanded in portrait. Settings → Library →
-    /// Dictionaries.
-    pub dictionary_full_height: bool,
-    /// The lookup card stays at the bottom (the right in landscape) rather
-    /// than moving away from the word. Settings → Library → Dictionaries.
+    /// The lookup card's size in portrait as ⤢ last left it: it opens
+    /// expanded until collapsed.
+    pub dictionary_expanded: bool,
+    /// The compact lookup card stays at the bottom (the right in landscape)
+    /// rather than moving away from the word. Dictionaries → Lookup card.
     pub dictionary_at_bottom: bool,
 }
 impl Default for Settings {
@@ -94,7 +94,7 @@ impl Default for Settings {
             folder_preview: FolderPreview::default(),
             untested_seen: Vec::new(),
             koreader_progress: true,
-            dictionary_full_height: true,
+            dictionary_expanded: true,
             dictionary_at_bottom: true,
         }
     }
