@@ -89,23 +89,31 @@ impl OfferSheet {
         update.place(Rect::new(c.x, bottom - t.mm(3.0) - t.button_h, c.w, t.button_h), t);
         let blocked = (!update::can_install()).then_some("Start Verso from KUAL to install updates.");
         update.enabled = blocked.is_none();
-        let meta = Rect { h: t.mm(6.0), ..c };
-        let notes_top = meta.bottom() + t.mm(12.0);
+        // Room for two lines: the meta line splits on 800x600.
+        let meta = Rect { h: t.mm(7.0), ..c };
+        let notes_top = c.y + t.mm(6.0) + t.mm(12.0);
         let notes_bottom = update.rect().y - t.mm(if blocked.is_some() { 12.0 } else { 4.0 });
         let notes = Rect::new(c.x, notes_top, c.w, (notes_bottom - notes_top).max(0));
         Self { sheet, offer, meta, notes, blocked, update, later, skip }
     }
 
-    fn meta_line(&self) -> String {
-        let o = &self.offer;
-        format!("A {} download · released {}", update::file_size(o.download), release_date(&o.released))
+    /// One line, or two split at the dot where one doesn't fit (800x600).
+    fn meta_line(&self, text: &mut crate::gfx::TextRenderer, t: &Theme) -> String {
+        let (size, date) = (update::file_size(self.offer.download), release_date(&self.offer.released));
+        let line = format!("A {size} download · released {date}");
+        if text.width(&line, t.small) <= self.meta.w as f32 {
+            line
+        } else {
+            format!("A {size} download\nReleased {date}")
+        }
     }
 
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         self.sheet.draw(cx);
         let o = &self.offer;
-        cx.paragraph(&self.meta_line(), t.small.gray(INK2), self.meta, HAlign::Left);
+        let meta = self.meta_line(cx.text, t);
+        cx.paragraph(&meta, t.small.gray(INK2), self.meta, HAlign::Left);
         cx.section_label("What’s new", Rect::new(self.notes.x, self.notes.y - t.mm(8.0), self.notes.w, t.mm(8.0)));
         let notes = if o.notes.trim().is_empty() { "No notes for this release." } else { o.notes.trim() };
         let height = cx.text.measure(notes, t.body, Some(self.notes.w as f32)).1.ceil() as i32;
@@ -530,10 +538,8 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
     let o = OfferSheet::new(t, screen, offer);
     let mut sheet = Parts::new("OfferSheet", o.sheet.rect(), [o.update.rect(), o.later.rect(), o.skip.rect()])
         .body(o.notes, text_h(text, &o.offer.notes, t.body, o.notes.w));
-    // Left out at 800x600 until fixed: the meta line wraps to two lines (42 px) in its 39 px.
-    if (screen.w, screen.h) != (800, 600) {
-        sheet = sheet.body(o.meta, text_h(text, &o.meta_line(), t.small, o.meta.w));
-    }
+    let meta = o.meta_line(text, t);
+    sheet = sheet.body(o.meta, text_h(text, &meta, t.small, o.meta.w));
     if let Some(why) = o.blocked {
         let r = Rect::new(o.notes.x, o.update.rect().y - t.mm(9.0), o.notes.w, t.mm(7.0));
         sheet = sheet.body(r, text_h(text, why, t.small, r.w));
