@@ -364,7 +364,7 @@ mod tests {
         writer.flush()?;
         let saved = store.book("book");
         assert_eq!(saved.page, 2);
-        assert!(!saved.finished && !saved.hidden_from_continue);
+        assert!(saved.finished && !saved.hidden_from_continue, "opening unhides but keeps finished");
         drop(writer);
         std::fs::remove_dir_all(root)?;
         Ok(())

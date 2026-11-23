@@ -594,6 +594,7 @@ mod tests {
                         progress: *progress,
                         last_opened: *opened,
                         finished: *finished,
+                        rereading: false,
                         hidden_from_continue: false,
                     },
                 })

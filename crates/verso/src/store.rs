@@ -141,7 +141,15 @@ pub struct BookState {
     pub page: usize,
     pub progress: u32,
     pub last_opened: u64,
+    /// I have read this book. Sticky: opening the book doesn't clear it, only
+    /// *Mark unfinished* (docs/finished-books.md).
     pub finished: bool,
+    /// When `finished` last changed, in either direction (Unix seconds, 0 =
+    /// never). While finished, this is the finished date.
+    pub status_at: u64,
+    /// Finished, and being read again: back in Continue reading with its real
+    /// progress. Meaningless unless `finished` is set.
+    pub rereading: bool,
     pub hidden_from_continue: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dictionary_set: Option<String>,
@@ -337,17 +345,17 @@ impl Store {
         }
     }
     /// Sets the finished flag of many books, skipping those that already have
-    /// it. Home is updated once, for the books it shows, rather than per
+    /// it (see `BookState::mark_finished`). Home is updated once, for the books it shows, rather than per
     /// book. Returns the saved states, and the error that stopped the rest.
     pub fn set_finished(&self, ids: &[String], finished: bool) -> (Vec<(String, BookState)>, Option<anyhow::Error>) {
         let mut changed = Vec::new();
         let mut error = None;
+        let now = crate::update::unix_now();
         for id in ids {
             let mut state = self.book(id);
-            if state.finished == finished {
+            if !state.mark_finished(finished, now) {
                 continue;
             }
-            state.finished = finished;
             if let Err(e) = atomic(&self.book_path(id), &state) {
                 error = Some(e);
                 break;
@@ -689,10 +697,31 @@ impl BookState {
         if p.speed.is_some() {
             self.reading_speed = p.speed;
         }
+        // Finished is sticky: opening a finished book to look something up
+        // keeps it (docs/finished-books.md).
         if fresh_open {
-            self.finished = false;
             self.hidden_from_continue = false;
         }
+    }
+    /// Marks the book finished or unfinished at `now`, ending any re-read.
+    /// False when nothing changed: already in that state and not re-reading.
+    pub fn mark_finished(&mut self, finished: bool, now: u64) -> bool {
+        if self.finished == finished && !self.rereading {
+            return false;
+        }
+        self.finished = finished;
+        self.status_at = now;
+        self.rereading = false;
+        true
+    }
+    /// Whether the book belongs in Continue reading: it has a place, isn't
+    /// hidden, and is unfinished or being re-read.
+    pub fn continues(&self) -> bool {
+        !self.position.0.is_empty() && !self.hidden_from_continue && (!self.finished || self.rereading)
+    }
+    /// Finished and not being re-read: the solid 100% bar.
+    pub fn done(&self) -> bool {
+        self.finished && !self.rereading
     }
 }
 

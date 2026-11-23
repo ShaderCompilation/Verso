@@ -15,6 +15,7 @@ pub struct Status {
     pub progress: u32,
     pub last_opened: u64,
     pub finished: bool,
+    pub rereading: bool,
     pub hidden_from_continue: bool,
 }
 impl From<&BookState> for Status {
@@ -24,6 +25,7 @@ impl From<&BookState> for Status {
             progress: state.progress.min(10000),
             last_opened: state.last_opened,
             finished: state.finished,
+            rereading: state.finished && state.rereading,
             hidden_from_continue: state.hidden_from_continue,
         }
     }
@@ -49,7 +51,10 @@ impl Entry {
         Self { book, status: state.into() }
     }
     pub fn can_resume(&self) -> bool {
-        self.book.available && self.status.has_position && !self.status.finished && !self.status.hidden_from_continue
+        self.book.available
+            && self.status.has_position
+            && (!self.status.finished || self.status.rereading)
+            && !self.status.hidden_from_continue
     }
 }
 
@@ -83,7 +88,7 @@ impl Default for Summary {
     }
 }
 impl Summary {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
     pub fn set_library_counts(&mut self, (roots, folders, books): (usize, usize, usize)) {
         self.library_root_count = roots;
         self.library_folders = folders;
@@ -152,6 +157,18 @@ mod tests {
         assert_eq!(summary.resume().unwrap().book.id, "0");
         assert_eq!(summary.recents(4).iter().map(|e| e.book.id.as_str()).collect::<Vec<_>>(), ["29", "27", "26", "25"]);
         assert!(!serde_json::to_string(&summary).unwrap().contains("saved"));
+    }
+
+    #[test]
+    fn a_rereading_finished_book_can_resume_and_a_finished_one_cannot() {
+        let state = BookState { position: Position("p".into()), last_opened: 3, finished: true, ..Default::default() };
+        assert!(!Entry::new(&book(1), &state).can_resume());
+        let rereading = BookState { rereading: true, ..state.clone() };
+        assert!(Entry::new(&book(1), &rereading).can_resume());
+        assert!(!Entry::new(&book(1), &BookState { hidden_from_continue: true, ..rereading }).can_resume());
+        // Re-reading means nothing without finished.
+        let stray = BookState { finished: false, rereading: true, ..state };
+        assert!(!Entry::new(&book(1), &stray).status.rereading);
     }
 
     #[test]

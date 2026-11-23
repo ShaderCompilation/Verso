@@ -1527,7 +1527,7 @@ impl Books {
         } else {
             (Some(Icon::Check), "Mark finished".into())
         });
-        if self.is_home() && !state.position.0.is_empty() && !state.hidden_from_continue && !state.finished {
+        if self.is_home() && state.continues() {
             items.push((Some(Icon::Close), "Remove from continue reading".into()));
         }
         if !self.is_home() {
@@ -1577,7 +1577,7 @@ impl Books {
             self.store.select_home_book(book);
         }
         let mut state = self.store.book(id);
-        state.finished = finished;
+        state.mark_finished(finished, crate::update::unix_now());
         match self.store.save_book(id, &state) {
             Ok(()) => {
                 self.set_book_state(id.to_owned(), state);
@@ -2209,14 +2209,22 @@ fn load_states(
     }
     (reads, false)
 }
+/// The status text for Details: `New`, `34%`, `Finished · 23 Nov 2026`,
+/// `Finished · 23 Nov 2026 · re-reading 34%` (no date for books marked before
+/// dates were kept).
 fn status(state: &BookState) -> String {
-    if state.finished {
-        "Finished".into()
-    } else if state.position.0.is_empty() {
-        "New".into()
-    } else {
-        format!("{}%", state.progress.min(10000) / 100)
+    let percent = state.progress.min(10000) / 100;
+    if !state.finished {
+        return if state.position.0.is_empty() { "New".into() } else { format!("{percent}%") };
     }
+    let mut text = String::from("Finished");
+    if let Some(at) = crate::clock::LocalDateTime::at(state.status_at).filter(|_| state.status_at > 0) {
+        text += &format!(" · {}", at.date());
+    }
+    if state.rereading {
+        text += &format!(" · re-reading {percent}%");
+    }
+    text
 }
 /// A folder holding only empty folders is not itself "Empty".
 fn folder_subtitle(folder: &collections::Folder) -> String {
@@ -2802,7 +2810,7 @@ impl Screen for Books {
                 let state = self.states.get(&book.id);
                 let bar_h = t.mm(PROGRESS_BAR_MM).max(2);
                 if let Some(state) = state {
-                    if state.finished {
+                    if state.done() {
                         // 100% solid bar with a 2 px white gap below the cover outline
                         // so it stays distinct from dark covers.
                         let bar = Rect::new(cover.x, cover.bottom() + cover_outline(t), cover.w, bar_h);
@@ -6815,6 +6823,17 @@ mod tests {
             BookState { position: crate::document::Position("done".into()), finished: true, ..Default::default() },
         );
         books.remove_book_state(&id2);
+        let id3 = books.books[3].id.clone();
+        books.set_book_state(
+            id3,
+            BookState {
+                position: crate::document::Position("again".into()),
+                progress: 5000,
+                finished: true,
+                rereading: true,
+                ..Default::default()
+            },
+        );
         let cells = books.grid.cells();
         assert_eq!(cells.len(), 12);
         for (_, cell) in &cells {
@@ -6856,9 +6875,32 @@ mod tests {
         for dy in 0..8 {
             assert_eq!(px(c2.x + 10, c2.bottom() + dy), PAPER, "unread book has no progress bar");
         }
+        // Book 3 (finished, re-reading at 50%): its real bar, and the badge stays.
+        let c3 = books.cover_rect(cells[3].1, &t);
+        assert_eq!(px(c3.x + 10, c3.bottom() + 2), INK, "re-reading filled portion");
+        assert_eq!(px(c3.right() - 10, c3.bottom() + 2), crate::ui::theme::INK3, "re-reading remaining track");
+        let (bx, by) = badge(c3);
+        assert_eq!(px(bx, by), INK, "a re-reading cover keeps its check badge");
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn status_text_names_new_progress_finished_and_rereading() {
+        let reading =
+            BookState { position: crate::document::Position("p".into()), progress: 3456, ..Default::default() };
+        assert_eq!(status(&BookState::default()), "New");
+        assert_eq!(status(&reading), "34%");
+        let finished = BookState { finished: true, ..reading };
+        assert_eq!(status(&finished), "Finished", "no date for books marked before dates were kept");
+        let rereading = BookState { rereading: true, ..finished.clone() };
+        assert_eq!(status(&rereading), "Finished · re-reading 34%");
+        let at = crate::clock::LocalDateTime::at(1_795_000_000).unwrap().date();
+        assert_eq!(
+            status(&BookState { status_at: 1_795_000_000, ..rereading }),
+            format!("Finished · {at} · re-reading 34%")
+        );
     }
 
     #[test]
@@ -6875,6 +6917,8 @@ mod tests {
             // A partly finished folder offers "Mark all finished"; the book menu follows each book.
             books.mark_book(&ids[0], true, cx);
             assert!(store.book(&ids[0]).finished && books.is_finished(&ids[0]));
+            assert!(store.book(&ids[0]).status_at > 0, "Mark finished dates the book");
+            assert!(status(&store.book(&ids[0])).starts_with("Finished · "), "Details shows the date");
             books.open_menu(ids[0].clone(), Point::new(200, 600), &t);
             assert_eq!(books.menu.as_ref().unwrap().1.items[2].1, "Mark unfinished");
             books.open_menu(ids[1].clone(), Point::new(200, 600), &t);
@@ -6889,13 +6933,16 @@ mod tests {
             books.delete_target(request, cx);
             assert!(books.folder_book_ids("/books/Fiction".as_ref()).iter().all(|id| store.book(id).finished));
             assert!(!store.book("20").finished, "a book outside the folder is untouched");
+            assert!(ids.iter().all(|id| store.book(id).status_at > 0), "Mark all finished dates every book");
             books.open_folder_menu(nested.clone(), Point::new(200, 600), &t);
             assert_eq!(label(&books), "Mark all unfinished");
             books.menu = None;
             // Unmarking one book turns the folder back to "Mark all finished"; positions stay.
             let before = store.book(&ids[3]).position.clone();
+            store.save_book(&ids[3], &BookState { status_at: 1, rereading: true, ..store.book(&ids[3]) }).unwrap();
             books.mark_book(&ids[3], false, cx);
-            assert!(!store.book(&ids[3]).finished);
+            let unmarked = store.book(&ids[3]);
+            assert!(!unmarked.finished && !unmarked.rereading && unmarked.status_at > 1);
             assert_eq!(store.book(&ids[3]).position, before);
             books.open_folder_menu(nested.clone(), Point::new(200, 600), &t);
             assert_eq!(label(&books), "Mark all finished");

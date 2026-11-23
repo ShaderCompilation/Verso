@@ -4057,7 +4057,7 @@ mod tests {
         }
     }
     #[test]
-    fn failed_opens_keep_state_successful_presentation_clears_flags_and_saves_preserve_later_flags()
+    fn failed_opens_keep_state_successful_presentation_unhides_keeps_finished_and_saves_preserve_later_flags()
     -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("verso-reader-library-{}", std::process::id()));
         let store = Store::at(root.clone());
@@ -4131,7 +4131,8 @@ mod tests {
         r.after_present();
         r.flush_position()?;
         let mut state = store.book("book");
-        assert!(!state.finished && !state.hidden_from_continue);
+        // Finished is sticky (docs/finished-books.md): opening only unhides.
+        assert!(state.finished && !state.hidden_from_continue);
         assert!(state.last_opened > 10);
         assert_eq!(state.dictionary_set.as_deref(), Some("english"));
         state.dictionary_set = Some("russian".into());

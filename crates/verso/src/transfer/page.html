@@ -683,7 +683,12 @@ function renderBooks() {
       const meta = document.createElement("div");
       meta.className = "book-meta";
       const prog = document.createElement("span");
-      prog.textContent = b.finished ? "done" : (typeof b.progress === "number" ? b.progress + "%" : "new");
+      prog.textContent = b.finished
+        ? (b.rereading ? "done · re-reading " + (b.progress || 0) + "%" : "done")
+        : (typeof b.progress === "number" ? b.progress + "%" : "new");
+      if (b.finished && b.finished_at) {
+        prog.title = "Finished " + new Date(b.finished_at * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+      }
       const sz = document.createElement("span");
       sz.textContent = size(b.size || 0);
 

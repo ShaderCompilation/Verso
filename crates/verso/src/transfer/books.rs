@@ -785,6 +785,8 @@ fn book_json(
         "size": book.stamp.size,
         "progress": progress,
         "finished": finished,
+        "rereading": finished && state.is_some_and(|s| s.rereading),
+        "finished_at": state.filter(|s| s.finished && s.status_at > 0).map(|s| s.status_at),
         "has_highlights": highlight_count > 0,
         "highlight_count": highlight_count,
     })

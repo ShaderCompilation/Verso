@@ -86,6 +86,10 @@ impl LocalDateTime {
             _ => format!("on {} {} {}", self.day, MONTHS[usize::from(self.month - 1)], self.year),
         }
     }
+    /// The calendar date: `23 Nov 2026`.
+    pub fn date(self) -> String {
+        format!("{} {} {}", self.day, MONTHS[usize::from(self.month - 1)], self.year)
+    }
     /// How long ago `self` was, in days, seen from `now`: `today`,
     /// `yesterday`, `3 days ago`, and after a week the date: `3 Nov` or
     /// `3 Nov 2025`.

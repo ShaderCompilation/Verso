@@ -346,10 +346,32 @@ mod tests {
             at: 99,
         })?;
         writer.flush()?;
+        // Opening a finished book keeps it finished and out of Continue reading.
+        let summary = store.home_summary().unwrap();
+        assert_eq!(summary.resume().unwrap().book.id, "0");
+        let entry = summary.books.iter().find(|e| e.book.id == "11").unwrap();
+        assert!(entry.status.finished && !entry.status.rereading);
+        assert_eq!(entry.status.progress, 3456);
+        assert_eq!(store.book("11").position.0, "latest exact anchor");
+        // Re-reading brings it back with its real progress.
+        let mut state = store.book("11");
+        state.rereading = true;
+        store.save_book("11", &state)?;
         let summary = store.home_summary().unwrap();
         assert_eq!(summary.resume().unwrap().book.id, "11");
         assert_eq!(summary.resume().unwrap().status.progress, 3456);
-        assert_eq!(store.book("11").position.0, "latest exact anchor");
+        // Mark finished ends the re-read; Mark unfinished brings it back. Each
+        // status change is followed by the background reselection.
+        let resume_after = |finished| -> Result<String> {
+            let (changed, error) = store.set_finished(&["11".into()], finished);
+            assert!(error.is_none() && changed.len() == 1);
+            store.rebuild_home_summary(&index)?;
+            Ok(store.home_summary().unwrap().resume().unwrap().book.id.clone())
+        };
+        assert_eq!(resume_after(true)?, "0");
+        assert!(!store.book("11").rereading);
+        assert_eq!(resume_after(false)?, "11");
+        assert_eq!(resume_after(true)?, "0");
         drop(writer);
         std::fs::remove_dir_all(root)?;
         Ok(())
