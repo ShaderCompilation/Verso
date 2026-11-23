@@ -632,6 +632,13 @@ impl Canvas {
     /// Copies `rect` into a screen-layout grayscale buffer, preserving padding.
     pub fn copy_gray(&self, rect: Rect, dst: &mut [u8], stride: usize) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
+        if let Pixels::Gray(p) = &self.pixels
+            && r == self.bounds()
+            && stride == self.width as usize
+        {
+            dst[..p.len()].copy_from_slice(p);
+            return;
+        }
         for y in r.y..r.bottom() {
             let s = y as usize * self.width as usize + r.x as usize;
             let d = y as usize * stride + r.x as usize;
@@ -649,8 +656,16 @@ impl Canvas {
 
     /// Copies `rect` into a screen-layout RGBA buffer (`stride` pixels per
     /// row), preserving padding. Gray pixels become `[g, g, g, 255]`.
+    #[cfg_attr(feature = "kindle", allow(dead_code))] // the simulator's panels; the Kindle writes rows itself
     pub fn copy_rgba(&self, rect: Rect, dst: &mut [u8], stride: usize) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
+        if let Pixels::Rgba(p) = &self.pixels
+            && r == self.bounds()
+            && stride == self.width as usize
+        {
+            dst[..p.len()].copy_from_slice(p);
+            return;
+        }
         for y in r.y..r.bottom() {
             let s = y as usize * self.width as usize + r.x as usize;
             let d = y as usize * stride + r.x as usize;
@@ -684,7 +699,13 @@ impl Canvas {
     /// wide and `width` tall, and canvas pixel (x, y) lands on panel pixel
     /// (y, width - 1 - x). Returns the panel rectangle that changed.
     #[cfg_attr(not(feature = "kindle"), allow(dead_code))] // the simulator turns its window instead
-    pub fn copy_gray_rotated(&self, rect: Rect, dst: &mut [u8], stride: usize) -> Option<Rect> {
+    pub fn copy_gray_rotated(
+        &self,
+        rect: Rect,
+        dst: &mut [u8],
+        stride: usize,
+        scratch: &mut RotateScratch,
+    ) -> Option<Rect> {
         let r = rect.intersect(&self.bounds())?;
         let gray = match &self.pixels {
             Pixels::Gray(gray) => gray,
@@ -706,10 +727,10 @@ impl Canvas {
         assert!(stride >= ch && dst.len() >= (cw - 1 - x0) * stride + y1, "panel too small");
         const BAND: usize = 64;
         let h = y1 - y0;
-        let mut band = vec![0u8; BAND * h];
+        let band = RotateScratch::band(&mut scratch.gray, BAND * h);
         for bx in (x0..x1).step_by(BAND) {
             let bw = (bx + BAND).min(x1) - bx;
-            transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, &mut band);
+            transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, band);
             for i in 0..bw {
                 let row = (cw - 1 - (bx + i)) * stride;
                 dst[row + y0..row + y1].copy_from_slice(&band[i * h..(i + 1) * h]);
@@ -720,7 +741,13 @@ impl Canvas {
 
     /// `copy_gray_rotated` for an RGBA panel (`stride` pixels per row).
     #[cfg_attr(not(test), allow(dead_code))] // the Kindle's true-color path
-    pub fn copy_rgba_rotated(&self, rect: Rect, dst: &mut [u8], stride: usize) -> Option<Rect> {
+    pub fn copy_rgba_rotated(
+        &self,
+        rect: Rect,
+        dst: &mut [u8],
+        stride: usize,
+        scratch: &mut RotateScratch,
+    ) -> Option<Rect> {
         let r = rect.intersect(&self.bounds())?;
         let cw = self.width as usize;
         let ch = self.height as usize;
@@ -731,10 +758,10 @@ impl Canvas {
         match &self.pixels {
             Pixels::Gray(gray) => {
                 const BAND: usize = 64;
-                let mut band = vec![0u8; BAND * h];
+                let band = RotateScratch::band(&mut scratch.gray, BAND * h);
                 for bx in (x0..x1).step_by(BAND) {
                     let bw = (bx + BAND).min(x1) - bx;
-                    transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, &mut band);
+                    transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, band);
                     for i in 0..bw {
                         let row = (cw - 1 - (bx + i)) * stride;
                         for (px, &g) in dst[(row + y0) * 4..(row + y1) * 4]
@@ -755,7 +782,7 @@ impl Canvas {
                 // then copy each finished panel row sequentially into `dst`.
                 const BAND: usize = 16;
                 const AHEAD: usize = 8;
-                let mut band = vec![0u32; BAND * h];
+                let band = RotateScratch::band(&mut scratch.rgba, BAND * h);
                 for bx in (x0..x1).step_by(BAND) {
                     let bw = (bx + BAND).min(x1) - bx;
                     let whole = bw / 4 * 4;
@@ -818,6 +845,25 @@ impl Canvas {
             }
         }
         Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w))
+    }
+}
+
+/// The band buffers of the rotated copies, kept by the caller so a
+/// landscape frame allocates nothing.
+#[derive(Default)]
+pub struct RotateScratch {
+    gray: Vec<u8>,
+    rgba: Vec<u32>,
+}
+
+impl RotateScratch {
+    /// The first `len` elements, growing the buffer if needed. Old contents
+    /// stay: the transposes write every element they read back.
+    fn band<T: Copy + Default>(buf: &mut Vec<T>, len: usize) -> &mut [T] {
+        if buf.len() < len {
+            buf.resize(len, T::default());
+        }
+        &mut buf[..len]
     }
 }
 
@@ -1199,11 +1245,17 @@ mod tests {
         let mut c = Canvas::new(3, 2);
         c.blit_gray(c.bounds(), &[1, 2, 3, 4, 5, 6], 3);
         let mut out = vec![0u8; 6];
-        assert_eq!(c.copy_gray_rotated(c.bounds(), &mut out, 2), Some(Rect::new(0, 0, 2, 3)));
+        assert_eq!(
+            c.copy_gray_rotated(c.bounds(), &mut out, 2, &mut RotateScratch::default()),
+            Some(Rect::new(0, 0, 2, 3))
+        );
         // Panel rows, top to bottom, are the canvas columns from right to left.
         assert_eq!(out, [3, 6, 2, 5, 1, 4]);
         let mut out = vec![0u8; 6];
-        assert_eq!(c.copy_gray_rotated(Rect::new(2, 1, 5, 5), &mut out, 2), Some(Rect::new(1, 0, 1, 1)));
+        assert_eq!(
+            c.copy_gray_rotated(Rect::new(2, 1, 5, 5), &mut out, 2, &mut RotateScratch::default()),
+            Some(Rect::new(1, 0, 1, 1))
+        );
         assert_eq!(out, [0, 6, 0, 0, 0, 0]);
     }
 
@@ -1225,9 +1277,11 @@ mod tests {
             Rect::new(100, 40, 7, 3),
             Rect::new(170, 66, 1, 1),
         ];
+        // One scratch for every rectangle, as the framebuffer writer keeps it.
+        let mut scratch = RotateScratch::default();
         for rect in rects {
             let mut out = vec![9u8; h * w];
-            c.copy_gray_rotated(rect, &mut out, h);
+            c.copy_gray_rotated(rect, &mut out, h, &mut scratch);
             for y in 0..h {
                 for x in 0..w {
                     let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
@@ -1406,6 +1460,9 @@ mod tests {
         let page: Vec<u8> = (0..4 * 3).flat_map(|i| [i as u8 * 20, 255 - i as u8, 3, 0]).collect();
         color.set_rgba(&page);
         assert_eq!(rgba_at(&color, 1, 2), [9 * 20, 255 - 9, 3, 255]);
+        let mut out = vec![0u8; page.len()];
+        color.copy_rgba(color.bounds(), &mut out, 4);
+        assert_eq!(out, page.iter().enumerate().map(|(i, &v)| if i % 4 == 3 { 255 } else { v }).collect::<Vec<_>>());
         gray.set_rgba(&page);
         assert_eq!(gray.gray_data()[9], luma(180, 246, 3));
         color.set_gray(&[9; 12]);
@@ -1420,9 +1477,9 @@ mod tests {
         c.set_rgba(&page);
         for rect in [c.bounds(), Rect::new(3, 2, 20, 9), Rect::new(36, 22, 4, 4)] {
             let mut out = vec![9u8; w * h * 4];
-            let changed = c.copy_rgba_rotated(rect, &mut out, h);
+            let changed = c.copy_rgba_rotated(rect, &mut out, h, &mut RotateScratch::default());
             let mut gray = vec![9u8; w * h];
-            assert_eq!(c.copy_gray_rotated(rect, &mut gray, h), changed);
+            assert_eq!(c.copy_gray_rotated(rect, &mut gray, h, &mut RotateScratch::default()), changed);
             for y in 0..h {
                 for x in 0..w {
                     let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
@@ -1438,7 +1495,7 @@ mod tests {
         let mut g = Canvas::new(3, 2);
         g.blit_gray(g.bounds(), &[1, 2, 3, 4, 5, 6], 3);
         let mut out = vec![0u8; 6 * 4];
-        g.copy_rgba_rotated(g.bounds(), &mut out, 2);
+        g.copy_rgba_rotated(g.bounds(), &mut out, 2, &mut RotateScratch::default());
         assert_eq!(out.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), [3, 6, 2, 5, 1, 4]);
         assert!(out.chunks(4).all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255));
     }
@@ -1503,14 +1560,15 @@ mod tests {
                 Rect::new(w as i32 - 5, h as i32 - 3, 20, 20),
                 Rect::new(w as i32 + 5, 0, 10, 10),
             ];
+            let mut scratch = RotateScratch::default();
             for rect in rects {
                 let expected_changed =
                     rect.intersect(&color.bounds()).map(|r| Rect::new(r.y, w as i32 - r.right(), r.h, r.w));
 
                 let mut out_rgba = vec![9u8; w * stride * 4];
-                assert_eq!(color.copy_rgba_rotated(rect, &mut out_rgba, stride), expected_changed);
+                assert_eq!(color.copy_rgba_rotated(rect, &mut out_rgba, stride, &mut scratch), expected_changed);
                 let mut out_gray = vec![9u8; w * stride * 4];
-                assert_eq!(gray.copy_rgba_rotated(rect, &mut out_gray, stride), expected_changed);
+                assert_eq!(gray.copy_rgba_rotated(rect, &mut out_gray, stride, &mut scratch), expected_changed);
 
                 for row in 0..w {
                     let x = w - 1 - row;
@@ -1569,7 +1627,8 @@ mod tests {
 
         const ITERS: usize = 20;
         naive(c.raw(), &mut dst_old);
-        c.copy_rgba_rotated(c.bounds(), &mut dst_new, h);
+        let mut scratch = RotateScratch::default();
+        c.copy_rgba_rotated(c.bounds(), &mut dst_new, h, &mut scratch);
         assert_eq!(dst_old, dst_new, "tiled rotation must match naive pixel-for-pixel");
 
         let t0 = std::time::Instant::now();
@@ -1580,7 +1639,7 @@ mod tests {
 
         let t1 = std::time::Instant::now();
         for _ in 0..ITERS {
-            std::hint::black_box(c.copy_rgba_rotated(c.bounds(), std::hint::black_box(&mut dst_new), h));
+            std::hint::black_box(c.copy_rgba_rotated(c.bounds(), std::hint::black_box(&mut dst_new), h, &mut scratch));
         }
         let new_ms = t1.elapsed().as_secs_f64() * 1000.0 / ITERS as f64;
 

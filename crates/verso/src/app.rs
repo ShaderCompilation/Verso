@@ -1403,7 +1403,7 @@ mod tests {
         assert!(app.draw_sleep_cover(crate::store::SleepScreen::Cover));
         // The panel's top-left pixel shows the canvas's top-right one.
         let mut panel = vec![255u8; 600 * 800];
-        app.canvas.copy_gray_rotated(app.canvas.bounds(), &mut panel, 600);
+        app.canvas.copy_gray_rotated(app.canvas.bounds(), &mut panel, 600, &mut crate::gfx::RotateScratch::default());
         assert_eq!(panel[0], 0);
         assert_eq!(panel[1], 119);
     }

@@ -6,6 +6,8 @@ mod text;
 
 #[cfg(test)]
 pub use canvas::Color;
+#[cfg(any(feature = "kindle", test))]
+pub use canvas::RotateScratch;
 pub use canvas::{Canvas, ColorMode, luma};
 #[cfg(feature = "desktop")]
 pub use canvas::{save_gray_png, save_rgba_png};

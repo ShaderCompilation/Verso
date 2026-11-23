@@ -25,6 +25,10 @@ behaviour on other models is **(to verify)**.
 - **Tested device (measured):** Paperwhite 6 (*Sangria*, platform *Bellatrix4*,
   MediaTek MT8113, ~957 MB RAM / ~620 MB free with Kindle UI, 1272×1696 @ 300
   dpi Y8, `hwtcon_v2`, white+warm 0..=24).
+- **CPU (measured):** two cores, `ondemand` governor at 600 MHz–2 GHz. A page
+  turn's short burst mostly runs at 600–1000 MHz, so CPU-bound steps (the
+  framebuffer copy, the landscape turn) slow down when less work comes before
+  them, and timings swing between sessions: compare builds in one session.
 - **Model table ([kindle_profiles.rs](../crates/verso/src/platform/kindle_profiles.rs)):**
   19 Kindle models keyed by `FBInkState.device_id` with lights, ranges, page
   buttons and EPDC (`Imx` up to 2019 vs `Mtk` 2021+). Untested or unknown models
@@ -46,14 +50,15 @@ behaviour on other models is **(to verify)**.
   coordinates straight to the EPDC.
 - **Pixel formats:** accepts 8-bit (`Y8`, honouring `inverted_grayscale`) and
   32-bit (`RGBA`/`RGB32`, `BGRA`/`BGR32`). On 32-bit panels (Colorsoft),
-  `Writer` stages into a cached-RAM shadow buffer so R↔B swizzling and rotation
-  never read back from write-combining `/dev/fb0`.
+  `Writer` swizzles R↔B row by row straight from the canvas and never reads
+  back from write-combining `/dev/fb0`; landscape first turns the frame into a
+  cached-RAM shadow buffer.
 - **MediaTek `hwtcon_v2` (measured):** `is_mtk = 1`, `canRotate = 0` (landscape
   is rotated in software), `hasEclipseWfm = 1`, `canHWInvert = 1`.
 - **Waveforms & completion:** monochrome uses `DU` (`Fast`), `GL16` (`Ui`),
   `REAGL` (`Page`) and flashing `GC16` (`Full`). Color panels use `GLRC16`
   (`Page`) and `GCC16` (`Full`) with `CFA_DEFAULT` **(to verify)**. Full flashes
-  take ~300 ms and are awaited lazily via `fbink_get_last_marker()` /
+  take ~200–400 ms, varying by session **(measured)**, and are awaited lazily via `fbink_get_last_marker()` /
   `fbink_wait_for_complete()` before the next framebuffer write, sleep or exit.
 - **ARM alignment gotcha (measured):** crengine's glyph cache uses `alignas(16)`
   items that upstream allocates with 8-byte-aligned `malloc`, causing `SIGBUS`

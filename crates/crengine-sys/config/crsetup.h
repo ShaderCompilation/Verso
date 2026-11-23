@@ -66,6 +66,7 @@
 #define USE_BITMAP_FONTS                     0
 #define USE_WIN32_FONTS                      0
 #define USE_GLYPHCACHE_HASHTABLE             0
+// Enough: 24 pages at 10–18 pt evict nothing; 1 or 2 MiB draws no faster.
 #define GLYPH_CACHE_SIZE                     0x40000   // 256.0 KiB
 #define ALLOW_KERNING                        1
 #define USE_FONTCONFIG                       0

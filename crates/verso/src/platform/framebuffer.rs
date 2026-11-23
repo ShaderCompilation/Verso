@@ -6,7 +6,7 @@
 //! in the panel's channel order (`RGBA`/`RGB32` or `BGRA`/`BGR32`).
 
 use crate::geom::Rect;
-use crate::gfx::Canvas;
+use crate::gfx::{Canvas, ColorMode, RotateScratch};
 use crate::platform::Orientation;
 
 /// How a framebuffer pixel is laid out in memory.
@@ -72,18 +72,17 @@ impl Layout {
 
 pub struct Writer {
     layout: Layout,
-    /// Cached-RAM staging buffer for 32-bit panels so rotation and channel
-    /// swizzling never read back from mmap'd `/dev/fb0`. Empty for `Gray8`.
+    /// 32-bit landscape only: the turned frame in cached RAM, so channel
+    /// swizzling never reads back from mmap'd `/dev/fb0`. Allocated with
+    /// the first landscape frame; portrait writes straight from the canvas.
     shadow: Vec<u8>,
+    /// The landscape transpose's bands, kept between frames.
+    scratch: RotateScratch,
 }
 
 impl Writer {
     pub fn new(layout: Layout) -> Self {
-        let shadow = match layout.format {
-            Format::Gray8 => Vec::new(),
-            Format::Rgba32 | Format::Bgra32 => vec![255; layout.width as usize * layout.height as usize * 4],
-        };
-        Self { layout, shadow }
+        Self { layout, shadow: Vec::new(), scratch: RotateScratch::default() }
     }
 
     /// Copies `rect` of `canvas` (drawn in `orientation`) into `fb`, the
@@ -96,7 +95,14 @@ impl Writer {
         let r = match l.format {
             Format::Gray8 => {
                 let dst = &mut fb[l.offset()..];
-                let r = copy_gray(canvas, rect, orientation, panel, dst, l.stride)?;
+                let r = match orientation {
+                    Orientation::Portrait => {
+                        let r = rect.intersect(&panel)?;
+                        canvas.copy_gray(r, dst, l.stride);
+                        r
+                    }
+                    Orientation::Landscape => canvas.copy_gray_rotated(rect, dst, l.stride, &mut self.scratch)?,
+                };
                 if l.inverted {
                     for y in r.y..r.bottom() {
                         let row = y as usize * l.stride;
@@ -106,72 +112,74 @@ impl Writer {
                 r
             }
             Format::Rgba32 | Format::Bgra32 => {
-                let w = l.width as usize;
-                let r = copy_rgba(canvas, rect, orientation, panel, &mut self.shadow, w)?;
-                let swap_rb = l.format == Format::Bgra32;
-                let invert = if l.inverted { 0xff } else { 0 };
+                let pixel = Pixel { swap_rb: l.format == Format::Bgra32, invert: if l.inverted { 0xff } else { 0 } };
                 let dst = &mut fb[l.offset()..];
-                for y in r.y as usize..r.bottom() as usize {
-                    let src_start = (y * w + r.x as usize) * 4;
-                    let len = r.w as usize * 4;
-                    let src = &self.shadow[src_start..src_start + len];
-                    let dst_start = y * l.stride + r.x as usize * 4;
-                    let out = &mut dst[dst_start..dst_start + len];
-                    if !swap_rb && invert == 0 {
-                        out.copy_from_slice(src);
-                    } else if swap_rb {
-                        for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
-                            *o = [s[2] ^ invert, s[1] ^ invert, s[0] ^ invert, 0xff];
+                match orientation {
+                    Orientation::Portrait => {
+                        let r = rect.intersect(&panel)?;
+                        let (cw, src) = (canvas.width() as usize, canvas.raw());
+                        let (x0, w) = (r.x as usize, r.w as usize);
+                        let gray = canvas.mode() == ColorMode::Gray8;
+                        for y in r.y as usize..r.bottom() as usize {
+                            let out = &mut dst[y * l.stride + x0 * 4..][..w * 4];
+                            if gray {
+                                pixel.gray(out, &src[y * cw + x0..][..w]);
+                            } else {
+                                pixel.rgba(out, &src[(y * cw + x0) * 4..][..w * 4]);
+                            }
                         }
-                    } else {
-                        for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
-                            *o = [s[0] ^ invert, s[1] ^ invert, s[2] ^ invert, 0xff];
+                        r
+                    }
+                    Orientation::Landscape => {
+                        let w = l.width as usize;
+                        if self.shadow.is_empty() {
+                            self.shadow = vec![255; w * l.height as usize * 4];
                         }
+                        let r = canvas.copy_rgba_rotated(rect, &mut self.shadow, w, &mut self.scratch)?;
+                        let (x0, len) = (r.x as usize * 4, r.w as usize * 4);
+                        for y in r.y as usize..r.bottom() as usize {
+                            pixel.rgba(&mut dst[y * l.stride + x0..][..len], &self.shadow[y * w * 4 + x0..][..len]);
+                        }
+                        r
                     }
                 }
-                r
             }
         };
         Some(Rect::new(r.x + l.origin.0 as i32, r.y + l.origin.1 as i32, r.w, r.h))
     }
 }
 
-/// The 8-bit copy monochrome panels use: the canvas as is in portrait,
-/// turned a quarter in landscape.
-fn copy_gray(
-    canvas: &Canvas,
-    rect: Rect,
-    orientation: Orientation,
-    panel: Rect,
-    dst: &mut [u8],
-    stride: usize,
-) -> Option<Rect> {
-    match orientation {
-        Orientation::Portrait => {
-            let r = rect.intersect(&panel)?;
-            canvas.copy_gray(r, dst, stride);
-            Some(r)
-        }
-        Orientation::Landscape => canvas.copy_gray_rotated(rect, dst, stride),
-    }
+/// How a 32-bit panel wants its pixels: channel order and inversion.
+#[derive(Clone, Copy)]
+struct Pixel {
+    swap_rb: bool,
+    invert: u8,
 }
 
-/// The 32-bit RGBA copy color panels use: portrait as is, landscape rotated.
-fn copy_rgba(
-    canvas: &Canvas,
-    rect: Rect,
-    orientation: Orientation,
-    panel: Rect,
-    dst: &mut [u8],
-    stride_px: usize,
-) -> Option<Rect> {
-    match orientation {
-        Orientation::Portrait => {
-            let r = rect.intersect(&panel)?;
-            canvas.copy_rgba(r, dst, stride_px);
-            Some(r)
+impl Pixel {
+    /// One row of RGBA pixels into the panel row `out`, which is only
+    /// written, never read.
+    fn rgba(self, out: &mut [u8], src: &[u8]) {
+        let i = self.invert;
+        if !self.swap_rb && i == 0 {
+            out.copy_from_slice(src);
+        } else if self.swap_rb {
+            for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                *o = [s[2] ^ i, s[1] ^ i, s[0] ^ i, 0xff];
+            }
+        } else {
+            for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                *o = [s[0] ^ i, s[1] ^ i, s[2] ^ i, 0xff];
+            }
         }
-        Orientation::Landscape => canvas.copy_rgba_rotated(rect, dst, stride_px),
+    }
+
+    /// One row of gray pixels into the panel row `out`.
+    fn gray(self, out: &mut [u8], src: &[u8]) {
+        for (o, &g) in out.as_chunks_mut::<4>().0.iter_mut().zip(src) {
+            let g = g ^ self.invert;
+            *o = [g, g, g, 0xff];
+        }
     }
 }
 
