@@ -274,8 +274,9 @@ pub struct Lookup {
 impl Lookup {
     /// `word` is where the looked-up text is on the page. The compact card
     /// opens on the half of the screen away from it (the bottom half when
-    /// unknown), so the word, its sentence and the selection handles stay
-    /// visible; in landscape it stands at the side away from the word.
+    /// unknown, which is how the at-bottom setting keeps it there), so the
+    /// word, its sentence and the selection handles stay visible; in
+    /// landscape it stands at the side away from the word.
     pub fn new(
         query: &str,
         worker: Rc<Worker>,
@@ -350,6 +351,12 @@ impl Lookup {
         };
         lookup.place(t);
         lookup
+    }
+    /// Opens expanded, as the full-height setting asks; ⤡ still collapses it.
+    pub fn expanded(mut self, t: &Theme) -> Self {
+        self.expanded = true;
+        self.place(t);
+        self
     }
     /// The card's rectangle on screen. Touches outside it belong to the book
     /// page (a selection handle) or close the card.

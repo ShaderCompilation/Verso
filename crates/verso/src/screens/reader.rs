@@ -555,9 +555,15 @@ impl Reader {
     pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
         self.dictionary_prepare_at = None;
         let service = self.dictionary_service().clone();
-        let word = self.selected_rect();
+        let settings = self.store.settings();
+        // Without the word, the card takes its place at the bottom.
+        let word = if settings.dictionary_at_bottom { None } else { self.selected_rect() };
         let selection = self.dictionary_selection();
-        self.overlay = Overlay::Lookup(Box::new(Lookup::new(query, service, cx.theme, self.screen, word, selection)));
+        let mut lookup = Lookup::new(query, service, cx.theme, self.screen, word, selection);
+        if settings.dictionary_full_height {
+            lookup = lookup.expanded(cx.theme);
+        }
+        self.overlay = Overlay::Lookup(Box::new(lookup));
         cx.redraw();
     }
     fn selection_released(&mut self, cx: &mut EventCx) {
@@ -3476,7 +3482,7 @@ mod tests {
         r.laying_out = false;
         r.shown = Some(test_page(1, 2));
         let word = Rect::new(100, 100, 120, 30);
-        let open = |r: &mut Reader| {
+        let open_at = |r: &mut Reader, word: Rect| {
             r.selection.clear();
             r.extension = None;
             r.selection.selected = Some(Selection {
@@ -3491,6 +3497,7 @@ mod tests {
             let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
             lookup.rect(&theme)
         };
+        let open = |r: &mut Reader| open_at(r, word);
         let tap = |r: &mut Reader, p: Point| {
             test_cx(&theme, |cx| {
                 r.on_gesture(Gesture::Down(p), cx);
@@ -3501,9 +3508,9 @@ mod tests {
             Overlay::Lookup(lookup) => lookup.action_point(i),
             _ => panic!("no lookup"),
         };
-        // The compact card opens at the bottom, away from the word near the top.
+        // By default the card opens at full height at the bottom.
         let card = open(&mut r);
-        assert_eq!(card.bottom(), r.screen.h);
+        assert_eq!(card, Rect::new(0, 800 - 800 * 4 / 5, 600, 800 * 4 / 5));
         assert!(card.intersect(&word).is_none());
         // Highlight can't save before annotations are ready: the card stays.
         let p = action(&r, 0);
@@ -3542,9 +3549,16 @@ mod tests {
         );
         // Elsewhere outside the card, a tap closes it and drops the selection.
         open(&mut r);
-        tap(&mut r, Point::new(500, 300));
+        tap(&mut r, Point::new(500, 120));
         assert!(matches!(r.overlay, Overlay::None));
         assert!(r.selection.selected.is_none());
+        // With both settings off, a compact card stands away from the word.
+        let mut settings = r.store.settings();
+        (settings.dictionary_full_height, settings.dictionary_at_bottom) = (false, false);
+        r.store.save_settings(&settings).unwrap();
+        let low = Rect::new(100, 600, 120, 30);
+        let card = open_at(&mut r, low);
+        assert!(card.y == 0 && card.h < 800 / 2 + 100 && card.intersect(&low).is_none(), "{card:?}");
     }
 
     #[test]
