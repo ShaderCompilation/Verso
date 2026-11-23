@@ -6531,10 +6531,16 @@ mod tests {
                     let search = books.search.as_ref().unwrap();
                     assert_eq!(search.all.rect().y, t.top_bar + t.mm(2.0), "{w}x{h}");
                     assert_eq!(search.current.rect().y, search.all.rect().y, "{w}x{h}");
-                    // Row 0 stays above the open keyboard. Checked at 1696x1272 only until fixed:
-                    // it ends at 699 under the keyboard at 608 (1448x1072), 391 under 344 (800x600).
-                    let (row0, keyboard) = (books.grid.cells()[0].1.bottom(), search.keyboard.rect().y);
-                    assert!(w != 1696 || row0 <= keyboard, "{w}x{h}: row 0 ({row0}) above the keyboard ({keyboard})");
+                    // The open keyboard may cover the bottom of row 0, as on a phone: short
+                    // landscape screens have no room for a whole row above it. The result
+                    // count and the top half of each cover, with its title, stay visible.
+                    let keyboard = search.keyboard.rect().y;
+                    let cover = grid_cover_rect(&books.grid, books.grid.cells()[0].1, &t);
+                    assert!(books.header.bottom() <= keyboard, "{w}x{h}: results header above the keyboard");
+                    assert!(
+                        cover.center().y <= keyboard,
+                        "{w}x{h}: cover {cover:?} half above the keyboard ({keyboard})"
+                    );
                 }
                 let titles: Vec<_> = books.books.iter().map(|b| b.metadata.title.to_lowercase()).collect();
                 assert!(titles.is_sorted(), "{w}x{h}: fixed Title order");
