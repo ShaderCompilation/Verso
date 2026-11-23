@@ -267,7 +267,13 @@ mod tests {
     use crate::koreader::Status;
 
     fn progress(position: &str) -> Progress {
-        Progress { position: Position(position.into()), percent: 0.6, status: Status::Reading, modified: 100 }
+        Progress {
+            position: Position(position.into()),
+            percent: 0.6,
+            status: Status::Reading,
+            modified: 100,
+            status_day: None,
+        }
     }
 
     #[test]

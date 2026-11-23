@@ -90,6 +90,30 @@ impl LocalDateTime {
     pub fn date(self) -> String {
         format!("{} {} {}", self.day, MONTHS[usize::from(self.month - 1)], self.year)
     }
+    /// The start of a KOReader date, `2026-11-23`, in the local time zone:
+    /// Unix seconds at local midnight. None for anything else, including
+    /// dates that don't exist.
+    pub fn midnight(date: &str) -> Option<u64> {
+        let mut parts = date.split('-');
+        let year: i32 = parts.next()?.parse().ok()?;
+        let month: i32 = parts.next()?.parse().ok()?;
+        let day: i32 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || !(1970..=9999).contains(&year) {
+            return None;
+        }
+        // SAFETY: mktime only reads and normalizes the tm we pass.
+        unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            tm.tm_year = year - 1900;
+            tm.tm_mon = month - 1;
+            tm.tm_mday = day;
+            tm.tm_isdst = -1;
+            let t = libc::mktime(&mut tm);
+            // mktime rolls 31 Feb over to March: not a real date.
+            let same = tm.tm_year == year - 1900 && tm.tm_mon == month - 1 && tm.tm_mday == day;
+            (same && t >= 0).then_some(t as u64)
+        }
+    }
     /// How long ago `self` was, in days, seen from `now`: `today`,
     /// `yesterday`, `3 days ago`, and after a week the date: `3 Nov` or
     /// `3 Nov 2025`.
@@ -129,6 +153,13 @@ mod tests {
         assert_eq!(at(2026, 2, 21, 8, 0).ago(now), "21 Feb");
         assert_eq!(at(2025, 11, 3, 8, 0).ago(now), "3 Nov 2025");
         assert_eq!(at(2026, 3, 4, 8, 0).ago(now), "4 Mar", "ahead of the clock");
+        // KOReader's dates, as local midnight.
+        let midnight = LocalDateTime::midnight("2026-11-23").unwrap();
+        assert_eq!(LocalDateTime::at(midnight), Some(at(2026, 11, 23, 0, 0)));
+        assert_eq!(LocalDateTime::at(midnight - 1).map(|t| t.day), Some(22));
+        for bad in ["", "2026-11", "2026-02-31", "2026-13-01", "2026-11-23-1", "23 Nov 2026", "1900-01-01"] {
+            assert_eq!(LocalDateTime::midnight(bad), None, "{bad}");
+        }
         let local = LocalDateTime::at(1_800_000_000).unwrap();
         assert!(local.year == 2027 && local.month == 1, "{local:?}");
     }

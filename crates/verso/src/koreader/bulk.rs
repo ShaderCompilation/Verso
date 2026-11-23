@@ -35,7 +35,8 @@ pub struct Preview {
     pub newer_in_koreader: usize,
     pub newer_in_verso: usize,
     pub up_to_date: usize,
-    /// Books the import marks finished: complete in KOReader, not yet in Verso.
+    /// Books the import marks finished: complete in KOReader, and KOReader's
+    /// status newer than Verso's (`koreader::marks_finished`).
     pub finished: usize,
     /// Books with no KOReader position, only a `complete` status, that the
     /// import marks finished (also counted in `finished`).
@@ -137,7 +138,7 @@ pub fn scan(
             Found::NewerInVerso => preview.newer_in_verso += 1,
             Found::CompleteOnly => preview.complete_only += 1,
         }
-        if found.complete() && !state.finished {
+        if decision.state.as_ref().is_some_and(|s| s.done() && !state.done()) {
             preview.finished += 1;
         }
         if decision.state.is_some() {
@@ -430,6 +431,49 @@ mod tests {
         assert_eq!(store.book("7").position.0, "/k7");
         let p = run_scan(&store, &index, &history, None).preview;
         assert_eq!((p.up_to_date, p.changes), (6, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn a_book_marked_unfinished_stays_so_until_koreader_saves_it_again() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (store, index) = library(dir.path(), 3);
+        let path = |i: usize| index.books[i].path.clone();
+        // 0: finished in KOReader with a position kept in Verso. 1: complete
+        // only, with KOReader's date. 2: still reading in KOReader.
+        sidecar(&path(0), &koreader("/k0", "complete"), 2000);
+        store.save_book("0", &verso("/v0", 3000))?;
+        let complete = "return { summary = { modified = '2026-11-20', status = 'complete' } }";
+        sidecar(&path(1), complete, 2000);
+        sidecar(&path(2), &koreader("/k2", "reading"), 2000);
+        let history = Path::new("/nonexistent");
+        let found = run_scan(&store, &index, history, None);
+        let p = &found.preview;
+        assert_eq!((p.finished, p.complete_only, p.newer_in_verso, p.not_started, p.changes), (2, 1, 1, 1, 3));
+        assert_eq!(import(&store, &found, &index).written, 3);
+        let s = store.book("0");
+        assert_eq!((s.finished, s.status_at, s.position.0.as_str()), (true, 2000, "/v0"));
+        let day = crate::clock::LocalDateTime::midnight("2026-11-20").unwrap();
+        assert_eq!((store.book("1").finished, store.book("1").status_at), (true, day));
+
+        // Marked unfinished in Verso: a re-run leaves both alone.
+        let (changed, error) = store.set_finished(&["0".into(), "1".into()], false);
+        assert_eq!((changed.len(), error.is_none()), (2, true));
+        let again = run_scan(&store, &index, history, None);
+        let p = &again.preview;
+        assert_eq!((p.finished, p.complete_only, p.changes, p.up_to_date, p.newer_in_verso), (0, 0, 0, 2, 1));
+        assert!(!store.book("0").finished && !store.book("1").finished);
+
+        // KOReader saves book 0 again later (read there): marked again.
+        let later = crate::update::unix_now() + 100;
+        sidecar(&path(0), &koreader("/k0", "complete"), later);
+        let again = run_scan(&store, &index, history, None);
+        let p = &again.preview;
+        assert_eq!((p.finished, p.newer_in_koreader, p.changes), (1, 1, 1));
+        assert_eq!(import(&store, &again, &index).written, 1);
+        let s = store.book("0");
+        assert_eq!((s.finished, s.status_at, s.position.0.as_str()), (true, later, "/k0"));
+        assert!(!store.book("1").finished, "its sidecar wasn't saved again");
         Ok(())
     }
 

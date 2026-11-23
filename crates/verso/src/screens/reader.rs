@@ -2563,6 +2563,7 @@ mod tests {
             percent: 0.6,
             status: crate::koreader::Status::Reading,
             modified: 1_763_800_000,
+            status_day: None,
         }
     }
     /// A reader waiting for the KOReader check, its book open on page 1.

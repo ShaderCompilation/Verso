@@ -40,6 +40,9 @@ pub struct Progress {
     pub status: Status,
     /// The file's modified time, in seconds.
     pub modified: u64,
+    /// `summary.modified`, the day KOReader last changed `summary`, as local
+    /// midnight (Unix seconds). None when missing or not a date.
+    pub status_day: Option<u64>,
 }
 impl Progress {
     /// The percentage as Verso's `BookState::progress` (0–10000).
@@ -84,15 +87,24 @@ pub fn modified(path: &Path) -> Result<Option<u64>> {
 pub enum Sidecar {
     Progress(Progress),
     /// No position, but `summary.status` is `"complete"`: the book was
-    /// marked finished in KOReader without being read there.
-    Complete,
+    /// marked finished in KOReader without being read there. `modified`
+    /// and `status_day` as in [`Progress`].
+    Complete {
+        modified: u64,
+        status_day: Option<u64>,
+    },
 }
 impl Sidecar {
-    pub fn complete(&self) -> bool {
-        match self {
-            Sidecar::Progress(p) => p.status == Status::Complete,
-            Sidecar::Complete => true,
-        }
+    /// For a `complete` sidecar: when KOReader last saved it, and the
+    /// finished date to give the book (`summary.modified`, else the file's
+    /// time).
+    pub fn completed(&self) -> Option<(u64, u64)> {
+        let (modified, day) = match self {
+            Sidecar::Progress(p) if p.status == Status::Complete => (p.modified, p.status_day),
+            Sidecar::Progress(_) => return None,
+            Sidecar::Complete { modified, status_day } => (*modified, *status_day),
+        };
+        Some((modified, day.unwrap_or(modified)))
     }
 }
 
@@ -101,7 +113,7 @@ impl Sidecar {
 pub fn read(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<Progress>> {
     Ok(match read_sidecar(path, cancelled)? {
         Some(Sidecar::Progress(p)) => Some(p),
-        Some(Sidecar::Complete) | None => None,
+        Some(Sidecar::Complete { .. }) | None => None,
     })
 }
 
@@ -127,16 +139,24 @@ pub fn read_sidecar(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Option<
         Some(lua::Value::Scalar(s)) => s.parse::<f64>().unwrap_or(0.0).clamp(0.0, 1.0),
         _ => 0.0,
     };
-    let status = match fields.get("summary").and_then(|s| s.table().ok()?.get("status")?.string()) {
+    let summary = fields.get("summary").and_then(|s| s.table().ok());
+    let status_day = summary.and_then(|s| s.get("modified")?.string()).and_then(crate::clock::LocalDateTime::midnight);
+    let status = match summary.and_then(|s| s.get("status")?.string()) {
         Some("reading") => Status::Reading,
         Some("complete") => Status::Complete,
         Some("abandoned") => Status::Abandoned,
         _ => Status::Other,
     };
     let Some(position) = fields.get("last_xpointer").and_then(lua::Value::string).filter(|p| !p.is_empty()) else {
-        return Ok((status == Status::Complete).then_some(Sidecar::Complete));
+        return Ok((status == Status::Complete).then_some(Sidecar::Complete { modified, status_day }));
     };
-    Ok(Some(Sidecar::Progress(Progress { position: Position(position.to_owned()), percent, status, modified })))
+    Ok(Some(Sidecar::Progress(Progress {
+        position: Position(position.to_owned()),
+        percent,
+        status,
+        modified,
+        status_day,
+    })))
 }
 
 /// When KOReader last opened each file, from its `history.lua` (a list of
@@ -223,8 +243,8 @@ pub enum Found {
     UpToDate,
     /// Verso's position is kept.
     NewerInVerso,
-    /// No position in KOReader, only a `complete` status, and not yet
-    /// finished in Verso: marked finished. Already finished, the book is
+    /// No position in KOReader, only a `complete` status, that marks the
+    /// book finished (see [`marks_finished`]). Otherwise the book is
     /// `UpToDate`.
     CompleteOnly,
 }
@@ -237,18 +257,35 @@ pub struct Import {
     pub state: Option<BookState>,
 }
 
+/// Whether a `complete` sidecar KOReader saved at `modified` marks the
+/// book finished (docs/finished-books.md §5). Finished is a lasting label, so
+/// KOReader's must be newer than Verso's last change to it (`status_at`): a
+/// book marked unfinished in Verso since is left alone. A book being re-read
+/// in Verso is only marked again when KOReader saved after Verso's last save
+/// too, so an old sidecar doesn't end the re-read. Already finished and not
+/// re-read, there is nothing to change.
+pub fn marks_finished(state: &BookState, modified: u64) -> bool {
+    if state.done() {
+        return false;
+    }
+    modified > state.status_at && (!state.rereading || modified > state.last_opened)
+}
+
 /// Decides one book of the bulk import. `opened` is KOReader's time for the
 /// file from `history.lua`. An imported position replaces Verso's, with
 /// `last_opened` in KOReader's order so Continue reading and Recent follow
 /// it. A `complete` status marks the book finished whatever happens to its
-/// position, and for a sidecar with no position at all; nothing is ever
-/// unmarked, and `abandoned` is ignored (Verso has no such state).
+/// position, and for a sidecar with no position at all, when
+/// [`marks_finished`] allows it; the finished date is KOReader's. Nothing is
+/// ever unmarked, and `abandoned` is ignored (Verso has no such state).
 pub fn import(state: &BookState, sidecar: &Sidecar, opened: Option<u64>) -> Import {
+    let finish = sidecar.completed().filter(|&(modified, _)| marks_finished(state, modified)).map(|(_, at)| at);
     let progress = match sidecar {
         Sidecar::Progress(p) => p,
-        Sidecar::Complete if state.finished => return Import { found: Found::UpToDate, state: None },
-        Sidecar::Complete => {
-            let next = BookState { finished: true, ..state.clone() };
+        Sidecar::Complete { .. } => {
+            let Some(at) = finish else { return Import { found: Found::UpToDate, state: None } };
+            let mut next = state.clone();
+            next.mark_finished(true, at);
             return Import { found: Found::CompleteOnly, state: Some(next) };
         }
     };
@@ -276,8 +313,8 @@ pub fn import(state: &BookState, sidecar: &Sidecar, opened: Option<u64>) -> Impo
         next.koreader_seen = Some(progress.seen());
         changed = true;
     }
-    if progress.status == Status::Complete && !state.finished {
-        next.finished = true;
+    if let Some(at) = finish {
+        next.mark_finished(true, at);
         changed = true;
     }
     Import { found, state: changed.then_some(next) }
@@ -295,7 +332,13 @@ mod tests {
         dir
     }
     fn progress(position: &str, modified: u64) -> Progress {
-        Progress { position: Position(position.into()), percent: 0.5, status: Status::Reading, modified }
+        Progress {
+            position: Position(position.into()),
+            percent: 0.5,
+            status: Status::Reading,
+            modified,
+            status_day: None,
+        }
     }
     fn imp(state: &BookState, progress: &Progress, opened: Option<u64>) -> Import {
         import(state, &Sidecar::Progress(progress.clone()), opened)
@@ -336,6 +379,20 @@ mod tests {
         assert_eq!(read(&path, &|| false)?.map(|p| (p.percent, p.status)), Some((1.0, Status::Other)));
         std::fs::write(&path, "return { last_xpointer = '/c', summary = { status = 'complete' } }")?;
         assert_eq!(read(&path, &|| false)?.map(|p| (p.percent, p.status)), Some((0.0, Status::Complete)));
+        std::fs::write(
+            &path,
+            "return { last_xpointer = '/c', summary = { modified = '2026-11-20', status = 'complete' } }",
+        )?;
+        let p = read(&path, &|| false)?.unwrap();
+        assert_eq!(p.status_day, crate::clock::LocalDateTime::midnight("2026-11-20"));
+        assert!(p.status_day.is_some());
+        std::fs::write(&path, "return { summary = { modified = 'soon', status = 'complete' } }")?;
+        assert!(matches!(read_sidecar(&path, &|| false)?, Some(Sidecar::Complete { status_day: None, .. })));
+        std::fs::write(&path, "return { summary = { modified = '2026-11-20', status = 'complete' } }")?;
+        let day = crate::clock::LocalDateTime::midnight("2026-11-20");
+        assert!(
+            matches!(read_sidecar(&path, &|| false)?, Some(Sidecar::Complete { status_day, .. }) if status_day == day)
+        );
         std::fs::write(&path, "return { last_xpointer = '/a', summary = { status = 'abandoned' } }")?;
         assert_eq!(read(&path, &|| false)?.unwrap().status, Status::Abandoned);
         // No position: nothing to offer or import.
@@ -352,7 +409,11 @@ mod tests {
         ] {
             std::fs::write(&path, text)?;
             assert_eq!(read(&path, &|| false)?, None, "{text}");
-            assert_eq!(read_sidecar(&path, &|| false)?, Some(Sidecar::Complete), "{text}");
+            assert_eq!(
+                read_sidecar(&path, &|| false)?,
+                Some(Sidecar::Complete { modified: modified(&path)?.unwrap(), status_day: None }),
+                "{text}"
+            );
         }
         for text in ["return { summary = { status = 'abandoned' } }", "return { summary = { status = 'reading' } }"] {
             std::fs::write(&path, text)?;
@@ -498,22 +559,68 @@ mod tests {
 
     #[test]
     fn a_complete_sidecar_without_a_position_marks_the_book_finished() {
-        // Never opened in Verso: finished, and nothing else changes.
-        let i = import(&BookState::default(), &Sidecar::Complete, Some(90));
+        let complete = Sidecar::Complete { modified: 100, status_day: Some(80) };
+        // Never opened in Verso: finished on KOReader's day, nothing else changes.
+        let i = import(&BookState::default(), &complete, Some(90));
         assert_eq!(i.found, Found::CompleteOnly);
         let s = i.state.unwrap();
-        assert!(s.finished);
+        assert_eq!((s.finished, s.status_at, s.rereading), (true, 80, false));
         assert_eq!((s.position.0.as_str(), s.last_opened, s.koreader_seen), ("", 0, None));
-        // Read in Verso: finished, its position and time kept.
+        // Read in Verso: finished, its position and time kept. Without a
+        // `summary.modified`, the date is the sidecar's time.
         let verso = state("/v", 150);
-        let i = import(&verso, &Sidecar::Complete, None);
+        let i = import(&verso, &Sidecar::Complete { modified: 100, status_day: None }, None);
         assert_eq!(i.found, Found::CompleteOnly);
         let s = i.state.unwrap();
-        assert!(s.finished);
+        assert_eq!((s.finished, s.status_at), (true, 100));
         assert_eq!((s.position.0.as_str(), s.page, s.progress, s.last_opened), ("/v", 7, 1200, 150));
         // Already finished: up to date, nothing to write.
-        let done = BookState { finished: true, ..verso };
-        let i = import(&done, &Sidecar::Complete, None);
+        let i = import(&s, &complete, None);
         assert_eq!((i.found, i.state.is_none()), (Found::UpToDate, true));
+        // Marked unfinished in Verso after KOReader's save: left alone.
+        let unmarked = BookState { status_at: 120, ..verso };
+        let i = import(&unmarked, &complete, None);
+        assert_eq!((i.found, i.state.is_none()), (Found::UpToDate, true));
+    }
+
+    #[test]
+    fn finished_is_a_lasting_label_across_imports() {
+        let mut done = progress("/k", 1000);
+        done.status = Status::Complete;
+        done.status_day = Some(900);
+        // Marked from KOReader, with KOReader's day as the finished date.
+        let s = imp(&state("/v", 2000), &done, None).state.expect("marked");
+        assert_eq!((s.finished, s.status_at, s.rereading, s.position.0.as_str()), (true, 900, false, "/v"));
+        // Running it again: nothing to change.
+        assert!(imp(&s, &done, None).state.is_none());
+        // Marked unfinished in Verso since: a re-run leaves it alone.
+        let mut unmarked = s.clone();
+        assert!(unmarked.mark_finished(false, 3000));
+        let i = imp(&unmarked, &done, None);
+        assert_eq!((i.found, i.state.is_none()), (Found::NewerInVerso, true));
+        // KOReader saved the sidecar after that (read there again): marked again.
+        let mut again = done.clone();
+        again.modified = 4000;
+        again.status_day = Some(3600);
+        let s = imp(&unmarked, &again, None).state.expect("marked again");
+        assert_eq!((s.finished, s.status_at), (true, 3600));
+        // Re-reading in Verso since KOReader's save: the re-read goes on.
+        let mut rereading = s.clone();
+        rereading.rereading = true;
+        rereading.last_opened = 5000;
+        assert!(imp(&rereading, &again, None).state.is_none());
+        // Read and finished in KOReader after the re-read started: finished,
+        // the re-read over.
+        let mut later = again.clone();
+        later.modified = 6000;
+        later.status_day = None;
+        let s = imp(&rereading, &later, None).state.expect("re-read ended");
+        assert_eq!((s.finished, s.rereading, s.status_at), (true, false, 6000));
+        // A sidecar that isn't complete never touches the label.
+        let reading = progress("/k2", 9000);
+        let s = imp(&unmarked, &reading, None).state.expect("a newer position");
+        assert_eq!((s.finished, s.status_at), (false, 3000));
+        let s = imp(&rereading, &reading, None).state.expect("a newer position");
+        assert_eq!((s.finished, s.rereading, s.status_at), (true, true, 3600));
     }
 }
