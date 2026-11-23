@@ -576,3 +576,40 @@ python3 scripts/perf/prelayout.py target/armv7-unknown-linux-gnueabihf/release/v
 Install the build first (`scripts/deploy.sh --no-run`); the script checks its
 hash. Pre-layout lines in `verso.log` carry a `prelayout` tag after the
 module name. `redraw.py` and `analyze-startup.py` ignore them.
+
+## Finished books
+
+`finished_books.py` verifies [finished-books Phase
+4](../../docs/finished-books.md#phase-4--on-the-kindle--2026-11-23) on the Kindle with
+injected touches, isolated state under `/mnt/us/verso/finished-books-check`
+and only the original `selection.epub` fixture, uploaded as three titled
+books. It reads to the end, checks the mark and the saved states, the
+end-of-book sheet's refresh area (from the probe's trace: its updates must
+succeed and lie in one band along the bottom or right edge of the screen,
+covering every pixel that changed), each closing rule, Undo, a slider jump
+that doesn't mark, Next, Home and Library, the finished book reopened and
+jumped around, re-reading and finishing again, then the sheet in landscape.
+Install the latest build first (`scripts/deploy.sh --no-run`) and start
+Verso once from KUAL: at its first launch after a deploy it restarts the SSH
+server, which ends the sessions open meanwhile (the script rides that out).
+
+```sh
+python3 scripts/perf/finished_books.py target/armv7-unknown-linux-gnueabihf/release/verso \
+  --probe /tmp/probe --preload /tmp/probe.so --output /tmp/finished-books
+```
+
+`finished_books_import.py` runs the KOReader import through Settings →
+Library → KOReader → *Import progress*: on a copy of the user's state over the
+real library (the import, the same import again, and once more after a book is
+marked unfinished in its saved state), then on a copy of one real finished
+book and its sidecar in a library of its own (`--copy-book`: finished in
+KOReader and not at its last page). KOReader's files are digested before and
+after. Both scripts save a capture per step and `results.json`, and stop
+Verso and check that the launcher restored the Kindle UI however they end.
+They leave `/mnt/us/verso/finished-books-check` behind: remove it afterwards.
+
+```sh
+python3 scripts/perf/finished_books_import.py target/armv7-unknown-linux-gnueabihf/release/verso \
+  --probe /tmp/probe --preload /tmp/probe.so --output /tmp/finished-books-import \
+  --copy-book '/mnt/us/My Library/Read/Red Rising/Golden Son - Pierce Brown (10).epub'
+```
