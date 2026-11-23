@@ -123,17 +123,18 @@ fn button_w(cx: &mut DrawCx, labels: &[&str], w: i32) -> i32 {
     (text.ceil() as i32 + t.mm(8.0)).min(w / 2)
 }
 
-/// A gray note with `button` (`button_w` wide) on its right, or below it
-/// across the column where the note would be too narrow beside it.
-fn note_beside(cx: &mut DrawCx, col: &mut Column, note: &str, button: &mut Button, button_w: i32) {
+/// A gray note with `button` (`button_w` wide) on its right, `button_dy`
+/// lower, or below it across the column where the note would be too narrow
+/// beside it.
+fn note_beside(cx: &mut DrawCx, col: &mut Column, note: &str, button: &mut Button, button_w: i32, button_dy: i32) {
     let t = cx.theme;
     let style = t.small.gray(INK2);
     let note_w = col.w - button_w - t.mm(3.0);
     if note_w >= t.mm(40.0) {
         let h = note_h(cx, note, note_w);
         cx.paragraph(note, style, Rect::new(col.x, col.y, note_w, h), HAlign::Left);
-        button.place(Rect::new(col.x + col.w - button_w, col.y, button_w, t.mm(CONTROL_MM)), t);
-        col.y += h.max(t.mm(CONTROL_MM));
+        button.place(Rect::new(col.x + col.w - button_w, col.y + button_dy, button_w, t.mm(CONTROL_MM)), t);
+        col.y += h.max(button_dy + t.mm(CONTROL_MM));
     } else {
         let h = note_h(cx, note, col.w);
         cx.paragraph(note, style, col.take(h), HAlign::Left);
@@ -789,7 +790,8 @@ impl SystemSettings {
         self.wifi_toggle.place(row.right(), row.center().y, t);
         self.wifi_toggle.draw(cx);
         let transfer_w = button_w(cx, &[&self.transfer.label], col.w);
-        note_beside(cx, &mut col, self.wifi_note(), &mut self.transfer, transfer_w);
+        // The button clear of the switch above it, and of its touch area.
+        note_beside(cx, &mut col, self.wifi_note(), &mut self.transfer, transfer_w, t.mm(2.5));
         // Updates below, or heading the right column in landscape.
         let mut col = if self.left == self.right {
             col.gap(t);
@@ -835,7 +837,7 @@ impl SystemSettings {
         });
         if self.go_back.is_some() {
             col.y += t.mm(NOTE_GAP_MM);
-            note_beside(cx, col, &note, &mut self.go_back_button, check_w);
+            note_beside(cx, col, &note, &mut self.go_back_button, check_w, 0);
         } else {
             col.note(cx, &note, &[]);
         }
