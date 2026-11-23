@@ -60,7 +60,7 @@ Verso requires a **jailbroken Kindle with KUAL** running **hard-float firmware
 | **Not supported** | Older soft-float Kindles (Paperwhite 2/3, Voyage, Oasis 1/2, Basic 1/2) and firmware older than 5.16.3 |
 
 On an untested model, Verso shows a one-time notice at launch. If you try it on
-another Kindle, **Settings → Device → Create problem report** (or **KUAL →
+another Kindle, **Settings → Advanced → Create problem report** (or **KUAL →
 Verso → Create problem report**) writes a redacted hardware and log report to
 `verso/reports/` that helps mark your model tested.
 

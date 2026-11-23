@@ -326,9 +326,9 @@ via **Check for updates**.
 - **Display:** orientation, full page refresh interval, folder previews.
 - **Library:** library folders, dictionaries, KOReader bulk progress import.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
-  a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates
-  and **Create problem report**.
-- **Advanced:** text shaping, plus **Developer** options (hidden until you tap
+  a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.
+- **Advanced:** text shaping, **Run setup again** and **Create problem
+  report**, plus **Developer** options (hidden until you tap
   the version line in **Device** five times). Developer mode exposes the
   built-in **SSH server** (Dropbear + `sftp-server`, port 2222, key-only login
   via `/mnt/us/verso/ssh/authorized_keys`, advertised as `verso.local`) and
@@ -336,7 +336,7 @@ via **Check for updates**.
 
 ### Problem reports
 
-Open **Settings → Device → Create problem report** (or **KUAL → Verso → Create
+Open **Settings → Advanced → Create problem report** (or **KUAL → Verso → Create
 problem report** if Verso cannot start) to write
 `/mnt/us/verso/reports/report-YYYYMMDD-HHMMSS.txt`. Crash reports
 (`crash-*.txt`, newest five kept) are also saved automatically when Verso exits

@@ -144,7 +144,7 @@ def main():
 def library_tab(s):
     """Settings → Library: the third of five tabs."""
     margin = s.mm(5)
-    return s.tap(margin + 2.5 * (s.w - 2 * margin) / 5, s.mm(13) + margin + s.mm(10) / 2)
+    return s.tap(margin + 2.5 * (s.w - 2 * margin) / 5, s.mm(13) + margin + s.mm(8) / 2)
 
 
 def import_row(s):
@@ -152,8 +152,8 @@ def import_row(s):
     margin = s.mm(5)
     if s.w > s.h:
         column = (s.w - 2 * margin - s.mm(10)) / 2
-        return s.tap(s.w - margin - column / 2, s.mm(34 + 23 + 6 + 8 + 7.5))
-    return s.tap(s.w * 0.75, s.h - s.mm(5 + 11 + 2 + 23 - 8 - 7.5))
+        return s.tap(s.w - margin - column / 2, s.mm(30 + 20.5 + 5 + 5.5 + 7.5))
+    return s.tap(s.w * 0.75, s.h - s.mm(5 + 11 + 2 + 7.5))
 
 
 def sheet_buttons(s):

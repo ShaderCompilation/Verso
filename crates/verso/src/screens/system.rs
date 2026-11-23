@@ -27,7 +27,7 @@ use crate::ui::widgets::{
 use crate::update::{self, Updates};
 use verso_update::Version;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
     Reading,
     Display,
@@ -55,6 +55,94 @@ fn flash_choice(every: u32) -> usize {
     (0..FLASH_CHOICES.len() - 1).min_by_key(|&i| FLASH_CHOICES[i].abs_diff(every)).unwrap_or(1)
 }
 
+// The vertical rhythm, in millimetres: a section is a label, a control and
+// a gray note, and sections are a gap apart.
+/// Tabs, choices and buttons.
+const CONTROL_MM: f32 = 8.0;
+/// A section label's strip above its control.
+const LABEL_MM: f32 = 5.5;
+/// From a control to its note.
+const NOTE_GAP_MM: f32 = 1.5;
+/// Between sections.
+const SECTION_GAP_MM: f32 = 5.0;
+
+/// A column laid out top to bottom as it's drawn. Notes are measured, so
+/// sections never overlap however their text wraps on a narrower screen.
+struct Column {
+    x: i32,
+    w: i32,
+    y: i32,
+}
+
+impl Column {
+    fn new(area: Rect, y: i32) -> Self {
+        Self { x: area.x, w: area.w, y }
+    }
+
+    /// The next `h` pixels of the column.
+    fn take(&mut self, h: i32) -> Rect {
+        let rect = Rect::new(self.x, self.y, self.w, h);
+        self.y += h;
+        rect
+    }
+
+    fn label(&mut self, cx: &mut DrawCx, text: &str) {
+        let rect = self.take(cx.theme.mm(LABEL_MM));
+        cx.section_label(text, rect);
+    }
+
+    fn control(&mut self, t: &Theme) -> Rect {
+        self.take(t.mm(CONTROL_MM))
+    }
+
+    /// A gray note under a control, with room for the tallest of
+    /// `variants` (the notes of the control's other choices), so that
+    /// choosing doesn't move what follows.
+    fn note(&mut self, cx: &mut DrawCx, text: &str, variants: &[&str]) {
+        self.y += cx.theme.mm(NOTE_GAP_MM);
+        let h = variants.iter().chain([&text]).map(|v| note_h(cx, v, self.w)).max().unwrap_or(0);
+        let (rect, style) = (self.take(h), cx.theme.small.gray(INK2));
+        cx.paragraph(text, style, rect, HAlign::Left);
+    }
+
+    fn gap(&mut self, t: &Theme) {
+        self.y += t.mm(SECTION_GAP_MM);
+    }
+}
+
+/// The height of a gray note `w` wide.
+fn note_h(cx: &mut DrawCx, text: &str, w: i32) -> i32 {
+    let style = cx.theme.small.gray(INK2);
+    cx.text.measure(text, style, Some(w as f32)).1.ceil() as i32
+}
+
+/// A button wide enough for the longest of `labels`, at most half of `w`.
+fn button_w(cx: &mut DrawCx, labels: &[&str], w: i32) -> i32 {
+    let t = cx.theme;
+    let text = labels.iter().map(|l| cx.text.width(l, t.button)).fold(0.0_f32, f32::max);
+    (text.ceil() as i32 + t.mm(8.0)).min(w / 2)
+}
+
+/// A gray note with `button` (`button_w` wide) on its right, or below it
+/// across the column where the note would be too narrow beside it.
+fn note_beside(cx: &mut DrawCx, col: &mut Column, note: &str, button: &mut Button, button_w: i32) {
+    let t = cx.theme;
+    let style = t.small.gray(INK2);
+    let note_w = col.w - button_w - t.mm(3.0);
+    if note_w >= t.mm(40.0) {
+        let h = note_h(cx, note, note_w);
+        cx.paragraph(note, style, Rect::new(col.x, col.y, note_w, h), HAlign::Left);
+        button.place(Rect::new(col.x + col.w - button_w, col.y, button_w, t.mm(CONTROL_MM)), t);
+        col.y += h.max(t.mm(CONTROL_MM));
+    } else {
+        let h = note_h(cx, note, col.w);
+        cx.paragraph(note, style, col.take(h), HAlign::Left);
+        col.y += t.mm(2.0);
+        button.place(col.control(t), t);
+    }
+    button.draw(cx);
+}
+
 pub struct SystemSettings {
     top: TopBar,
     tabs: Segmented,
@@ -68,20 +156,21 @@ pub struct SystemSettings {
     body: i32,
     /// `Store::settings_saves` when the folder list was last read.
     settings_seen: u64,
+    /// Two columns side by side in landscape, which is too short for one;
+    /// in portrait both are the content area. Every tab but Library places
+    /// its controls as it draws, below the notes it measured.
+    left: Rect,
+    right: Rect,
     // Reading: tap zones, then the switches below the preview, or (landscape)
     // the zones note and the switches on the right.
     zones: Segmented,
     zones_preview: Rect,
-    /// Where the tap zones note goes: beside the preview, or the top of the
-    /// right column in landscape (its height is measured when drawn).
-    zones_note: Rect,
     /// "Tap the top-right corner to bookmark".
     corner: Toggle,
     /// "Check KOReader progress".
     koreader: Toggle,
-    /// The switch rows' column; its top is the first row's in portrait.
-    switches: Rect,
-    // Display: one column, or (landscape) folder previews on the right.
+    // Display: one column, or (landscape) orientation and folder previews
+    // side by side and the refresh choices across both below them.
     orientation: Segmented,
     flash: Segmented,
     previews: Segmented,
@@ -101,9 +190,7 @@ pub struct SystemSettings {
     folder_row: i32,
     folder_pager: Pager,
     add_folder: Button,
-    // Device (and Advanced): one column, or two side by side in landscape.
-    device_left: Rect,
-    device_right: Rect,
+    // Device: sleep screen and Wi-Fi, then (or on the right) updates.
     sleep: Segmented,
     /// The version in the Updates section. Tap it five times to show or
     /// hide the developer options (on the Advanced tab).
@@ -114,7 +201,6 @@ pub struct SystemSettings {
     wifi: Option<bool>,
     wifi_toggle: Toggle,
     wifi_pending: Option<bool>,
-    wifi_top: i32,
     /// Opens Wi-Fi transfer, beside the Wi-Fi note.
     transfer: Button,
     ssh: ssh::Status,
@@ -134,9 +220,6 @@ pub struct SystemSettings {
     // Updates
     updates: Arc<Updates>,
     update_status: update::Status,
-    update_top: i32,
-    /// Room for the check's note: two lines, three in a landscape column.
-    update_note_h: i32,
     /// "Check for updates", or "Update" while an update is available.
     check_button: Button,
     auto_check: Toggle,
@@ -146,18 +229,13 @@ pub struct SystemSettings {
     go_back_button: Button,
     offer: Option<OfferSheet>,
     go_back_sheet: Option<GoBackSheet>,
-    // Help: Run setup again and the problem report (on the Device tab)
-    report_label_y: Option<i32>,
+    // Advanced: text shaping, then (or on the right) help and the
+    // developer section.
     setup_button: Button,
     report_button: Button,
     report_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
     report_sheet: Option<ReportSheet>,
-    // Advanced: text shaping, then (below, or on the right in landscape)
-    // the developer section.
-    dev_top: i32,
     shaping: Segmented,
-    /// Height of each text-shaping note: taller in a landscape column.
-    shaping_note_h: i32,
 }
 impl SystemSettings {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
@@ -167,85 +245,42 @@ impl SystemSettings {
         let content = screen.split_top(t.top_bar).1.inset(t.margin);
         let settings = store.settings();
         let mut tabs = Segmented::texts(&["Reading", "Display", "Library", "Device", "Advanced"], 0);
-        tabs.place(Rect::new(content.x, content.y, content.w, t.button_h));
-        let body = tabs.rect().bottom() + t.mm(6.0);
-
-        // Landscape is too short for the switches below the preview: the
-        // zones note and the switches go on the right.
+        tabs.place(Rect::new(content.x, content.y, content.w, t.mm(CONTROL_MM)));
+        let body = tabs.rect().bottom() + t.mm(4.0);
         let landscape = screen.w > screen.h;
-        let (zones_column, switches) = if landscape {
+        let (left, right) = if landscape {
             let gap = t.mm(10.0);
             let w = (content.w - gap) / 2;
             (Rect { w, ..content }, Rect { x: content.right() - w, w, ..content })
         } else {
             (content, content)
         };
+
         let selected = TapZones::ALL.iter().position(|&z| z == settings.tap_zones).unwrap_or(0);
-        let mut zones = Segmented::texts(&["Standard", "Left-handed", "Halves"], selected);
-        zones.place(Rect::new(zones_column.x, body + t.mm(8.0), zones_column.w, t.button_h));
-        // A small page with the zones drawn on it, shaped like the screen.
-        // Below it in portrait, two switches: a label line and a note each.
-        let switch_rows = if landscape { 0 } else { 2 * t.mm(16.0) };
-        let preview_top = zones.rect().bottom() + t.mm(5.0);
-        let preview_h = (content.bottom() - preview_top - switch_rows).clamp(t.mm(20.0), t.mm(36.0));
-        let preview_w = (preview_h * screen.w / screen.h.max(1)).min(zones_column.w);
-        let preview_h = preview_h.min(preview_w * screen.h / screen.w.max(1));
-        let zones_preview = Rect::new(zones_column.x, preview_top, preview_w, preview_h);
-        let zones_note = if landscape {
-            Rect::new(switches.x, body + t.mm(2.0), switches.w, 0)
-        } else {
-            let x = zones_preview.right() + t.mm(5.0);
-            Rect::new(x, zones_preview.y, content.right() - x, zones_preview.h)
-        };
-        let switches_top = if landscape { zones_note.y } else { zones_preview.bottom() + t.mm(5.0) };
-        let switches = Rect { y: switches_top, h: content.bottom() - switches_top, ..switches };
-        // Placed again when drawn, after measuring the text.
-        let mut corner = Toggle::new(settings.bookmark_corner);
-        corner.place(switches.right(), switches.y + t.mm(4.0), t);
-        let mut koreader = Toggle::new(settings.koreader_progress);
-        koreader.place(switches.right(), switches.y + t.mm(20.0), t);
-
-        // Landscape is too short for everything in one column.
-        let (device_left, device_right) = if screen.w > screen.h {
-            let gap = t.mm(10.0);
-            let w = (content.w - gap) / 2;
-            (Rect { w, ..content }, Rect { x: content.right() - w, w, ..content })
-        } else {
-            (content, content)
-        };
-
-        let mut orientation =
+        let zones = Segmented::texts(&["Standard", "Left-handed", "Halves"], selected);
+        let orientation =
             Segmented::texts(&["Portrait", "Landscape"], usize::from(settings.orientation == Orientation::Landscape));
-        orientation.place(Rect::new(device_left.x, body + t.mm(8.0), device_left.w, t.button_h));
-        let mut flash =
+        let flash =
             Segmented::texts(&["Every page", "Every 6", "Every 12", "Never"], flash_choice(settings.page_flash));
-        flash.place(Rect::new(device_left.x, orientation.rect().bottom() + t.mm(24.0), device_left.w, t.button_h));
         let selected = FolderPreview::OFFERED.iter().position(|&m| m == settings.folder_preview).unwrap_or(0);
         // Covers is disabled for now; see FolderPreview::OFFERED.
-        let mut previews = Segmented::texts(&["Stack", "Latest", "Icon"], selected);
-        // In one column, below the refresh note: its two lines and a label.
-        let previews_y =
-            if device_right == device_left { flash.rect().bottom() + t.mm(20.0) } else { body + t.mm(8.0) };
-        previews.place(Rect::new(device_right.x, previews_y, device_right.w, t.button_h));
+        let previews = Segmented::texts(&["Stack", "Latest", "Icon"], selected);
 
         let mut add_folder = Button::new("Add folder", ButtonKind::Secondary).with_icon(Icon::Folder);
-        add_folder.place(Rect::new(content.x, 0, content.w, t.button_h), t);
+        add_folder.place(Rect::new(content.x, 0, content.w, t.mm(CONTROL_MM)), t);
         let mut folder_pager = Pager::new(1);
         folder_pager.place(Rect::new(content.x, content.bottom() - t.mm(11.0), content.w, t.mm(11.0)), t);
         // The dictionary and KOReader entries: a section label and one row
         // each. Landscape is too short for them below the library folders,
         // and a 6" portrait screen has room for only one row of entries
         // there, so they stand side by side.
-        let entry_h = t.mm(8.0) + t.row2;
-        let landscape = screen.w > screen.h;
+        let label_h = t.mm(LABEL_MM);
+        let entry_h = label_h + t.row2;
         let (library, dictionaries, koreader_area) = if landscape {
-            let gap = t.mm(10.0);
-            let w = (content.w - gap) / 2;
-            let right = Rect { x: content.right() - w, w, ..content };
             // The folder pager stays under the folders.
-            folder_pager.place(Rect { w, ..folder_pager.rect() }, t);
+            folder_pager.place(Rect { w: left.w, ..folder_pager.rect() }, t);
             let dictionaries = Rect { y: body, h: entry_h, ..right };
-            (Rect { w, ..content }, dictionaries, Rect { y: dictionaries.bottom() + t.mm(6.0), ..dictionaries })
+            (left, dictionaries, Rect { y: dictionaries.bottom() + t.mm(SECTION_GAP_MM), ..dictionaries })
         } else {
             let y = folder_pager.rect().y - t.mm(2.0) - entry_h;
             let half = screen.x + screen.w / 2;
@@ -255,82 +290,30 @@ impl SystemSettings {
         let mut dictionary_entry = List::new(vec![Row::new("Dictionaries").sub("Sets, order and folders").chevron()]);
         let mut koreader_entry = List::new(vec![Row::new("Import progress").sub("Positions and finished books")]);
         if landscape {
-            dictionary_entry.place(Rect { y: dictionaries.y + t.mm(8.0), h: t.row2, ..dictionaries }, t.row2, 0);
-            koreader_entry.place(Rect { y: koreader_area.y + t.mm(8.0), h: t.row2, ..koreader_area }, t.row2, 0);
+            dictionary_entry.place(Rect { y: dictionaries.y + label_h, h: t.row2, ..dictionaries }, t.row2, 0);
+            koreader_entry.place(Rect { y: koreader_area.y + label_h, h: t.row2, ..koreader_area }, t.row2, 0);
         } else {
             // Rows reach the screen edges, their text inset by the margin.
             let half = screen.x + screen.w / 2;
-            let row = |x: i32, right: i32| Rect::new(x, dictionaries.y + t.mm(8.0), right - x, t.row2);
+            let row = |x: i32, right: i32| Rect::new(x, dictionaries.y + label_h, right - x, t.row2);
             dictionary_entry.place(row(screen.x, half), t.row2, t.margin);
             koreader_entry.place(row(half, screen.right()), t.row2, t.margin);
         }
 
-        // Landscape is too short for the developer section below the rest.
-        let mut sleep =
+        let sleep =
             Segmented::texts(&["Book cover", "Amazon"], usize::from(settings.sleep_screen == SleepScreen::Amazon));
-        sleep.place(Rect::new(device_left.x, body + t.mm(7.0), device_left.w, t.button_h));
-        let wifi_top = sleep.rect().bottom() + t.mm(14.0);
         let wifi = Self::read_wifi();
         let mut wifi_toggle = Toggle::new(wifi.unwrap_or(false));
         wifi_toggle.enabled = wifi.is_some();
-        wifi_toggle.place(device_left.right(), wifi_top + t.mm(4.0), t);
-        let mut transfer = Button::new("Wi-Fi transfer", ButtonKind::Secondary);
-        let transfer_w = t.mm(40.0).min(device_left.w / 2);
-        transfer.place(Rect::new(device_left.right() - transfer_w, wifi_top + t.mm(9.0), transfer_w, t.button_h), t);
-        // Updates: below Wi-Fi, or on the right in landscape.
-        let landscape = device_right != device_left;
-        let update_top = if landscape { body } else { wifi_top + t.mm(20.0) };
-        let u = device_right;
-        let mut check_button = Button::new("Check for updates", ButtonKind::Secondary);
-        let check_w = t.mm(40.0).min(u.w / 2);
-        check_button.place(Rect::new(u.right() - check_w, update_top + t.mm(7.0), check_w, t.button_h), t);
-        let version = Rect::new(u.x, update_top + t.mm(7.0), u.w - check_w, t.button_h);
-        let update_note_h = if landscape { t.mm(16.0) } else { t.mm(10.0) };
-        let mut auto_check = Toggle::new(settings.check_updates);
-        auto_check.place(u.right(), Self::auto_check_top(update_top, update_note_h, t) + t.mm(4.0), t);
         let updates = store.updates();
         let update_status = updates.status();
-        check_button.enabled = !update_status.checking;
-        // "Go back to …": under the check button in portrait (the note
-        // beside it narrows), or a row of its own in the landscape column.
         let go_back = updates.previous();
         let label = go_back.as_ref().map_or_else(String::new, |(_, previous)| format!("Go back to {previous}"));
-        let mut go_back_button = Button::new(label, ButtonKind::Secondary);
-        let go_back_rect = if landscape {
-            let y = Self::auto_check_top(update_top, update_note_h, t) + t.mm(17.0);
-            Rect::new(u.x, y, u.w, t.button_h)
-        } else {
-            Rect { y: check_button.rect().bottom() + t.mm(2.0), ..check_button.rect() }
-        };
-        go_back_button.place(go_back_rect, t);
-        // Help: below Wi-Fi on the left in landscape, or below Updates in portrait.
-        let report_top = if landscape {
-            wifi_top + t.mm(21.0)
-        } else {
-            Self::auto_check_top(update_top, update_note_h, t) + t.mm(14.0)
-        };
-        let (report_label_y, report_btn_y) = if report_top + t.mm(7.0) + t.button_h <= content.bottom() {
-            (Some(report_top), report_top + t.mm(7.0))
-        } else {
-            (None, report_top.min(content.bottom() - t.button_h))
-        };
-        // Run setup again and the report side by side.
-        let half = (device_left.w - t.mm(3.0)) / 2;
-        let mut setup_button = Button::new("Run setup again", ButtonKind::Secondary);
-        setup_button.place(Rect::new(device_left.x, report_btn_y, half, t.button_h), t);
-        let mut report_button = Button::new("Create problem report", ButtonKind::Secondary);
-        report_button.place(Rect::new(device_left.right() - half, report_btn_y, half, t.button_h), t);
-        // Advanced: text shaping on the left, the developer section below
-        // it or on the right.
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
-        let mut shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
-        shaping.place(Rect::new(device_left.x, body + t.mm(8.0), device_left.w, t.button_h));
-        let shaping_note_h = if landscape { t.mm(16.0) } else { t.mm(11.0) };
-        let dev_top = if landscape { body } else { shaping.rect().bottom() + 2 * shaping_note_h + t.mm(12.0) };
+        let shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
         let ssh = ssh::status();
         let ssh_read_at = Instant::now();
-        let mut ssh_toggle = Toggle::new(ssh.running);
-        ssh_toggle.place(device_right.right(), dev_top + t.mm(12.0), t);
+        let ssh_toggle = Toggle::new(ssh.running);
         let mut this = Self {
             top,
             tabs,
@@ -341,12 +324,12 @@ impl SystemSettings {
             screen,
             content,
             body,
+            left,
+            right,
             zones,
-            zones_preview,
-            zones_note,
-            corner,
-            koreader,
-            switches,
+            zones_preview: Rect::default(),
+            corner: Toggle::new(settings.bookmark_corner),
+            koreader: Toggle::new(settings.koreader_progress),
             orientation,
             flash,
             previews,
@@ -362,18 +345,15 @@ impl SystemSettings {
             folder_row: t.row,
             folder_pager,
             add_folder,
-            device_left,
-            device_right,
             sleep,
-            version,
+            version: Rect::default(),
             version_press: Press::default(),
             version_taps: (0, Instant::now()),
             developer: settings.developer,
             wifi,
             wifi_toggle,
             wifi_pending: None,
-            wifi_top,
-            transfer,
+            transfer: Button::new("Wi-Fi transfer", ButtonKind::Secondary),
             ssh_was_running: ssh.running,
             ssh,
             ssh_toggle,
@@ -383,22 +363,17 @@ impl SystemSettings {
             ssh_read_on_wake: false,
             updates,
             update_status,
-            update_top,
-            update_note_h,
-            check_button,
-            auto_check,
+            check_button: Button::new("Check for updates", ButtonKind::Secondary),
+            auto_check: Toggle::new(settings.check_updates),
             go_back,
-            go_back_button,
+            go_back_button: Button::new(label, ButtonKind::Secondary),
             offer: None,
             go_back_sheet: None,
-            report_label_y,
-            setup_button,
-            report_button,
+            setup_button: Button::new("Run setup again", ButtonKind::Secondary),
+            report_button: Button::new("Create problem report", ButtonKind::Secondary),
             report_rx: None,
             report_sheet: None,
-            dev_top,
             shaping,
-            shaping_note_h,
         };
         this.load_folders(t);
         this.sync_check_button();
@@ -438,10 +413,19 @@ impl SystemSettings {
 
     fn draw_reading(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.content;
-        let zones_label = self.zones.rect().y - t.mm(8.0);
-        cx.section_label("Tap zones", Rect::new(c.x, zones_label, c.w, t.mm(8.0)));
+        let landscape = self.left != self.right;
+        let mut col = Column::new(self.left, self.body);
+        col.label(cx, "Tap zones");
+        self.zones.place(col.control(t));
         self.zones.draw(cx);
+        // A small page with the zones drawn on it, shaped like the screen,
+        // leaving room in portrait for the two switch rows below it.
+        let top = col.y + t.mm(3.0);
+        let switch_rows = if landscape { 0 } else { 2 * t.mm(14.0) };
+        let h = (self.content.bottom() - top - switch_rows).clamp(t.mm(20.0), t.mm(36.0));
+        let w = (h * self.screen.w / self.screen.h.max(1)).min(col.w);
+        let h = h.min(w * self.screen.h / self.screen.w.max(1));
+        self.zones_preview = Rect::new(col.x, top, w, h);
         let zones = TapZones::ALL[self.zones.selected];
         // The corner square at the preview's scale.
         let corner =
@@ -452,19 +436,22 @@ impl SystemSettings {
             TapZones::Mirrored => "Tap the right side to go back and anywhere else to go forward.",
             TapZones::Halves => "Tap the left half to go back and the right half to go forward.",
         };
-        let style = t.small.gray(INK2);
-        let mut text = self.zones_note;
-        let mut y = self.switches.y;
-        // Landscape: the note heads the right column, the switches follow.
-        let landscape = text.h == 0;
         let gap = if landscape { "\n" } else { "\n\n" };
         let note = format!("{note}{gap}Tap the middle for the menu. Swiping left or right also turns pages.");
-        if landscape {
-            text.h = cx.text.measure(&note, style, Some(text.w as f32)).1.ceil() as i32;
-            y = text.bottom() + t.mm(4.0);
-        }
-        cx.paragraph(&note, style, text, HAlign::Left);
-        let (x, w) = (self.switches.x, self.switches.w);
+        let style = t.small.gray(INK2);
+        // The note beside the preview and the switches below it, or
+        // (landscape) the note heading the right column and the switches
+        // following it.
+        let mut y = if landscape {
+            let h = note_h(cx, &note, self.right.w);
+            cx.paragraph(&note, style, Rect { y: self.body, h, ..self.right }, HAlign::Left);
+            self.body + h + t.mm(4.0)
+        } else {
+            let x = self.zones_preview.right() + t.mm(5.0);
+            cx.paragraph(&note, style, Rect { x, w: self.content.right() - x, ..self.zones_preview }, HAlign::Left);
+            self.zones_preview.bottom() + t.mm(SECTION_GAP_MM)
+        };
+        let (x, w) = (self.right.x, self.right.w);
         let corner = ("Tap the top-right corner to bookmark", "Tap it again to remove the bookmark.");
         y = switch_row(cx, &mut self.corner, corner, x, y, w);
         let koreader = ("Check KOReader progress", "When you open a book, offer KOReader’s newer position.");
@@ -492,29 +479,42 @@ impl SystemSettings {
 
     // ---- Display ----
 
+    /// Portrait: one column. Landscape: orientation and folder previews side
+    /// by side, and the refresh choices across both below them, where all
+    /// four labels fit.
     fn draw_display(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.device_left;
-        cx.section_label("Orientation", Rect::new(c.x, self.orientation.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        let mut col = Column::new(self.left, self.body);
+        col.label(cx, "Orientation");
+        self.orientation.place(col.control(t));
         self.orientation.draw(cx);
-        cx.paragraph(
-            "For landscape, turn the Kindle clockwise so its top edge is on the right.",
-            t.small.gray(INK2),
-            Rect::new(c.x, self.orientation.rect().bottom() + t.mm(2.0), c.w, t.mm(11.0)),
-            HAlign::Left,
-        );
-        cx.section_label("Full page refresh", Rect::new(c.x, self.flash.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        col.note(cx, "For landscape, turn the Kindle clockwise so its top edge is on the right.", &[]);
+        col.gap(t);
+        if self.left == self.right {
+            self.draw_refresh(cx, &mut col);
+            col.gap(t);
+            self.draw_previews(cx, &mut col);
+        } else {
+            let mut right = Column::new(self.right, self.body);
+            self.draw_previews(cx, &mut right);
+            right.gap(t);
+            let mut across = Column::new(self.content, col.y.max(right.y));
+            self.draw_refresh(cx, &mut across);
+        }
+    }
+
+    fn draw_refresh(&mut self, cx: &mut DrawCx, col: &mut Column) {
+        col.label(cx, "Full page refresh");
+        self.flash.place(col.control(cx.theme));
         self.flash.draw(cx);
-        cx.paragraph(
-            "A brief flash clears ghosting. Chapter starts and pictures always refresh fully.",
-            t.small.gray(INK2),
-            Rect::new(c.x, self.flash.rect().bottom() + t.mm(2.0), c.w, t.mm(9.0)),
-            HAlign::Left,
-        );
-        let c = self.device_right;
-        cx.section_label("Folder previews", Rect::new(c.x, self.previews.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        col.note(cx, "A brief flash clears ghosting. Chapter starts and pictures always refresh fully.", &[]);
+    }
+
+    fn draw_previews(&mut self, cx: &mut DrawCx, col: &mut Column) {
+        col.label(cx, "Folder previews");
+        self.previews.place(col.control(cx.theme));
         self.previews.draw(cx);
-        let note = match FolderPreview::OFFERED[self.previews.selected] {
+        let note = |preview| match preview {
             FolderPreview::Covers => "Folders in Collections show four covers, the books read most recently first.",
             FolderPreview::Stack => {
                 "Folders in Collections show three covers stacked, the book read most recently in front."
@@ -522,10 +522,8 @@ impl SystemSettings {
             FolderPreview::Latest => "Folders in Collections show the cover of the book read most recently in them.",
             FolderPreview::Icon => "Folders in Collections show a folder icon and how many books they hold.",
         };
-        // As many lines as fit above the bottom edge on small screens.
-        let y = self.previews.rect().bottom() + t.mm(2.0);
-        let h = (self.content.bottom() - y).clamp(0, t.mm(11.0));
-        cx.paragraph(note, t.small.gray(INK2), Rect::new(c.x, y, c.w, h), HAlign::Left);
+        let variants: Vec<_> = FolderPreview::OFFERED.iter().map(|&p| note(p)).collect();
+        col.note(cx, note(FolderPreview::OFFERED[self.previews.selected]), &variants);
     }
 
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
@@ -577,14 +575,14 @@ impl SystemSettings {
     }
 
     fn folders_top(&self, t: &Theme) -> i32 {
-        self.body + t.mm(8.0)
+        self.body + t.mm(LABEL_MM)
     }
 
     /// Rows that fit above the add button, note and pager (and, in portrait,
     /// the dictionary entry).
     fn folders_per_page(&self, t: &Theme) -> usize {
         let bottom = if self.library.w == self.content.w { self.dictionaries.y } else { self.folder_pager.rect().y };
-        let space = bottom - t.mm(26.0) - self.folders_top(t);
+        let space = bottom - t.mm(24.0) - self.folders_top(t);
         (space / self.folder_row).max(1) as usize
     }
 
@@ -601,14 +599,14 @@ impl SystemSettings {
             let row = Rect::new(self.library.x, top + k as i32 * self.folder_row, self.library.w, self.folder_row);
             self.removes[i].place(Rect::new(row.right() - t.target + t.mm(2.0), row.y, t.target, row.h));
         }
-        let y = top + range.len() as i32 * self.folder_row + t.mm(4.0);
-        self.add_folder.place(Rect::new(self.library.x, y, self.library.w, t.button_h), t);
+        let y = top + range.len() as i32 * self.folder_row + t.mm(3.0);
+        self.add_folder.place(Rect::new(self.library.x, y, self.library.w, t.mm(CONTROL_MM)), t);
     }
 
     fn draw_library(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
         let c = self.library;
-        cx.section_label("Library folders", Rect::new(c.x, self.body, c.w, t.mm(8.0)));
+        cx.section_label("Library folders", Rect::new(c.x, self.body, c.w, t.mm(LABEL_MM)));
         let top = self.folders_top(t);
         for (k, i) in self.visible_folders(t).enumerate() {
             let row = Rect::new(c.x, top + k as i32 * self.folder_row, c.w, self.folder_row);
@@ -625,14 +623,14 @@ impl SystemSettings {
         } else {
             "Verso shows EPUB books from these folders and their subfolders. Removing a folder keeps its books and reading progress on the Kindle."
         };
-        let y = self.add_folder.rect().bottom() + t.mm(3.0);
+        let y = self.add_folder.rect().bottom() + t.mm(2.0);
         cx.paragraph(note, t.small.gray(INK2), Rect::new(c.x, y, c.w, t.mm(14.0)), HAlign::Left);
         self.folder_pager.draw(cx);
         let d = self.dictionaries;
-        cx.section_label("Dictionaries", Rect::new(d.x, d.y, d.w, t.mm(8.0)));
+        cx.section_label("Dictionaries", Rect::new(d.x, d.y, d.w, t.mm(LABEL_MM)));
         self.dictionary_entry.draw(cx);
         let k = self.koreader_area;
-        cx.section_label("KOReader", Rect::new(k.x, k.y, k.w, t.mm(8.0)));
+        cx.section_label("KOReader", Rect::new(k.x, k.y, k.w, t.mm(LABEL_MM)));
         self.koreader_entry.draw(cx);
     }
 
@@ -778,41 +776,31 @@ impl SystemSettings {
 
     fn draw_device(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.device_left;
-        cx.section_label("Sleep screen", Rect::new(c.x, self.body, c.w, t.mm(8.0)));
+        let mut col = Column::new(self.left, self.body);
+        col.label(cx, "Sleep screen");
+        self.sleep.place(col.control(t));
         self.sleep.draw(cx);
-        cx.paragraph(
-            "Show the current book’s cover while asleep. When no cover is available, use Amazon’s sleep screen.",
-            t.small.gray(INK2),
-            Rect::new(c.x, self.sleep.rect().bottom() + t.mm(2.0), c.w, t.mm(12.0)),
-            HAlign::Left,
-        );
-        let label = Rect::new(c.x, self.wifi_top, c.w - t.mm(12.0), t.mm(8.0));
-        cx.line("Wi-Fi", t.body, label, HAlign::Left);
+        let note = "Show the current book’s cover while asleep. When no cover is available, use Amazon’s sleep screen.";
+        col.note(cx, note, &[]);
+        col.gap(t);
+        // The Wi-Fi switch, then its note with Wi-Fi transfer beside it.
+        let row = col.take(t.mm(6.0));
+        cx.line("Wi-Fi", t.body, Rect { w: row.w - Toggle::size(t).0 - t.mm(3.0), ..row }, HAlign::Left);
+        self.wifi_toggle.place(row.right(), row.center().y, t);
         self.wifi_toggle.draw(cx);
-        let note_w = self.transfer.rect().x - t.mm(3.0) - label.x;
-        cx.paragraph(
-            self.wifi_note(),
-            t.small.gray(INK2),
-            Rect::new(label.x, label.bottom() - t.mm(1.0), note_w, t.mm(14.0)),
-            HAlign::Left,
-        );
-        self.transfer.draw(cx);
-        self.draw_updates(cx);
-        if let Some(y) = self.report_label_y {
-            cx.section_label("Help", Rect::new(c.x, y, c.w, t.mm(7.0)));
-        }
-        self.setup_button.draw(cx);
-        self.report_button.draw(cx);
+        let transfer_w = button_w(cx, &[&self.transfer.label], col.w);
+        note_beside(cx, &mut col, self.wifi_note(), &mut self.transfer, transfer_w);
+        // Updates below, or heading the right column in landscape.
+        let mut col = if self.left == self.right {
+            col.gap(t);
+            col
+        } else {
+            Column::new(self.right, self.body)
+        };
+        self.draw_updates(cx, &mut col);
     }
 
     // ---- Updates (on the Device tab) ----
-
-    /// The "Check automatically" row: below the section label, the version
-    /// row and the check's note.
-    fn auto_check_top(update_top: i32, note_h: i32, t: &Theme) -> i32 {
-        update_top + t.mm(7.0) + t.button_h + note_h + t.mm(1.5)
-    }
 
     fn refresh_update_status(&mut self) {
         self.update_status = self.updates.status();
@@ -828,46 +816,38 @@ impl SystemSettings {
         self.check_button.kind = if available { ButtonKind::Primary } else { ButtonKind::Secondary };
     }
 
-    /// Portrait with "Go back": the note leaves room for the button.
-    fn update_note_w(&self, t: &Theme) -> i32 {
-        let c = self.device_right;
-        if self.go_back.is_some() && self.device_left == self.device_right {
-            self.check_button.rect().x - t.mm(3.0) - c.x
-        } else {
-            c.w
-        }
-    }
-
-    fn draw_updates(&mut self, cx: &mut DrawCx) {
+    /// The version and the check button, the check's note (with "Go back
+    /// to …" beside it, under the check button), and the automatic check.
+    fn draw_updates(&mut self, cx: &mut DrawCx, col: &mut Column) {
         let t = cx.theme;
-        let c = self.device_right;
-        cx.section_label("Updates", Rect::new(c.x, self.update_top, c.w, t.mm(8.0)));
+        col.label(cx, "Updates");
+        let check_w = button_w(cx, &["Check for updates", &self.go_back_button.label], col.w);
+        let (check, version) = col.control(t).split_right(check_w);
         // The installed release, which a data-only release moves past the app's own version.
+        self.version = Rect { w: version.w - t.mm(3.0), ..version };
         cx.line(&format!("Verso {}", self.update_status.current), t.body, self.version, HAlign::Left);
+        self.check_button.place(check, t);
         self.check_button.draw(cx);
         let now = LocalDateTime::at(update::unix_now());
         let note = self.update_status.note(|at| match (LocalDateTime::at(at), now) {
             (Some(at), Some(now)) => at.since(now),
             _ => "earlier".into(),
         });
-        let note_rect = Rect::new(c.x, self.version.bottom() + t.mm(1.0), self.update_note_w(t), self.update_note_h);
-        cx.paragraph(&note, t.small.gray(INK2), note_rect, HAlign::Left);
         if self.go_back.is_some() {
-            self.go_back_button.draw(cx);
+            col.y += t.mm(NOTE_GAP_MM);
+            note_beside(cx, col, &note, &mut self.go_back_button, check_w);
+        } else {
+            col.note(cx, &note, &[]);
         }
-        let top = Self::auto_check_top(self.update_top, self.update_note_h, t);
-        let label = Rect::new(c.x, top, c.w - t.mm(12.0), t.mm(8.0));
-        cx.line("Check automatically", t.body, label, HAlign::Left);
-        self.auto_check.draw(cx);
-        let note = if !self.auto_check.on {
+        col.y += t.mm(3.0);
+        let auto = if !self.auto_check.on {
             "Off. Verso checks only when you ask."
         } else if self.update_status.dev {
             "Off for development installs."
         } else {
             "Once a day, when Verso starts with Wi-Fi on."
         };
-        let note_rect = Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(6.0));
-        cx.paragraph(note, t.small.gray(INK2), note_rect, HAlign::Left);
+        col.y = switch_row(cx, &mut self.auto_check, ("Check automatically", auto), col.x, col.y, col.w);
     }
 
     fn updates_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
@@ -909,12 +889,6 @@ impl SystemSettings {
             self.wifi_pending = Some(on);
         }
         self.updates_gesture(g, cx);
-        if self.setup_button.on_gesture(g) {
-            return Action::Push(Box::new(SetupScreen::new(cx.theme, self.screen, self.store.clone(), None)));
-        }
-        if self.report_rx.is_none() && self.report_button.on_gesture(g) {
-            self.start_report();
-        }
         if let Some(PressEvent::Tap) = self.version_press.on_gesture(g, self.version) {
             self.tap_version(cx);
         }
@@ -943,31 +917,12 @@ impl SystemSettings {
     // ---- Advanced ----
 
     fn draw_advanced(&mut self, cx: &mut DrawCx) {
-        self.draw_shaping(cx);
-        if self.show_developer() {
-            self.draw_developer(cx);
-        }
-    }
-
-    fn draw_developer(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let c = self.device_right;
-        cx.section_label("Developer", Rect::new(c.x, self.dev_top, c.w, t.mm(8.0)));
-        // A label line centred on the toggle, then the note under it.
-        let label = Rect::new(c.x, self.dev_top + t.mm(8.0), c.w - t.mm(12.0), t.mm(8.0));
-        cx.line("SSH server", t.body, label, HAlign::Left);
-        self.ssh_toggle.draw(cx);
-        let note = self.ssh_note();
-        let note_rect = Rect::new(c.x, label.bottom() - t.mm(1.0), c.w - t.mm(12.0), t.mm(14.0));
-        cx.paragraph(&note, t.small.gray(INK2), note_rect, HAlign::Left);
-    }
-
-    fn draw_shaping(&mut self, cx: &mut DrawCx) {
-        let t = cx.theme;
-        let c = self.device_left;
-        cx.section_label("Text shaping", Rect::new(c.x, self.shaping.rect().y - t.mm(8.0), c.w, t.mm(8.0)));
+        let mut col = Column::new(self.left, self.body);
+        col.label(cx, "Text shaping");
+        self.shaping.place(col.control(t));
         self.shaping.draw(cx);
-        let note = match TextShaping::ALL[self.shaping.selected] {
+        let notes = TextShaping::ALL.map(|shaping| match shaping {
             TextShaping::Full => {
                 "HarfBuzz with ligatures such as “fi” and “Th”, and full support for scripts like Arabic or Hindi. The slowest to lay out a book."
             }
@@ -977,18 +932,47 @@ impl SystemSettings {
             TextShaping::FreeType => {
                 "The simplest shaping. Books lay out about three times faster, but without ligatures, and spacing and hyphenation can look rougher."
             }
+        });
+        col.note(cx, notes[self.shaping.selected], &notes);
+        col.note(cx, "Applies from the next book you open. Each book is laid out again once.", &[]);
+        // Help and the developer section below, or on the right in landscape.
+        let mut col = if self.left == self.right {
+            col.gap(t);
+            col
+        } else {
+            Column::new(self.right, self.body)
         };
-        let note_rect = Rect::new(c.x, self.shaping.rect().bottom() + t.mm(2.0), c.w, self.shaping_note_h);
-        cx.paragraph(note, t.small.gray(INK2), note_rect, HAlign::Left);
-        cx.paragraph(
-            "Applies from the next book you open. Each book is laid out again once.",
-            t.small.gray(INK2),
-            Rect { y: note_rect.bottom() + t.mm(2.0), ..note_rect },
-            HAlign::Left,
-        );
+        self.draw_help(cx, &mut col);
+        if self.show_developer() {
+            col.gap(t);
+            col.label(cx, "Developer");
+            let note = self.ssh_note();
+            switch_row(cx, &mut self.ssh_toggle, ("SSH server", &note), col.x, col.y, col.w);
+        }
     }
 
-    fn advanced_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+    /// Run setup again and the problem report, side by side where both
+    /// labels fit, or one above the other.
+    fn draw_help(&mut self, cx: &mut DrawCx, col: &mut Column) {
+        let t = cx.theme;
+        col.label(cx, "Help");
+        let half = (col.w - t.mm(3.0)) / 2;
+        let labels = [self.setup_button.label.as_str(), "Create problem report", "Creating report…"];
+        let text = labels.iter().map(|l| cx.text.width(l, t.button)).fold(0.0_f32, f32::max);
+        if text.ceil() as i32 + t.mm(4.0) <= half {
+            let row = col.control(t);
+            self.setup_button.place(Rect { w: half, ..row }, t);
+            self.report_button.place(Rect { x: row.right() - half, w: half, ..row }, t);
+        } else {
+            self.setup_button.place(col.control(t), t);
+            col.y += t.mm(2.0);
+            self.report_button.place(col.control(t), t);
+        }
+        self.setup_button.draw(cx);
+        self.report_button.draw(cx);
+    }
+
+    fn advanced_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
         if self.show_developer()
             && self.wifi_pending.is_none()
             && self.ssh_pending.is_none()
@@ -1002,6 +986,13 @@ impl SystemSettings {
             let current = self.store.settings().text_shaping;
             self.shaping.selected = TextShaping::ALL.iter().position(|&m| m == current).unwrap_or(1);
         }
+        if self.setup_button.on_gesture(g) {
+            return Action::Push(Box::new(SetupScreen::new(cx.theme, self.screen, self.store.clone(), None)));
+        }
+        if self.report_rx.is_none() && self.report_button.on_gesture(g) {
+            self.start_report();
+        }
+        Action::None
     }
 }
 
@@ -1020,19 +1011,19 @@ pub(super) fn switch_row(
     let label_w = w - Toggle::size(t).0 - t.mm(3.0);
     // The note starts just below the label, as under a one-line label.
     let top = if cx.text.width(label, t.body) <= label_w as f32 {
-        cx.line(label, t.body, Rect::new(x, y, label_w, t.mm(8.0)), HAlign::Left);
-        y + t.mm(7.0)
+        cx.line(label, t.body, Rect::new(x, y, label_w, t.mm(6.0)), HAlign::Left);
+        y + t.mm(6.0)
     } else {
         let h = cx.text.measure(label, t.body, Some(label_w as f32)).1.ceil() as i32;
         cx.paragraph(label, t.body, Rect::new(x, y + t.mm(1.0), label_w, h), HAlign::Left);
         y + t.mm(1.5) + h
     };
-    toggle.place(x + w, y + t.mm(4.0), t);
+    toggle.place(x + w, y + t.mm(3.0), t);
     toggle.draw(cx);
     let style = t.small.gray(INK2);
     let note_h = cx.text.measure(note, style, Some(w as f32)).1.ceil() as i32;
     cx.paragraph(note, style, Rect::new(x, top, w, note_h), HAlign::Left);
-    top + note_h + t.mm(5.0)
+    top + note_h + t.mm(SECTION_GAP_MM)
 }
 
 /// A miniature page: the back zone shaded, the menu box outlined, and the
@@ -1193,7 +1184,7 @@ impl Screen for SystemSettings {
             Tab::Display => return self.display_gesture(&g, cx),
             Tab::Library => return self.library_gesture(&g, cx),
             Tab::Device => return self.device_gesture(&g, cx),
-            Tab::Advanced => self.advanced_gesture(&g, cx),
+            Tab::Advanced => return self.advanced_gesture(&g, cx),
         }
         Action::None
     }
@@ -1493,12 +1484,13 @@ mod tests {
         }
     }
 
-    fn draw(s: &mut SystemSettings, t: &Theme, w: i32, h: i32) {
+    fn draw(s: &mut SystemSettings, t: &Theme, w: i32, h: i32) -> crate::gfx::Canvas {
         use crate::gfx::{Canvas, IconRenderer, TextRenderer};
         let (mut canvas, mut text, mut icons) =
             (Canvas::new(w as u32, h as u32), TextRenderer::new(), IconRenderer::default());
         let mut hints = vec![];
         s.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, t, &mut hints));
+        canvas
     }
 
     fn tap(s: &mut SystemSettings, t: &Theme, screen: Rect, rect: Rect) -> Option<String> {
@@ -1549,6 +1541,15 @@ mod tests {
             let t = Theme::for_dpi(dpi);
             let screen = Rect::new(0, 0, w, h);
             let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
+            // Every tab, developer section shown, ends above the bottom margin.
+            s.developer = true;
+            for tab in TABS {
+                s.tab = tab;
+                let canvas = draw(&mut s, &t, w, h);
+                let margin = &canvas.gray_data()[(s.content.bottom() * w) as usize..];
+                assert!(margin.iter().all(|&g| g == PAPER), "{w}x{h}: {tab:?} reaches the bottom margin");
+            }
+            s.tab = Tab::Reading;
             draw(&mut s, &t, w, h);
             let (corner, koreader) = (s.corner.rect(), s.koreader.rect());
             assert!(corner.bottom() < koreader.y, "{w}x{h}: one row after the other");
@@ -1604,7 +1605,7 @@ mod tests {
         store.save_library(&crate::library::LibraryIndex { books, ..Default::default() })?;
         let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {})).with_open_book(Some("1".into()));
         s.tab = Tab::Library;
-        let row = Rect { y: s.koreader_area.y + t.mm(8.0), h: t.row2, ..s.koreader_area };
+        let row = Rect { y: s.koreader_area.y + t.mm(LABEL_MM), h: t.row2, ..s.koreader_area };
         // Cancel: nothing written.
         tap(&mut s, &t, screen, row);
         assert!(s.import_sheet.is_some());

@@ -303,7 +303,7 @@ impl SetupScreen {
         let updates = ("Check for updates automatically", "Once a day, only when Wi-Fi is already on.");
         y = switch_row(cx, &mut self.auto_check, updates, c.x, y, c.w);
         cx.paragraph(
-            "Run setup again: Settings → Device.",
+            "Run setup again: Settings → Advanced.",
             t.small.gray(INK2),
             Rect::new(c.x, y, c.w, t.mm(6.0)),
             HAlign::Left,
