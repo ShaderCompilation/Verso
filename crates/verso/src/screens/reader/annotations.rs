@@ -53,6 +53,9 @@ pub(super) struct State {
     /// The running save toggled a bookmark: its success shows no "Saved"
     /// (the mark or the ribbon is the confirmation). Failures still show.
     quiet: bool,
+    /// The KOReader check's reply, for the reader to take
+    /// (`Reader::koreader_checked`).
+    pub koreader: Option<Result<Option<(crate::koreader::OnOpen, crate::koreader::Progress)>, String>>,
 }
 /// What a KOReader import preview found (`State::preview_counts`).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -427,6 +430,10 @@ impl State {
                 None
             }
             worker::Reply::Preview(..) => None,
+            worker::Reply::Koreader(result) => {
+                self.koreader = Some(result);
+                None
+            }
             worker::Reply::Exported(result) => {
                 // Shown in the list's status line only: a toast would cover the
                 // details buttons, and export takes well under a second.

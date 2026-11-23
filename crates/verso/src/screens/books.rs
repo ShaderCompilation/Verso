@@ -1328,7 +1328,7 @@ impl Books {
             saved.position.clone(),
         ));
         self.reader_path = Some(path.clone());
-        self.reader.as_mut().unwrap().annotations(annotation_book);
+        self.reader.as_mut().unwrap().annotations(annotation_book, &saved);
         self.reader.as_mut().unwrap().reading_speed(saved.reading_speed, self.store.reading_speed());
         self.reader.as_mut().unwrap().detected_language(saved.language);
         self.worker.send(Command::Open {

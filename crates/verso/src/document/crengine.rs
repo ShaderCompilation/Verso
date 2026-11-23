@@ -557,6 +557,16 @@ fn cstr(path: &Path) -> Result<CString> {
 
 impl CreDocument {
     /// `progress` was computed for `position` in this book; reuse it there.
+    /// The progress at the top of the current page (0–10000), counting the
+    /// book's text if it hasn't been yet.
+    pub fn page_progress(&mut self) -> u32 {
+        if self.current_page() == 0 {
+            return 0;
+        }
+        self.counted = true;
+        unsafe { sys::verso_cre_progress(self.raw) }.clamp(0, 10000) as u32
+    }
+
     pub fn remember_progress(&mut self, position: Position, progress: u32) {
         self.known_progress = (!position.0.is_empty()).then_some((position, progress));
     }

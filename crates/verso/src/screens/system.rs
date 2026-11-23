@@ -65,12 +65,19 @@ pub struct SystemSettings {
     body: i32,
     /// `Store::settings_saves` when the folder list was last read.
     settings_seen: u64,
-    // Reading
+    // Reading: tap zones, then the switches below the preview, or (landscape)
+    // the zones note and the switches on the right.
     zones: Segmented,
     zones_preview: Rect,
-    /// "Tap the top-right corner to bookmark", below the preview.
+    /// Where the tap zones note goes: beside the preview, or the top of the
+    /// right column in landscape (its height is measured when drawn).
+    zones_note: Rect,
+    /// "Tap the top-right corner to bookmark".
     corner: Toggle,
-    corner_top: i32,
+    /// "Check KOReader progress".
+    koreader: Toggle,
+    /// The switch rows' column; its top is the first row's in portrait.
+    switches: Rect,
     // Display: one column, or (landscape) folder previews on the right.
     orientation: Segmented,
     flash: Segmented,
@@ -152,19 +159,40 @@ impl SystemSettings {
         tabs.place(Rect::new(content.x, content.y, content.w, t.button_h));
         let body = tabs.rect().bottom() + t.mm(6.0);
 
+        // Landscape is too short for the switches below the preview: the
+        // zones note and the switches go on the right.
+        let landscape = screen.w > screen.h;
+        let (zones_column, switches) = if landscape {
+            let gap = t.mm(10.0);
+            let w = (content.w - gap) / 2;
+            (Rect { w, ..content }, Rect { x: content.right() - w, w, ..content })
+        } else {
+            (content, content)
+        };
         let selected = TapZones::ALL.iter().position(|&z| z == settings.tap_zones).unwrap_or(0);
         let mut zones = Segmented::texts(&["Standard", "Left-handed", "Halves"], selected);
-        zones.place(Rect::new(content.x, body + t.mm(8.0), content.w, t.button_h));
+        zones.place(Rect::new(zones_column.x, body + t.mm(8.0), zones_column.w, t.button_h));
         // A small page with the zones drawn on it, shaped like the screen.
-        // Below it, the corner-tap switch: a label line and a note.
-        let corner_row = t.mm(16.0);
+        // Below it in portrait, two switches: a label line and a note each.
+        let switch_rows = if landscape { 0 } else { 2 * t.mm(16.0) };
         let preview_top = zones.rect().bottom() + t.mm(5.0);
-        let preview_h = (content.bottom() - preview_top - corner_row).clamp(t.mm(20.0), t.mm(36.0));
-        let preview_w = preview_h * screen.w / screen.h.max(1);
-        let zones_preview = Rect::new(content.x, preview_top, preview_w, preview_h);
-        let corner_top = zones_preview.bottom() + t.mm(5.0);
+        let preview_h = (content.bottom() - preview_top - switch_rows).clamp(t.mm(20.0), t.mm(36.0));
+        let preview_w = (preview_h * screen.w / screen.h.max(1)).min(zones_column.w);
+        let preview_h = preview_h.min(preview_w * screen.h / screen.w.max(1));
+        let zones_preview = Rect::new(zones_column.x, preview_top, preview_w, preview_h);
+        let zones_note = if landscape {
+            Rect::new(switches.x, body + t.mm(2.0), switches.w, 0)
+        } else {
+            let x = zones_preview.right() + t.mm(5.0);
+            Rect::new(x, zones_preview.y, content.right() - x, zones_preview.h)
+        };
+        let switches_top = if landscape { zones_note.y } else { zones_preview.bottom() + t.mm(5.0) };
+        let switches = Rect { y: switches_top, h: content.bottom() - switches_top, ..switches };
+        // Placed again when drawn, after measuring the text.
         let mut corner = Toggle::new(settings.bookmark_corner);
-        corner.place(content.right(), corner_top + t.mm(4.0), t);
+        corner.place(switches.right(), switches.y + t.mm(4.0), t);
+        let mut koreader = Toggle::new(settings.koreader_progress);
+        koreader.place(switches.right(), switches.y + t.mm(20.0), t);
 
         // Landscape is too short for everything in one column.
         let (device_left, device_right) = if screen.w > screen.h {
@@ -288,8 +316,10 @@ impl SystemSettings {
             body,
             zones,
             zones_preview,
+            zones_note,
             corner,
-            corner_top,
+            koreader,
+            switches,
             orientation,
             flash,
             previews,
@@ -383,23 +413,23 @@ impl SystemSettings {
             TapZones::Mirrored => "Tap the right side to go back and anywhere else to go forward.",
             TapZones::Halves => "Tap the left half to go back and the right half to go forward.",
         };
-        let p = self.zones_preview;
-        let text = Rect::new(p.right() + t.mm(5.0), p.y, c.right() - p.right() - t.mm(5.0), p.h);
-        cx.paragraph(
-            &format!("{note}\n\nTap the middle for the menu. Swiping left or right also turns pages."),
-            t.small.gray(INK2),
-            text,
-            HAlign::Left,
-        );
-        let label = Rect::new(c.x, self.corner_top, c.w - t.mm(12.0), t.mm(8.0));
-        cx.line("Tap the top-right corner to bookmark", t.body, label, HAlign::Left);
-        self.corner.draw(cx);
-        cx.paragraph(
-            "Tap it again to remove the bookmark.",
-            t.small.gray(INK2),
-            Rect::new(label.x, label.bottom() - t.mm(1.0), label.w, t.mm(7.0)),
-            HAlign::Left,
-        );
+        let style = t.small.gray(INK2);
+        let mut text = self.zones_note;
+        let mut y = self.switches.y;
+        // Landscape: the note heads the right column, the switches follow.
+        let landscape = text.h == 0;
+        let gap = if landscape { "\n" } else { "\n\n" };
+        let note = format!("{note}{gap}Tap the middle for the menu. Swiping left or right also turns pages.");
+        if landscape {
+            text.h = cx.text.measure(&note, style, Some(text.w as f32)).1.ceil() as i32;
+            y = text.bottom() + t.mm(4.0);
+        }
+        cx.paragraph(&note, style, text, HAlign::Left);
+        let (x, w) = (self.switches.x, self.switches.w);
+        let corner = ("Tap the top-right corner to bookmark", "Tap it again to remove the bookmark.");
+        y = switch_row(cx, &mut self.corner, corner, x, y, w);
+        let koreader = ("Check KOReader progress", "When you open a book, offer KOReader’s newer position.");
+        switch_row(cx, &mut self.koreader, koreader, x, y, w);
     }
 
     fn reading_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
@@ -407,6 +437,11 @@ impl SystemSettings {
             && !self.save(cx, "the corner tap", |s| s.bookmark_corner = on)
         {
             self.corner.on = !on;
+        }
+        if let Some(on) = self.koreader.on_gesture(g)
+            && !self.save(cx, "KOReader progress", |s| s.koreader_progress = on)
+        {
+            self.koreader.on = !on;
         }
         if let Some(i) = self.zones.on_gesture(g)
             && !self.save(cx, "tap zones", |s| s.tap_zones = TapZones::ALL[i])
@@ -921,6 +956,29 @@ impl SystemSettings {
 
 /// A miniature page: the back zone shaded, the menu box outlined, and the
 /// bookmark corner (`corner` pixels a side, when on) outlined with a ribbon.
+/// A switch row in a column `w` wide from `x`: its label beside the toggle
+/// (on two lines when it needs them) and a note below. Places the toggle;
+/// returns the next row's top.
+fn switch_row(cx: &mut DrawCx, toggle: &mut Toggle, (label, note): (&str, &str), x: i32, y: i32, w: i32) -> i32 {
+    let t = cx.theme;
+    let label_w = w - Toggle::size(t).0 - t.mm(3.0);
+    // The note starts just below the label, as under a one-line label.
+    let top = if cx.text.width(label, t.body) <= label_w as f32 {
+        cx.line(label, t.body, Rect::new(x, y, label_w, t.mm(8.0)), HAlign::Left);
+        y + t.mm(7.0)
+    } else {
+        let h = cx.text.measure(label, t.body, Some(label_w as f32)).1.ceil() as i32;
+        cx.paragraph(label, t.body, Rect::new(x, y + t.mm(1.0), label_w, h), HAlign::Left);
+        y + t.mm(1.5) + h
+    };
+    toggle.place(x + w, y + t.mm(4.0), t);
+    toggle.draw(cx);
+    let style = t.small.gray(INK2);
+    let note_h = cx.text.measure(note, style, Some(w as f32)).1.ceil() as i32;
+    cx.paragraph(note, style, Rect::new(x, top, w, note_h), HAlign::Left);
+    top + note_h + t.mm(5.0)
+}
+
 fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones, corner: Option<i32>) {
     let t = cx.theme;
     // Zones inside the outline, so the shading keeps its rounded corners.
@@ -1325,6 +1383,45 @@ mod tests {
             address: address.map(str::to_owned),
             hostname: hostname.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn reading_switches_fit_every_screen_and_save() -> anyhow::Result<()> {
+        use crate::geom::Point;
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        for (dpi, w, h) in [(300, 1272, 1696), (300, 1696, 1272), (167, 600, 800), (167, 800, 600)] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
+            let (mut canvas, mut text, mut icons) =
+                (Canvas::new(w as u32, h as u32), TextRenderer::new(), IconRenderer::default());
+            let mut hints = vec![];
+            s.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
+            let (corner, koreader) = (s.corner.rect(), s.koreader.rect());
+            assert!(corner.bottom() < koreader.y, "{w}x{h}: one row after the other");
+            assert!(koreader.bottom() <= s.content.bottom(), "{w}x{h}: {koreader:?}");
+            assert!(corner.y > s.zones.rect().bottom() && corner.x > s.zones_preview.right(), "{w}x{h}");
+            // Off, saved; on again.
+            for on in [false, true] {
+                let p = Point::new(koreader.center().x, koreader.center().y);
+                let mut toast = None;
+                let mut cx = EventCx {
+                    theme: &t,
+                    screen,
+                    now: Instant::now(),
+                    toast: &mut toast,
+                    forced: &mut vec![],
+                    needs_redraw: &mut false,
+                    battery: None,
+                };
+                s.on_gesture(Gesture::Down(p), &mut cx);
+                s.on_gesture(Gesture::Tap(p), &mut cx);
+                assert_eq!(store.settings().koreader_progress, on, "{w}x{h}");
+            }
+        }
+        Ok(())
     }
 
     #[test]

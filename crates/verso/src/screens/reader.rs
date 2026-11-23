@@ -1,12 +1,13 @@
 //! A book screen. Only displayed pages are persisted; speculative renders never are.
 mod annotations;
 mod bars;
+mod koreader;
 mod layout;
 mod search;
 mod selection;
 use crate::document::{
     FontFace, Link, Metadata, Position, SelectionQuery, TocEntry,
-    thread::{Command, LinkRequest, Page, Reply, SelectionRequest, Worker},
+    thread::{Command, LinkRequest, LocateRequest, Page, Reply, SelectionRequest, Worker},
 };
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
@@ -118,6 +119,8 @@ pub struct Reader {
     /// The bookmark mark changed over the bare page: the next draw updates
     /// just its corner, with the fast black-and-white waveform.
     mark_fast: bool,
+    /// KOReader's newer position for this book, checked on open.
+    koreader: koreader::Check,
 }
 /// What the bars show beyond the page itself: chapter offsets, reading
 /// speed, and the clock and battery as of the last reader redraw.
@@ -238,6 +241,7 @@ impl Reader {
             link_pending: None,
             next_link: 0,
             mark_fast: false,
+            koreader: koreader::Check::default(),
         }
     }
     /// The book's saved reading speed and the average carried over from
@@ -245,14 +249,22 @@ impl Reader {
     pub fn reading_speed(&mut self, book: Option<ReadingSpeed>, global: Option<ReadingSpeed>) {
         self.bars.speed = ReadingSpeed::start(book, global);
     }
-    pub fn annotations(&mut self, mut book: crate::library::Book) {
+    /// Starts the book's I/O thread: annotations and, when the setting is
+    /// on, the KOReader check against `saved`, the state this open loaded.
+    pub fn annotations(&mut self, mut book: crate::library::Book, saved: &crate::store::BookState) {
         self.language_tag = book.metadata.language.clone();
         self.book_path = Some(book.path.clone());
         if book.annotation_id.is_empty() {
             book.annotation_id = book.id.clone();
         }
+        // Off, the sidecar isn't even looked at.
+        let check = (self.settings.koreader_progress)
+            .then(|| crate::koreader::metadata_path(&book.path))
+            .flatten()
+            .map(|path| crate::annotations::worker::KoreaderCheck { path, state: saved.clone() });
+        self.koreader = koreader::Check::new(saved, check.is_some());
         self.annotations.service =
-            Some(crate::annotations::worker::Worker::new(self.store.clone(), book, self.worker.waker()));
+            Some(crate::annotations::worker::Worker::new(self.store.clone(), book, self.worker.waker(), check));
     }
     /// The language saved in the book's state, if any.
     pub fn detected_language(&mut self, detected: Option<DetectedLanguage>) {
@@ -376,6 +388,7 @@ impl Reader {
                 }
             }
             Reply::Link { request, result } => self.link_arrived(request, result, cx),
+            Reply::Located { request, found } => self.koreader_located(request, found, cx),
             Reply::Opening { request, result } => {
                 let chapter =
                     reader::chapter(&self.toc, request.page).map(|i| self.toc[i].title.clone()).unwrap_or_default();
@@ -399,10 +412,17 @@ impl Reader {
                     cx.redraw();
                 }
             }
-            Reply::Opened { generation, metadata, toc, pages, current } if generation == self.cache.generation => {
+            Reply::Opened { generation, metadata, toc, pages, current, lost }
+                if generation == self.cache.generation =>
+            {
                 self.metadata = metadata;
                 self.toc = toc;
                 self.pages = pages.max(1);
+                // Not lost progress: a KOReader position that doesn't fit.
+                if lost && generation == self.bars.opened && self.koreader.saved_from_koreader() {
+                    cx.toast(koreader::LOST, None);
+                }
+                self.koreader_locate();
                 self.annotations.resolve(generation, &self.worker);
                 self.target = current.min(self.pages - 1);
                 if matches!(self.overlay, Overlay::Contents(_)) {
@@ -463,6 +483,7 @@ impl Reader {
             }
             Reply::Error { generation, message } if generation == 0 || generation == self.cache.generation => {
                 log::error!("{message}");
+                self.koreader.abandon();
                 self.error = Some(message.clone());
                 self.opening_notice_at = None;
                 self.laying_out = false;
@@ -561,6 +582,7 @@ impl Reader {
         }
         self.highlight = None;
         self.anchor = page.position.clone();
+        self.koreader.shown(page.generation, page.number);
         self.shown = Some(page.clone());
         if self.selection.extending
             && let Some(context) = self.selection_context()
@@ -754,6 +776,80 @@ impl Reader {
         let Some(origin) = self.back.take() else { return };
         let page = (origin.generation == self.cache.generation).then_some(origin.page);
         self.jump_position(page, origin.position, cx);
+        cx.redraw();
+    }
+    /// The I/O thread's KOReader check arrived.
+    fn koreader_checked(
+        &mut self,
+        result: Result<Option<(crate::koreader::OnOpen, crate::koreader::Progress)>, String>,
+    ) {
+        if let Some(seen) = self.koreader.checked(result) {
+            self.persistence.save_seen(seen);
+        }
+        self.koreader_locate();
+    }
+    /// Asks the book thread for a found position's page, once the book is
+    /// open. Only in the layout it opened with: after a relayout the check
+    /// is dropped, and the next open asks again.
+    fn koreader_locate(&mut self) {
+        if self.cache.generation != self.bars.opened {
+            self.koreader.abandon();
+        } else if self.pages > 0
+            && let Some((request, position)) = self.koreader.locate(self.cache.generation)
+        {
+            self.worker.send(Command::Locate { request, position });
+        }
+    }
+    fn koreader_located(&mut self, request: LocateRequest, found: Option<(usize, u32)>, cx: &mut EventCx) {
+        // The page on screen, unless a turn is under way.
+        let here = (self.shown.as_ref())
+            .filter(|p| p.number == self.target && !self.pending_turn && !self.turn_pending)
+            .map(|p| (p.generation, p.number));
+        match self.koreader.located(request, found, here, self.cache.generation) {
+            koreader::Located::Ignore => {}
+            koreader::Located::Record(seen) => self.persistence.save_seen(seen),
+            koreader::Located::Offer { progress, page, page_progress, here } => {
+                let t = cx.theme;
+                let percent = reader::bars::book_percent(page, self.pages, page_progress);
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .and_then(|d| crate::clock::LocalDateTime::at(d.as_secs()));
+                let font_px = self.settings.typography.font_px(t.dpi);
+                let geometry = self.settings.page_layout.geometry(self.screen.w, self.screen.h, t.dpi, font_px);
+                // Above the bottom bar, or over the bottom margin.
+                let bottom = geometry.bottom_bar.map_or(self.screen.bottom() - t.mm(3.0), |b| b.y - t.mm(1.5));
+                let area = Rect { h: bottom - self.screen.y, ..self.screen };
+                let card = koreader::Card::new(progress, page, percent, here, now, t, area);
+                log::info!("KOReader position offered: p. {} of {}", page + 1, self.pages);
+                self.koreader.show(card);
+                cx.redraw();
+            }
+        }
+    }
+    /// The KOReader card shows over the page it was offered on, with
+    /// nothing else over it.
+    fn koreader_card_visible(&self) -> bool {
+        let Some(card) = self.koreader.card() else { return false };
+        matches!(self.overlay, Overlay::None)
+            && self.selection.selected.is_none()
+            && !self.selection.extending
+            && self.search_bar.is_none()
+            && !self.laying_out
+            && self.layout_at.is_none()
+            && self.shown.as_ref().is_some_and(|p| (p.generation, p.number) == card.here)
+    }
+    /// Closes the KOReader card: *Go there* jumps, with the way back
+    /// offered; anything else is *Stay here*. Either way the position is
+    /// recorded as dealt with.
+    fn koreader_answer(&mut self, answer: koreader::Answer, cx: Option<&mut EventCx>) {
+        let Some(card) = self.koreader.take_card() else { return };
+        self.persistence.save_seen(card.progress.seen());
+        let Some(cx) = cx else { return };
+        if answer == koreader::Answer::Go {
+            let page = (card.here.0 == self.cache.generation).then_some(card.page);
+            self.jump_away(page, card.progress.position, cx);
+        }
         cx.redraw();
     }
     fn open_search(&mut self, prefill: Option<&str>, cx: &mut EventCx) {
@@ -1094,6 +1190,8 @@ impl Reader {
         let _ = self.flush_text_settings();
     }
     fn changed(&mut self) {
+        self.koreader_answer(koreader::Answer::Stay, None);
+        self.koreader.abandon();
         self.pending_turn = false;
         if self.jump != 0 {
             self.pending_position = self.jump_destination.take();
@@ -1254,6 +1352,25 @@ impl Reader {
                 self.selection_released(cx);
             }
             return Action::None;
+        }
+        // The KOReader card's buttons answer it. A touch elsewhere counts as
+        // Stay here, and does what it would have done anyway.
+        if self.koreader_card_visible()
+            && let Some(card) = self.koreader.card_mut()
+        {
+            match card.on_gesture(&g) {
+                (true, answer) => {
+                    cx.redraw(); // pressed feedback
+                    if let Some(answer) = answer {
+                        self.koreader_answer(answer, Some(cx));
+                    }
+                    return Action::None;
+                }
+                (false, _) if !matches!(g, Gesture::Down(_) | Gesture::Move(_)) => {
+                    self.koreader_answer(koreader::Answer::Stay, Some(cx));
+                }
+                (false, _) => {}
+            }
         }
         if let Gesture::Down(p) = g {
             self.back_touch = self.back_visible() && self.back_rect.contains(p);
@@ -1715,6 +1832,7 @@ impl Screen for Reader {
     }
 
     fn top_drawer_opened(&mut self) {
+        self.koreader_answer(koreader::Answer::Stay, None);
         if matches!(self.overlay, Overlay::Menu(_)) {
             self.overlay = Overlay::None;
         }
@@ -1799,6 +1917,11 @@ impl Screen for Reader {
             let pill = Toast { text: self.back_label(), icon: Some(Icon::ArrowLeft), until: Instant::now() };
             self.back_rect = pill.draw_above(cx, self.screen.bottom() - t.mm(1.5));
         }
+        if self.koreader_card_visible()
+            && let Some(card) = self.koreader.card()
+        {
+            card.draw(cx);
+        }
         match &mut self.overlay {
             Overlay::None => {}
             Overlay::Menu(menu) => {
@@ -1845,6 +1968,9 @@ impl Screen for Reader {
     /// Page buttons turn pages in plain reading, like a tap on a page-turn
     /// zone; over a menu, sheet, card or selection they do nothing.
     fn on_key(&mut self, key: KeyAction, cx: &mut EventCx) -> Action {
+        if self.koreader_card_visible() {
+            self.koreader_answer(koreader::Answer::Stay, Some(cx));
+        }
         if matches!(self.overlay, Overlay::None)
             && self.selection.selected.is_none()
             && !self.selection.extending
@@ -1874,6 +2000,7 @@ impl Screen for Reader {
     }
     fn busy(&self) -> bool {
         self.annotations.resolving
+            || self.koreader.busy()
             || self.language_detect_at.is_some()
             || self.language_detection.is_some()
             || self.annotations.paint_pending
@@ -1964,6 +2091,9 @@ impl Screen for Reader {
                 view.refresh_keep(&self.annotations, cx.theme);
             }
             cx.redraw();
+        }
+        if let Some(result) = self.annotations.koreader.take() {
+            self.koreader_checked(result);
         }
         self.receive_language();
         let had_error = self.save_error.is_some();
@@ -2265,6 +2395,280 @@ mod tests {
         Ok(())
     }
 
+    fn koreader_progress(position: &str) -> crate::koreader::Progress {
+        crate::koreader::Progress {
+            position: Position(position.into()),
+            percent: 0.6,
+            status: crate::koreader::Status::Reading,
+            modified: 1_763_800_000,
+        }
+    }
+    /// A reader waiting for the KOReader check, its book open on page 1.
+    fn koreader_reader(name: &str, theme: &Theme) -> (Reader, std::sync::mpsc::Receiver<Command>) {
+        let (mut r, commands) = test_reader(name);
+        r.koreader = koreader::Check::new(&BookState::default(), true);
+        test_cx(theme, |cx| {
+            r.receive(
+                Reply::Opened {
+                    generation: 1,
+                    metadata: Metadata::default(),
+                    toc: vec![],
+                    pages: 20,
+                    current: 0,
+                    lost: false,
+                },
+                cx,
+            );
+            r.receive(Reply::Page(test_page(1, 0)), cx);
+        });
+        (r, commands)
+    }
+    fn locate_sent(commands: &std::sync::mpsc::Receiver<Command>) -> Option<(LocateRequest, Position)> {
+        commands.try_iter().find_map(|c| match c {
+            Command::Locate { request, position } => Some((request, position)),
+            _ => None,
+        })
+    }
+    fn koreader_seen(r: &mut Reader) -> Option<crate::koreader::Seen> {
+        r.persistence.flush().unwrap();
+        r.store.book("book").koreader_seen
+    }
+    fn draw_reader(r: &mut Reader, theme: &Theme) {
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        let (mut canvas, mut text, mut icons) = (Canvas::new(600, 800), TextRenderer::new(), IconRenderer::default());
+        let mut hints = vec![];
+        r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, theme, &mut hints));
+    }
+    fn tap_at(r: &mut Reader, theme: &Theme, p: crate::geom::Point) {
+        test_cx(theme, |cx| {
+            r.on_gesture(Gesture::Down(p), cx);
+            r.on_gesture(Gesture::Tap(p), cx);
+        });
+    }
+    fn remove_store(name: &str) {
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("verso-{name}-{}", std::process::id())));
+    }
+
+    #[test]
+    fn koreader_card_offers_a_newer_position_and_stay_here_records_it() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = koreader_reader("koreader-stay", &theme);
+        assert!(r.busy(), "waiting for the I/O thread");
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        let (request, position) = locate_sent(&commands).expect("the book thread is asked for the page");
+        assert_eq!((request.generation, position.0.as_str()), (1, "/k"));
+        assert!(r.busy() && r.koreader.card().is_none());
+        test_cx(&theme, |cx| r.receive(Reply::Located { request, found: Some((9, 4500)) }, cx));
+        let card = r.koreader.card().expect("the card is up");
+        assert_eq!(card.title, "KOReader: p. 10 · 45%");
+        assert!(card.detail.ends_with("ahead of this page"), "{}", card.detail);
+        assert!(!r.busy());
+        assert!(r.koreader_card_visible());
+        draw_reader(&mut r, &theme);
+        let (stay, _) = r.koreader.card().unwrap().buttons();
+        tap_at(&mut r, &theme, stay.center());
+        assert!(r.koreader.card().is_none());
+        assert_eq!(r.shown.as_ref().unwrap().number, 0, "staying here");
+        assert!(commands.try_iter().all(|c| !matches!(c, Command::Position { .. })));
+        assert_eq!(koreader_seen(&mut r), Some(koreader_progress("/k").seen()));
+        remove_store("koreader-stay");
+    }
+
+    #[test]
+    fn koreader_card_go_there_jumps_with_the_way_back() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = koreader_reader("koreader-go", &theme);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        let (request, _) = locate_sent(&commands).unwrap();
+        test_cx(&theme, |cx| r.receive(Reply::Located { request, found: Some((9, 4500)) }, cx));
+        let (_, go) = r.koreader.card().unwrap().buttons();
+        tap_at(&mut r, &theme, go.center());
+        assert!(r.koreader.card().is_none());
+        let (position, jump) = commands
+            .try_iter()
+            .find_map(|c| match c {
+                Command::Position { position, jump, .. } => Some((position, jump)),
+                _ => None,
+            })
+            .expect("Go there jumps");
+        assert_eq!(position.0, "/k");
+        test_cx(&theme, |cx| r.receive(Reply::Jumped { jump, page: test_page(1, 9) }, cx));
+        assert_eq!(r.shown.as_ref().unwrap().number, 9);
+        assert!(r.back_visible());
+        assert_eq!(r.back_label(), "Back to p. 1");
+        assert_eq!(koreader_seen(&mut r), Some(koreader_progress("/k").seen()));
+        remove_store("koreader-go");
+    }
+
+    #[test]
+    fn koreader_page_turns_before_and_after_the_reply() {
+        use crate::geom::Point;
+        let theme = Theme::for_dpi(150);
+        // Before: nothing shown and nothing recorded, so the next open asks again.
+        let (mut r, commands) = koreader_reader("koreader-turn-before", &theme);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        let (request, _) = locate_sent(&commands).unwrap();
+        r.cache.insert(test_page(1, 1), 0);
+        tap_at(&mut r, &theme, Point::new(590, 400));
+        assert_eq!(r.shown.as_ref().unwrap().number, 1);
+        test_cx(&theme, |cx| r.receive(Reply::Located { request, found: Some((9, 4500)) }, cx));
+        assert!(r.koreader.card().is_none() && !r.busy());
+        assert_eq!(koreader_seen(&mut r), None);
+        remove_store("koreader-turn-before");
+        // After: the card is up, and a page turn counts as Stay here.
+        let (mut r, commands) = koreader_reader("koreader-turn-after", &theme);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        let (request, _) = locate_sent(&commands).unwrap();
+        test_cx(&theme, |cx| r.receive(Reply::Located { request, found: Some((9, 4500)) }, cx));
+        assert!(r.koreader.card().is_some());
+        r.cache.insert(test_page(1, 1), 0);
+        tap_at(&mut r, &theme, Point::new(590, 400));
+        assert_eq!(r.shown.as_ref().unwrap().number, 1, "the page still turns");
+        assert!(r.koreader.card().is_none());
+        assert_eq!(koreader_seen(&mut r), Some(koreader_progress("/k").seen()));
+        remove_store("koreader-turn-after");
+        // A page button, and the menu, count as Stay here too.
+        let (mut r, commands) = koreader_reader("koreader-menu", &theme);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        let (request, _) = locate_sent(&commands).unwrap();
+        test_cx(&theme, |cx| r.receive(Reply::Located { request, found: Some((9, 4500)) }, cx));
+        tap_at(&mut r, &theme, Point::new(300, 400));
+        assert!(matches!(r.overlay, Overlay::Menu(_)) && r.koreader.card().is_none());
+        assert_eq!(koreader_seen(&mut r), Some(koreader_progress("/k").seen()));
+        remove_store("koreader-menu");
+    }
+
+    #[test]
+    fn koreader_positions_without_a_card_are_recorded() {
+        let theme = Theme::for_dpi(150);
+        // The same page, and a position that isn't in the book.
+        for (name, found) in [("koreader-same-page", Some((0, 0))), ("koreader-not-in-book", None)] {
+            let (mut r, commands) = koreader_reader(name, &theme);
+            r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+            let (request, _) = locate_sent(&commands).unwrap();
+            test_cx(&theme, |cx| r.receive(Reply::Located { request, found }, cx));
+            assert!(r.koreader.card().is_none() && !r.busy(), "{name}");
+            assert_eq!(koreader_seen(&mut r), Some(koreader_progress("/k").seen()), "{name}");
+            remove_store(name);
+        }
+        // Exactly where Verso opened: recorded without asking the book thread.
+        let (mut r, commands) = koreader_reader("koreader-record", &theme);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Record, koreader_progress("page-0")))));
+        assert!(locate_sent(&commands).is_none() && !r.busy());
+        assert_eq!(koreader_seen(&mut r), Some(koreader_progress("page-0").seen()));
+        remove_store("koreader-record");
+        // A relayout before the reply drops the check: nothing recorded.
+        let (mut r, commands) = koreader_reader("koreader-relayout", &theme);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        let (request, _) = locate_sent(&commands).unwrap();
+        r.changed();
+        assert!(!r.koreader.busy());
+        test_cx(&theme, |cx| r.receive(Reply::Located { request, found: Some((9, 4500)) }, cx));
+        assert!(r.koreader.card().is_none());
+        assert_eq!(koreader_seen(&mut r), None);
+        remove_store("koreader-relayout");
+        // The read arriving before the book opens waits for it.
+        let (mut r, commands) = test_reader("koreader-early");
+        r.koreader = koreader::Check::new(&BookState::default(), true);
+        r.koreader_checked(Ok(Some((crate::koreader::OnOpen::Offer, koreader_progress("/k")))));
+        assert!(locate_sent(&commands).is_none() && r.busy());
+        test_cx(&theme, |cx| {
+            r.receive(
+                Reply::Opened {
+                    generation: 1,
+                    metadata: Metadata::default(),
+                    toc: vec![],
+                    pages: 20,
+                    current: 0,
+                    lost: false,
+                },
+                cx,
+            )
+        });
+        assert!(locate_sent(&commands).is_some());
+        remove_store("koreader-early");
+    }
+
+    #[test]
+    fn an_imported_position_not_in_the_book_says_so() {
+        let theme = Theme::for_dpi(150);
+        let opened = |lost| Reply::Opened {
+            generation: 1,
+            metadata: Metadata::default(),
+            toc: vec![],
+            pages: 20,
+            current: 0,
+            lost,
+        };
+        let toast_for = |saved: &BookState, lost: bool| {
+            let (mut r, _commands) = test_reader("koreader-lost");
+            r.koreader = koreader::Check::new(saved, false);
+            let mut toast = None;
+            r.receive(
+                opened(lost),
+                &mut EventCx {
+                    theme: &theme,
+                    screen: Rect::new(0, 0, 600, 800),
+                    now: Instant::now(),
+                    toast: &mut toast,
+                    forced: &mut vec![],
+                    needs_redraw: &mut false,
+                    battery: None,
+                },
+            );
+            toast.map(|t| t.text)
+        };
+        let imported = BookState {
+            position: Position("/k".into()),
+            koreader_seen: Some(koreader_progress("/k").seen()),
+            ..Default::default()
+        };
+        assert_eq!(toast_for(&imported, true).as_deref(), Some(koreader::LOST));
+        assert_eq!(toast_for(&imported, false), None, "found");
+        let own = BookState { position: Position("/v".into()), ..imported.clone() };
+        assert_eq!(toast_for(&own, true), None, "Verso's own position falls back quietly, as before");
+        remove_store("koreader-lost");
+    }
+
+    #[test]
+    fn the_koreader_check_runs_on_the_io_thread_only_when_the_setting_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Book.epub");
+        std::fs::write(&path, b"book bytes").unwrap();
+        std::fs::create_dir(dir.path().join("Book.sdr")).unwrap();
+        std::fs::write(dir.path().join("Book.sdr/metadata.epub.lua"), "return { last_xpointer = '/k' }").unwrap();
+        for on in [false, true] {
+            let name = format!("koreader-setting-{on}");
+            let (mut r, _commands) = test_reader(&name);
+            r.settings.koreader_progress = on;
+            let mut book = crate::library::selection_tests::book(1);
+            book.path = path.clone();
+            r.annotations(book, &BookState::default());
+            assert_eq!(r.koreader.busy(), on);
+            // Everything the I/O thread sends up to the annotations it loads.
+            let mut replies = vec![];
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !replies.iter().any(|r| matches!(r, crate::annotations::worker::Reply::Loaded(_))) {
+                assert!(Instant::now() < deadline, "the I/O thread didn't load");
+                replies.extend(r.annotations.service.as_ref().unwrap().drain());
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let checked = replies.iter().find_map(|r| match r {
+                crate::annotations::worker::Reply::Koreader(result) => Some(result.clone()),
+                _ => None,
+            });
+            if on {
+                let (found, progress) = checked.expect("checked first").unwrap().unwrap();
+                assert_eq!((found, progress.position.0.as_str()), (crate::koreader::OnOpen::Offer, "/k"));
+                assert!(matches!(replies[0], crate::annotations::worker::Reply::Koreader(_)));
+            } else {
+                assert!(checked.is_none(), "off: the sidecar isn't looked at");
+            }
+            drop(r);
+            remove_store(&name);
+        }
+    }
+
     #[test]
     fn jumps_offer_one_tap_back_until_the_next_page_turn() {
         use crate::document::TocEntry;
@@ -2534,7 +2938,14 @@ mod tests {
             // A passage chosen during layout supersedes the earlier chapter.
             assert!(r.jump_position(None, Position("passage".into()), cx));
             r.receive(
-                Reply::Opened { generation: 2, metadata: Metadata::default(), toc: vec![], pages: 40, current: 1 },
+                Reply::Opened {
+                    generation: 2,
+                    metadata: Metadata::default(),
+                    toc: vec![],
+                    pages: 40,
+                    current: 1,
+                    lost: false,
+                },
                 cx,
             );
             assert!(commands.try_iter().all(|c| !matches!(c, Command::Position { .. })));
@@ -2600,7 +3011,14 @@ mod tests {
             r.on_tick(cx);
             assert!(matches!(commands.try_recv(), Ok(Command::Layout { generation: 2, .. })));
             r.receive(
-                Reply::Opened { generation: 2, metadata: Metadata::default(), toc: vec![], pages: 20, current: 0 },
+                Reply::Opened {
+                    generation: 2,
+                    metadata: Metadata::default(),
+                    toc: vec![],
+                    pages: 20,
+                    current: 0,
+                    lost: false,
+                },
                 cx,
             );
             r.receive(Reply::Page(test_page(2, 0)), cx);
@@ -2656,6 +3074,7 @@ mod tests {
                     toc,
                     pages: 10,
                     current: 0,
+                    lost: false,
                 },
                 cx,
             );
@@ -2684,7 +3103,14 @@ mod tests {
             cx.now += Duration::from_secs(1);
             r.on_tick(cx);
             r.receive(
-                Reply::Opened { generation: 2, metadata: Metadata::default(), toc: vec![], pages: 10, current: 0 },
+                Reply::Opened {
+                    generation: 2,
+                    metadata: Metadata::default(),
+                    toc: vec![],
+                    pages: 10,
+                    current: 0,
+                    lost: false,
+                },
                 cx,
             );
             r.receive(Reply::Page(test_page(2, 0)), cx);
@@ -3545,7 +3971,14 @@ mod tests {
             }))
         };
         r.receive(
-            Reply::Opened { generation: 1, metadata: Metadata::default(), toc: Vec::new(), pages: 10, current: 0 },
+            Reply::Opened {
+                generation: 1,
+                metadata: Metadata::default(),
+                toc: Vec::new(),
+                pages: 10,
+                current: 0,
+                lost: false,
+            },
             &mut cx,
         );
         assert!(!*cx.needs_redraw);
@@ -3682,7 +4115,14 @@ mod tests {
             })
         };
         r.receive(
-            Reply::Opened { generation: 1, metadata: Metadata::default(), toc: Vec::new(), pages: 10, current: 0 },
+            Reply::Opened {
+                generation: 1,
+                metadata: Metadata::default(),
+                toc: Vec::new(),
+                pages: 10,
+                current: 0,
+                lost: false,
+            },
             &mut cx,
         );
         r.receive(Reply::Page(page(0)), &mut cx);

@@ -22,6 +22,9 @@ enum Command {
     /// The book's detected language, saved in order with its positions so
     /// neither write loses the other.
     Language(DetectedLanguage),
+    /// The KOReader position offered, taken or recorded on open, saved in
+    /// order with positions for the same reason.
+    Seen(crate::koreader::Seen),
     Flush(mpsc::Sender<Result<()>>),
     Stop,
 }
@@ -32,6 +35,9 @@ trait Backend: Send + 'static {
         Ok(())
     }
     fn language(&mut self, _detected: &DetectedLanguage) -> Result<()> {
+        Ok(())
+    }
+    fn seen(&mut self, _seen: &crate::koreader::Seen) -> Result<()> {
         Ok(())
     }
 }
@@ -106,6 +112,13 @@ impl Backend for StoreBackend {
     fn language(&mut self, detected: &DetectedLanguage) -> Result<()> {
         let (mut state, generation) = self.take_state();
         state.language = Some(detected.clone());
+        self.store.save_book_record(&self.id, &state)?;
+        self.cached = Some((state, generation));
+        Ok(())
+    }
+    fn seen(&mut self, seen: &crate::koreader::Seen) -> Result<()> {
+        let (mut state, generation) = self.take_state();
+        state.koreader_seen = Some(seen.clone());
         self.store.save_book_record(&self.id, &state)?;
         self.cached = Some((state, generation));
         Ok(())
@@ -206,6 +219,12 @@ impl Writer {
                                 log::warn!("saving book language: {e:#}");
                             }
                         }
+                        // Best effort: without it the same position is offered again.
+                        Command::Seen(seen) => {
+                            if let Err(e) = backend.seen(&seen) {
+                                log::warn!("saving the KOReader position seen: {e:#}");
+                            }
+                        }
                         Command::Stop => {
                             if failed.is_none() {
                                 backend.flush_home();
@@ -228,6 +247,10 @@ impl Writer {
     /// Queues the book's detected language; nothing waits for it.
     pub fn save_language(&self, detected: DetectedLanguage) {
         let _ = self.tx.send(Command::Language(detected));
+    }
+    /// Queues the KOReader position dealt with on open; nothing waits for it.
+    pub fn save_seen(&self, seen: crate::koreader::Seen) {
+        let _ = self.tx.send(Command::Seen(seen));
     }
     pub fn drain(&self) -> impl Iterator<Item = Result<()>> + '_ {
         self.results.try_iter()
@@ -449,12 +472,15 @@ mod tests {
         let writer = Writer::new(store.clone(), "book".into(), Waker::new(|| {}));
         writer.save(presented(1))?;
         writer.save_language(DetectedLanguage { code: "fr".into(), reliable: true, version: 1 });
+        let seen = crate::koreader::Seen { modified: 7, position: Position("/k".into()) };
+        writer.save_seen(seen.clone());
         writer.save(presented(2))?;
         writer.flush()?;
         let after_lang = store.book("book");
         assert_eq!(after_lang.page, 2);
         assert_eq!(after_lang.dictionary_set.as_deref(), Some("english"));
         assert_eq!(after_lang.language.as_ref().map(|l| l.code.as_str()), Some("fr"));
+        assert_eq!(after_lang.koreader_seen, Some(seen.clone()), "kept by the position saved after it");
         // External dictionary_set save (via Store::save_book) invalidates cached BookState.
         let mut updated = after_lang;
         updated.dictionary_set = Some("french".into());
@@ -465,6 +491,7 @@ mod tests {
         assert_eq!(after_ext.page, 3);
         assert_eq!(after_ext.dictionary_set.as_deref(), Some("french"));
         assert_eq!(after_ext.language.as_ref().map(|l| l.code.as_str()), Some("fr"));
+        assert_eq!(after_ext.koreader_seen, Some(seen));
         Ok(())
     }
     #[test]

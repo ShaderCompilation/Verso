@@ -251,6 +251,13 @@ pub struct OpeningRequest {
     pub page: usize,
     pub id: u64,
 }
+/// Where a position falls in a book layout, asked without moving the
+/// reader (the KOReader check on open); IDs are never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocateRequest {
+    pub generation: u64,
+    pub id: u64,
+}
 /// A search session on one book layout; IDs are never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchRequest {
@@ -293,6 +300,11 @@ pub enum Command {
     },
     /// Where a tapped link leads; replies with `Reply::Link`.
     Link(LinkRequest),
+    /// The page holding `position`; replies with `Reply::Located`.
+    Locate {
+        request: LocateRequest,
+        position: Position,
+    },
     /// Replaces any running search. Steps interleave with other commands.
     Search {
         request: SearchRequest,
@@ -365,6 +377,12 @@ pub enum Reply {
         request: OpeningRequest,
         result: Result<Opening, String>,
     },
+    /// The page holding the position and the progress at its top
+    /// (0–10000), or None when the position isn't in the book.
+    Located {
+        request: LocateRequest,
+        found: Option<(usize, u32)>,
+    },
     Fonts(Vec<FontFace>),
     Opened {
         generation: u64,
@@ -372,6 +390,9 @@ pub enum Reply {
         toc: Vec<TocEntry>,
         pages: usize,
         current: usize,
+        /// Opening: the saved position isn't in the book, so it opened at
+        /// the start. Always false after a relayout.
+        lost: bool,
     },
     /// Sent once per open, after the first page: the book's text length and
     /// the text offsets of chapter starts (top two TOC levels), by position.
@@ -565,6 +586,7 @@ impl Worker {
                         annotation_revision = 0;
                     }
                     let mut opened = false;
+                    let mut lost = false;
                     let result: Result<()> = (|| {
                         match command {
                             Command::Resolve { generation: g, revision, records, fingerprint, preview } => {
@@ -613,6 +635,21 @@ impl Worker {
                                 }
                                 return Ok(());
                             }
+                            Command::Locate { request, position } => {
+                                if request.generation == generation
+                                    && let Some(d) = &mut doc
+                                {
+                                    // Renders always go to their page, so the
+                                    // engine's place can move here.
+                                    let found = d.go_to_position(&position).ok().map(|()| {
+                                        let page = d.current_page();
+                                        d.go_to_page(page);
+                                        (page, d.page_progress())
+                                    });
+                                    send(Reply::Located { request, found });
+                                }
+                                return Ok(());
+                            }
                             Command::Opening(request) => {
                                 if request.generation == generation
                                     && let Some(d) = &mut doc
@@ -656,6 +693,7 @@ impl Worker {
                                     && let Err(e) = d.go_to_position(&position)
                                 {
                                     log::warn!("{e}");
+                                    lost = true;
                                 }
                                 pool = Some(PixelPool::new(pixel_bytes(dimensions, color)));
                                 doc = Some(d);
@@ -757,7 +795,7 @@ impl Worker {
                             let toc = d.toc()?;
                             let chapters: Vec<_> =
                                 toc.iter().filter(|e| e.level <= 2).map(|e| e.position.clone()).collect();
-                            send(Reply::Opened { generation, metadata, toc, pages, current });
+                            send(Reply::Opened { generation, metadata, toc, pages, current, lost });
                             send(Reply::Page(render(
                                 d,
                                 generation,

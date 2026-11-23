@@ -168,6 +168,21 @@ pub fn on_open(state: &BookState, progress: &Progress) -> OnOpen {
     }
 }
 
+/// The check on open (§4), on the reader's I/O thread: a `stat`, and the
+/// position fields only when the file is newer (rule 2). None when there is
+/// nothing to offer or record, including books without a sidecar.
+pub fn check(path: &Path, state: &BookState, cancelled: &dyn Fn() -> bool) -> Result<Option<(OnOpen, Progress)>> {
+    let Some(modified) = modified(path)? else { return Ok(None) };
+    if !newer(state, modified) {
+        return Ok(None);
+    }
+    let Some(progress) = read(path, cancelled)? else { return Ok(None) };
+    Ok(match on_open(state, &progress) {
+        OnOpen::Nothing => None,
+        found => Some((found, progress)),
+    })
+}
+
 /// How the bulk import counts a book (§5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Found {
@@ -337,6 +352,34 @@ mod tests {
         seen.koreader_seen = Some(Seen { modified: 400, position: Position("/old".into()) });
         assert!(!newer(&seen, 300));
         assert_eq!(on_open(&seen, &progress("/k2", 300)), OnOpen::Nothing);
+    }
+
+    #[test]
+    fn the_check_on_open_reads_only_newer_sidecars() -> Result<()> {
+        let dir = temp("check");
+        let path = metadata_path(&dir.join("Book.epub")).unwrap();
+        let never = || false;
+        // No sidecar: nothing, and no error.
+        assert_eq!(check(&path, &BookState::default(), &never)?, None);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(&path, "return { last_xpointer = '/k', percent_finished = 0.25 }")?;
+        let modified = modified(&path)?.unwrap();
+        // Never opened in Verso: offered.
+        let (found, p) = check(&path, &BookState::default(), &never)?.unwrap();
+        assert_eq!((found, p.position.0.as_str(), p.progress()), (OnOpen::Offer, "/k", 2500));
+        // Verso saved since: not even read (an unreadable file isn't an error).
+        std::fs::write(&path, "return { last_xpointer = os.exit() }")?;
+        let modified_now = super::modified(&path)?.unwrap();
+        assert_eq!(check(&path, &state("/v", modified_now), &never)?, None);
+        assert!(check(&path, &state("/v", modified_now.min(modified) - 1), &never).is_err());
+        // Exactly where Verso is: recorded; already dealt with: nothing.
+        std::fs::write(&path, "return { last_xpointer = '/v' }")?;
+        assert_eq!(check(&path, &state("/v", 0), &never)?.map(|(f, _)| f), Some(OnOpen::Record));
+        let mut seen = state("/x", 0);
+        seen.koreader_seen = Some(Seen { modified: 0, position: Position("/v".into()) });
+        assert_eq!(check(&path, &seen, &never)?, None);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 
     #[test]

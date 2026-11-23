@@ -1,7 +1,7 @@
 //! Ordered I/O service. Failed snapshots remain pending until retry/flush;
 //! success is reported only after the durable manifest commit.
 use super::*;
-use crate::{document::Position, library::Book, platform::Waker};
+use crate::{document::Position, koreader, library::Book, platform::Waker};
 use std::{
     sync::{
         Arc,
@@ -24,6 +24,15 @@ pub enum Reply {
     Preview(u64, Result<Preview, String>),
     /// The export's destination, or why it couldn't be written.
     Exported(Result<PathBuf, String>),
+    /// KOReader's position for the book (`koreader::check`), sent before
+    /// `Loaded` when the worker was started with a check.
+    Koreader(Result<Option<(koreader::OnOpen, koreader::Progress)>, String>),
+}
+/// The KOReader check on open (docs/koreader-progress.md §4): the book's
+/// sidecar metadata file and its state as loaded for this open.
+pub struct KoreaderCheck {
+    pub path: PathBuf,
+    pub state: crate::store::BookState,
 }
 #[derive(Clone, Default, Debug)]
 pub struct Preview {
@@ -39,7 +48,9 @@ pub struct Worker {
     import_id: Arc<AtomicU64>,
 }
 impl Worker {
-    pub fn new(store: Store, book: Book, waker: Waker) -> Self {
+    /// Starts the book's I/O thread. A KOReader `check` runs first, before
+    /// the book is hashed, so its reply can arrive with the first page.
+    pub fn new(store: Store, book: Book, waker: Waker, check: Option<KoreaderCheck>) -> Self {
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
         let mut b = book.clone();
@@ -52,6 +63,16 @@ impl Worker {
                     let _ = results.send(r);
                     waker.wake();
                 };
+                if let Some(check) = check {
+                    let started = std::time::Instant::now();
+                    let result = koreader::check(&check.path, &check.state, &|| false).map_err(|e| format!("{e:#}"));
+                    log::info!(
+                        "koreader check: found={:?} elapsed_us={}",
+                        result.as_ref().map(|r| r.as_ref().map(|(found, _)| *found)),
+                        started.elapsed().as_micros()
+                    );
+                    send(Reply::Koreader(result));
+                }
                 let loaded = (|| -> Result<_> {
                     use std::io::Read;
                     let mut file = std::fs::File::open(&b.path)?;
@@ -234,7 +255,7 @@ mod tests {
             &source,
             "return { annotations = { { drawer='lighten', pos0='/a', pos1='/b', text='Quote' } } }",
         )?;
-        let worker = Worker::new(store.clone(), book, Waker::new(|| {}));
+        let worker = Worker::new(store.clone(), book, Waker::new(|| {}), None);
         // A barrier that, unlike flush(), doesn't cancel the queued preview.
         let barrier = || {
             let (tx, rx) = mpsc::channel();
