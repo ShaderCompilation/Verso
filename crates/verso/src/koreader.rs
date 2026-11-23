@@ -1,6 +1,5 @@
-//! KOReader's reading progress, read one way: KOReader → Verso
-//! (docs/koreader-progress.md). Only `Book.sdr/metadata.epub.lua` beside the
-//! book and KOReader's `history.lua` are read; Verso never writes either.
+//! KOReader's reading progress, read one way: KOReader → Verso. Only
+//! `Book.sdr/metadata.epub.lua` beside the book and KOReader's `history.lua` are read; Verso never writes either.
 use crate::annotations::lua;
 use crate::document::Position;
 use crate::store::BookState;
@@ -258,7 +257,7 @@ pub struct Import {
 }
 
 /// Whether a `complete` sidecar KOReader saved at `modified` marks the
-/// book finished (docs/finished-books.md §5). Finished is a lasting label, so
+/// book finished. Finished is a lasting label, so
 /// KOReader's must be newer than Verso's last change to it (`status_at`): a
 /// book marked unfinished in Verso since is left alone. A book being re-read
 /// in Verso is only marked again when KOReader saved after Verso's last save

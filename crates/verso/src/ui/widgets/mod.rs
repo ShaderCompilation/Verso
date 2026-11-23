@@ -1,5 +1,4 @@
 //! The widgets. Each is a plain struct: place it, draw it, feed it gestures.
-//! See docs/design.md §5 for how each one looks and refreshes.
 
 pub mod button;
 pub mod grid;

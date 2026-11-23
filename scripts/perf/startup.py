@@ -3,7 +3,6 @@
 
 Copies the real index/state/covers, never writes the user's real data. Output
 contains numeric timings/accounting and anonymous trace records, not book names.
-See docs/archive/home-startup-2026-11-11.md for measurement boundaries and cold-cache limits.
 """
 import argparse
 import hashlib

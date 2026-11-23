@@ -1,6 +1,6 @@
 #!/bin/sh
 # Tests the launcher's update switch-over, journal and rollback
-# (dist/kindle/verso/verso.sh, docs/updates.md) on a pretend Kindle: a
+# (dist/kindle/verso/verso.sh) on a pretend Kindle: a
 # storage root in a work folder, fake Kindle commands (nothing on this
 # machine is paused or restarted) and fake Verso versions that do what each
 # case needs: start, ask for the update, crash, panic, hang, lose power.
@@ -10,7 +10,7 @@
 #   STEP_EVERY=3 scripts/test-launcher.sh    every third power-loss point only
 #   SWEEP=install STEP_FROM=17 STEP_EVERY=1000 KEEP=1 scripts/test-launcher.sh
 #                                            one point of one sweep, files kept
-#   scripts/test-launcher.sh LAUNCHER WORKDIR  (the Kindle run: docs/updates.md)
+#   scripts/test-launcher.sh LAUNCHER WORKDIR  (the Kindle run)
 #
 # Power loss: the launcher's mv, rm, cp, mkdir and sync go through counting
 # wrappers; with CRASH_AT=N the Nth one kills the launcher's whole process

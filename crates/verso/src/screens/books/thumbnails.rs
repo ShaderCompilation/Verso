@@ -1,6 +1,6 @@
 //! Decoded library covers: a byte-bounded cache that keeps the pages next to
 //! the current one, a background decoder that prepares them, and the visible
-//! strips of Stack covers behind the front one (docs/library.md#cover-drawing).
+//! strips of Stack covers behind the front one.
 use crate::geom::Rect;
 use crate::gfx::{Canvas, ColorMode};
 use crate::library::{

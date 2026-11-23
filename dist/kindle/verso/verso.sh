@@ -2,9 +2,8 @@
 # Verso launcher. Pauses the Kindle UI, runs Verso, and always brings the
 # Kindle UI back afterwards, even if Verso crashes or is killed. It also
 # switches in updates that Verso staged, and goes back to the previous
-# version if a new one fails to start (docs/updates.md, "Installing" and
-# "Rollback"), with renames from the plan Verso staged, and starts Verso
-# again when it asks (Restart to apply, docs/web-app.md).
+# version if a new one fails to start, with renames from the plan Verso staged, and starts Verso
+# again when it asks (Restart to apply).
 #
 # Started from KUAL (extensions/verso/menu.json) or by scripts/deploy.sh.
 # Installed at /mnt/us/verso/verso.sh.
@@ -73,7 +72,7 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') launcher: $*" >>"${LOG}"
 }
 
-# Writes a full problem report (tools/report.sh, docs/device-support.md).
+# Writes a full problem report (tools/report.sh).
 save_report() {
     [ -f "${APP_DIR}/tools/report.sh" ] || return
     REPORT_FILE="$(VERSO_STORAGE_ROOT="${ROOT}" sh "${APP_DIR}/tools/report.sh" report 2>>"${LOG}")"
@@ -126,7 +125,7 @@ if [ "${POWER_STATE}" != "active" ]; then
 fi
 # Verso is built for hard-float firmware (5.16.3 and later); older firmware
 # can't even load it. Say so over the Kindle UI, which was never paused, so
-# there is nothing to restore (docs/device-support.md, Phase 3).
+# there is nothing to restore.
 if [ ! -e "${ARMHF_LOADER}" ]; then
     log "this firmware has no hard-float loader (${ARMHF_LOADER}); Verso needs firmware 5.16.3 or later"
     # eips can't draw apostrophes.

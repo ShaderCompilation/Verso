@@ -1,4 +1,4 @@
-//! The web app's server (docs/web-app.md, "HTTP server"): one accept
+//! The web app's server: one accept
 //! thread and one thread per connection, at most MAX_CONNECTIONS at once;
 //! more wait in the listen backlog. Stopping closes every connection, which
 //! wakes any read or write in progress, and joins every thread before it

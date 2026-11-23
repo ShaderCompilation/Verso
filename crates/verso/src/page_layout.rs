@@ -1,6 +1,6 @@
 //! Page layout: margins and the reader's top and bottom bars. Shared by the
 //! engine (which lays text out inside the margins), the reader (which draws
-//! the bars) and the layout screen. See docs/reader-bars.md.
+//! the bars) and the layout screen.
 use crate::geom::Rect;
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ pub struct Bar {
     pub slots: [Option<BarItem>; 3],
 }
 
-/// What a slot can show. The catalog is in docs/reader-bars.md.
+/// What a slot can show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BarItem {

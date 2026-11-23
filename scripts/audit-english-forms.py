@@ -8,7 +8,7 @@ lemmas: since curated lemmas are authoritative, these are never shown. A real
 alternative belongs in assets/wordforms/english-overrides.txt. Only
 dictionaries whose folder names appear in ENGLISH are read; the `core` column
 counts hits in Concise Oxford, Macmillan and Cambridge. Keep RULES in sync
-with forms/english.rs. See docs/dictionary.md, "Authoritative exceptions".
+with forms/english.rs.
 """
 import os, re, sys
 

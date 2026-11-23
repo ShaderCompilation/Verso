@@ -123,8 +123,7 @@ pub struct Reader {
     mark_fast: bool,
     /// KOReader's newer position for this book, checked on open.
     koreader: koreader::Check,
-    /// The finished label as this reader loaded or last wrote it
-    /// (docs/finished-books.md).
+    /// The finished label as this reader loaded or last wrote it.
     finished: bool,
     rereading: bool,
     /// A forward page turn was made this session: only the first one can
@@ -677,7 +676,7 @@ impl Reader {
     }
     /// A forward page turn showed page `number`. Onto the last page it marks
     /// the book finished; the session's first one elsewhere in a finished
-    /// book starts a re-read (docs/finished-books.md §3–4). Jumps never
+    /// book starts a re-read. Jumps never
     /// come here.
     fn turned_forward_onto(&mut self, number: usize) {
         let first = !std::mem::replace(&mut self.turned_forward, true);
@@ -4294,7 +4293,7 @@ mod tests {
         r.after_present();
         r.flush_position()?;
         let mut state = store.book("book");
-        // Finished is sticky (docs/finished-books.md): opening only unhides.
+        // Finished is sticky: opening only unhides.
         assert!(state.finished && !state.hidden_from_continue);
         assert!(state.last_opened > 10);
         assert_eq!(state.dictionary_set.as_deref(), Some("english"));

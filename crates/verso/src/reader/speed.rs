@@ -1,5 +1,5 @@
 //! Reading speed for the time-left items, in characters of text per second,
-//! so it holds across font, size and margin changes. See docs/reader-bars.md.
+//! so it holds across font, size and margin changes.
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 

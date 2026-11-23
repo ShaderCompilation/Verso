@@ -1,4 +1,4 @@
-//! The KOReader check on open (docs/koreader-progress.md §4). When KOReader
+//! The KOReader check on open. When KOReader
 //! has a newer position for the book, a card over the first page offers to
 //! go there. The I/O thread reads the sidecar, the book thread finds the page
 //! without moving the reader, and anything other than *Go there* counts as

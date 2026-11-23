@@ -37,7 +37,7 @@ pub fn bookmark_corner(screen: Rect, size: i32) -> Rect {
 }
 /// Where the bookmark mark hangs from the top edge: centred in the right
 /// margin `side` pixels wide when that is at least 5 mm, otherwise 1.5 mm
-/// from the edge (docs/bookmarks.md §2). `mm` converts millimetres to pixels.
+/// from the edge. `mm` converts millimetres to pixels.
 pub fn bookmark_mark(screen: Rect, side: i32, mm: impl Fn(f32) -> i32) -> Rect {
     let (w, h) = (mm(3.4), mm(5.5));
     let x = if side >= mm(5.0) { screen.right() - side / 2 - w / 2 } else { screen.right() - mm(1.5) - w };

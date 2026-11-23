@@ -3,8 +3,7 @@
 //! (crates/verso-mdns, installed as verso/bin/verso-mdns). The responder
 //! watches the process it serves and exits when it does: the SSH server
 //! (whoever stops it, Verso or KOReader), or Verso itself for Wi-Fi
-//! transfer, so it can't outlive a crash. See docs/device-tools.md and
-//! docs/web-app.md.
+//! transfer, so it can't outlive a crash.
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;

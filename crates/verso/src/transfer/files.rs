@@ -1,4 +1,4 @@
-//! The Files tab API (docs/web-app.md, "Files: who may write where"): a plain
+//! The Files tab API: a plain
 //! browser of the Kindle's storage (`/mnt/us`) with guardrails. Every path is
 //! classified on the server, ignoring ASCII case, both as given and after
 //! following symlinks, and the stricter class wins. Names the classes depend
@@ -52,7 +52,7 @@ const _: () = assert!(STALE_PART.as_secs() > 4 * STALL.as_secs());
 /// entries.
 const COUNT_LIMIT: u64 = 100_000;
 
-/// Who may do what with a path (the table in docs/web-app.md).
+/// Who may do what with a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     /// Read and write.

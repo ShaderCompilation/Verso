@@ -15,8 +15,7 @@ pub struct Presented {
     pub speed: Option<ReadingSpeed>,
     pub at: u64,
 }
-/// A change to the book's finished label made in the reader
-/// (docs/finished-books.md §3–4).
+/// A change to the book's finished label made in the reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     /// Reached the end: finished at this time (Unix seconds), ending a re-read.

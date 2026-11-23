@@ -100,7 +100,7 @@ pub enum SleepScreen {
     Cover,
     Amazon,
 }
-/// What a folder tile in Collections shows (docs/archive/folder-previews.md).
+/// What a folder tile in Collections shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderPreview {
@@ -121,7 +121,7 @@ impl FolderPreview {
     pub const ALL: [FolderPreview; 4] =
         [FolderPreview::Covers, FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Icon];
     /// The modes Settings offers, in its order. Covers is left out until its
-    /// grid looks right on the panel (docs/archive/folder-previews.md); add it back
+    /// grid looks right on the panel; add it back
     /// here, with its label in Settings, to enable it again.
     pub const OFFERED: [FolderPreview; 3] = [FolderPreview::Stack, FolderPreview::Latest, FolderPreview::Icon];
     /// How many of a folder's preview books the tile shows: a prefix of its pick.
@@ -142,7 +142,7 @@ pub struct BookState {
     pub progress: u32,
     pub last_opened: u64,
     /// I have read this book. Sticky: opening the book doesn't clear it, only
-    /// *Mark unfinished* (docs/finished-books.md).
+    /// *Mark unfinished*.
     pub finished: bool,
     /// When `finished` last changed, in either direction (Unix seconds, 0 =
     /// never). While finished, this is the finished date.
@@ -159,8 +159,7 @@ pub struct BookState {
     /// The language detected from the book's text on its first open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<crate::library::language::DetectedLanguage>,
-    /// The last KOReader position offered, taken or imported for this book
-    /// (docs/koreader-progress.md).
+    /// The last KOReader position offered, taken or imported for this book.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub koreader_seen: Option<crate::koreader::Seen>,
 }
@@ -698,7 +697,7 @@ impl BookState {
             self.reading_speed = p.speed;
         }
         // Finished is sticky: opening a finished book to look something up
-        // keeps it (docs/finished-books.md).
+        // keeps it.
         if fresh_open {
             self.hidden_from_continue = false;
         }

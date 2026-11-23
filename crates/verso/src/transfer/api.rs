@@ -1,4 +1,4 @@
-//! The web app's requests (docs/web-app.md, "API"): the page, sign-in and
+//! The web app's requests: the page, sign-in and
 //! status. Every request must name the Kindle in its Host header; every API
 //! call needs the session cookie, and every write X-Verso-Request too.
 

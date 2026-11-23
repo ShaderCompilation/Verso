@@ -3,7 +3,6 @@
 //! change and saves the result in `state.json`; Settings shows it. The
 //! download: another worker fetches the changed components' archives,
 //! verifies and stages them for the launcher (`download.rs`).
-//! See docs/updates.md.
 pub mod download;
 pub mod fetch;
 

@@ -1,8 +1,7 @@
 /* Verso's build options for upstream Dropbear (all options and their defaults
  * are in third_party/dropbear/src/default_options.h). scripts/build-ssh.sh
  * puts this file next to a copy of the sources. The paths are where
- * scripts/deploy.sh installs the server on the Kindle.
- * See docs/device-tools.md#ssh-developer-only. */
+ * scripts/deploy.sh installs the server on the Kindle. */
 
 /* Key login only, no passwords. */
 #define DROPBEAR_SVR_PASSWORD_AUTH 0

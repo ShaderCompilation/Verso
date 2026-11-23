@@ -2,7 +2,6 @@
 """Merge WordNet 3.0 exceptions; keep the downloaded source outside the repo.
 
 Usage: scripts/gen-english-forms.py /tmp/verso-wordnet/WordNet-3.0/dict
-The archive URL and checksum are recorded in docs/dictionary.md.
 """
 
 import argparse

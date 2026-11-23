@@ -33,7 +33,7 @@ pub struct Annotation {
 }
 /// What an annotation marks. A page bookmark's range runs from the page start
 /// to the end of its opening words, which are its `quotation`; on a page with
-/// no text both the end and the quotation are empty (docs/bookmarks.md §5).
+/// no text both the end and the quotation are empty.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {

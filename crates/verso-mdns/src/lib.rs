@@ -6,7 +6,7 @@
 //! It is its own small binary rather than a mode of `verso`, because the
 //! Kindle's busybox `pidof`/`killall` match processes by executable name: a
 //! second `verso` process would make the launcher think Verso is already
-//! running. See docs/device-tools.md and docs/archive/mdns.md.
+//! running.
 //!
 //! The library half is what Verso needs to talk to a running responder: the
 //! file paths and name rules.

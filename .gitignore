@@ -3,4 +3,7 @@
 .DS_Store
 /testbooks
 /screenshots
+/notes
+.claude/
+.agents/
 __pycache__/

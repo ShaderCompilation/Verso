@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KOReader progress, Phases 2–3 (docs/koreader-progress.md §4–5): the card
+"""KOReader progress, Phases 2–3: the card
 that offers KOReader's newer position when a book opens, in portrait,
 landscape and on a 6" screen; Go there with the way back, Stay here, a page
 turn, the setting off, a position that isn't in the book, and the Settings

@@ -1,5 +1,5 @@
 //! The widget gallery (the Phase 3 milestone): every widget, working, on three
-//! pages. Page 1 follows mockup 8 in docs/design.md; page 2 has the stepper,
+//! pages. Page 1 follows the design mockups; page 2 has the stepper,
 //! a settings-style list and the sheet; page 3 has the cover grid and its
 //! long-press menu. The Phase 2 engine spike opens from page 1.
 

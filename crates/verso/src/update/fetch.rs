@@ -1,6 +1,5 @@
 //! HTTPS downloads with `ureq` and `rustls`, trusting the certificate list
-//! built into Verso (`webpki-roots`) rather than the firmware's. See
-//! docs/updates.md ("HTTPS client").
+//! built into Verso (`webpki-roots`) rather than the firmware's.
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};

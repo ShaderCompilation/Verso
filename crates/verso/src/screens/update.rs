@@ -1,4 +1,4 @@
-//! The update screens (docs/updates.md, Phase 5): the sheet that offers an
+//! The update screens: the sheet that offers an
 //! update (Home's notice and Settings open it), the screen that downloads
 //! it and restarts Verso to install it, the question before going back to
 //! the previous version, and the sheet that says why the launcher went back.

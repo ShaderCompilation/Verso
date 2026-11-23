@@ -1,4 +1,4 @@
-//! Wi-Fi transfer (docs/web-app.md, "Kindle screen"): where to open the web
+//! Wi-Fi transfer: where to open the web
 //! app, its code, and what has arrived. The server runs only while this
 //! screen is open: Done, sleep, an exit (for USB too) or 10 minutes without
 //! a request stop it.

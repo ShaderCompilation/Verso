@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Page bookmarks, Phases 2 to 4 (docs/bookmarks.md): the mark, the menu's
+"""Page bookmarks, Phases 2 to 4: the mark, the menu's
 ribbon, the corner tap and its setting, the remove-with-note question, the
 Notes list (filter, details, a note, jumping back and removing), and KOReader
 import and Markdown export.

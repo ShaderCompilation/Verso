@@ -1,5 +1,5 @@
 //! The Top Drawer: quick settings pulled down from the top edge over Home,
-//! Library and (later) the reader. See docs/archive/top-drawer.md.
+//! Library and (later) the reader.
 //!
 //! The app owns the drawer (`App`), drawn above the screen stack and below
 //! its prompts and toasts. It shows the clock, battery, Light and Warmth, and

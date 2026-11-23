@@ -2,7 +2,7 @@
 //! downloaded into `update/download/`, checked against the verified
 //! manifest, unpacked into `update/staged/` and recorded in `staged.json`,
 //! written last. Nothing outside `update/` is touched; installing is the
-//! launcher's job. See docs/updates.md.
+//! launcher's job.
 use std::fs;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finished books, Phase 2 (docs/finished-books.md §3): the end-of-book
+"""Finished books, Phase 2: the end-of-book
 sheet after a tap past the last page, in portrait, landscape and on a 6"
 screen, with and without a next book in the folder; Undo, Next and Home,
 checking the saved states.

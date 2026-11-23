@@ -1,4 +1,4 @@
-//! The HTTP/1.1 subset the web app needs (docs/web-app.md, "HTTP server"):
+//! The HTTP/1.1 subset the web app needs:
 //! request heads, bodies with a Content-Length, and responses that always
 //! carry one. Sockets are read and written with a short timeout so every
 //! wait can notice a stop, and gives up after a while without progress.

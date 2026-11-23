@@ -14,7 +14,7 @@ use std::{
 const MAX_WORD_BYTES: usize = 4096;
 /// Bucket counts are powers of two between these: about two words a
 /// bucket, so a lookup reads two or three records instead of a chain of
-/// hundreds spread over the file (docs/dictionary.md#implementation-decisions).
+/// hundreds spread over the file.
 const MIN_BUCKETS: usize = 4096;
 const MAX_BUCKETS: usize = 1 << 18;
 const SIGNATURE: u64 = 64;

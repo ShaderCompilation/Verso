@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Original, redistributable EPUB with the footnote and link patterns the
-footnote rules handle (docs/reader.md#footnotes)."""
+footnote rules handle."""
 from pathlib import Path
 from zipfile import ZipFile, ZIP_STORED
 

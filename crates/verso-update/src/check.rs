@@ -1,6 +1,6 @@
 //! The update check's decisions, without the network: when an automatic
 //! check is due, what a verified manifest offers this device, and the saved
-//! result (`state.json`). See docs/updates.md.
+//! result (`state.json`).
 use crate::{Installed, Manifest, Version};
 use serde::{Deserialize, Serialize};
 use std::fmt;

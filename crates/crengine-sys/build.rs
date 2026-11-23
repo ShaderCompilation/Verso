@@ -377,7 +377,7 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     // The document cache index (`cr3cache.inx`) is rewritten in place. Verso's
     // background pre-layout process can be killed at any moment, and an index
     // cut short there would drop every cached book at the next start. Write a
-    // temporary file and rename it over the index instead (docs/reader.md).
+    // temporary file and rename it over the index instead.
     (
         "crengine/src/lvtinydom.cpp",
         "            LVStreamRef stream = LVOpenFileStream(filename.c_str(), LVOM_WRITE);\n            if ( !stream )\n                return false;\n            if ( stream->Write( buf.buf(), buf.pos(), NULL )!=LVERR_OK )\n                return false;\n            _oldStreamCRC = newCRC;",
@@ -388,7 +388,7 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     // followed by its own CRC is the same for every index of one length. So a
     // reopened book moved to the top of the index was never saved, and eviction
     // (oldest first) could drop a book read every day. Leave the trailing CRC
-    // out on both sides (docs/reader.md).
+    // out on both sides.
     (
         "crengine/src/lvtinydom.cpp",
         "                _oldStreamCRC = (lUInt32)oldStream->getcrc32();",
@@ -411,7 +411,7 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     // Large images inside an SVG used to cost two full-size copies: libpng
     // decoded the whole image into one buffer, and smooth scaling (always on
     // inside an SVG) kept another to scale from. The 2481x3509 PNG cover of
-    // *Go with Domain* took 70 MB that way (docs/archive/svg-covers.md). A PNG without
+    // *Go with Domain* took 70 MB that way. A PNG without
     // interlacing is now decoded one line at a time.
     (
         "crengine/src/lvimg.cpp",

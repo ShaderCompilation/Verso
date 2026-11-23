@@ -583,7 +583,6 @@ regression = "\n".join(
         note("Russian miss; no English reduction."),
         word_and_note("best", "Exact in the checked dictionaries; without it, good and well, possibly with be."),
         word_and_note("lying", "Exact in the checked dictionaries; lye is a known rule-only false positive with the English explanatory dictionary (main)."),
-        note("See docs/dictionary.md for the full verification notes and timings."),
     ]
 )
 

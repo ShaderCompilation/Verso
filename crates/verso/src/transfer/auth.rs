@@ -1,5 +1,4 @@
-//! Who may use the web app (docs/web-app.md, "Access code" and
-//! "Security"): a 4-digit code shown on the Kindle, a session cookie for a
+//! Who may use the web app a 4-digit code shown on the Kindle, a session cookie for a
 //! browser that entered it, and the Host check against DNS rebinding.
 
 use std::io::Read;

@@ -2,7 +2,7 @@
 # Puts each release component's files in target/package/stage/<id>/, laid out
 # as they are installed under the component's folder (dist/components.json).
 # Builds nothing: run it after the builds in scripts/package.sh or
-# scripts/deploy.sh, which both use it. See docs/updates.md#components.
+# scripts/deploy.sh, which both use it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,6 +27,8 @@ copy() {
 
 rm -rf "$STAGE"
 copy app "$KINDLE/verso"
+copy app LICENSE
+copy app NOTICE.md
 copy launcher dist/kindle/verso/verso.sh
 copy launcher dist/kindle/verso/tools/report.sh tools/report.sh
 copy launcher scripts/collect-diagnostics.sh tools/collect-diagnostics.sh

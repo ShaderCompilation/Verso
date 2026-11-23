@@ -1,5 +1,5 @@
 //! Writing the app's canvas into the Kindle's framebuffer, whatever its
-//! pixel format and viewport (docs/device-support.md, Phases 4 and 6).
+//! pixel format and viewport.
 //!
 //! An 8-bit panel (every monochrome Kindle) gets the exact 8-bit grayscale
 //! copy it always had. A 32-bit panel (Colorsoft) writes true color pixels

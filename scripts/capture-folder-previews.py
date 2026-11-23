@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Folder preview captures (docs/archive/folder-previews.md): every mode in
+"""Folder preview captures: every mode in
 portrait and landscape, plus selection, a pressed tile, missing art and an
 empty folder.
 

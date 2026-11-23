@@ -2,8 +2,7 @@
 //! language turns a word into candidate lemmas, and the lookup checks them
 //! against real headwords. English is built in; other languages read a
 //! word-form pack (`<lang>.vwf`) from the word-forms folder, and any other
-//! language a Hunspell dictionary the user installed. See
-//! docs/archive/word-forms-languages.md and docs/archive/universal-languages.md.
+//! language a Hunspell dictionary the user installed.
 mod english;
 mod hunspell;
 mod table;

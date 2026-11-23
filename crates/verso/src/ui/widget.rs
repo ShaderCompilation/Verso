@@ -1,6 +1,6 @@
 //! Pieces every widget shares: the drawing context and press tracking.
 //!
-//! Widgets are plain structs owned by their screen (see docs/design.md §6).
+//! Widgets are plain structs owned by their screen.
 //! A screen places them (`place`), draws them, and passes each gesture to
 //! them; a widget answers with a typed result (clicked, new value, row…).
 //! Every widget gets every gesture, but only reacts to a touch that started

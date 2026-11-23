@@ -2,7 +2,7 @@
 # Builds Verso's SSH server for the Kindle: upstream Dropbear and OpenSSH's
 # sftp-server (for scp and sftp), as small static armv7 binaries (musl libc)
 # with zig cc. scripts/deploy.sh runs this and installs the result in
-# /mnt/us/verso/bin. See docs/device-tools.md#ssh-developer-only.
+# /mnt/us/verso/bin.
 #
 # Output: target/kindle-ssh/bin/ (the two programs and their licences).
 # Does nothing when the submodules, options and this script are unchanged.

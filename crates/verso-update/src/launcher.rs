@@ -3,7 +3,7 @@
 //! while it switches an update in or goes back. The launcher does the
 //! switch-over with renames, from the plan staged with the update
 //! ([`crate::stage::PLAN_FILE`]). Paths are relative to the storage root
-//! (`/mnt/us`). See docs/updates.md.
+//! (`/mnt/us`).
 use crate::Version;
 use serde::Deserialize;
 use std::path::Path;

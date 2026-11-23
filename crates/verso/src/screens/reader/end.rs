@@ -1,4 +1,4 @@
-//! The end-of-book sheet (docs/finished-books.md §3). A forward tap on the
+//! The end-of-book sheet. A forward tap on the
 //! last page opens it over the page; the book is already marked finished.
 //! *Undo* unmarks it, *Next* opens the next book in the folder, *Home* closes
 //! the book. A tap outside or the × closes it, and the book stays finished.

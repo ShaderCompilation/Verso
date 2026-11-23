@@ -26,7 +26,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 pub struct Kindle {
     info: DeviceInfo,
     model: DeviceModel,
-    /// The model's lights and their range (docs/device-support.md, Phase 3).
+    /// The model's lights and their range.
     lights: Lights,
     /// The profile's facts for the session header.
     profile_line: String,

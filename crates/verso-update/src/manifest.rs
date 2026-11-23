@@ -1,5 +1,5 @@
 //! The release manifest (`latest.json`), the record of what is installed
-//! (`installed.json`) and component hashing. See docs/updates.md.
+//! (`installed.json`) and component hashing.
 use crate::{Error, Version};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

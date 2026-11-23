@@ -1,6 +1,6 @@
 //! Settings → Library → KOReader → *Import progress*: the sheet that reads
 //! KOReader's data for the whole library, shows what it found and imports it
-//! after the user confirms (docs/koreader-progress.md §5). The work runs on a
+//! after the user confirms. The work runs on a
 //! [`Job`] thread; nothing is written before *Import*.
 use crate::geom::Rect;
 use crate::gfx::HAlign;

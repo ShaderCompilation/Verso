@@ -1,5 +1,4 @@
 //! The UI toolkit: theme, layout, gestures, damage tracking and widgets.
-//! How it fits together: docs/design.md §6.
 
 pub mod damage;
 pub mod gesture;

@@ -1,5 +1,5 @@
 //! Verso's look: grays, type scale, spacing and sizes. Defined in millimetres
-//! and points (see docs/design.md §3) and converted for the screen's density,
+//! and points and converted for the screen's density,
 //! so the same design works on any e-reader.
 
 use crate::gfx::{Family, TextStyle, Weight};

@@ -6,7 +6,6 @@
 //! KOReader's port and pidfile, so either app sees and can stop a server the
 //! other one started. The server keeps running after Verso exits. While it
 //! runs, the mDNS responder (platform/mdns.rs) advertises `verso.local`.
-//! See docs/device-tools.md.
 
 use anyhow::Result;
 

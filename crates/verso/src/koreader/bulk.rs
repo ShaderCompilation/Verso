@@ -1,4 +1,4 @@
-//! The bulk import from Settings → Library (docs/koreader-progress.md §5).
+//! The bulk import from Settings → Library.
 //! A scan reads every book's KOReader sidecar and decides each book without
 //! writing anything; the import then writes the changed states in one pass
 //! and rebuilds Home and the opened order once. Both run on a [`Job`]

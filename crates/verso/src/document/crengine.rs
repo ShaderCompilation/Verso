@@ -25,7 +25,7 @@ const FONT_LIST_VERSION: u32 = 1;
 
 /// The faces crengine registered from each font file, written on one start
 /// and read on the next, so fonts register without opening every file: the
-/// 93 on the Kindle took 0.4–1.3 s to open (docs/reader.md#font-list).
+/// 93 on the Kindle took 0.4–1.3 s to open.
 #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct FontList {
     version: u32,

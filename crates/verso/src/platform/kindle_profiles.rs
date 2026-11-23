@@ -10,7 +10,7 @@
 //! On the PW2, PW3 and Voyage (`canTurnFrontlightOff = no`) step 0 is dim,
 //! not off; their firmware is soft-float, so Verso doesn't run there anyway.
 //!
-//! Only models with a report are `tested` (docs/device-support.md).
+//! Only models with a report are `tested`.
 
 use super::{DeviceModel, Frontlight, LightRange};
 

@@ -1,7 +1,7 @@
 //! Staging an update: unpacking verified component archives into
 //! `update/staged/`, and `staged.json`, the record the launcher installs
 //! from. Everything here writes only inside the folders it is given; the
-//! installed files are never touched. See docs/updates.md.
+//! installed files are never touched.
 use crate::{Component, FORMAT, Installed, InstalledComponent, MODE_EXEC, MODE_FILE, Manifest, Version, is_safe_path};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,4 @@
-//! Verso — a calm, lightweight e-reader. See docs/plan.md.
+//! Verso — a calm, lightweight e-reader.
 //!
 //! Simulator only: `--screenshot out.png` renders without a window, saves a
 //! grayscale PNG at device size and exits. `--screen books|settings|transfer|gallery` picks the
@@ -20,7 +20,7 @@ mod dictionary;
 mod document;
 mod geom;
 mod gfx;
-// Used by the check on open and the bulk import (docs/koreader-progress.md, Phases 2–3).
+// Used by the check on open and the bulk import.
 #[cfg_attr(not(test), allow(dead_code))]
 mod koreader;
 mod library;

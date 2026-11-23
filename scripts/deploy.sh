@@ -7,7 +7,7 @@
 #   scripts/deploy.sh --no-run         build and copy only
 #   RUST_LOG=debug scripts/deploy.sh   more detailed log
 #
-# The SSH host defaults to `kindle` (see docs/setup.md); override with VERSO_KINDLE_HOST.
+# The SSH host defaults to `kindle` (an SSH config alias); override with VERSO_KINDLE_HOST.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,7 +29,7 @@ cargo kindle-build
 scripts/build-ssh.sh
 scripts/build-wordforms.sh
 cargo build --release --quiet -p verso-update --bin verso-release
-# The same component folders a release is made from (docs/updates.md), and
+# The same component folders a release is made from, and
 # the installed.json that describes them, marked as a development install.
 scripts/stage.sh
 STAGE=target/package/stage
@@ -71,7 +71,7 @@ except Exception:
 device_hash_of() { awk -v id="$1" '$1 == id { print $2 }' <<<"$DEVICE_HASHES"; }
 # An update staged or downloaded earlier would replace this build on the next
 # start, and an earlier update's previous files, trial or journal would "go
-# back" over it (docs/updates.md). A development install starts clean.
+# back" over it. A development install starts clean.
 U=$APP/update
 ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json $APP/data/cre/.version $APP/wordforms/.version &&
     rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json $U/rollback.json.new $U/journal-*"
@@ -101,6 +101,8 @@ fi
 # its binary open. (Verso restarts a responder left on the old binary.)
 tar -C "$STAGE/tools" --owner=0 --group=0 -cf - . | ssh "$HOST" "rm -rf $APP/bin.new && mkdir -p $APP/bin.new $APP/bin $APP/ssh &&
     tar -xf - -C $APP/bin.new && for f in $APP/bin.new/*; do mv -f \$f $APP/bin/; done && rmdir $APP/bin.new"
+# The licence and notices that ship with the app.
+tar -C "$STAGE/app" --owner=0 --group=0 -cf - LICENSE NOTICE.md | ssh "$HOST" "tar -xf - -C $APP"
 # Copy under a temporary name first, so a broken transfer never leaves half a binary.
 ssh "$HOST" "cat > $APP/verso.new && chmod 755 $APP/verso.new && mv -f $APP/verso.new $APP/verso" <"$STAGE/app/verso"
 # Removed before copying and written last, so it never describes files that

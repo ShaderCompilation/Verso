@@ -1,4 +1,4 @@
-# Quality list for Hunspell base forms (es); see docs/archive/universal-languages.md Phase 4.
+# Quality list for Hunspell base forms (es).
 # form<TAB>expected lemmas, best first<TAB>note. A form counts as found when Hunspell
 # gives any stem, as right when one of its stems is expected, and as right first when
 # its first stem is the first expected lemma. Forms occur in testbooks/cervantes-quijote-es.epub

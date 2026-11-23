@@ -3,7 +3,7 @@ name = "verso-mdns"
 description = "Minimal mDNS responder that advertises the Kindle as verso.local."
 # Its own version, not the workspace's: the crate version feeds the symbol
 # hashes, so following the release version would change the binary (and the
-# `tools` component) in every release (docs/updates.md, Phase 6).
+# `tools` component) in every release.
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true

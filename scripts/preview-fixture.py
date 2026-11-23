@@ -7,7 +7,7 @@ subfolders. A tenth of the covers are pending and a tenth have no art;
 app's own rebuild gives the same order. Paths are offline, so no EPUB is read.
 Cover keys follow covers::key, so the app treats them as current; it draws a
 Ready cover only once covers/<key>.png and <key>-s.png exist (see
-scripts/perf/folder-previews.py). Usage: scripts/preview-fixture.py OUT_DIR,
+the folder-preview capture scripts). Usage: scripts/preview-fixture.py OUT_DIR,
 then VERSO_DATA=OUT_DIR VERSO_PREVIEW_BENCH=1 verso
 """
 import hashlib

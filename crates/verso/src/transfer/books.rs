@@ -1,4 +1,4 @@
-//! The Books tab API (docs/web-app.md, "Books"): list, search, upload,
+//! The Books tab API: list, search, upload,
 //! download, delete and New folder. Uploads check `.epub` and the zip header
 //! early, stream into a `.part` file while hashing SHA-256 in 64 KB chunks,
 //! validate with `library::epub`, resolve name clashes as `Name (2).epub`, and

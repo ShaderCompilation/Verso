@@ -1,5 +1,4 @@
-//! The one-time notice on a Kindle model Verso hasn't been tested on yet
-//! (docs/device-support.md, Phase 3). It shows over the first screen and
+//! The one-time notice on a Kindle model Verso hasn't been tested on yet. It shows over the first screen and
 //! is remembered per model once dismissed.
 
 use anyhow::Result;

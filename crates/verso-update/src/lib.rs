@@ -2,7 +2,6 @@
 //! what is installed, version ordering, component hashes and signature
 //! checks, and staging a downloaded update. The app reads, verifies and
 //! stages with it; `verso-release` (the `release` feature) writes releases.
-//! See docs/updates.md.
 pub mod check;
 pub mod launcher;
 mod manifest;

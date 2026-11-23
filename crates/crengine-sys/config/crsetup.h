@@ -25,7 +25,7 @@
 #define USE_MD4C                             0
 
 /* Images. GIF uses crengine's own decoder. SVG uses LunaSVG, vendored in
-   ../lunasvg (docs/archive/svg-covers.md). */
+   ../lunasvg. */
 #define ARBITRARY_IMAGE_SCALE_ENABLED        1
 #define MAX_IMAGE_SCALE_MUL                  2
 #define USE_GIF                              1

@@ -72,7 +72,7 @@ pub enum StyledBlock {
 }
 
 /// A word or cross-reference picked by a touch on a drawn page.
-#[allow(dead_code)] // Lookup's chained lookups (docs/archive/dictionary-selection.md, Phase 3)
+#[allow(dead_code)] // Lookup's chained lookups
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyledWordHit {
     /// What to look up: one word, or a whole underlined reference with its
@@ -596,7 +596,7 @@ impl TextRenderer {
     /// or a word still counts; blank margins, phonetic spans, inert
     /// paragraphs and tokens without letters (numbers, punctuation) don't.
     /// Reuses the layouts drawing cached, so it normally shapes nothing.
-    #[allow(dead_code)] // Lookup's chained lookups (docs/archive/dictionary-selection.md, Phase 3)
+    #[allow(dead_code)] // Lookup's chained lookups
     pub fn hit_test_styled_page(
         &mut self,
         pagination: &mut StyledPagination,

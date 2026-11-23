@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Builds three small EPUBs from Project Gutenberg plain-text files, for the
-Hunspell/language-detection checks (docs/archive/universal-languages.md, Phase 4).
+Hunspell/language-detection checks.
 
     gen-language-testbooks.py <de.txt> <fr.txt> <es.txt> <output dir>
 

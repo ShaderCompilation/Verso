@@ -1,5 +1,5 @@
 //! On-demand Wi-Fi control. The firmware owns saved networks and reconnecting;
-//! Verso only reads and changes whether Wi-Fi is enabled. See docs/device-tools.md.
+//! Verso only reads and changes whether Wi-Fi is enabled.
 
 use anyhow::Result;
 

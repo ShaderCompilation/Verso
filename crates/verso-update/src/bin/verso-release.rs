@@ -1,5 +1,5 @@
 //! Builds and checks Verso releases. scripts/package.sh and scripts/deploy.sh
-//! run it; see docs/setup.md#releasing.
+//! run it.
 //!
 //! ```text
 //! verso-release pack --components dist/components.json --stage DIR --out DIR --version 0.3.0 --released 2026-12-01 --notes FILE
@@ -113,10 +113,7 @@ fn run() -> Result<()> {
                 .collect::<Result<_>>()?;
             let (keys, from): (Vec<&str>, String) = if files.is_empty() {
                 let names = release_key_names();
-                ensure!(
-                    !names.is_empty(),
-                    "no release keys are built in: add crates/verso-update/keys/main.pub (docs/setup.md#release-keys)"
-                );
+                ensure!(!names.is_empty(), "no release keys are built in: add crates/verso-update/keys/main.pub");
                 (release_keys(), format!("built-in keys ({})", names.join(", ")))
             } else {
                 (files.iter().map(String::as_str).collect(), "the given keys".into())

@@ -1,4 +1,4 @@
-//! The Dictionaries tab API (docs/web-app.md, "Dictionaries"): list installed
+//! The Dictionaries tab API: list installed
 //! dictionaries, upload `.zip` (through a `.part` file), `.tar.gz`/`.tgz` and
 //! `.tar.bz2`/`.tbz2` (streamed), or loose StarDict files through staging
 //! batches, unpack `.syn.dz`, validate with `Info::read` and `companion`, and

@@ -1,7 +1,7 @@
 //! The Page layout screen: a sketch of the page with the bars' real values,
 //! and controls for the bars, the progress line and the margins. It edits a
 //! copy of the layout; the reader applies it when the screen closes, so the
-//! book is laid out at most once per visit. See docs/reader-bars.md.
+//! book is laid out at most once per visit.
 use super::bars::{self, BarStyle};
 use crate::document::Typography;
 use crate::geom::{Point, Rect};

@@ -1,5 +1,5 @@
 //! Wi-Fi transfer: a small web app served by the Kindle while its screen
-//! (screens/transfer.rs) is open. See docs/web-app.md.
+//! (screens/transfer.rs) is open.
 //!
 //! A session turns Wi-Fi on if needed, opens port 80, starts the server and
 //! a `verso.local` responder, then watches the address and keeps the Kindle

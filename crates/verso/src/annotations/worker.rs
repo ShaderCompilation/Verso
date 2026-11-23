@@ -28,7 +28,7 @@ pub enum Reply {
     /// `Loaded` when the worker was started with a check.
     Koreader(Result<Option<(koreader::OnOpen, koreader::Progress)>, String>),
 }
-/// The KOReader check on open (docs/koreader-progress.md §4): the book's
+/// The KOReader check on open: the book's
 /// sidecar metadata file and its state as loaded for this open.
 pub struct KoreaderCheck {
     pub path: PathBuf,

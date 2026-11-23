@@ -1,5 +1,4 @@
-//! The performance line logged at a clean exit (docs/device-support.md,
-//! Phase 3), so a problem report from a slower Kindle carries its numbers:
+//! The performance line logged at a clean exit, so a problem report from a slower Kindle carries its numbers:
 //!
 //! `perf: first_frame_ms=812 page_turns=48 turn_median_ms=22.1 turn_p95_ms=35.0 peak_rss_kib=45123`
 //!

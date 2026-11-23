@@ -11,7 +11,7 @@
 # The setting goes back to 0 on reboot. A sleeping Kindle has Wi-Fi off and
 # can't be woken over SSH, so turn this on before leaving it.
 #
-# The SSH host defaults to `kindle` (see docs/setup.md); override with VERSO_KINDLE_HOST.
+# The SSH host defaults to `kindle` (an SSH config alias); override with VERSO_KINDLE_HOST.
 set -euo pipefail
 
 HOST="${VERSO_KINDLE_HOST:-kindle}"

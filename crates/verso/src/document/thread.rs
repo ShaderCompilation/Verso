@@ -339,7 +339,7 @@ pub enum Command {
     },
     Close,
     /// Lays out the books likely to be opened next in a background process
-    /// (docs/reader.md), at these settings. Closes the open book first; a
+    /// at these settings. Closes the open book first; a
     /// run at other settings is replaced. Send only while no reader is open.
     Prelayout {
         layout: Layout,

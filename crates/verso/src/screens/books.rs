@@ -44,7 +44,7 @@ use thumbnails::{CoverSpec, Fit, Thumbnails};
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 /// Untouched this long with the library settled, books likely to be opened
-/// next are laid out in the background (docs/reader.md).
+/// next are laid out in the background.
 const PRELAYOUT_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Idle time on Home before the library's first page is prepared.
 const WARM_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -256,8 +256,7 @@ pub struct Books {
     reader_path: Option<PathBuf>,
     generation: u64,
     engine_error: Option<String>,
-    // The update notice on Home and the dot on the Settings icon
-    // (docs/updates.md, Phase 5).
+    // The update notice on Home and the dot on the Settings icon.
     updates: Arc<crate::update::Updates>,
     /// `Updates::revision` when the notice and dot were last taken.
     update_revision: u64,
@@ -1515,7 +1514,7 @@ impl Books {
         self.apply_pending(cx);
         self.refresh(cx.theme);
         self.save_navigation();
-        // The end-of-book sheet's Next and Home (docs/finished-books.md §3).
+        // The end-of-book sheet's Next and Home.
         match leave {
             // The old page stays up until the next book's first page.
             Leave::Next(book) => return self.open_book(*book, cx.theme),

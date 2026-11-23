@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Builds a Verso release in target/package/<version>/: one archive per
 # component, latest.json (the manifest) and verso-<version>.zip (the
-# first install). Sign it afterwards with scripts/sign-release.sh. See
-# docs/setup.md#releasing and docs/updates.md.
+# first install). Sign it afterwards with scripts/sign-release.sh.
 #
 #   scripts/package.sh                   package the version in Cargo.toml
 #   scripts/package.sh --allow-dirty     package uncommitted changes, for testing
@@ -52,4 +51,4 @@ rm -rf "$OUT"
 target/release/verso-release pack --components dist/components.json --stage target/package/stage \
     --out "$OUT" --version "$VERSION" --released "$RELEASED" --notes "$NOTES"
 ls -l "$OUT"
-echo "==> next: scripts/sign-release.sh, then publish (docs/setup.md#releasing)"
+echo "==> next: scripts/sign-release.sh, then publish"
