@@ -73,6 +73,9 @@ pub struct Settings {
     /// The compact lookup card stays at the bottom (the right in landscape)
     /// rather than moving away from the word. Dictionaries → Lookup card.
     pub dictionary_at_bottom: bool,
+    /// First-time setup was finished or skipped; until then it shows over
+    /// Home on every launch (`screens/setup.rs`).
+    pub setup_done: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -96,6 +99,7 @@ impl Default for Settings {
             koreader_progress: true,
             dictionary_expanded: true,
             dictionary_at_bottom: true,
+            setup_done: false,
         }
     }
 }

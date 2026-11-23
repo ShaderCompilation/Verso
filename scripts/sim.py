@@ -164,13 +164,14 @@ def books(folder, *fixtures):
 
 def state(path, library=None, settings=None, files=None):
     """A fresh data folder. `library` (a folder or a list) goes into
-    settings.json's library_folders; `files` maps file names to JSON."""
+    settings.json's library_folders; `files` maps file names to JSON.
+    First-time setup counts as done unless `settings` says otherwise."""
     shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True)
-    if library is not None or settings:
-        folders = [str(f) for f in (library if isinstance(library, (list, tuple)) else [library]) if f]
-        write_json(path / 'settings.json', {**({'library_folders': folders} if library is not None else {}),
-                                            **(settings or {})})
+    folders = [str(f) for f in (library if isinstance(library, (list, tuple)) else [library]) if f]
+    write_json(path / 'settings.json', {'setup_done': True,
+                                        **({'library_folders': folders} if library is not None else {}),
+                                        **(settings or {})})
     for name, value in (files or {}).items():
         write_json(path / name, value)
     return path

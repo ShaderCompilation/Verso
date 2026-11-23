@@ -19,7 +19,7 @@ pub struct TextMap {
     pub starts: std::collections::HashMap<String, u64>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zone {
     Back,
     Forward,

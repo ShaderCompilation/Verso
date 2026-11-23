@@ -241,6 +241,11 @@ impl App {
         self.exit_code.unwrap_or(0)
     }
 
+    /// Opens a screen over the current one (first-time setup at startup).
+    pub fn push_screen(&mut self, screen: Box<dyn Screen>) {
+        self.apply(Action::Push(screen));
+    }
+
     /// Shows why the launcher went back to this version, over whatever
     /// screen is open, until OK.
     pub fn show_rollback(&mut self, sheet: RollbackSheet) {

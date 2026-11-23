@@ -9,9 +9,11 @@ use crate::document::TextShaping;
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::platform::{Waker, ssh, wifi};
+use crate::reader::Zone;
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::koreader_import::{ImportSheet, Outcome};
+use crate::screens::setup::SetupScreen;
 use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
@@ -144,8 +146,9 @@ pub struct SystemSettings {
     go_back_button: Button,
     offer: Option<OfferSheet>,
     go_back_sheet: Option<GoBackSheet>,
-    // Problem report (on the Device tab)
+    // Help: Run setup again and the problem report (on the Device tab)
     report_label_y: Option<i32>,
+    setup_button: Button,
     report_button: Button,
     report_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
     report_sheet: Option<ReportSheet>,
@@ -300,7 +303,7 @@ impl SystemSettings {
             Rect { y: check_button.rect().bottom() + t.mm(2.0), ..check_button.rect() }
         };
         go_back_button.place(go_back_rect, t);
-        // Problem report: below Wi-Fi on the left in landscape, or below Updates in portrait.
+        // Help: below Wi-Fi on the left in landscape, or below Updates in portrait.
         let report_top = if landscape {
             wifi_top + t.mm(21.0)
         } else {
@@ -311,8 +314,12 @@ impl SystemSettings {
         } else {
             (None, report_top.min(content.bottom() - t.button_h))
         };
+        // Run setup again and the report side by side.
+        let half = (device_left.w - t.mm(3.0)) / 2;
+        let mut setup_button = Button::new("Run setup again", ButtonKind::Secondary);
+        setup_button.place(Rect::new(device_left.x, report_btn_y, half, t.button_h), t);
         let mut report_button = Button::new("Create problem report", ButtonKind::Secondary);
-        report_button.place(Rect::new(device_left.x, report_btn_y, device_left.w, t.button_h), t);
+        report_button.place(Rect::new(device_left.right() - half, report_btn_y, half, t.button_h), t);
         // Advanced: text shaping on the left, the developer section below
         // it or on the right.
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
@@ -385,6 +392,7 @@ impl SystemSettings {
             offer: None,
             go_back_sheet: None,
             report_label_y,
+            setup_button,
             report_button,
             report_rx: None,
             report_sheet: None,
@@ -438,7 +446,7 @@ impl SystemSettings {
         // The corner square at the preview's scale.
         let corner =
             self.corner.on.then(|| t.mm(crate::reader::BOOKMARK_CORNER_MM) * self.zones_preview.w / self.screen.w);
-        draw_zones(cx, self.zones_preview, zones, corner);
+        draw_zones(cx, self.zones_preview, zones, corner, None);
         let note = match zones {
             TapZones::Standard => "Tap the left side to go back and anywhere else to go forward.",
             TapZones::Mirrored => "Tap the right side to go back and anywhere else to go forward.",
@@ -792,8 +800,9 @@ impl SystemSettings {
         self.transfer.draw(cx);
         self.draw_updates(cx);
         if let Some(y) = self.report_label_y {
-            cx.section_label("Problem report", Rect::new(c.x, y, c.w, t.mm(7.0)));
+            cx.section_label("Help", Rect::new(c.x, y, c.w, t.mm(7.0)));
         }
+        self.setup_button.draw(cx);
         self.report_button.draw(cx);
     }
 
@@ -900,6 +909,9 @@ impl SystemSettings {
             self.wifi_pending = Some(on);
         }
         self.updates_gesture(g, cx);
+        if self.setup_button.on_gesture(g) {
+            return Action::Push(Box::new(SetupScreen::new(cx.theme, self.screen, self.store.clone(), None)));
+        }
         if self.report_rx.is_none() && self.report_button.on_gesture(g) {
             self.start_report();
         }
@@ -993,12 +1005,17 @@ impl SystemSettings {
     }
 }
 
-/// A miniature page: the back zone shaded, the menu box outlined, and the
-/// bookmark corner (`corner` pixels a side, when on) outlined with a ribbon.
 /// A switch row in a column `w` wide from `x`: its label beside the toggle
 /// (on two lines when it needs them) and a note below. Places the toggle;
 /// returns the next row's top.
-fn switch_row(cx: &mut DrawCx, toggle: &mut Toggle, (label, note): (&str, &str), x: i32, y: i32, w: i32) -> i32 {
+pub(super) fn switch_row(
+    cx: &mut DrawCx,
+    toggle: &mut Toggle,
+    (label, note): (&str, &str),
+    x: i32,
+    y: i32,
+    w: i32,
+) -> i32 {
     let t = cx.theme;
     let label_w = w - Toggle::size(t).0 - t.mm(3.0);
     // The note starts just below the label, as under a one-line label.
@@ -1018,33 +1035,41 @@ fn switch_row(cx: &mut DrawCx, toggle: &mut Toggle, (label, note): (&str, &str),
     top + note_h + t.mm(5.0)
 }
 
-fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones, corner: Option<i32>) {
+/// A miniature page: the back zone shaded, the menu box outlined, and the
+/// bookmark corner (`corner` pixels a side, when on) outlined with a ribbon.
+/// `tried`, the zone last tapped on it (setup), is drawn black.
+pub(super) fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones, corner: Option<i32>, tried: Option<Zone>) {
     let t = cx.theme;
     // Zones inside the outline, so the shading keeps its rounded corners.
     let inner = page.inset(t.border);
     let back = zones.back(inner);
     let menu = TapZones::menu(page);
-    cx.canvas.fill_rounded_rect(page, t.radius, PAPER);
-    cx.canvas.fill_rounded_rect(back, t.radius - t.border as f32, FILL_ZONE);
+    let ink = |zone: Zone| if tried == Some(zone) { PAPER } else { INK };
+    let page_fill = if tried == Some(Zone::Forward) { INK } else { PAPER };
+    let back_fill = if tried == Some(Zone::Back) { INK } else { FILL_ZONE };
+    cx.canvas.fill_rounded_rect(page, t.radius, page_fill);
+    cx.canvas.fill_rounded_rect(back, t.radius - t.border as f32, back_fill);
     // Square off the shading's inner edge.
     let half = back.w / 2;
-    cx.fill(if back.x == inner.x { back.split_right(half).0 } else { back.split_left(half).0 }, FILL_ZONE);
-    cx.canvas.fill_rounded_rect(menu, t.radius, PAPER);
+    cx.fill(if back.x == inner.x { back.split_right(half).0 } else { back.split_left(half).0 }, back_fill);
+    let menu_fill = if tried == Some(Zone::Menu) { INK } else { PAPER };
+    cx.canvas.fill_rounded_rect(menu, t.radius, menu_fill);
     cx.canvas.stroke_rounded_rect(menu, t.radius, t.hairline as f32, INK2);
     if let Some(size) = corner {
         let square = crate::reader::bookmark_corner(inner, size);
-        cx.canvas.fill_rounded_rect(square, t.radius, PAPER);
+        let fill = if tried == Some(Zone::Bookmark) { INK } else { PAPER };
+        cx.canvas.fill_rounded_rect(square, t.radius, fill);
         cx.canvas.stroke_rounded_rect(square, t.radius, t.hairline as f32, INK2);
-        cx.icon(Icon::BookmarkFilled, square, size * 3 / 5, INK);
+        cx.icon(Icon::BookmarkFilled, square, size * 3 / 5, ink(Zone::Bookmark));
     }
     cx.canvas.stroke_rounded_rect(page, t.radius, t.border as f32, INK);
     // Labels sit below the menu box so they never overlap it.
     let band = Rect::new(page.x, menu.bottom(), page.w, page.bottom() - menu.bottom());
     let forward = if back.x == inner.x { inner.split_left(back.w).1 } else { inner.split_right(back.w).1 };
-    let style = t.caption.gray(INK);
-    cx.line("Back", style, Rect { x: back.x, w: back.w, ..band }, HAlign::Center);
-    cx.line("Next", style, Rect { x: forward.x, w: forward.w, ..band }, HAlign::Center);
-    cx.line("Menu", t.caption.gray(INK2), menu, HAlign::Center);
+    cx.line("Back", t.caption.gray(ink(Zone::Back)), Rect { x: back.x, w: back.w, ..band }, HAlign::Center);
+    cx.line("Next", t.caption.gray(ink(Zone::Forward)), Rect { x: forward.x, w: forward.w, ..band }, HAlign::Center);
+    let menu_ink = if tried == Some(Zone::Menu) { PAPER } else { INK2 };
+    cx.line("Menu", t.caption.gray(menu_ink), menu, HAlign::Center);
 }
 /// The shaded back zone in the tap-zone preview (an exact panel gray).
 const FILL_ZONE: u8 = 0xdd;

@@ -15,6 +15,7 @@ pub mod gallery;
 pub mod koreader_import;
 pub mod reader;
 pub mod reader_menu;
+pub mod setup;
 pub mod styled_sheet;
 pub mod system;
 pub mod text_sheet;
@@ -55,8 +56,8 @@ pub enum Action {
 
 /// What the screens were showing before the display turned, so the screens
 /// rebuilt at the new size show the same: Home or the Library folder and
-/// page (saved in `Navigation`), the open book at its saved position, and
-/// Settings on top.
+/// page (saved in `Navigation`), the open book at its saved position,
+/// Settings, and setup on top.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RelayoutState {
     /// The open book's id.
@@ -65,6 +66,8 @@ pub struct RelayoutState {
     pub library_open: bool,
     /// Settings was open over the other screens.
     pub in_settings: bool,
+    /// First-time setup was open on top, on this page.
+    pub setup: Option<setup::SetupResume>,
     /// The last book generation used, so the reopened book's replies never
     /// mix with ones still on their way to the old reader.
     pub book_generation: u64,

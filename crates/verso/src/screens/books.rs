@@ -3528,8 +3528,11 @@ fn relayout_stack_from(
     let open = books.open_book_id().map(str::to_owned);
     let mut screens: Vec<Box<dyn Screen>> = vec![Box::new(books)];
     if state.in_settings {
-        let settings = crate::screens::system::SystemSettings::new(t, screen, store, waker);
+        let settings = crate::screens::system::SystemSettings::new(t, screen, store.clone(), waker);
         screens.push(Box::new(settings.on_display_tab().with_open_book(open)));
+    }
+    if let Some(setup) = &state.setup {
+        screens.push(Box::new(crate::screens::setup::SetupScreen::resume(t, screen, store, setup)));
     }
     screens
 }
@@ -4017,7 +4020,13 @@ mod tests {
         let state = snapshot(&[&books]);
         assert_eq!(
             state,
-            RelayoutState { open_book: Some(id.clone()), library_open: true, in_settings: false, book_generation: 1 }
+            RelayoutState {
+                open_book: Some(id.clone()),
+                library_open: true,
+                in_settings: false,
+                setup: None,
+                book_generation: 1
+            }
         );
         books.on_quit()?;
         drop(books);
@@ -4034,17 +4043,21 @@ mod tests {
         assert_eq!(books.navigation.folder.as_ref(), Some(&nested));
         drop(books);
 
-        // Settings over a book comes back on top of the reopened book.
+        // Settings and setup over a book come back on top of the reopened book.
         let mut books = browsing_books(&t, portrait, worker.clone(), store.clone());
         with_cx(&t, portrait, |cx| books.open(id.clone(), cx));
         let settings = crate::screens::system::SystemSettings::new(&t, portrait, store.clone(), worker.waker());
-        let state = snapshot(&[&books, &settings]);
+        // Setup run again over Settings keeps its page.
+        let resume = crate::screens::setup::SetupResume { page: 1, note: None };
+        let setup = crate::screens::setup::SetupScreen::resume(&t, portrait, store.clone(), &resume);
+        let state = snapshot(&[&books, &settings, &setup]);
         assert!(state.in_settings && state.open_book.as_deref() == Some(id.as_str()));
+        assert_eq!(state.setup, Some(resume));
         books.on_quit()?;
-        drop((books, settings));
+        drop((books, settings, setup));
         let books = Books::with_library(&t, landscape, worker.clone(), store.clone(), Some(LibraryWorker::stub()));
         let stack = relayout_stack_from(books, &state, &t, store.clone(), worker.waker());
-        assert_eq!(stack.len(), 2);
+        assert_eq!(stack.len(), 3);
         let after = snapshot(&stack.iter().map(|s| s.as_ref()).collect::<Vec<_>>());
         assert_eq!(after, RelayoutState { book_generation: state.book_generation + 1, ..state });
         drop(stack);

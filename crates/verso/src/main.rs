@@ -294,7 +294,13 @@ fn run() -> Result<i32> {
     }
     let model = platform.model();
     app.set_light_range(model.light_range);
-    if screens::untested::due(&store.settings(), &model) {
+    // First-time setup over Home; it shows the untested-model line itself.
+    let home = matches!(opts.screen.as_deref(), None | Some("home"));
+    if home && screens::setup::due(&store.settings()) {
+        log::info!("showing first-time setup");
+        let note = screens::setup::untested_note(&store, &model);
+        app.push_screen(Box::new(screens::setup::SetupScreen::new(&theme, bounds, store.clone(), note)));
+    } else if screens::untested::due(&store.settings(), &model) {
         log::info!("showing the untested-model notice: {}", model.name);
         app.show_notice(app::Notice::Untested(screens::untested::UntestedSheet::new(
             &theme,
