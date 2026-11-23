@@ -1837,7 +1837,9 @@ mod tests {
         let worker = Worker::new(store.clone(), roots.clone(), Waker::new(|| {}));
         let added = finished(&worker).0.expect("an added book publishes the index").index;
         assert_eq!(added.books.iter().filter(|b| b.available).count(), 2);
-        assert_eq!(store.library(), added);
+        // The same books are saved; fingerprints may be saved after publishing.
+        let listed = |index: &LibraryIndex| index.books.iter().map(|b| (b.id.clone(), b.available)).collect::<Vec<_>>();
+        assert_eq!(listed(&store.library()), listed(&added));
         drop(worker);
         std::fs::remove_file(books.join("added.epub"))?;
         let worker = Worker::new(store.clone(), roots, Waker::new(|| {}));

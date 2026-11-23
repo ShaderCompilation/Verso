@@ -3985,7 +3985,10 @@ mod tests {
         store.save_book(&book.id, &BookState { last_opened: 7, progress: 1000, ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        // No library worker: its scan of `root` would replace the fixture's
+        // index and Home summary mid-test, so the book could vanish.
+        let mut books =
+            Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
         let mut toast = None;
         {
             let mut cx = EventCx {
