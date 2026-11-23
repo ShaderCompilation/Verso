@@ -20,6 +20,9 @@ mod dictionary;
 mod document;
 mod geom;
 mod gfx;
+// Used by the check on open and the bulk import (docs/koreader-progress.md, Phases 2–3).
+#[cfg_attr(not(test), allow(dead_code))]
+mod koreader;
 mod library;
 mod logging;
 mod page_layout;

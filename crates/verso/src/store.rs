@@ -55,6 +55,8 @@ pub struct Settings {
     /// Untested Kindle models whose notice was dismissed
     /// (`DeviceModel::key`), so it shows once per model.
     pub untested_seen: Vec<String>,
+    /// When a book opens, offer KOReader's newer position. Settings → Reading.
+    pub koreader_progress: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -75,6 +77,7 @@ impl Default for Settings {
             check_updates: true,
             folder_preview: FolderPreview::default(),
             untested_seen: Vec::new(),
+            koreader_progress: true,
         }
     }
 }
@@ -148,6 +151,10 @@ pub struct BookState {
     /// The language detected from the book's text on its first open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<crate::library::language::DetectedLanguage>,
+    /// The last KOReader position offered, taken or imported for this book
+    /// (docs/koreader-progress.md).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub koreader_seen: Option<crate::koreader::Seen>,
 }
 #[derive(Clone)]
 pub struct Store {
@@ -693,11 +700,22 @@ fn folder_paths(settings: Settings, override_folders: Option<std::ffi::OsString>
 mod tests {
     use super::*;
     #[test]
+    fn koreader_seen_round_trips_and_is_left_out_when_unset() -> Result<()> {
+        let plain = serde_json::to_string(&BookState::default())?;
+        assert!(!plain.contains("koreader"), "{plain}");
+        let seen = crate::koreader::Seen { modified: 1763800000, position: Position("/body/p[3]".into()) };
+        let state = BookState { koreader_seen: Some(seen.clone()), ..Default::default() };
+        let restored: BookState = serde_json::from_str(&serde_json::to_string(&state)?)?;
+        assert_eq!(restored.koreader_seen, Some(seen));
+        Ok(())
+    }
+    #[test]
     fn existing_settings_default_to_stack_and_amazon_round_trips() -> Result<()> {
         let mut settings: Settings = serde_json::from_str(r#"{"footer":false}"#)?;
         settings.normalize();
         assert_eq!(settings.sleep_screen, SleepScreen::Cover);
         assert_eq!(settings.folder_preview, FolderPreview::Stack);
+        assert!(settings.koreader_progress, "KOReader progress is on by default, in existing files too");
         // Covers is disabled: a saved choice reads as Stack.
         let mut covers: Settings = serde_json::from_str(r#"{"folder_preview":"covers"}"#)?;
         covers.normalize();
