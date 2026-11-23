@@ -10,6 +10,7 @@ pub mod dictionary_folders;
 pub mod folders;
 pub mod footnote;
 pub mod gallery;
+pub mod koreader_import;
 pub mod reader;
 pub mod reader_menu;
 pub mod styled_sheet;

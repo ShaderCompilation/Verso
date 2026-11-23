@@ -576,7 +576,12 @@ impl App {
                 let Some(services) = &self.services else { return };
                 let (store, waker) = (services.store.clone(), services.waker.clone());
                 let screen: Box<dyn Screen> = if event == DrawerEvent::Settings {
-                    Box::new(crate::screens::system::SystemSettings::new(&self.theme, bounds, store, waker))
+                    // The KOReader import leaves out a book open under Settings.
+                    let open = self.relayout_state().open_book;
+                    Box::new(
+                        crate::screens::system::SystemSettings::new(&self.theme, bounds, store, waker)
+                            .with_open_book(open),
+                    )
                 } else {
                     Box::new(crate::screens::transfer::TransferScreen::new(&self.theme, bounds, store, waker))
                 };

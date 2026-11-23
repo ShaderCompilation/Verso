@@ -11,6 +11,7 @@ use crate::gfx::{HAlign, Icon};
 use crate::platform::{Waker, ssh, wifi};
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
+use crate::screens::koreader_import::{ImportSheet, Outcome};
 use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
@@ -82,10 +83,17 @@ pub struct SystemSettings {
     orientation: Segmented,
     flash: Segmented,
     previews: Segmented,
-    // Library: folders on the left, dictionaries below or (landscape) right.
+    // Library: folders on the left; the dictionaries and KOReader entries
+    // below them side by side, or (landscape) one above the other on the right.
     library: Rect,
     dictionaries: Rect,
     dictionary_entry: List,
+    koreader_area: Rect,
+    /// "Import progress" from KOReader.
+    koreader_entry: List,
+    import_sheet: Option<ImportSheet>,
+    /// The book open in the reader under Settings, which the import leaves out.
+    open_book: Option<String>,
     folders: Vec<PathBuf>,
     removes: Vec<IconButton>,
     folder_row: i32,
@@ -221,26 +229,38 @@ impl SystemSettings {
         add_folder.place(Rect::new(content.x, 0, content.w, t.button_h), t);
         let mut folder_pager = Pager::new(1);
         folder_pager.place(Rect::new(content.x, content.bottom() - t.mm(11.0), content.w, t.mm(11.0)), t);
-        // The dictionary entry: a section label and one row. Landscape is too
-        // short for it below the library folders.
+        // The dictionary and KOReader entries: a section label and one row
+        // each. Landscape is too short for them below the library folders,
+        // and a 6" portrait screen has room for only one row of entries
+        // there, so they stand side by side.
         let entry_h = t.mm(8.0) + t.row2;
-        let (library, dictionaries) = if screen.w > screen.h {
+        let landscape = screen.w > screen.h;
+        let (library, dictionaries, koreader_area) = if landscape {
             let gap = t.mm(10.0);
             let w = (content.w - gap) / 2;
             let right = Rect { x: content.right() - w, w, ..content };
             // The folder pager stays under the folders.
             folder_pager.place(Rect { w, ..folder_pager.rect() }, t);
-            (Rect { w, ..content }, Rect { y: body, h: entry_h, ..right })
+            let dictionaries = Rect { y: body, h: entry_h, ..right };
+            (Rect { w, ..content }, dictionaries, Rect { y: dictionaries.bottom() + t.mm(6.0), ..dictionaries })
         } else {
             let y = folder_pager.rect().y - t.mm(2.0) - entry_h;
-            (content, Rect { y, h: entry_h, ..content })
+            let half = screen.x + screen.w / 2;
+            let left = Rect::new(content.x, y, half - t.margin - content.x, entry_h);
+            (content, left, Rect { x: half + t.margin, w: content.right() - half - t.margin, ..left })
         };
         let mut dictionary_entry = List::new(vec![Row::new("Dictionaries").sub("Sets, order and folders").chevron()]);
-        let entry_row = Rect::new(screen.x, dictionaries.y + t.mm(8.0), screen.w, t.row2);
-        let entry_row =
-            if screen.w > screen.h { Rect { x: dictionaries.x, w: dictionaries.w, ..entry_row } } else { entry_row };
-        let pad = if screen.w > screen.h { 0 } else { t.margin };
-        dictionary_entry.place(entry_row, t.row2, pad);
+        let mut koreader_entry = List::new(vec![Row::new("Import progress").sub("Positions and finished books")]);
+        if landscape {
+            dictionary_entry.place(Rect { y: dictionaries.y + t.mm(8.0), h: t.row2, ..dictionaries }, t.row2, 0);
+            koreader_entry.place(Rect { y: koreader_area.y + t.mm(8.0), h: t.row2, ..koreader_area }, t.row2, 0);
+        } else {
+            // Rows reach the screen edges, their text inset by the margin.
+            let half = screen.x + screen.w / 2;
+            let row = |x: i32, right: i32| Rect::new(x, dictionaries.y + t.mm(8.0), right - x, t.row2);
+            dictionary_entry.place(row(screen.x, half), t.row2, t.margin);
+            koreader_entry.place(row(half, screen.right()), t.row2, t.margin);
+        }
 
         // Landscape is too short for the developer section below the rest.
         let mut sleep =
@@ -326,6 +346,10 @@ impl SystemSettings {
             library,
             dictionaries,
             dictionary_entry,
+            koreader_area,
+            koreader_entry,
+            import_sheet: None,
+            open_book: None,
             folders: Vec::new(),
             removes: Vec::new(),
             folder_row: t.row,
@@ -373,6 +397,13 @@ impl SystemSettings {
         this.sync_ssh_toggle();
         this.remember_hostname();
         this
+    }
+
+    /// Settings over an open book (from the top drawer): the KOReader import
+    /// leaves that book out.
+    pub fn with_open_book(mut self, id: Option<String>) -> Self {
+        self.open_book = id;
+        self
     }
 
     /// Settings reopened after turning the screen, where the choice was made.
@@ -592,6 +623,9 @@ impl SystemSettings {
         let d = self.dictionaries;
         cx.section_label("Dictionaries", Rect::new(d.x, d.y, d.w, t.mm(8.0)));
         self.dictionary_entry.draw(cx);
+        let k = self.koreader_area;
+        cx.section_label("KOReader", Rect::new(k.x, k.y, k.w, t.mm(8.0)));
+        self.koreader_entry.draw(cx);
     }
 
     fn library_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
@@ -603,6 +637,11 @@ impl SystemSettings {
             && self.folder_pager.on_swipe(dir).is_some()
         {
             self.place_folders(cx.theme);
+            return Action::None;
+        }
+        if let Some(ListEvent::Tapped(_)) = self.koreader_entry.on_gesture(g) {
+            let (store, waker) = (self.store.clone(), self.waker.clone());
+            self.import_sheet = Some(ImportSheet::open(cx.theme, self.screen, store, waker, self.open_book.clone()));
             return Action::None;
         }
         if let Some(ListEvent::Tapped(_)) = self.dictionary_entry.on_gesture(g) {
@@ -1040,6 +1079,16 @@ fn ssh_note(pending: Option<bool>, s: &ssh::Status, wifi: Option<bool>, rechecki
     }
 }
 
+impl SystemSettings {
+    fn import_closed(&mut self, outcome: Outcome, cx: &mut EventCx) {
+        self.import_sheet = None;
+        if let Outcome::Imported(message) = outcome {
+            cx.toast(message, None);
+        }
+        cx.redraw();
+    }
+}
+
 impl Screen for SystemSettings {
     fn relayout_state(&self, state: &mut RelayoutState) {
         state.in_settings = true;
@@ -1063,9 +1112,18 @@ impl Screen for SystemSettings {
         if let Some(sheet) = &self.report_sheet {
             sheet.draw(cx);
         }
+        if let Some(sheet) = &self.import_sheet {
+            sheet.draw(cx);
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
+        if let Some(sheet) = &mut self.import_sheet {
+            if let Some(outcome) = sheet.on_gesture(&g, cx.theme) {
+                self.import_closed(outcome, cx);
+            }
+            return Action::None;
+        }
         if let Some(sheet) = &mut self.report_sheet {
             if sheet.on_gesture(&g) {
                 self.report_sheet = None;
@@ -1117,6 +1175,14 @@ impl Screen for SystemSettings {
     /// Called when the folder picker closes (show its addition) and when
     /// the update check finishes.
     fn on_background(&mut self, cx: &mut EventCx) {
+        if let Some(sheet) = &mut self.import_sheet {
+            let mut changed = false;
+            if let Some(outcome) = sheet.on_background(cx.theme, &mut changed) {
+                self.import_closed(outcome, cx);
+            } else if changed {
+                cx.redraw();
+            }
+        }
         if let Some(rx) = &self.report_rx {
             match rx.try_recv() {
                 Ok(res) => {
@@ -1194,7 +1260,9 @@ impl Screen for SystemSettings {
     }
     /// Scripted screenshots wait for a running update check or report build.
     fn busy(&self) -> bool {
-        self.update_status.checking || self.report_rx.is_some()
+        self.update_status.checking
+            || self.report_rx.is_some()
+            || self.import_sheet.as_ref().is_some_and(ImportSheet::busy)
     }
     fn run_pending_work(&mut self, cx: &mut EventCx) -> Action {
         // "Going back…" is on screen: the launcher does the rest.
@@ -1421,6 +1489,113 @@ mod tests {
                 assert_eq!(store.settings().koreader_progress, on, "{w}x{h}");
             }
         }
+        Ok(())
+    }
+
+    fn draw(s: &mut SystemSettings, t: &Theme, w: i32, h: i32) {
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        let (mut canvas, mut text, mut icons) =
+            (Canvas::new(w as u32, h as u32), TextRenderer::new(), IconRenderer::default());
+        let mut hints = vec![];
+        s.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, t, &mut hints));
+    }
+
+    fn tap(s: &mut SystemSettings, t: &Theme, screen: Rect, rect: Rect) -> Option<String> {
+        let p = crate::geom::Point::new(rect.center().x, rect.center().y);
+        let mut toast = None;
+        let mut cx = EventCx {
+            theme: t,
+            screen,
+            now: Instant::now(),
+            toast: &mut toast,
+            forced: &mut vec![],
+            needs_redraw: &mut false,
+            battery: None,
+        };
+        s.on_gesture(Gesture::Down(p), &mut cx);
+        s.on_gesture(Gesture::Tap(p), &mut cx);
+        toast.map(|t| t.text)
+    }
+
+    /// Waits for the import sheet's job, as the main loop would.
+    fn settle(s: &mut SystemSettings, t: &Theme, screen: Rect) -> Option<String> {
+        let mut toast = None;
+        for _ in 0..1000 {
+            let mut cx = EventCx {
+                theme: t,
+                screen,
+                now: Instant::now(),
+                toast: &mut toast,
+                forced: &mut vec![],
+                needs_redraw: &mut false,
+                battery: None,
+            };
+            s.on_background(&mut cx);
+            if !s.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        toast.map(|t| t.text)
+    }
+
+    #[test]
+    fn koreader_import_row_fits_every_screen_and_imports() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().join("data"));
+        for (dpi, w, h) in [(300, 1272, 1696), (300, 1696, 1272), (167, 600, 800), (167, 800, 600)] {
+            let t = Theme::for_dpi(dpi);
+            let screen = Rect::new(0, 0, w, h);
+            let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
+            s.tab = Tab::Library;
+            draw(&mut s, &t, w, h);
+            let (d, k) = (s.dictionaries, s.koreader_area);
+            assert!(d.bottom() <= k.y || d.right() <= k.x, "{w}x{h}: {d:?} {k:?}");
+            assert!(k.bottom() <= s.content.bottom() && k.right() <= s.content.right(), "{w}x{h}: {k:?}");
+            assert!(k.y > s.add_folder.rect().bottom() || k.x >= s.library.right(), "{w}x{h}: below the folders");
+            if w > h {
+                assert_eq!((d.x, k.x), (s.library.right() + t.mm(10.0), d.x), "{w}x{h}: right column");
+            } else {
+                assert_eq!(d.y, k.y, "{w}x{h}: side by side");
+            }
+        }
+
+        // A book with KOReader progress, and one open under Settings.
+        let lib = dir.path().join("lib");
+        let books: Vec<_> = (0..2)
+            .map(|i| crate::library::Book {
+                path: lib.join(format!("{i}.epub")),
+                ..crate::library::selection_tests::book(i)
+            })
+            .collect();
+        for book in &books {
+            let path = crate::koreader::metadata_path(&book.path).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(&path, "return { last_xpointer = '/k', percent_finished = 0.25 }")?;
+        }
+        store.save_library(&crate::library::LibraryIndex { books, ..Default::default() })?;
+        let (t, screen) = (Theme::for_dpi(300), Rect::new(0, 0, 1272, 1696));
+        let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {})).with_open_book(Some("1".into()));
+        s.tab = Tab::Library;
+        let row = Rect { y: s.koreader_area.y + t.mm(8.0), h: t.row2, ..s.koreader_area };
+        // Cancel: nothing written.
+        tap(&mut s, &t, screen, row);
+        assert!(s.import_sheet.is_some());
+        settle(&mut s, &t, screen);
+        draw(&mut s, &t, 1272, 1696);
+        let cancel = s.import_sheet.as_ref().unwrap().button("Cancel").unwrap();
+        tap(&mut s, &t, screen, cancel);
+        assert!(s.import_sheet.is_none());
+        assert!(store.book("0").position.0.is_empty());
+        // Import: the open book is left out.
+        tap(&mut s, &t, screen, row);
+        settle(&mut s, &t, screen);
+        let import = s.import_sheet.as_ref().unwrap().button("Import").unwrap();
+        assert_eq!(tap(&mut s, &t, screen, import), None);
+        let toast = settle(&mut s, &t, screen);
+        assert_eq!(toast.as_deref(), Some("Imported KOReader progress for 1 book"));
+        assert!(s.import_sheet.is_none());
+        assert_eq!((store.book("0").position.0.as_str(), store.book("1").position.0.as_str()), ("/k", ""));
         Ok(())
     }
 

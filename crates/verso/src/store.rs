@@ -180,6 +180,9 @@ pub struct Store {
     /// Counts external book-state writes through this store and its clones, so
     /// the position writer knows when to re-read its cached `BookState`.
     book_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Counts bulk state writes (the KOReader import), so the library
+    /// reloads every cached state when it comes back from Settings.
+    bulk_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The update check, shared by startup and Settings; made on first use.
     updates: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::update::Updates>>>,
     /// Set when the web app's Files tab wrote into Verso's live data
@@ -224,6 +227,7 @@ impl Store {
             settings_saves: Default::default(),
             settings_cache: Default::default(),
             book_saves: Default::default(),
+            bulk_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),
@@ -363,6 +367,30 @@ impl Store {
             }
         }
         (changed, error)
+    }
+    /// Writes many books' states in one pass (the KOReader import), stopping
+    /// at the first failure. Home and the opened order aren't updated per
+    /// book: the caller rebuilds them once. Returns how many were written,
+    /// and the error that stopped the rest.
+    pub fn save_books(&self, states: &[(String, BookState)]) -> (usize, Option<anyhow::Error>) {
+        let mut written = 0;
+        let mut error = None;
+        for (id, state) in states {
+            if let Err(e) = atomic(&self.book_path(id), state) {
+                error = Some(e.context(format!("saving the reading state of {id}")));
+                break;
+            }
+            written += 1;
+        }
+        if written > 0 {
+            self.book_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.bulk_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        (written, error)
+    }
+    /// Changes whenever `save_books` wrote something; compare to notice it.
+    pub fn bulk_saves(&self) -> u64 {
+        self.bulk_saves.load(std::sync::atomic::Ordering::Acquire)
     }
     /// Ids that have a reading-state record, from one directory listing, so
     /// books never opened cost no failed file open. None when listing fails.
@@ -533,6 +561,7 @@ impl Store {
             settings_saves: Default::default(),
             settings_cache: Default::default(),
             book_saves: Default::default(),
+            bulk_saves: Default::default(),
             dictionary_service: Default::default(),
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),

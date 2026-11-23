@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""KOReader progress, Phase 2 (docs/koreader-progress.md §4): the card that
-offers KOReader's newer position when a book opens, in portrait, landscape
-and on a 6" screen; Go there with the way back, Stay here, a page turn, the
-setting off, a position that isn't in the book, and the Settings row.
+"""KOReader progress, Phases 2–3 (docs/koreader-progress.md §4–5): the card
+that offers KOReader's newer position when a book opens, in portrait,
+landscape and on a 6" screen; Go there with the way back, Stay here, a page
+turn, the setting off, a position that isn't in the book, and the Settings
+row. Then the bulk import: Settings → Library's KOReader row, the preview
+sheet, Import, and the saved states.
 
 Run cargo build first. Outputs go to gitignored screenshots/koreader-progress/,
 each scene with isolated state. Taps come from the theme's millimetre sizes,
@@ -62,18 +64,19 @@ def sidecar(position, age=THREE_DAYS):
     return path
 
 
-def run(name, device, settings, script, state=None, screen=None, book_state=None):
+def run(name, device, settings, script, state=None, screen=None, book_state=None, books=None, env_extra=None):
     fresh = state is None
     state = state or OUT / 'state' / name
     if fresh:
         shutil.rmtree(state, ignore_errors=True)
         state.mkdir(parents=True)
-        (state / 'settings.json').write_text(json.dumps({'library_folders': [str(OUT / 'book')], **settings}))
+        (state / 'settings.json').write_text(json.dumps({'library_folders': [str(books or OUT / 'book')], **settings}))
     if book_state is not None:
         (state / 'books').mkdir(exist_ok=True)
         (state / 'books' / f'{book_id(state)}.json').write_text(json.dumps(book_state))
     env = {k: v for k, v in os.environ.items() if not k.startswith('VERSO_SIM_')}
-    env.update(VERSO_DATA=str(state), VERSO_BOOKS=str(OUT / 'book'), VERSO_SIM_BATTERY='82', RUST_LOG='error')
+    env.update(VERSO_DATA=str(state), VERSO_BOOKS=str(books or OUT / 'book'), VERSO_SIM_BATTERY='82', RUST_LOG='error')
+    env.update(env_extra or {})
     args = [str(ROOT / 'target/debug/verso'), '--device', device, '--screenshot', str(OUT / f'{name}.png'), *script]
     if screen:
         args += ['--screen', screen]
@@ -152,7 +155,115 @@ def main():
 
     sidecar(KOREADER)
     assert source.read_bytes() == before, 'KOReader files stay untouched'
+    bulk_import()
     print(OUT)
+
+
+def library_tab(s):
+    """Settings → Library: the third of five tabs."""
+    margin = s.mm(5)
+    return s.tap(margin + 2.5 * (s.w - 2 * margin) / 5, s.mm(13) + margin + s.mm(10) / 2)
+
+
+def import_row(s):
+    """The KOReader row: beside Dictionaries in portrait, below it on the right in landscape."""
+    margin = s.mm(5)
+    if s.w > s.h:
+        column = (s.w - 2 * margin - s.mm(10)) / 2
+        return s.tap(s.w - margin - column / 2, s.mm(34 + 23 + 6 + 8 + 7.5))
+    return s.tap(s.w * 0.75, s.h - s.mm(5 + 11 + 2 + 23 - 8 - 7.5))
+
+
+def sheet_buttons(s):
+    """Cancel and Import at the bottom of the import sheet."""
+    margin = s.mm(5)
+    w = (s.w - 2 * margin - s.mm(3)) / 2
+    y = s.h - s.mm(10)
+    return s.tap(margin + w / 2, y), s.tap(margin + w + s.mm(3) + w / 2, y)
+
+
+def bulk_import():
+    """Phase 3: four books with KOReader data (one finished, one unreadable)
+    and one without, imported from Settings → Library."""
+    library = OUT / 'library'
+    shutil.rmtree(library, ignore_errors=True)
+    library.mkdir(parents=True)
+    fixture = (ROOT / 'crates/verso/tests/fixtures/selection.epub').read_bytes()
+    # Distinct sizes give distinct ids (the id hashes the name and size).
+    sidecars = {
+        'Current.epub': ('reading', 0.78, 3600),
+        'Finished.epub': ('complete', 1.0, THREE_DAYS),
+        'Started.epub': ('reading', 0.12, 2 * THREE_DAYS),
+        'Broken.epub': (None, 0, THREE_DAYS),
+        'Plain.epub': None,
+    }
+    now = time.time()
+    for n, (name, data) in enumerate(sidecars.items()):
+        (library / name).write_bytes(fixture + b'\0' * n)
+        if data is None:
+            continue
+        status, percent, age = data
+        folder = library / (name[:-5] + '.sdr')
+        folder.mkdir()
+        path = folder / 'metadata.epub.lua'
+        if status is None:
+            path.write_text('return { last_xpointer = os.exit() }\n')
+        else:
+            path.write_text('return {\n'
+                            f'    ["last_xpointer"] = "{KOREADER}",\n'
+                            f'    ["percent_finished"] = {percent},\n'
+                            f'    ["summary"] = {{ ["status"] = "{status}" }},\n}}\n')
+        os.utime(path, (now - age, now - age))
+    koreader = OUT / 'koreader'
+    koreader.mkdir(exist_ok=True)
+    opened = int(now - 1800)
+    (koreader / 'history.lua').write_text(
+        f'return {{ [1] = {{ ["file"] = "{library / "Current.epub"}", ["time"] = {opened} }} }}\n')
+    env = {'VERSO_KOREADER': str(koreader)}
+    checksums = {p: p.read_bytes() for p in library.rglob('*.lua')}
+
+    def scanned(name, device, settings):
+        """A state whose library.json has the five books, from a scan run."""
+        state = run(name, device, settings, [], books=library, env_extra=env)
+        assert len(json.loads((state / 'library.json').read_text())['books']) == 5
+        return state
+
+    for device, settings, suffix in (('pw6', {}, ''), ('pw6', {'orientation': 'landscape'}, '-landscape'),
+                                     ('basic-167', {}, '-basic-167'),
+                                     ('basic-167', {'orientation': 'landscape'}, '-landscape-basic-167')):
+        w, h, dpi = devices.DEVICES[device]
+        s = devices.Screen(h, w, dpi) if settings else devices.Screen(w, h, dpi)
+        state = scanned(f'import-scan{suffix}', device, settings)
+        run(f'settings-library{suffix}', device, settings, library_tab(s), state=state, screen='settings',
+            books=library, env_extra=env)
+        run(f'import-preview{suffix}', device, settings, [*library_tab(s), *import_row(s)], state=state,
+            screen='settings', books=library, env_extra=env)
+        assert not list((state / 'books').glob('*.json')), 'the preview writes nothing'
+
+    # Import, then the toast over Settings.
+    s = devices.Screen(*devices.DEVICES['pw6'])
+    cancel, import_ = sheet_buttons(s)
+    state = scanned('import-done', 'pw6', {})
+    run('import-cancelled', 'pw6', {}, [*library_tab(s), *import_row(s), *cancel], state=state, screen='settings',
+        books=library, env_extra=env)
+    assert not list((state / 'books').glob('*.json')), 'Cancel writes nothing'
+    run('import-done', 'pw6', {}, [*library_tab(s), *import_row(s), *import_], state=state, screen='settings',
+        books=library, env_extra=env)
+    ids = {b['path'].rsplit('/', 1)[1]: b['id'] for b in json.loads((state / 'library.json').read_text())['books']}
+    saved_state = lambda name: json.loads((state / 'books' / f'{ids[name]}.json').read_text())
+    current, finished, started = saved_state('Current.epub'), saved_state('Finished.epub'), saved_state('Started.epub')
+    assert current['position'] == KOREADER and current['last_opened'] == opened, current
+    assert finished['finished'] and finished['progress'] == 10000, finished
+    assert started['progress'] == 1200 and 'koreader_seen' in started, started
+    assert not (state / 'books' / f'{ids["Plain.epub"]}.json').exists()
+    assert not (state / 'books' / f'{ids["Broken.epub"]}.json').exists()
+    home = json.loads((state / 'home.json').read_text())
+    assert home['books'][0]['book']['id'] == ids['Current.epub'], 'Continue reading is the current KOReader book'
+    # Home after the import, and the same import again: up to date.
+    run('import-home', 'pw6', {}, [], state=state, books=library, env_extra=env)
+    run('import-again', 'pw6', {}, [*library_tab(s), *import_row(s)], state=state, screen='settings',
+        books=library, env_extra=env)
+    assert all(p.read_bytes() == b for p, b in checksums.items()), 'KOReader files stay untouched'
 
 
 if __name__ == '__main__':

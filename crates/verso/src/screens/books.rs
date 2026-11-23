@@ -201,6 +201,9 @@ pub struct Books {
     /// True once every saved record in `books/` has been loaded, so ids absent
     /// from `states` are known to have default state without storing them.
     states_loaded: bool,
+    /// `Store::bulk_saves` when `states` was last known current: the
+    /// KOReader import in Settings writes many states at once.
+    bulk_saves_seen: u64,
     fonts: Vec<FontFace>,
     title_rect: Rect,
     battery_rect: Rect,
@@ -300,6 +303,7 @@ impl Books {
     fn with_library(t: &Theme, screen: Rect, worker: Rc<Worker>, store: Store, library: Option<LibraryWorker>) -> Self {
         let roots = store.library_folders();
         let settings_seen = store.settings_saves();
+        let bulk_saves_seen = store.bulk_saves();
         let settings = store.settings();
         let started = std::time::Instant::now();
         let home = store.home_summary();
@@ -393,6 +397,7 @@ impl Books {
             path_press: Press::default(),
             states: HashMap::new(),
             states_loaded: false,
+            bulk_saves_seen,
             fonts,
             title_rect,
             battery_rect,
@@ -1595,6 +1600,28 @@ impl Books {
                 cx.toast("Removed from continue reading", None);
             }
             Err(e) => cx.toast(format!("Couldn't save book status: {e}"), None),
+        }
+    }
+    /// After the KOReader import wrote many states (and rebuilt Home and the
+    /// opened order): forget every cached state and reload what's shown. A
+    /// warm-up still under way would bring old states back, so it's dropped.
+    fn reload_bulk_states(&mut self, cx: &mut EventCx) {
+        let saves = self.store.bulk_saves();
+        if saves == self.bulk_saves_seen {
+            return;
+        }
+        self.bulk_saves_seen = saves;
+        self.states.clear();
+        self.states_loaded = false;
+        self.warm_seq = self.warm_seq.wrapping_add(1);
+        self.warm_due = true;
+        self.previews.forget_order();
+        self.opened_touched = true;
+        self.reload_home();
+        // An open book's return to the library reloads the rest then.
+        if self.reader.is_none() {
+            self.apply_pending(cx);
+            self.refresh(cx.theme);
         }
     }
     /// Home and the open list follow a finished or hidden flag.
@@ -3265,9 +3292,10 @@ impl Screen for Books {
             reader.top_drawer_opened();
         }
     }
-    /// Back from Settings or Wi-Fi transfer: leave a book whose file the
-    /// transfer deleted.
+    /// Back from Settings or Wi-Fi transfer: take in the KOReader import's
+    /// states, and leave a book whose file the transfer deleted.
     fn on_return(&mut self, cx: &mut EventCx) {
+        self.reload_bulk_states(cx);
         let Some(reader) = &mut self.reader else { return };
         if self.reader_path.as_ref().is_none_or(|path| path.exists()) {
             return;
@@ -3471,9 +3499,12 @@ fn relayout_stack_from(
 ) -> Vec<Box<dyn Screen>> {
     let screen = books.screen;
     books.reopen_after_relayout(state, t);
+    // The KOReader import leaves out the book open under Settings.
+    let open = books.open_book_id().map(str::to_owned);
     let mut screens: Vec<Box<dyn Screen>> = vec![Box::new(books)];
     if state.in_settings {
-        screens.push(Box::new(crate::screens::system::SystemSettings::new(t, screen, store, waker).on_display_tab()));
+        let settings = crate::screens::system::SystemSettings::new(t, screen, store, waker);
+        screens.push(Box::new(settings.on_display_tab().with_open_book(open)));
     }
     screens
 }
@@ -4757,6 +4788,46 @@ mod tests {
         assert!(books.sleep_cover(600, 800).is_some());
         books.index.books[0].available = false;
         assert!(books.sleep_cover(600, 800).is_none());
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn back_from_the_koreader_import_every_state_and_home_are_reloaded() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("koreader-import")?;
+        let index = store.library();
+        store.save_book(
+            "3",
+            &BookState { position: crate::document::Position("/v".into()), last_opened: 50, ..Default::default() },
+        )?;
+        store.rebuild_home_summary(&index)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.navigation.folder = Some("/books/Fiction/Nested".into());
+        books.refresh(&t);
+        assert_eq!(books.states.get("3").map(|s| s.last_opened), Some(50));
+        assert_eq!(books.home.resume().unwrap().book.id, "3");
+        // The import in Settings: book 7 read last in KOReader, 3 finished there.
+        let imported = BookState {
+            position: crate::document::Position("/k".into()),
+            progress: 4000,
+            last_opened: 90,
+            ..Default::default()
+        };
+        let finished = BookState { finished: true, ..store.book("3") };
+        let (written, error) = store.save_books(&[("7".into(), imported), ("3".into(), finished)]);
+        assert_eq!((written, error.is_none()), (2, true));
+        store.rebuild_home_summary(&index)?;
+        with_cx(&t, screen, |cx| books.on_return(cx));
+        assert!(books.states["3"].finished);
+        assert_eq!(books.states["7"].progress, 4000);
+        assert_eq!(books.home.resume().unwrap().book.id, "7", "Continue reading");
+        assert_eq!(books.home.recents(4).iter().map(|e| e.book.id.as_str()).collect::<Vec<_>>(), ["3"]);
+        // Nothing new: nothing is reloaded.
+        books.states.insert("3".into(), BookState::default());
+        with_cx(&t, screen, |cx| books.on_return(cx));
+        assert!(!books.states["3"].finished);
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())

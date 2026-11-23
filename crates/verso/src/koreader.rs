@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub mod bulk;
+
 /// The last KOReader position offered, taken or imported for a book.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seen {
