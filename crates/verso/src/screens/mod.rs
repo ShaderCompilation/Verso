@@ -91,6 +91,12 @@ pub trait Screen {
         false
     }
 
+    /// True while drawing leaves the canvas as it is (the previous screen
+    /// stays up while a book opens), so the app skips drawing and diffing.
+    fn keeps_canvas(&self) -> bool {
+        false
+    }
+
     /// True in the states where a swipe down from the top edge opens the Top
     /// Drawer (no sheet, menu, keyboard or selection open). The app then
     /// cancels the touch this screen saw start.

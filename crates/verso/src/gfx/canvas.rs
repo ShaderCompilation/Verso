@@ -526,7 +526,10 @@ impl Canvas {
     pub fn blend_mask(&mut self, x: i32, y: i32, w: u32, h: u32, mask: &[u8], gray: u8, clip: Rect) {
         let Some(clip) = clip.intersect(&self.bounds()) else { return };
         let Some(area) = Rect::new(x, y, w as i32, h as i32).intersect(&clip) else { return };
-        let blend = |v: &mut u8, a: u32| *v = ((*v as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8;
+        // Glyph cores are opaque: the blend of 255 is `gray` itself.
+        let blend = |v: &mut u8, a: u32| {
+            *v = if a == 255 { gray } else { ((*v as u32 * (255 - a) + gray as u32 * a + 127) / 255) as u8 }
+        };
         let width = self.width as usize;
         let mask_rows = (area.y..area.bottom()).map(|py| {
             let mrow = (py - y) as usize * w as usize + (area.x - x) as usize;

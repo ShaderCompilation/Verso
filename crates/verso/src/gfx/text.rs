@@ -6,6 +6,7 @@
 //! screen every frame stays cheap.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use cosmic_text::{
@@ -114,10 +115,10 @@ impl TextStyle {
     }
 }
 
-/// Everything that changes how text is laid out (colour doesn't).
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct Key {
-    text: String,
+/// Everything besides the text that changes how it is laid out (colour
+/// doesn't).
+#[derive(PartialEq, Eq, Hash)]
+struct Params {
     size: u32,
     weight: Weight,
     family: Family,
@@ -128,11 +129,19 @@ struct Key {
     align: HAlign,
 }
 
+/// A shaped text, stored under the hash of its text and `Params` so that
+/// looking it up copies nothing.
+struct Layout {
+    text: String,
+    params: Params,
+    buffer: Buffer,
+}
+
 pub struct TextRenderer {
     fonts: FontSystem,
     book_families: Vec<String>,
     glyphs: SwashCache,
-    layouts: HashMap<Key, Buffer>,
+    layouts: HashMap<u64, Layout>,
 }
 
 impl TextRenderer {
@@ -270,7 +279,7 @@ impl TextRenderer {
             return;
         }
         let key = self.ensure_layout(text, style, Some(rect.w as f32), max_lines, align);
-        self.paint(canvas, &key, style, rect, align);
+        self.paint(canvas, key, style, rect, align);
     }
 
     /// Draws one line laid out without a width limit, from the left of
@@ -281,12 +290,12 @@ impl TextRenderer {
             return;
         }
         let key = self.ensure_layout(text, style, None, 0, HAlign::Left);
-        self.paint(canvas, &key, style, rect, HAlign::Left);
+        self.paint(canvas, key, style, rect, HAlign::Left);
     }
 
-    fn paint(&mut self, canvas: &mut Canvas, key: &Key, style: TextStyle, rect: Rect, align: HAlign) {
+    fn paint(&mut self, canvas: &mut Canvas, key: u64, style: TextStyle, rect: Rect, align: HAlign) {
         let Self { fonts, glyphs, layouts, .. } = self;
-        let buffer = &layouts[key];
+        let buffer = &layouts[&key].buffer;
 
         // Centre the block from the top of the first line's capitals to the
         // last baseline.
@@ -331,7 +340,7 @@ impl TextRenderer {
 
     fn layout(&mut self, text: &str, style: TextStyle, width: Option<f32>, max_lines: usize, align: HAlign) -> &Buffer {
         let key = self.ensure_layout(text, style, width, max_lines, align);
-        &self.layouts[&key]
+        &self.layouts[&key].buffer
     }
 
     fn ensure_layout(
@@ -341,9 +350,8 @@ impl TextRenderer {
         width: Option<f32>,
         max_lines: usize,
         align: HAlign,
-    ) -> Key {
-        let key = Key {
-            text: text.to_owned(),
+    ) -> u64 {
+        let params = Params {
             size: style.size.to_bits(),
             weight: style.weight,
             family: style.family,
@@ -352,12 +360,16 @@ impl TextRenderer {
             max_lines,
             align,
         };
-        if !self.layouts.contains_key(&key) {
+        let mut hasher = std::hash::DefaultHasher::new();
+        (text, &params).hash(&mut hasher);
+        let key = hasher.finish();
+        // A colliding hash replaces the other layout: rare, and still right.
+        if !self.layouts.get(&key).is_some_and(|l| l.text == text && l.params == params) {
             if self.layouts.len() >= CACHE_LIMIT {
                 self.layouts.clear();
             }
             let buffer = self.shape(text, style, width, max_lines, align);
-            self.layouts.insert(key.clone(), buffer);
+            self.layouts.insert(key, Layout { text: text.to_owned(), params, buffer });
         }
         key
     }

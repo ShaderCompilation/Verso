@@ -452,34 +452,15 @@ pub(super) fn fill(image: &CoverImage, w: u32, h: u32) -> CoverImage {
     if (sw, sh) == image.dimensions() && (sw, sh) == (w, h) {
         return image.clone();
     }
-    match image {
-        CoverImage::Gray(img) => {
-            let scaled = if sw > img.width() || sh > img.height() {
-                image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle)
-            } else {
-                image::imageops::thumbnail(img, sw, sh)
-            };
-            let out = if (sw, sh) == (w, h) {
-                scaled
-            } else {
-                image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
-            };
-            CoverImage::Gray(out)
+    let scaled = if sw > image.width() || sh > image.height() {
+        covers::resize(image, sw, sh)
+    } else {
+        match image {
+            CoverImage::Gray(img) => CoverImage::Gray(image::imageops::thumbnail(img, sw, sh)),
+            CoverImage::Rgb(img) => CoverImage::Rgb(image::imageops::thumbnail(img, sw, sh)),
         }
-        CoverImage::Rgb(img) => {
-            let scaled = if sw > img.width() || sh > img.height() {
-                image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle)
-            } else {
-                image::imageops::thumbnail(img, sw, sh)
-            };
-            let out = if (sw, sh) == (w, h) {
-                scaled
-            } else {
-                image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
-            };
-            CoverImage::Rgb(out)
-        }
-    }
+    };
+    covers::crop(scaled, w, h)
 }
 
 /// Bilinearly samples only the visible top (`w × d`) and right (`d × (h - d)`)

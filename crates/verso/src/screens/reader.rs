@@ -376,6 +376,7 @@ impl Reader {
                 } else {
                     revision == self.annotations.revision
                 };
+                let bookmarked = self.page_bookmarked();
                 if current && self.annotations.receive(reply) {
                     if !preview {
                         self.annotations.paint_pending = true;
@@ -387,7 +388,7 @@ impl Reader {
                     if let Overlay::Highlights(view) = &mut self.overlay {
                         view.refresh_keep(&self.annotations, cx.theme);
                     }
-                    cx.redraw();
+                    self.redraw_for_annotations(bookmarked, cx);
                 }
             }
             Reply::Selection { request, result } if self.highlight_pending == Some(request) => {
@@ -589,9 +590,17 @@ impl Reader {
         let layout_changed = self.laying_out;
         let different = self.shown.as_ref().is_none_or(|p| p.generation != page.generation || p.number != page.number);
         if !different {
-            if self.shown.as_ref().is_some_and(|p| p.annotation_revision != page.annotation_revision) {
+            if let Some(shown) = &self.shown
+                && shown.annotation_revision != page.annotation_revision
+            {
+                // Rendered again after a resolution: without highlights on
+                // either version, the pixels are the same.
+                let unmarked = |p: &Page| p.annotations.is_empty() && p.painted.is_empty();
+                let same = unmarked(shown) && unmarked(&page);
                 self.shown = Some(page);
-                cx.redraw();
+                if !same {
+                    cx.redraw();
+                }
             }
             return;
         }
@@ -1220,6 +1229,14 @@ impl Reader {
     /// The displayed page shows the bookmark mark.
     fn page_bookmarked(&self) -> bool {
         self.shown.as_ref().is_some_and(|p| self.annotations.bookmarked(p.number))
+    }
+    /// After annotation state changed: plain reading shows it only as the
+    /// page's ribbon (highlights come with the page rendered again), so a
+    /// frame is needed only for that or for an open overlay.
+    fn redraw_for_annotations(&self, bookmarked: bool, cx: &mut EventCx) {
+        if !matches!(self.overlay, Overlay::None) || self.page_bookmarked() != bookmarked {
+            cx.redraw();
+        }
     }
     /// Toggles the bookmark on the displayed page (the corner tap, the menu's
     /// ribbon or a confirmed removal). Bookmarks with a note are removed only
@@ -1962,6 +1979,10 @@ impl Screen for Reader {
         self.shown.is_some() || self.waiting_for_open()
     }
 
+    fn keeps_canvas(&self) -> bool {
+        self.waiting_for_open()
+    }
+
     /// Plain reading (no selection, highlight extension or search bar) and
     /// the Reader Menu, which the drawer replaces.
     fn allows_top_drawer(&self) -> bool {
@@ -2262,11 +2283,12 @@ impl Screen for Reader {
         if let Overlay::Lookup(lookup) = &mut self.overlay {
             lookup.receive(cx);
         }
+        let bookmarked = self.page_bookmarked();
         if self.annotations.drain(self.cache.generation, &self.worker, cx) {
             if let Overlay::Highlights(view) = &mut self.overlay {
                 view.refresh_keep(&self.annotations, cx.theme);
             }
-            cx.redraw();
+            self.redraw_for_annotations(bookmarked, cx);
         }
         if let Some(result) = self.annotations.koreader.take() {
             self.koreader_checked(result);
@@ -5026,7 +5048,7 @@ mod tests {
         let (mut r, _) = test_reader("opening-defer");
         // Immediately after open, Reader leaves the canvas intact until OPENING_NOTICE_DELAY.
         assert!(r.waiting_for_open());
-        assert!(r.fills_canvas());
+        assert!(r.fills_canvas() && r.keeps_canvas());
         assert!(r.deadline().is_some());
         let mut canvas = crate::gfx::Canvas::new(r.screen.w as u32, r.screen.h as u32);
         canvas.fill(119);
@@ -5058,9 +5080,48 @@ mod tests {
         assert!(r2.opening_notice_at.is_some());
         test_cx(&theme, |cx| r2.display(test_page(1, 0), cx));
         assert!(r2.opening_notice_at.is_none());
-        assert!(r2.fills_canvas());
+        assert!(r2.fills_canvas() && !r2.keeps_canvas());
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
         let _ = std::fs::remove_dir_all(settings_path(&r2).parent().unwrap());
+    }
+
+    #[test]
+    fn annotation_replies_without_highlights_draw_no_frame() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, _) = test_reader("annotation-frames");
+        test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 0)), cx));
+        let screen = r.screen;
+        let redrawn = |r: &mut Reader, reply: Reply| {
+            let mut needs_redraw = false;
+            let mut cx = EventCx {
+                theme: &theme,
+                screen,
+                now: Instant::now(),
+                toast: &mut None,
+                forced: &mut vec![],
+                needs_redraw: &mut needs_redraw,
+                battery: None,
+            };
+            r.receive(reply, &mut cx);
+            needs_redraw
+        };
+        // A resolution that finds nothing for this page renders it again...
+        (r.annotations.revision, r.annotations.resolving) = (1, true);
+        let (generation, revision) = (r.cache.generation, 1);
+        let resolved = Reply::Resolved { generation, revision, entries: vec![], openings: vec![], preview: false };
+        assert!(!redrawn(&mut r, resolved));
+        assert!(r.annotations.paint_pending);
+        // ...and the same pixels come back.
+        let mut page = (*test_page(1, 0)).clone();
+        page.annotation_revision = 1;
+        assert!(!redrawn(&mut r, Reply::Page(Arc::new(page.clone()))));
+        assert_eq!(r.shown.as_ref().map(|p| p.annotation_revision), Some(1));
+        // A highlight on it is drawn.
+        r.annotations.revision = 2;
+        page.annotation_revision = 2;
+        page.painted = vec![crate::document::thread::Paint { rect: Rect::new(0, 0, 10, 10), pixels: vec![] }];
+        assert!(redrawn(&mut r, Reply::Page(Arc::new(page))));
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub struct Tiles {
 }
 
 impl Tiles {
+    /// No tile changed, over `bounds`.
+    pub fn clean(bounds: Rect) -> Self {
+        let (cols, rows) = ((bounds.w + TILE - 1) / TILE, (bounds.h + TILE - 1) / TILE);
+        Self { cols, rows, dirty: vec![false; (cols * rows) as usize] }
+    }
+
     fn tile_rect(&self, col: i32, row: i32) -> Rect {
         Rect::new(col * TILE, row * TILE, TILE, TILE)
     }
@@ -213,13 +219,22 @@ impl FrameDiff {
         Tiles { cols, rows, dirty }
     }
 
-    /// Remembers the changed tiles of `canvas` as what's now on screen.
+    /// Remembers the changed tiles of `canvas` as what's now on screen,
+    /// one copy per run of changed tiles in a row.
     pub fn commit(&mut self, canvas: &Canvas, tiles: &Tiles) {
-        for row in 0..tiles.rows {
-            for col in 0..tiles.cols {
-                if tiles.dirty[(row * tiles.cols + col) as usize] {
-                    canvas.copy_raw(tiles.tile_rect(col, row), &mut self.prev);
+        for (row, dirty) in tiles.dirty.chunks(tiles.cols as usize).enumerate() {
+            let mut col = 0;
+            while col < dirty.len() {
+                if !dirty[col] {
+                    col += 1;
+                    continue;
                 }
+                let start = col;
+                while col < dirty.len() && dirty[col] {
+                    col += 1;
+                }
+                let run = Rect::new(start as i32 * TILE, row as i32 * TILE, (col - start) as i32 * TILE, TILE);
+                canvas.copy_raw(run, &mut self.prev);
             }
         }
     }

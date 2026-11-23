@@ -303,6 +303,20 @@ impl App {
             forced.extend(self.fast_debt.drain(..).map(|rect| Update { rect, mode: RefreshMode::Ui }));
         }
         let bounds = self.canvas.bounds();
+        // Nothing draws over a kept canvas, so diffing it would find nothing:
+        // only forced refreshes (a pressed cover's cleanup) go out.
+        if self.stack.last().is_some_and(|s| s.keeps_canvas())
+            && self.drawer.is_none()
+            && self.notices.is_empty()
+            && self.usb_prompt.is_none()
+            && self.exit_prompt.is_none()
+            && self.toast.is_none()
+        {
+            let updates = damage::plan(&damage::Tiles::clean(bounds), bounds, &[], RefreshMode::Ui, &forced);
+            self.remember_fast_debt(&updates);
+            log::trace!("frame: canvas kept, {} update(s)", updates.len());
+            return updates;
+        }
         // Check before drawing whether forced refreshes already guarantee a
         // full-screen bypass. DrawCx::hint only emits Fast or Ui, so any
         // full-screen forced refresh >= Ui with no stronger local forced rect
@@ -370,13 +384,18 @@ impl App {
             updates
         };
         let diffed = sync_time + diff_started.elapsed();
+        self.remember_fast_debt(&updates);
+        log::trace!("frame: drawn in {drawn:?}, diffed in {diffed:?}, {} update(s)", updates.len());
+        updates
+    }
+
+    /// `Fast` updates leave debt that gets a `Ui` pass once the finger lifts.
+    fn remember_fast_debt(&mut self, updates: &[Update]) {
         for u in updates.iter().filter(|u| u.mode == RefreshMode::Fast) {
             if !self.fast_debt.iter().any(|d| d.union(&u.rect) == *d) {
                 self.fast_debt.push(u.rect);
             }
         }
-        log::trace!("frame: drawn in {drawn:?}, diffed in {diffed:?}, {} update(s)", updates.len());
-        updates
     }
 
     pub fn begin_batch(&mut self) {
@@ -1138,10 +1157,14 @@ mod tests {
         struct PageScreen {
             bg: Rc<Cell<u8>>,
             dot: Rc<Cell<bool>>,
+            kept: Rc<Cell<bool>>,
         }
         impl Screen for PageScreen {
             fn fills_canvas(&self) -> bool {
                 true
+            }
+            fn keeps_canvas(&self) -> bool {
+                self.kept.get()
             }
             fn draw(&mut self, cx: &mut DrawCx) {
                 cx.canvas.fill(self.bg.get());
@@ -1155,9 +1178,11 @@ mod tests {
         }
         let bg = Rc::new(Cell::new(240u8));
         let dot = Rc::new(Cell::new(false));
+        let kept = Rc::new(Cell::new(false));
         let info =
             DeviceInfo { name: "test".into(), width: 160, height: 96, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
-        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(PageScreen { bg: bg.clone(), dot: dot.clone() }));
+        let screen = PageScreen { bg: bg.clone(), dot: dot.clone(), kept: kept.clone() };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(screen));
         let initial_copies = app.diff.full_copies();
         // Multiple full-screen Page/Full frames copy `prev` 0 times.
         for (value, mode) in [(220, RefreshMode::Page), (200, RefreshMode::Page), (180, RefreshMode::Full)] {
@@ -1167,6 +1192,18 @@ mod tests {
             assert!(app.diff.is_baseline_deferred());
         }
         assert_eq!(app.diff.full_copies(), initial_copies, "back-to-back full frames never copy prev");
+        // A screen keeping the canvas (a book opening) is neither drawn nor diffed.
+        kept.set(true);
+        bg.set(0);
+        app.needs_redraw = true;
+        assert!(app.frame().is_empty());
+        let cleanup = Update { rect: Rect::new(0, 0, 16, 16), mode: RefreshMode::Ui };
+        app.forced.push(cleanup);
+        app.needs_redraw = true;
+        assert_eq!(app.frame(), vec![cleanup], "forced refreshes still go out");
+        assert_eq!((app.canvas.raw()[0], app.diff.full_copies()), (180, initial_copies));
+        kept.set(false);
+        bg.set(180);
         // A partial frame right after syncs once and diffs accurately against bg = 180.
         dot.set(true);
         app.needs_redraw = true;

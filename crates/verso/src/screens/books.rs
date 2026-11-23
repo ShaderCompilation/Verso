@@ -2572,6 +2572,9 @@ impl Screen for Books {
     fn fills_canvas(&self) -> bool {
         self.reader.as_ref().is_some_and(Screen::fills_canvas)
     }
+    fn keeps_canvas(&self) -> bool {
+        self.reader.as_ref().is_some_and(Screen::keeps_canvas)
+    }
     fn relayout_state(&self, state: &mut RelayoutState) {
         state.open_book = self.open_book_id().map(str::to_owned);
         state.library_open = self.is_in_library();

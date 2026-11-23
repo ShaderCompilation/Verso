@@ -72,9 +72,13 @@ impl CoverImage {
     }
 
     fn write_to_png(&self, out: &mut Cursor<Vec<u8>>) -> Result<()> {
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        // Adaptive filters: one fixed filter (Sub) encodes about 30% faster,
+        // but real covers grow 12-13%, and resizing is most of the cost anyway.
+        let encoder = PngEncoder::new_with_quality(out, CompressionType::Fast, FilterType::Adaptive);
         match self {
-            Self::Gray(i) => i.write_to(out, image::ImageFormat::Png)?,
-            Self::Rgb(i) => i.write_to(out, image::ImageFormat::Png)?,
+            Self::Gray(i) => i.write_with_encoder(encoder)?,
+            Self::Rgb(i) => i.write_with_encoder(encoder)?,
         }
         Ok(())
     }
@@ -167,41 +171,117 @@ pub fn fill_size(iw: u32, ih: u32, w: u32, h: u32) -> (u32, u32) {
 /// smoother Triangle filter.
 pub fn tile(full: &CoverImage, w: u32, h: u32) -> CoverImage {
     let (sw, sh) = fill_size(full.width(), full.height(), w, h);
-    match full {
+    crop(resize(full, sw, sh), w, h)
+}
+/// The `w × h` part of an image scaled by `fill_size`: centred across, from
+/// the top down.
+pub fn crop(scaled: CoverImage, w: u32, h: u32) -> CoverImage {
+    if scaled.dimensions() == (w, h) {
+        return scaled;
+    }
+    let x = (scaled.width() - w) / 2;
+    match scaled {
+        CoverImage::Gray(img) => CoverImage::Gray(image::imageops::crop_imm(&img, x, 0, w, h).to_image()),
+        CoverImage::Rgb(img) => CoverImage::Rgb(image::imageops::crop_imm(&img, x, 0, w, h).to_image()),
+    }
+}
+/// `image` scaled to `w × h` with the Triangle filter of
+/// `image::imageops::resize` (bilinear, widened to the scale when
+/// shrinking), in fixed point: within a level of it and several times faster.
+pub fn resize(image: &CoverImage, w: u32, h: u32) -> CoverImage {
+    let (iw, ih) = image.dimensions();
+    match image {
         CoverImage::Gray(img) => {
-            let scaled = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
-            let out = if (sw, sh) == (w, h) {
-                scaled
-            } else {
-                image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
-            };
-            CoverImage::Gray(out)
+            CoverImage::Gray(GrayImage::from_raw(w, h, resample::<1>(img.as_raw(), iw, ih, w, h)).expect("sized"))
         }
         CoverImage::Rgb(img) => {
-            let scaled = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
-            let out = if (sw, sh) == (w, h) {
-                scaled
-            } else {
-                image::imageops::crop_imm(&scaled, (sw - w) / 2, 0, w, h).to_image()
-            };
-            CoverImage::Rgb(out)
+            CoverImage::Rgb(RgbImage::from_raw(w, h, resample::<3>(img.as_raw(), iw, ih, w, h)).expect("sized"))
         }
     }
 }
+/// Fixed-point weights sum to this.
+const ONE: i32 = 1 << 14;
+/// Triangle taps from `from` pixels to `to`, as `image` places them: per
+/// output pixel, its first input pixel and weights that sum to `ONE`.
+fn taps(from: u32, to: u32) -> Vec<(usize, Vec<i32>)> {
+    let ratio = from as f32 / to as f32;
+    let scale = ratio.max(1.0);
+    (0..to)
+        .map(|out| {
+            let center = (out as f32 + 0.5) * ratio;
+            let left = ((center - scale).floor() as i64).clamp(0, from as i64 - 1);
+            let right = ((center + scale).ceil() as i64).clamp(left + 1, from as i64);
+            let weights: Vec<f32> =
+                (left..right).map(|i| (1.0 - ((i as f32 - (center - 0.5)) / scale).abs()).max(0.0)).collect();
+            let sum: f32 = weights.iter().sum();
+            let mut fixed: Vec<i32> =
+                weights.iter().map(|w| if sum > 0.0 { (w / sum * ONE as f32).round() as i32 } else { 0 }).collect();
+            // The rounding remainder goes to the heaviest tap.
+            let heaviest = (0..fixed.len()).max_by_key(|&i| fixed[i]).unwrap_or(0);
+            fixed[heaviest] += ONE - fixed.iter().sum::<i32>();
+            (left as usize, fixed)
+        })
+        .collect()
+}
+/// Resamples `C`-channel 8-bit pixels: across each row into 16 bits (8
+/// fractional), then down. Taps are non-negative, so sums stay in range.
+fn resample<const C: usize>(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (across, down) = (taps(sw, dw), taps(sh, dh));
+    let stride = dw as usize * C;
+    let mut rows = vec![0u16; sh as usize * stride];
+    for (row, out) in src.chunks_exact(sw as usize * C).zip(rows.chunks_exact_mut(stride)) {
+        for ((start, weights), px) in across.iter().zip(out.as_chunks_mut::<C>().0) {
+            let mut sum = [0i32; C];
+            for (s, &w) in row[start * C..].as_chunks::<C>().0.iter().zip(weights) {
+                for c in 0..C {
+                    sum[c] += s[c] as i32 * w;
+                }
+            }
+            for c in 0..C {
+                px[c] = ((sum[c] + (1 << 5)) >> 6) as u16;
+            }
+        }
+    }
+    let mut out = vec![0u8; dh as usize * stride];
+    let mut sum = vec![0i32; stride];
+    for ((start, weights), line) in down.iter().zip(out.chunks_exact_mut(stride)) {
+        sum.fill(0);
+        for (k, &w) in weights.iter().enumerate() {
+            for (s, &v) in sum.iter_mut().zip(&rows[(start + k) * stride..][..stride]) {
+                *s += v as i32 * w;
+            }
+        }
+        for (o, &s) in line.iter_mut().zip(&sum) {
+            *o = ((s + (1 << 21)) >> 22).min(255) as u8;
+        }
+    }
+    out
+}
+/// The small thumbnail: half of each side, each pixel the rounded mean of
+/// the 2 × 2 it covers.
 fn shrink(full: &CoverImage) -> CoverImage {
+    debug_assert_eq!(full.dimensions(), (WIDTH, HEIGHT));
+    fn halve<const C: usize>(src: &[u8]) -> Vec<u8> {
+        let stride = WIDTH as usize * C;
+        let mut out = Vec::with_capacity(src.len() / 4);
+        for rows in src.chunks_exact(2 * stride) {
+            let (a, b) = rows.split_at(stride);
+            for (a, b) in a.chunks_exact(2 * C).zip(b.chunks_exact(2 * C)) {
+                for c in 0..C {
+                    let sum = a[c] as u16 + a[C + c] as u16 + b[c] as u16 + b[C + c] as u16;
+                    out.push(((sum + 2) >> 2) as u8);
+                }
+            }
+        }
+        out
+    }
     match full {
-        CoverImage::Gray(img) => CoverImage::Gray(image::imageops::resize(
-            img,
-            SMALL_WIDTH,
-            SMALL_HEIGHT,
-            image::imageops::FilterType::Triangle,
-        )),
-        CoverImage::Rgb(img) => CoverImage::Rgb(image::imageops::resize(
-            img,
-            SMALL_WIDTH,
-            SMALL_HEIGHT,
-            image::imageops::FilterType::Triangle,
-        )),
+        CoverImage::Gray(img) => {
+            CoverImage::Gray(GrayImage::from_raw(SMALL_WIDTH, SMALL_HEIGHT, halve::<1>(img.as_raw())).expect("sized"))
+        }
+        CoverImage::Rgb(img) => {
+            CoverImage::Rgb(RgbImage::from_raw(SMALL_WIDTH, SMALL_HEIGHT, halve::<3>(img.as_raw())).expect("sized"))
+        }
     }
 }
 /// The tile sizes to keep, most recently drawn first.
@@ -430,24 +510,7 @@ pub fn benchmark(store: &Store, index: &LibraryIndex) -> serde_json::Value {
         let read = started.elapsed().as_secs_f64() * 1000.0;
         let image = decode(bytes, width, height, color).ok()?;
         let decoded = started.elapsed().as_secs_f64() * 1000.0;
-        match &image {
-            CoverImage::Gray(img) => {
-                std::hint::black_box(image::imageops::resize(
-                    img,
-                    SLOT.0,
-                    SLOT.1,
-                    image::imageops::FilterType::Triangle,
-                ));
-            }
-            CoverImage::Rgb(img) => {
-                std::hint::black_box(image::imageops::resize(
-                    img,
-                    SLOT.0,
-                    SLOT.1,
-                    image::imageops::FilterType::Triangle,
-                ));
-            }
-        }
+        std::hint::black_box(resize(&image, SLOT.0, SLOT.1));
         let total = started.elapsed().as_secs_f64() * 1000.0;
         let fast = Instant::now();
         match &image {
@@ -757,6 +820,52 @@ mod tests {
 
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn fixed_point_resizing_matches_the_triangle_filter() {
+        // Noise is the worst case for rounding; sizes shrink and grow.
+        let mut seed = 0x9e37_79b9_u32;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        };
+        let gray = GrayImage::from_fn(WIDTH, HEIGHT, |_, _| image::Luma([noise()]));
+        let rgb = RgbImage::from_fn(WIDTH, HEIGHT, |_, _| image::Rgb([noise(), noise(), noise()]));
+        let triangle = image::imageops::FilterType::Triangle;
+        for (w, h) in [(243, 365), (209, 313), (144, 216), (97, 1), (1, 431), (300, 450), (576, 864)] {
+            let pairs = [
+                (
+                    resize(&CoverImage::Gray(gray.clone()), w, h),
+                    CoverImage::Gray(image::imageops::resize(&gray, w, h, triangle)),
+                ),
+                (
+                    resize(&CoverImage::Rgb(rgb.clone()), w, h),
+                    CoverImage::Rgb(image::imageops::resize(&rgb, w, h, triangle)),
+                ),
+            ];
+            for (ours, theirs) in pairs {
+                let (ours, theirs) = match (&ours, &theirs) {
+                    (CoverImage::Gray(a), CoverImage::Gray(b)) => (a.as_raw(), b.as_raw()),
+                    (CoverImage::Rgb(a), CoverImage::Rgb(b)) => (a.as_raw(), b.as_raw()),
+                    _ => unreachable!(),
+                };
+                let worst = ours.iter().zip(theirs).map(|(a, b)| a.abs_diff(*b)).max();
+                assert!(worst <= Some(1), "{w}×{h}: off by {worst:?}");
+            }
+        }
+        // The small thumbnail is the exact 2 × 2 mean.
+        let CoverImage::Gray(small) = shrink(&CoverImage::Gray(gray.clone())) else { unreachable!() };
+        let mean = |x: u32, y: u32| {
+            let sum: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                .iter()
+                .map(|(dx, dy)| gray.get_pixel(2 * x + dx, 2 * y + dy)[0] as u32)
+                .sum();
+            ((sum + 2) / 4) as u8
+        };
+        assert!(small.enumerate_pixels().all(|(x, y, p)| p[0] == mean(x, y)));
     }
 
     #[test]
