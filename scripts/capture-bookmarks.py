@@ -5,28 +5,22 @@ Notes list (filter, details, a note, jumping back and removing), and KOReader
 import and Markdown export.
 
 Run cargo build first. Outputs go to gitignored screenshots/bookmarks/, each
-scene with isolated state. Taps come from the theme's millimetre sizes, as in
-capture-devices.py.
+scene with isolated state. Taps come from the theme's millimetre sizes, through
+scripts/sim.py.
 
     python3 scripts/capture-bookmarks.py
 """
-import importlib.util
 import json
-import os
-from pathlib import Path
 import shutil
-import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/bookmarks'
-spec = importlib.util.spec_from_file_location('capture_devices', ROOT / 'scripts/capture-devices.py')
-devices = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(devices)
+import sim
+
+OUT = sim.out_dir('bookmarks')
 
 
 def steps(s):
     """Opening the book at page 2, the corner, the menu and its ribbon."""
-    page2 = devices.scenes(s)['reader'][2]
+    page2 = [*s.open_book(), *s.swipe(s.w * 0.8, s.h / 2, s.w * 0.2, s.h / 2)]
     corner = s.tap(s.w - s.mm(4), s.mm(4))
     menu = s.tap(s.w / 2, s.h / 2)
     # The ribbon sits left of Search, the Sun and the battery (13.5 mm).
@@ -51,20 +45,8 @@ def notes_taps(s):
 
 
 def run(name, device, settings, script, state=None, screen=None):
-    w, h, dpi = devices.DEVICES[device]
-    fresh = state is None
-    state = state or OUT / 'state' / name
-    if fresh:
-        shutil.rmtree(state, ignore_errors=True)
-        state.mkdir(parents=True)
-        (state / 'settings.json').write_text(json.dumps({'library_folders': [str(OUT / 'book')], **settings}))
-    env = {k: v for k, v in os.environ.items() if not k.startswith('VERSO_SIM_')}
-    env.update(VERSO_DATA=str(state), VERSO_BOOKS=str(OUT / 'book'), VERSO_SIM_BATTERY='82', RUST_LOG='error')
-    args = [str(ROOT / 'target/debug/verso'), '--device', device, '--screenshot', str(OUT / f'{name}.png'), *script]
-    if screen:
-        args += ['--screen', screen]
-    subprocess.run(args, env=env, check=True, timeout=90, stderr=subprocess.DEVNULL)
-    return state
+    state = state or sim.state(OUT / 'state' / name, OUT / 'book', settings)
+    return sim.run(OUT / f'{name}.png', script, state, OUT / 'book', device=device, screen=screen)
 
 
 def records(state):
@@ -76,9 +58,8 @@ def records(state):
 
 
 def main():
-    (OUT / 'book').mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/selection.epub', OUT / 'book/selection.epub')
-    portrait = devices.Screen(*devices.DEVICES['pw6'])
+    sim.books(OUT / 'book', 'selection.epub')
+    portrait = sim.Screen(*sim.DEVICES['pw6'])
     page2, corner, menu, ribbon = steps(portrait)
 
     # The corner tap, then the menu shows the ribbon filled; tapping it
@@ -97,12 +78,12 @@ def main():
         run(f'margin-{sides}', 'pw6', {'page_layout': {'margins': {'sides': sides}}}, [*page2, *corner])
     run('top-bar', 'pw6', {'page_layout': {'top': {'on': True}, 'margins': {'sides': 3}}}, [*page2, *corner])
     for device in ('pw6', 'basic-167'):
-        w, h, dpi = devices.DEVICES[device]
-        s = devices.Screen(h, w, dpi)
+        w, h, dpi = sim.DEVICES[device]
+        s = sim.Screen(h, w, dpi)
         p2, c, m, _ = steps(s)
         run(f'landscape-{device}', device, {'orientation': 'landscape'}, [*p2, *c])
         run(f'landscape-menu-{device}', device, {'orientation': 'landscape'}, [*p2, *c, *m])
-    small = devices.Screen(*devices.DEVICES['basic-167'])
+    small = sim.Screen(*sim.DEVICES['basic-167'])
     p2, c, m, _ = steps(small)
     run('basic-167', 'basic-167', {}, [*p2, *c])
     run('basic-167-menu', 'basic-167', {}, [*p2, *c, *m])
@@ -157,8 +138,8 @@ def notes(s, page2, corner, menu):
     state = run('notes-removed', 'pw6', {}, [*details, *n['remove']])
     assert records(state) == []
     # The list on a 6" screen in both orientations.
-    for name, screen, settings in [('notes-basic-167', devices.Screen(600, 800, 167), {}),
-                                   ('notes-landscape-basic-167', devices.Screen(800, 600, 167),
+    for name, screen, settings in [('notes-basic-167', sim.Screen(600, 800, 167), {}),
+                                   ('notes-landscape-basic-167', sim.Screen(800, 600, 167),
                                     {'orientation': 'landscape'})]:
         p2, c, m, _ = steps(screen)
         run(name, 'basic-167', settings, [*p2, *c, *m, *notes_taps(screen)['notes']])
@@ -216,7 +197,7 @@ def koreader(s, page2, corner, menu):
         assert len(records(state)) == 2
         assert source.read_bytes() == before, 'KOReader files stay untouched'
         # The preview's text on a 6" screen in landscape.
-        small = devices.Screen(800, 600, 167)
+        small = sim.Screen(800, 600, 167)
         p2, _, m, _ = steps(small)
         small_top = small.mm(13) + small.mm(2) + small.mm(9) / 2
         run('koreader-preview-landscape-basic-167', 'basic-167', {'orientation': 'landscape'},

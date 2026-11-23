@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """Capture Phases 4 and 5 with original fixtures and isolated state; build the simulator first."""
 import json
-import os
 import shutil
-import subprocess
 import zipfile
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/highlights'
+import sim
+
+OUT = sim.out_dir('highlights')
 
 
 def main():
-    books = OUT / 'books'
-    books.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/selection.epub', books / 'selection.epub')
+    books = sim.books(OUT / 'books', 'selection.epub')
     opening = ['--tap', '636,1560', '--tap', '165,500']  # Home → Library → book
     passage = [*opening, '--hold-drag', '200,110,500,190']
     extend = [*passage, '--tap', '1094,340']  # the passage bar's Extend
@@ -24,14 +20,8 @@ def main():
               'saved': save, 'cancel': [*moved, '--tap', '1100,1600'],
               'backward': [*moved, '--tap', '200,1600', '--tap', '180,110']}
     for name, steps in scenes.items():
-        state = OUT / (name + '-state')
-        shutil.rmtree(state, ignore_errors=True)
-        state.mkdir(parents=True)
-        (state / 'settings.json').write_text(json.dumps({'library_folders': [str(books)]}))
-        env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
-        subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps], env=env, check=True, timeout=30)
+        sim.run(OUT / (name + '.png'), steps, sim.state(OUT / (name + '-state'), books), books, quiet=False)
     state = OUT / 'saved-state'
-    env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
     resume = ['--tap', '200,550']
     # The saved highlight now covers the whole first page (drags snap to
     # pages), so a centre tap would open it; turn to the next page, then
@@ -41,7 +31,7 @@ def main():
     # Bookmarks filter: the first is centred at y 548, then 726 and 903.
     for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,548'],
                         'jump': [*listing, '--tap', '400,548', '--tap', '300,1500']}.items():
-        subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps], env=env, check=True, timeout=30)
+        sim.run(OUT / (name + '.png'), steps, state, books, quiet=False)
     # Import only original fixture text. An edited source quotation must stay
     # readable/removable as unresolved; removing a valid import retains its ID.
     manifest = next((state / 'annotations').glob('book-*.json'))
@@ -69,7 +59,7 @@ def main():
                                          '--tap', '300,1500'],
                         'after-import-error': [*importing, '--tap', '600,370', '--text', 'x', '--edit', 'submit',
                                                '--tap', '300,1500', '--tap', '80,75']}.items():
-        subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps], env=env, check=True, timeout=30)
+        sim.run(OUT / (name + '.png'), steps, state, books, quiet=False)
     result = json.loads(manifest.read_text())
     assert len(result['records']) == 2 and len(result['sources']) == 2
     assert source.read_bytes() == before
@@ -77,7 +67,7 @@ def main():
     settings['orientation'] = 'landscape'
     settings['typography'] = {'size_pt': 16.0}
     (state / 'settings.json').write_text(json.dumps(settings))
-    subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / 'landscape.png'), *resume], env=env, check=True, timeout=30)
+    sim.run(OUT / 'landscape.png', resume, state, books, quiet=False)
     notes(passage, resume)
     print(OUT)
 
@@ -88,7 +78,7 @@ def notes(passage, resume):
     books = OUT / 'notes-books'
     shutil.rmtree(books, ignore_errors=True)
     books.mkdir(parents=True)
-    with zipfile.ZipFile(ROOT / 'crates/verso/tests/fixtures/selection.epub') as src, \
+    with zipfile.ZipFile(sim.FIXTURES / 'selection.epub') as src, \
             zipfile.ZipFile(books / 'selection.epub', 'w') as dst:
         for item in src.infolist():
             data = src.read(item)
@@ -98,12 +88,8 @@ def notes(passage, resume):
 
     def run(name, steps, state, fresh=False):
         if fresh:
-            shutil.rmtree(state, ignore_errors=True)
-            state.mkdir(parents=True)
-            (state / 'settings.json').write_text(json.dumps({'library_folders': [str(books)]}))
-        env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
-        subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps],
-                       env=env, check=True, timeout=30)
+            sim.state(state, books)
+        sim.run(OUT / (name + '.png'), steps, state, books, quiet=False)
 
     add_note = [*passage, '--tap', '406,340']  # the passage bar's Note
     first = 'A first thought on this passage.'

@@ -7,24 +7,19 @@ row. Then the bulk import: Settings → Library's KOReader row, the preview
 sheet, Import, and the saved states.
 
 Run cargo build first. Outputs go to gitignored screenshots/koreader-progress/,
-each scene with isolated state. Taps come from the theme's millimetre sizes,
-as in capture-devices.py.
+each scene with isolated state. Taps come from the theme's millimetre sizes
+(scripts/sim.py).
 
     python3 scripts/capture-koreader-progress.py
 """
-import importlib.util
 import json
 import os
-from pathlib import Path
 import shutil
-import subprocess
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/koreader-progress'
-spec = importlib.util.spec_from_file_location('capture_devices', ROOT / 'scripts/capture-devices.py')
-devices = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(devices)
+import sim
+
+OUT = sim.out_dir('koreader-progress')
 
 # Page 7 of the fixture's 8 in the simulator's portrait layout, mid-page.
 KOREADER = '/body[1]/DocFragment[1]/body[1]/p[5]/text()[1].6200'
@@ -34,9 +29,7 @@ THREE_DAYS = 3 * 24 * 3600
 
 def book(s):
     """Home's Library card, then the fixture book."""
-    margin, target = s.mm(5), s.mm(9)
-    card_h = max(target, min(s.mm(13.2), s.h // 8))
-    return [*s.tap(s.w / 2, s.h - margin - card_h / 2), *s.tap(margin + s.mm(9), s.mm(42))]
+    return s.open_book()
 
 
 def card_buttons(s):
@@ -65,23 +58,12 @@ def sidecar(position, age=THREE_DAYS):
 
 
 def run(name, device, settings, script, state=None, screen=None, book_state=None, books=None, env_extra=None):
-    fresh = state is None
-    state = state or OUT / 'state' / name
-    if fresh:
-        shutil.rmtree(state, ignore_errors=True)
-        state.mkdir(parents=True)
-        (state / 'settings.json').write_text(json.dumps({'library_folders': [str(books or OUT / 'book')], **settings}))
+    books = books or OUT / 'book'
+    state = state or sim.state(OUT / 'state' / name, books, settings)
     if book_state is not None:
         (state / 'books').mkdir(exist_ok=True)
-        (state / 'books' / f'{book_id(state)}.json').write_text(json.dumps(book_state))
-    env = {k: v for k, v in os.environ.items() if not k.startswith('VERSO_SIM_')}
-    env.update(VERSO_DATA=str(state), VERSO_BOOKS=str(books or OUT / 'book'), VERSO_SIM_BATTERY='82', RUST_LOG='error')
-    env.update(env_extra or {})
-    args = [str(ROOT / 'target/debug/verso'), '--device', device, '--screenshot', str(OUT / f'{name}.png'), *script]
-    if screen:
-        args += ['--screen', screen]
-    subprocess.run(args, env=env, check=True, timeout=90, stderr=subprocess.DEVNULL)
-    return state
+        sim.write_json(state / 'books' / f'{book_id(state)}.json', book_state)
+    return sim.run(OUT / f'{name}.png', script, state, books, device=device, screen=screen, env=env_extra)
 
 
 def book_id(state):
@@ -100,8 +82,8 @@ def saved(state):
 def main():
     shutil.rmtree(OUT / 'book', ignore_errors=True)
     (OUT / 'book').mkdir(parents=True)
-    shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/selection.epub', OUT / 'book/selection.epub')
-    portrait = devices.Screen(*devices.DEVICES['pw6'])
+    shutil.copyfile(sim.FIXTURES / 'selection.epub', OUT / 'book/selection.epub')
+    portrait = sim.Screen(*sim.DEVICES['pw6'])
     stay, go = card_buttons(portrait)
     source = sidecar(KOREADER)
     before = source.read_bytes()
@@ -111,10 +93,10 @@ def main():
     # The card on the first page of a book Verso has never opened.
     run('card', 'pw6', {}, book(portrait))
     for device in ('pw6', 'basic-167'):
-        w, h, dpi = devices.DEVICES[device]
-        landscape = devices.Screen(h, w, dpi)
+        w, h, dpi = sim.DEVICES[device]
+        landscape = sim.Screen(h, w, dpi)
         run(f'card-landscape-{device}', device, {'orientation': 'landscape'}, book(landscape))
-    small = devices.Screen(*devices.DEVICES['basic-167'])
+    small = sim.Screen(*sim.DEVICES['basic-167'])
     run('card-basic-167', 'basic-167', {}, book(small))
     run('card-top-bar', 'pw6', {'page_layout': {'top': {'on': True}, 'bottom': {'on': False}}}, book(portrait))
 
@@ -188,7 +170,7 @@ def bulk_import():
     library = OUT / 'library'
     shutil.rmtree(library, ignore_errors=True)
     library.mkdir(parents=True)
-    fixture = (ROOT / 'crates/verso/tests/fixtures/selection.epub').read_bytes()
+    fixture = (sim.FIXTURES / 'selection.epub').read_bytes()
     # Distinct sizes give distinct ids (the id hashes the name and size).
     sidecars = {
         'Current.epub': ('reading', 0.78, 3600),
@@ -231,8 +213,8 @@ def bulk_import():
     for device, settings, suffix in (('pw6', {}, ''), ('pw6', {'orientation': 'landscape'}, '-landscape'),
                                      ('basic-167', {}, '-basic-167'),
                                      ('basic-167', {'orientation': 'landscape'}, '-landscape-basic-167')):
-        w, h, dpi = devices.DEVICES[device]
-        s = devices.Screen(h, w, dpi) if settings else devices.Screen(w, h, dpi)
+        w, h, dpi = sim.DEVICES[device]
+        s = sim.Screen(h, w, dpi) if settings else sim.Screen(w, h, dpi)
         state = scanned(f'import-scan{suffix}', device, settings)
         run(f'settings-library{suffix}', device, settings, library_tab(s), state=state, screen='settings',
             books=library, env_extra=env)
@@ -241,7 +223,7 @@ def bulk_import():
         assert not list((state / 'books').glob('*.json')), 'the preview writes nothing'
 
     # Import, then the toast over Settings.
-    s = devices.Screen(*devices.DEVICES['pw6'])
+    s = sim.Screen(*sim.DEVICES['pw6'])
     cancel, import_ = sheet_buttons(s)
     state = scanned('import-done', 'pw6', {})
     run('import-cancelled', 'pw6', {}, [*library_tab(s), *import_row(s), *cancel], state=state, screen='settings',

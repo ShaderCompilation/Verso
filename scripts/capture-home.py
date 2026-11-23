@@ -6,15 +6,13 @@ Each state is captured twice: once while the worker migrates/rebuilds the
 summary, then again as a warm, summary-only launch.
 """
 import json
-import os
 from pathlib import Path
 import shutil
-import subprocess
 
-repo = Path(__file__).resolve().parents[1]
-out = repo / "screenshots/home"
-shutil.rmtree(out, ignore_errors=True)
-fixtures = repo / "crates/verso/tests/fixtures"
+import sim
+
+out = sim.out_dir("home", clean=True)
+fixtures = sim.FIXTURES
 library = out / "fixtures/Library"
 library.mkdir(parents=True)
 names = ["Quiet Harbour", "The Long Way", "Notes", "Field Guide", "Letters", "Morning", "Unopened"]
@@ -23,25 +21,9 @@ for i, name in enumerate(names):
     shutil.copyfile(fixtures / sources[i % len(sources)], library / f"{name}.epub")
 
 
-def mm(v, dpi):
-    return round(v * dpi / 25.4)
-
-
-def library_card_center(size, dpi):
-    w, h = size
-    margin, target = mm(5.0, dpi), mm(9.0, dpi)
-    card_h = max(target, min(mm(13.2, dpi), h // 8))
-    return w // 2, h - margin - card_h // 2
-
-
 def run(state, png, *steps, small=False, landscape=False):
-    env = dict(os.environ, VERSO_BOOKS=str(library), VERSO_DATA=str(state), RUST_LOG="warn")
-    if small:
-        env.update(VERSO_SIM_SIZE="600x800", VERSO_SIM_DPI="167")
-    elif landscape:
-        env.update(VERSO_SIM_SIZE="1696x1272", VERSO_SIM_DPI="300")
-    subprocess.run([str(repo / "target/debug/verso"), "--screenshot", str(png), *steps],
-                   env=env, check=True, cwd=repo)
+    size = ((600, 800), 167) if small else ((1696, 1272), 300) if landscape else None
+    sim.run(png, steps, state, library, size=size, quiet=False)
 
 
 def capture(name, history, small=False, landscape=False):
@@ -72,6 +54,5 @@ capture("recents-only", [("Quiet Harbour", 3, ("finished",)), ("The Long Way", 2
 capture("empty", [])
 # Tap the bottom Library card from Home to open Library.
 state = out / "state/populated"
-cx, cy = library_card_center((1272, 1696), 300)
-run(state, out / "populated-library.png", "--tap", f"{cx},{cy}")
+run(state, out / "populated-library.png", *sim.tap(sim.library_card_center((1272, 1696), 300)))
 print("captured", sorted(p.name for p in out.glob("*.png")))

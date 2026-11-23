@@ -1,44 +1,14 @@
 #!/usr/bin/env python3
-"""Cut-and-paste move simulator captures with disposable fixture books."""
-import json
-import os
-from pathlib import Path
+"""Cut-and-paste move simulator captures with disposable fixture books.
+
+Run cargo build first. Outputs go to gitignored screenshots/library-moves/.
+"""
 import shutil
-import subprocess
 
-REPO = Path(__file__).resolve().parents[1]
-OUT = REPO / 'screenshots/library-moves'
+import sim
+from sim import grid_cell_center, hold, library_card_center, menu_point, mm, search_button_center, tap
 
-
-def mm(v, dpi):
-    return round(v * dpi / 25.4)
-
-
-def library_card_center(size, dpi):
-    w, h = size
-    margin, target = mm(5.0, dpi), mm(9.0, dpi)
-    card_h = max(target, min(mm(13.2, dpi), h // 8))
-    return w // 2, h - margin - card_h // 2
-
-
-def grid_cell_center(size, dpi, col, row, search=False):
-    w, h = size
-    margin, top_bar, target = mm(5.0, dpi), mm(13.0, dpi), mm(9.0, dpi)
-    cols, rows = (6, 2) if w > h else ((3, 3) if w < mm(100.0, dpi) else (4, 3))
-    gap_x = mm(2.6 if cols == 6 else (2.8 if cols == 3 else 3.4), dpi)
-    gap_y = mm(2.0, dpi)
-    if search:
-        y = top_bar + mm(2.0, dpi)
-        gap = mm(2.0, dpi)
-        header_y = y + target + mm(1.8, dpi) if w > h else y + 2 * target + gap + mm(1.7, dpi)
-        grid_top = header_y + mm(7.0, dpi) + mm(1.8, dpi)
-    else:
-        grid_top = top_bar + mm(2.2, dpi) + mm(11.0, dpi) + mm(2.9, dpi)
-    grid_w = w - 2 * margin
-    grid_h = max(target, h - margin - grid_top)
-    cell_w = (grid_w - gap_x * (cols - 1)) // cols
-    cell_h = (grid_h - gap_y * (rows - 1)) // rows
-    return margin + col * (cell_w + gap_x) + cell_w // 2, grid_top + row * (cell_h + gap_y) + cell_h // 2
+OUT = sim.out_dir('library-moves')
 
 
 def selection_buttons(size, dpi):
@@ -67,17 +37,6 @@ def selection_buttons(size, dpi):
     }
 
 
-def search_button_center(size, dpi):
-    w, _ = size
-    margin, top_bar, target, icon = mm(5.0, dpi), mm(13.0, dpi), mm(9.0, dpi), mm(5.0, dpi)
-    narrow = w < mm(100.0, dpi)
-    group_step = mm(10.0 if narrow else 12.2, dpi)
-    exit_step = mm(10.0 if narrow else 10.5, dpi)
-    exit_cx = w - margin - icon // 2
-    search_cx = exit_cx - exit_step - target - group_step - target
-    return search_cx, top_bar // 2
-
-
 def header_buttons(size, dpi, multipage=False):
     w, _ = size
     margin, top_bar, icon = mm(5.0, dpi), mm(13.0, dpi), mm(5.0, dpi)
@@ -92,39 +51,6 @@ def header_buttons(size, dpi, multipage=False):
     return {'back': back, 'new_folder': new_folder}
 
 
-def menu_point(size, dpi, anchor, count, index):
-    """PopupMenu's column-major layout, including its minimum touch target."""
-    w, h = size
-    margin, top = mm(5.0, dpi), mm(13.0, dpi)
-    available = h - top - 2 * margin - 2 * mm(1.0, dpi)
-    columns = 2 if available // count < mm(9.0, dpi) else 1
-    rows = (count + columns - 1) // columns
-    row = min(mm(12.0, dpi), available // rows)
-    height = row * rows + 2 * mm(1.0, dpi)
-    width = min(mm(70.0 * columns, dpi), w - 2 * margin)
-    x, y = anchor
-    centered = max(margin, min(x - width // 2, w - margin - width))
-    below, above = y + mm(2.0, dpi), y - mm(2.0, dpi) - height
-    if below + height <= h - margin:
-        mx, my = centered, below
-    elif above >= top + margin:
-        mx, my = centered, above
-    else:
-        right = x + mm(2.0, dpi)
-        mx = max(margin, min(right if right + width <= w - margin else x - mm(2.0, dpi) - width, w - margin - width))
-        my = max(top + margin, min(y - height // 2, max(top + margin, h - margin - height)))
-    col_w = (width - 2 * mm(0.35, dpi)) // columns
-    return mx + mm(0.35, dpi) + (index // rows) * col_w + col_w // 2, my + mm(1.0, dpi) + (index % rows) * row + row // 2
-
-
-def tap(point):
-    return ['--tap', f'{point[0]},{point[1]}']
-
-
-def hold(point):
-    return ['--long-press', f'{point[0]},{point[1]}']
-
-
 def capture(name, steps=(), size=(1272, 1696), dpi=300, clashes=False, multi_root=False):
     case = OUT / name
     if case.exists():
@@ -133,9 +59,8 @@ def capture(name, steps=(), size=(1272, 1696), dpi=300, clashes=False, multi_roo
     dest = library / 'Destination'
     dest.mkdir(parents=True)
     (library / 'Tree/Child').mkdir(parents=True)
-    state.mkdir()
     for title in ['A', 'B', 'C']:
-        shutil.copyfile(REPO / 'crates/verso/tests/fixtures/library3.epub', library / f'{title}.epub')
+        shutil.copyfile(sim.FIXTURES / 'library3.epub', library / f'{title}.epub')
         if clashes:
             shutil.copyfile(library / f'{title}.epub', dest / f'{title}.epub')
     (library / 'A.sdr').mkdir()
@@ -144,22 +69,15 @@ def capture(name, steps=(), size=(1272, 1696), dpi=300, clashes=False, multi_roo
     if multi_root:
         other = case / 'Other'
         other.mkdir()
-        shutil.copyfile(REPO / 'crates/verso/tests/fixtures/library2.epub', other / 'Extra.epub')
+        shutil.copyfile(sim.FIXTURES / 'library2.epub', other / 'Extra.epub')
         roots.append(str(other))
-    (state / 'settings.json').write_text(json.dumps({'library_folders': roots}))
-    (state / 'library-navigation.json').write_text(json.dumps({'folder': str(library)}))
-    env = dict(os.environ, VERSO_DATA=str(state), RUST_LOG='warn',
-               VERSO_SIM_SIZE=f'{size[0]}x{size[1]}', VERSO_SIM_DPI=str(dpi))
-    env.pop('VERSO_BOOKS', None)
-    subprocess.run([str(REPO / 'target/debug/verso'), '--screenshot', str(OUT / f'{case.name}.png'),
-                    *tap(library_card_center(size, dpi)), *steps],
-                   env=env, cwd=REPO, check=True, timeout=120)
+    sim.state(state, roots, files={'library-navigation.json': {'folder': str(library)}})
+    sim.run(OUT / f'{case.name}.png', [*tap(library_card_center(size, dpi)), *steps], state,
+            size=(size, dpi), quiet=False)
     return library
 
 
 def main():
-    OUT.mkdir(parents=True, exist_ok=True)
-    subprocess.run(['cargo', 'build', '-p', 'verso'], cwd=REPO, check=True)
     size, dpi = (1272, 1696), 300
     btns = selection_buttons(size, dpi)
     hdr = header_buttons(size, dpi)

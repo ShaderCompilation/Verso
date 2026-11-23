@@ -118,7 +118,9 @@ Keep verification focused and fast:
   full suite (`cargo test`), `cargo clippy` and `cargo fmt --check` once before
   committing. Documentation-only changes need no builds or code checks.
 - **Simulator captures** only for new or changed UI, in one orientation unless
-  portrait and landscape layouts differ.
+  portrait and landscape layouts differ. The `scripts/capture-*.py` scripts
+  share `scripts/sim.py` (isolated state, one simulator run, tap positions);
+  extend the closest one.
 - **On-device checks** only for what actually needs hardware: touch feel, e-ink
   refresh/ghosting, Kindle integration (`powerd`, USB, launcher) and
   performance on paths with a latency or memory target. Measure only when

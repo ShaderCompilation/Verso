@@ -10,29 +10,20 @@ sheet they do nothing, so extra presses are harmless.
 
     python3 scripts/capture-finished-books.py
 """
-import importlib.util
 import json
-import os
-from pathlib import Path
 import shutil
-import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/finished-books'
-spec = importlib.util.spec_from_file_location('capture_devices', ROOT / 'scripts/capture-devices.py')
-devices = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(devices)
+import sim
 
-FIXTURE = ROOT / 'crates/verso/tests/fixtures/selection.epub'
+OUT = sim.out_dir('finished-books')
+FIXTURE = sim.FIXTURES / 'selection.epub'
 # More than the fixture's pages on any screen, then one past the end.
 TO_THE_END = ['--key', 'next'] * 40
 
 
 def first_book(s):
     """Home's Library card, then the first book."""
-    margin, target = s.mm(5), s.mm(9)
-    card_h = max(target, min(s.mm(13.2), s.h // 8))
-    return [*s.tap(s.w / 2, s.h - margin - card_h / 2), *s.tap(margin + s.mm(9), s.mm(42))]
+    return s.open_book()
 
 
 def sheet_buttons(s, next_book):
@@ -52,15 +43,8 @@ def sheet_buttons(s, next_book):
 
 
 def run(name, device, settings, script, books):
-    state = OUT / 'state' / name
-    shutil.rmtree(state, ignore_errors=True)
-    state.mkdir(parents=True)
-    (state / 'settings.json').write_text(json.dumps({'library_folders': [str(books)], **settings}))
-    env = {k: v for k, v in os.environ.items() if not k.startswith('VERSO_SIM_')}
-    env.update(VERSO_DATA=str(state), VERSO_BOOKS=str(books), VERSO_SIM_BATTERY='82', RUST_LOG='error')
-    args = [str(ROOT / 'target/debug/verso'), '--device', device, '--screenshot', str(OUT / f'{name}.png'), *script]
-    subprocess.run(args, env=env, check=True, timeout=120, stderr=subprocess.DEVNULL)
-    return state
+    state = sim.state(OUT / 'state' / name, books, settings)
+    return sim.run(OUT / f'{name}.png', script, state, books, device=device)
 
 
 def states(state):
@@ -86,9 +70,9 @@ def folder(name, files):
 
 def screens():
     for device in ('pw6', 'basic-167'):
-        w, h, dpi = devices.DEVICES[device]
-        yield device, {}, '', devices.Screen(w, h, dpi)
-        yield device, {'orientation': 'landscape'}, '-landscape', devices.Screen(h, w, dpi)
+        w, h, dpi = sim.DEVICES[device]
+        yield device, {}, '', sim.Screen(w, h, dpi)
+        yield device, {'orientation': 'landscape'}, '-landscape', sim.Screen(h, w, dpi)
 
 
 def main():
@@ -102,7 +86,7 @@ def main():
         assert saved['finished'] and saved['status_at'] > 0 and not saved.get('rereading'), saved
         run(f'sheet-last{tag}', device, settings, [*first_book(s), *TO_THE_END], single)
 
-    s = devices.Screen(*devices.DEVICES['pw6'])
+    s = sim.Screen(*sim.DEVICES['pw6'])
     undo, home, nxt = sheet_buttons(s, True)
     # Undo: unmarked, the sheet gone, the last page left.
     state = run('undo', 'pw6', {}, [*first_book(s), *TO_THE_END, *undo], series)

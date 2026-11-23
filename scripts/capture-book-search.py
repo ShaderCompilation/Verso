@@ -4,20 +4,13 @@
 Run cargo build first. Outputs live in gitignored screenshots/book-search/.
 Coordinates assume the 1272 x 1696 simulator screen.
 """
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
+import sim
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/book-search'
+OUT = sim.out_dir('book-search')
 
 
 def main():
-    books = OUT / 'books'
-    books.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
+    books = sim.books(OUT / 'books', 'search.epub')
     opening = ['--tap', '636,1560', '--tap', '165,500']
     menu = [*opening, '--tap', '636,848']
     search = [*menu, '--tap', '895,77']
@@ -42,13 +35,8 @@ def main():
         'dictionary-search': [*opening, '--long-press', '190,297', '--tap', '1036,685', '--tap', '338,1253'],
     }
     for name, steps in scenes.items():
-        state = OUT / (name + '-state')
-        shutil.rmtree(state, ignore_errors=True)
-        state.mkdir(parents=True)
-        (state / 'settings.json').write_text(json.dumps({'library_folders': [str(books)]}))
-        env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), RUST_LOG='error')
-        subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps],
-                       env=env, check=True)
+        state = sim.state(OUT / (name + '-state'), books)
+        sim.run(OUT / (name + '.png'), steps, state, books, quiet=False)
     print(OUT)
 
 

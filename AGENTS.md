@@ -32,7 +32,7 @@ don't link paths inside it from public files.
 | `crates/verso-wordforms`, `crates/verso-mdns` | Word-form packs (`vwf-build`); the mDNS responder |
 | `third_party/` | Git submodules. Never edit; fix at build time instead |
 | `dist/` | Launcher (`verso.sh`), KUAL entry, release components |
-| `scripts/` | Deploy, package, Kindle tools, simulator capture scripts, `perf/` |
+| `scripts/` | Deploy, package, Kindle tools, `perf/`, simulator captures (`capture-*.py` on the shared `sim.py`) |
 | `crates/verso/tests/fixtures` | Original EPUB fixtures for tests and captures |
 
 ## Commands

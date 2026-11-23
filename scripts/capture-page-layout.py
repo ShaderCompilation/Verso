@@ -8,14 +8,9 @@ sketch and on the page, the rest (and every item's value) in the picker.
 The state seeds a reading speed (20 characters a second) and the simulator
 reports an 82% battery, so time left and the battery show values.
 """
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
+import sim
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/page-layout'
+OUT = sim.out_dir('page-layout')
 
 # Home → Library → book → menu → Text or Layout, per orientation.
 STEPS = {
@@ -64,9 +59,7 @@ CENTRE_SLOT = {'portrait': '636,758', 'landscape': '848,720'}
 
 
 def main():
-    books = OUT / 'books'
-    books.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
+    books = sim.books(OUT / 'books', 'search.epub')
     for orientation, s in STEPS.items():
         opened = [*s['open'], '--swipe', '1000,700,300,700']  # page 2: a chapter title and progress
         layout = [*opened, *s['menu'], *s['layout']]
@@ -84,19 +77,11 @@ def main():
 
 
 def capture(name, orientation, page_layout, steps, books):
-    state = OUT / 'state' / name
-    shutil.rmtree(state, ignore_errors=True)
-    state.mkdir(parents=True)
-    settings = {'library_folders': [str(books)], 'orientation': orientation}
-    if page_layout:
-        settings['page_layout'] = page_layout
-    (state / 'settings.json').write_text(json.dumps(settings))
+    settings = {'orientation': orientation, **({'page_layout': page_layout} if page_layout else {})}
     # A reading speed carried over from earlier books, so time left shows.
-    (state / 'reading-speed.json').write_text(json.dumps({'chars_per_sec': 20.0, 'samples': 30}))
-    env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), VERSO_SIM_BATTERY='82',
-               RUST_LOG='error')
-    subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps],
-                   env=env, check=True, stderr=subprocess.DEVNULL)
+    state = sim.state(OUT / 'state' / name, books, settings,
+                      {'reading-speed.json': {'chars_per_sec': 20.0, 'samples': 30}})
+    sim.run(OUT / (name + '.png'), steps, state, books)
 
 
 if __name__ == '__main__':

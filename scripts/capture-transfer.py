@@ -8,14 +8,9 @@ shows a Kindle's name and address, `code=` fixes the code, `activity`
 fills the list and `phase=` shows a state without starting anything. The
 ready states really serve on 127.0.0.1 (VERSO_TRANSFER_PORT, default 8080).
 """
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
+import sim
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'screenshots/transfer'
+OUT = sim.out_dir('transfer')
 
 TRANSFER = {
     'ready': 'kindle,code=4827,activity',
@@ -38,9 +33,7 @@ ENTRIES = {
 
 
 def main():
-    books = OUT / 'books'
-    books.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / 'crates/verso/tests/fixtures/search.epub', books / 'search.epub')
+    books = sim.books(OUT / 'books', 'search.epub')
     for name, options in TRANSFER.items():
         capture(f'portrait-{name}', 'portrait', options, ['--screen', 'transfer'], books)
     for name in ['ready', 'no-network', 'failed-port']:
@@ -59,15 +52,8 @@ def main():
 
 
 def capture(name, orientation, options, steps, books, extra_env=None):
-    state = OUT / 'state' / name
-    shutil.rmtree(state, ignore_errors=True)
-    state.mkdir(parents=True)
-    settings = {'library_folders': [str(books)], 'orientation': orientation}
-    (state / 'settings.json').write_text(json.dumps(settings))
-    env = dict(os.environ, VERSO_DATA=str(state), VERSO_BOOKS=str(books), VERSO_SIM_BATTERY='82',
-               VERSO_SIM_TRANSFER=options, RUST_LOG='error', **(extra_env or {}))
-    subprocess.run([str(ROOT / 'target/debug/verso'), '--screenshot', str(OUT / (name + '.png')), *steps],
-                   env=env, check=True, stderr=subprocess.DEVNULL)
+    state = sim.state(OUT / 'state' / name, books, {'orientation': orientation})
+    sim.run(OUT / (name + '.png'), steps, state, books, env={'VERSO_SIM_TRANSFER': options, **(extra_env or {})})
 
 
 if __name__ == '__main__':
