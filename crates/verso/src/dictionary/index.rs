@@ -122,6 +122,7 @@ pub struct Index {
 /// packs: case folded and normalized, and blind to Russian ё/е and stress
 /// marks, so `ещё` finds `еще` and `молоко́` finds `молоко`.
 pub use verso_wordforms::fold;
+use verso_wordforms::fold_into;
 fn hash(text: &str, buckets: usize) -> usize {
     (text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) % buckets as u64)
         as usize
@@ -141,18 +142,21 @@ fn read_word<'a>(r: &mut impl BufRead, buf: &'a mut Vec<u8>) -> Result<Option<&'
 }
 /// The folded lookup key for a source headword, within the cache limit.
 /// Folding can lengthen text, so a source word that fits may not.
-fn folded_key(word: &str) -> Result<String> {
-    let key = fold(word);
+fn folded_key(word: &str, key: &mut String) -> Result<()> {
+    fold_into(word, key);
     ensure!(key.len() <= MAX_WORD_BYTES, "Folded headword too long (limit 4096 bytes)");
-    Ok(key)
+    Ok(())
 }
+/// Reads the next headword and its definition span, folding its key into
+/// `key` (reused across records, like `word_buf`).
 fn read_idx_record<'a>(
     input: &mut impl BufRead,
     word_buf: &'a mut Vec<u8>,
+    key: &mut String,
     info: &Info,
     data_len: u64,
     count: u32,
-) -> Result<Option<(&'a str, String, u64, u32)>> {
+) -> Result<Option<(&'a str, u64, u32)>> {
     let Some(word) = read_word(input, word_buf)? else { return Ok(None) };
     ensure!(count < info.count, "Index has more words than wordcount");
     let offset = if info.wide {
@@ -164,21 +168,22 @@ fn read_idx_record<'a>(
     };
     let size = read_u32_be(input).context("Truncated offset/size record")?;
     ensure!(offset.checked_add(size as u64).is_some_and(|end| end <= data_len), "Index points outside definitions");
-    let key = folded_key(word)?;
-    Ok(Some((word, key, offset, size)))
+    folded_key(word, key)?;
+    Ok(Some((word, offset, size)))
 }
 fn read_syn_record<'a>(
     input: &mut impl BufRead,
     word_buf: &'a mut Vec<u8>,
+    key: &mut String,
     info: &Info,
     count: u32,
-) -> Result<Option<(&'a str, String, u32)>> {
+) -> Result<Option<(&'a str, u32)>> {
     let Some(word) = read_word(input, word_buf)? else { return Ok(None) };
     ensure!(count < info.syn_count, "Synonym count differs from .ifo");
     let target = read_u32_be(input).context("Truncated synonym target record")?;
     ensure!(target < info.count, "Invalid synonym target");
-    let key = folded_key(word)?;
-    Ok(Some((word, key, target)))
+    folded_key(word, key)?;
+    Ok(Some((word, target)))
 }
 /// `false` when a lookup query exceeds the index limits, before or after
 /// folding. Such a query cannot match any headword.
@@ -426,6 +431,7 @@ impl Index {
             let input: Box<dyn Read> = if compressed { Box::new(GzDecoder::new(source)) } else { Box::new(source) };
             let mut input = BufReader::with_capacity(65536, input);
             let mut word_buf = Vec::with_capacity(256);
+            let mut key = String::with_capacity(256);
             let mut count = 0u32;
             let mut bytes = 0u64;
             loop {
@@ -434,9 +440,9 @@ impl Index {
                 }
                 // Only source-record problems get the record context; cache
                 // write errors (a full disk, say) are reported as they are.
-                let entry = read_idx_record(&mut input, &mut word_buf, info, data_len, count)
+                let entry = read_idx_record(&mut input, &mut word_buf, &mut key, info, data_len, count)
                     .with_context(|| format!("{}: .idx record {count} at byte offset {bytes}", idx.display()))?;
-                let Some((word, key, offset, size)) = entry else { break };
+                let Some((word, offset, size)) = entry else { break };
                 let at = builder.append(&key, word, offset, size)?;
                 match &mut syn_refs {
                     SynRefs::None => {}
@@ -474,9 +480,9 @@ impl Index {
                     if count.is_multiple_of(128) {
                         ensure!(current(), "Lookup cancelled");
                     }
-                    let alias = read_syn_record(&mut input, &mut word_buf, info, count)
+                    let alias = read_syn_record(&mut input, &mut word_buf, &mut key, info, count)
                         .with_context(|| format!("{}: .syn record {count} at byte offset {bytes}", syn.display()))?;
-                    let Some((word, key, target)) = alias else { break };
+                    let Some((word, target)) = alias else { break };
                     match &mut lookup {
                         SynLookup::Slab(slab) => {
                             let (orig_word, orig_offset, orig_size) =

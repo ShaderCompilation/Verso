@@ -75,22 +75,62 @@ impl Encoding {
 /// Shared by the dictionary index and the packs: when it changes, bump the
 /// index `KEY_VERSION` in the app and [`VERSION`] here.
 pub fn fold(text: &str) -> String {
+    let mut out = String::new();
+    fold_into(text, &mut out);
+    out
+}
+
+/// [`fold`] into a reused buffer, replacing its contents. Index builds fold
+/// every headword of every dictionary, so the common text skips the Unicode
+/// pipeline: ASCII and the basic Russian alphabet have no marks to judge and
+/// fold one character to one. Anything else takes the full pipeline; a test
+/// checks the shortcut against it for every BMP character.
+pub fn fold_into(text: &str, out: &mut String) {
+    out.clear();
+    if text.is_ascii() {
+        out.push_str(text);
+        out.make_ascii_lowercase();
+    } else if !fold_plain(text, out) {
+        out.clear();
+        fold_full(text, out);
+    }
+}
+
+/// The shortcut for ASCII and `А..я`, `Ё`, `ё`; `false` on any other
+/// character, leaving `out` partly written.
+fn fold_plain(text: &str, out: &mut String) -> bool {
+    out.reserve(text.len());
+    for c in text.chars() {
+        out.push(match c {
+            '\0'..='\x7f' => c.to_ascii_lowercase(),
+            // Of these, NFD splits only Й and й (и + breve), which recompose.
+            'А'..='Я' => char::from_u32(c as u32 + 0x20).unwrap(),
+            'а'..='я' => c,
+            'Ё' | 'ё' => 'е',
+            _ => return false,
+        });
+    }
+    true
+}
+
+fn fold_full(text: &str, out: &mut String) {
     let mut base = '\0';
-    text.nfd()
-        .default_case_fold()
-        .filter(|&c| {
-            let drop = match c {
-                '\u{301}' | '\u{300}' => cyrillic(base),
-                '\u{308}' => base == 'е',
-                _ => false,
-            };
-            if !is_combining_mark(c) {
-                base = c;
-            }
-            !drop
-        })
-        .nfc()
-        .collect()
+    out.extend(
+        text.nfd()
+            .default_case_fold()
+            .filter(|&c| {
+                let drop = match c {
+                    '\u{301}' | '\u{300}' => cyrillic(base),
+                    '\u{308}' => base == 'е',
+                    _ => false,
+                };
+                if !is_combining_mark(c) {
+                    base = c;
+                }
+                !drop
+            })
+            .nfc(),
+    );
 }
 
 fn cyrillic(c: char) -> bool {

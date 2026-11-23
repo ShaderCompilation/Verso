@@ -1,4 +1,4 @@
-use super::{Encoding, MAGIC, Pack, VERSION, fold, is_word, opencorpora::Dictionary, write::Writer};
+use super::{Encoding, MAGIC, Pack, VERSION, fold, fold_into, is_word, opencorpora::Dictionary, write::Writer};
 use anyhow::Result;
 
 const FIXTURE: &str = include_str!("../testdata/opencorpora.xml");
@@ -159,4 +159,67 @@ fn fold_matches_dictionary_keys() {
     assert_eq!(fold("ї"), "ї");
     assert_eq!(fold("Й"), "й");
     assert_eq!(fold("CAFE\u{301}"), "café");
+}
+
+#[test]
+fn fold_shortcut_matches_the_unicode_pipeline() {
+    // The full pipeline, written out again so the shortcut is checked
+    // against it rather than against itself.
+    let reference = |text: &str| {
+        use caseless::Caseless;
+        use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+        let mut base = '\0';
+        text.nfd()
+            .default_case_fold()
+            .filter(|&c| {
+                let cyrillic = matches!(base as u32, 0x0400..=0x052f | 0x1c80..=0x1c8f | 0xa640..=0xa69f);
+                let drop = match c {
+                    '\u{301}' | '\u{300}' => cyrillic,
+                    '\u{308}' => base == 'е',
+                    _ => false,
+                };
+                if !is_combining_mark(c) {
+                    base = c;
+                }
+                !drop
+            })
+            .nfc()
+            .collect::<String>()
+    };
+    // The buffer starts dirty: fold_into replaces it.
+    let mut out = String::from("stale");
+    let mut check = |text: &str| {
+        fold_into(text, &mut out);
+        assert_eq!(out, reference(text), "{text:?}");
+    };
+    // Every BMP character alone and between neighbours that marks or
+    // composition could join it to.
+    for c in (0..=0xffff).filter_map(char::from_u32) {
+        for text in [format!("{c}"), format!("Е{c}\u{301}"), format!("a{c}\u{308}Я"), format!("ё{c}\u{300}")] {
+            check(&text);
+        }
+    }
+    // Every pair the shortcut handles, so no two of them compose.
+    let plain: Vec<char> = (0..0x80).filter_map(char::from_u32).chain('А'..='я').chain(['Ё', 'ё']).collect();
+    for a in &plain {
+        for b in &plain {
+            check(&format!("{a}{b}"));
+        }
+    }
+    for text in [
+        "Ёлка и ЁЖ",
+        "моло\u{301}ко",
+        "е\u{308}ж",
+        "ї",
+        "і\u{308}",
+        "Й й",
+        "Straße",
+        "İstanbul",
+        "ﬁne ﬂow",
+        "CAFE\u{301} au lait",
+        "Hello, Мир-2",
+        "",
+    ] {
+        check(text);
+    }
 }
