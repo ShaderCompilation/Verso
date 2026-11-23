@@ -1,12 +1,16 @@
 //! First-time setup: a few pages over Home on the first launch (Welcome,
-//! Library, Turning pages, Ready), with Back / Skip / Next and "2 of 4". Every choice
+//! Library, Turning pages, Your page, Ready), with Back / Skip / Next and
+//! "2 of 5". Every choice
 //! is saved the moment it is made, through the same settings as Settings;
 //! only Skip and Ready set `Settings::setup_done`, so quitting midway
 //! shows setup again from Welcome with the choices in place. Settings →
-//! Device → *Run setup again* pushes the same screen over Settings.
+//! Advanced → *Run setup again* pushes the same screen over Settings.
 //!
 //! Turning a page redraws the content area (a `Ui` refresh of what
 //! changed); trying a zone on the sketch hints `Fast` for the sketch only.
+//!
+//! Your page is the Layout editor embedded with sample bar values; each
+//! change is saved at once, and a reader open underneath picks it up.
 //!
 //! The Library page lists the folders [`discovery`] finds as it finds them
 //! (the walk starts when setup opens). On a first setup, before any folder
@@ -15,12 +19,14 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::document::TocEntry;
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::library::discovery::{self, COUNT_CAP, Discovery, Folder};
 use crate::platform::{DeviceModel, RefreshMode, Waker};
 use crate::reader::{BOOKMARK_CORNER_MM, Zone, tap_zone};
 use crate::screens::folders::{FolderPicker, display_folder};
+use crate::screens::reader::layout::{LayoutView, sample_data, sample_toc};
 use crate::screens::system::{draw_zones, switch_row};
 use crate::screens::transfer::TransferScreen;
 use crate::screens::{Action, EventCx, RelayoutState, Screen, untested};
@@ -47,6 +53,13 @@ pub fn untested_note(store: &Store, model: &DeviceModel) -> Option<String> {
     Some(untested::message(model))
 }
 
+/// The pages' content area: under the top bar, above Back and Next.
+pub(crate) fn body_rect(t: &Theme, screen: Rect) -> Rect {
+    let content = screen.split_top(t.top_bar).1.inset(t.margin);
+    let top = content.y + t.mm(4.0);
+    Rect::new(content.x, top, content.w, content.bottom() - t.button_h - t.mm(6.0) - top)
+}
+
 /// Where setup was before the display turned.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SetupResume {
@@ -60,6 +73,7 @@ enum Page {
     Welcome,
     Library,
     Turning,
+    Layout,
     Ready,
 }
 
@@ -69,6 +83,7 @@ impl Page {
             Page::Welcome => "Welcome",
             Page::Library => "Library",
             Page::Turning => "Turning pages",
+            Page::Layout => "Your page",
             Page::Ready => "Ready",
         }
     }
@@ -140,6 +155,9 @@ pub struct SetupScreen {
     corner: Toggle,
     /// The column of the switch rows (Turning pages and Ready).
     switches: Rect,
+    // Your page, with sample bar values.
+    layout: LayoutView,
+    sample_toc: Vec<TocEntry>,
     // Ready
     auto_check: Toggle,
     finish: Button,
@@ -148,7 +166,7 @@ pub struct SetupScreen {
 impl SetupScreen {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker, note: Option<String>) -> Self {
         let settings = store.settings();
-        let pages = vec![Page::Welcome, Page::Library, Page::Turning, Page::Ready];
+        let pages = vec![Page::Welcome, Page::Library, Page::Turning, Page::Layout, Page::Ready];
         let mut top = TopBar::new("", false);
         top.place(screen, t);
         let content = screen.split_top(t.top_bar).1.inset(t.margin);
@@ -167,8 +185,8 @@ impl SetupScreen {
         let mut finish = Button::new("Start reading", ButtonKind::Primary);
         finish.place(nav.split_right(nav_w).0, t);
         let count = Rect { x: nav.x + nav_w, w: nav.w - 2 * nav_w, ..nav };
-        let body_top = content.y + t.mm(4.0);
-        let body = Rect::new(content.x, body_top, content.w, nav.y - t.mm(6.0) - body_top);
+        let body = body_rect(t, screen);
+        let layout = LayoutView::embedded(t, screen, body, &settings.page_layout, &settings.typography);
 
         // Welcome: the two buttons at the bottom, centred.
         let w = content.w.min(t.mm(80.0));
@@ -264,6 +282,8 @@ impl SetupScreen {
             caption,
             corner,
             switches,
+            layout,
+            sample_toc: sample_toc(),
             auto_check,
             finish,
         };
@@ -599,6 +619,16 @@ impl SetupScreen {
         );
     }
 
+    /// Your page: the editor takes the gesture; a change is saved at once.
+    fn layout_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
+        self.layout.on_gesture(g, cx.theme, &sample_data(&self.sample_toc));
+        let layout = self.layout.layout.clone();
+        let saved = self.store.settings().page_layout;
+        if layout != saved && !self.save(cx, "the page layout", |s| s.page_layout = layout) {
+            self.layout.reset(&saved);
+        }
+    }
+
     fn turning_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
         if let Some(i) = self.zones.on_gesture(g) {
             if self.save(cx, "tap zones", |s| s.tap_zones = TapZones::ALL[i]) {
@@ -678,12 +708,21 @@ impl Screen for SetupScreen {
             Page::Welcome => {}
             Page::Library => self.draw_library(cx),
             Page::Turning => self.draw_turning(cx),
+            // Below: its slot picker opens over the buttons.
+            Page::Layout => {}
             Page::Ready => self.draw_ready(cx),
         }
         self.back.draw(cx);
         let count = format!("{} of {}", self.page + 1, self.pages.len());
         cx.line(&count, cx.theme.small.gray(INK2), self.count, HAlign::Center);
-        if page == Page::Ready { self.finish.draw(cx) } else { self.next.draw(cx) }
+        if page == Page::Ready {
+            self.finish.draw(cx)
+        } else {
+            self.next.draw(cx)
+        }
+        if page == Page::Layout {
+            self.layout.draw(cx, &sample_data(&self.sample_toc));
+        }
     }
 
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
@@ -696,6 +735,11 @@ impl Screen for SetupScreen {
             if self.skip_setup.on_gesture(&g) {
                 return self.finish(cx);
             }
+            return Action::None;
+        }
+        // An open slot picker takes every gesture, also over the buttons.
+        if page == Page::Layout && self.layout.picker_open() {
+            self.layout_gesture(&g, cx);
             return Action::None;
         }
         if page != Page::Ready && self.skip.on_gesture(&g) {
@@ -723,6 +767,7 @@ impl Screen for SetupScreen {
         match page {
             Page::Library => return self.library_gesture(&g, cx),
             Page::Turning => self.turning_gesture(&g, cx),
+            Page::Layout => self.layout_gesture(&g, cx),
             _ => {}
         }
         Action::None
@@ -807,6 +852,8 @@ mod tests {
         tap(&mut s, &t, |s| s.zones.rect().columns(3, 0)[2]);
         tap(&mut s, &t, |s| s.corner.rect());
         tap(&mut s, &t, |s| s.next.rect());
+        assert_eq!(s.current(), Page::Layout);
+        tap(&mut s, &t, |s| s.next.rect());
         tap(&mut s, &t, |s| s.auto_check.rect());
         let settings = store.settings();
         assert_eq!(
@@ -843,10 +890,32 @@ mod tests {
         store.save_settings(&settings)?;
         let (mut s, t) = setup(&store);
         assert_eq!((s.zones.selected, s.corner.on, s.auto_check.on), (1, false, false));
-        s.go(3);
+        s.go(4);
         assert!(matches!(tap(&mut s, &t, |s| s.back.rect()), Action::None));
         assert!(matches!(tap(&mut s, &t, |s| s.skip.rect()), Action::Pop));
         assert!(store.settings().setup_done);
+        Ok(())
+    }
+
+    #[test]
+    fn your_page_saves_each_change_and_its_picker_takes_every_tap() -> anyhow::Result<()> {
+        use crate::page_layout::BarItem;
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        let (mut s, t) = setup(&store);
+        s.go(3);
+        assert_eq!(s.current(), Page::Layout);
+        tap(&mut s, &t, |s| s.layout.bar_toggle(0));
+        assert!(store.settings().page_layout.top.on, "saved at once");
+        // The top bar's empty centre slot opens the picker; a tap on Next
+        // while it is open only closes it.
+        tap(&mut s, &t, |s| s.layout.slot(&t, 0, 1));
+        assert!(s.layout.picker_open());
+        tap(&mut s, &t, |s| s.next.rect());
+        assert!(!s.layout.picker_open() && s.current() == Page::Layout);
+        tap(&mut s, &t, |s| s.layout.slot(&t, 0, 1));
+        tap(&mut s, &t, |s| s.layout.picker_item(&t, BarItem::Author));
+        assert_eq!(store.settings().page_layout.top.slots[1], Some(BarItem::Author));
         Ok(())
     }
 

@@ -2,12 +2,17 @@
 //! and controls for the bars, the progress line and the margins. It edits a
 //! copy of the layout; the reader applies it when the screen closes, so the
 //! book is laid out at most once per visit.
+//!
+//! First-time setup shows the same editor [embedded](LayoutView::embedded)
+//! in its own page: no top bar, only the bar rows (margins need the real
+//! page; Reader Menu → Layout has them), with [sample values](sample_data).
 use super::bars::{self, BarStyle};
-use crate::document::Typography;
+use crate::clock::LocalTime;
+use crate::document::{Position, TocEntry, Typography};
 use crate::geom::{Point, Rect};
 use crate::gfx::HAlign;
 use crate::page_layout::{BAR_MM, Bar, BarItem, MAX_MARGIN_MM, MIN_MARGIN_MM, PageLayout, ProgressLine};
-use crate::platform::RefreshMode;
+use crate::platform::{Battery, RefreshMode};
 use crate::reader::bars::{BarData, ItemText};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER, Theme};
@@ -18,10 +23,31 @@ use std::time::Instant;
 const LABELS: [&str; 7] =
     ["Top bar", "Bottom bar", "Progress line", "Chapter marks", "Side margins", "Top margin", "Bottom margin"];
 const LINES: [ProgressLine; 3] = [ProgressLine::Off, ProgressLine::Top, ProgressLine::Bottom];
-/// Space between the sketch's top and bottom pieces.
-const SKETCH_GAP_MM: f32 = 4.0;
+/// The rows setup shows: the bars, the progress line and chapter marks.
+const SETUP_ROWS: usize = 4;
+/// Space between the sketch's top and bottom pieces, where the caption goes.
+const SKETCH_GAP_MM: f32 = 5.0;
+const CAPTION: &str = "Tap a slot to change what it shows";
 
-pub(super) enum LayoutEvent {
+/// Bar values for the editor when no book is open.
+pub(crate) fn sample_toc() -> Vec<TocEntry> {
+    vec![TocEntry { title: "The Lighthouse Keeper".into(), level: 1, page: 4, position: Position::default() }]
+}
+pub(crate) fn sample_data(toc: &[TocEntry]) -> BarData<'_> {
+    BarData {
+        toc,
+        title: "A Summer by the Sea",
+        author: "Ada Lovelace",
+        page: 11,
+        pages: 340,
+        progress: 400,
+        clock: Some(LocalTime { hour: 9, minute: 41 }),
+        battery: Some(Battery { percent: 80, charging: false }),
+        ..BarData::default()
+    }
+}
+
+pub(crate) enum LayoutEvent {
     Close,
 }
 
@@ -32,58 +58,91 @@ struct Picker {
     menu: PopupMenu,
 }
 
-pub(super) struct LayoutView {
+pub(crate) struct LayoutView {
     /// The layout being edited.
     pub layout: PageLayout,
+    /// The page the sketch shows.
     screen: Rect,
+    /// Where the view draws: below the top bar, or setup's page body.
+    frame: Rect,
     font_px: i32,
     /// Distance between text lines on the page, in pixels.
     line_pitch: f32,
     justify: bool,
-    top_bar: TopBar,
+    /// None when embedded.
+    top_bar: Option<TopBar>,
     /// The sketch: the top and bottom of the page, `half` tall each, with
     /// the middle left out. `scale` maps page pixels to sketch pixels.
     sketch: Rect,
     half: i32,
     scale: f32,
     target: i32,
-    rows: [Rect; 7],
+    caption: Rect,
+    /// One per label shown: all seven, or `SETUP_ROWS` embedded.
+    rows: Vec<Rect>,
     label_w: i32,
     bars: [Toggle; 2],
     marks: Toggle,
     progress: Segmented,
-    margins: [Stepper; 3],
+    /// Empty when embedded.
+    margins: Vec<Stepper>,
     press: Press,
     pressed: Option<(usize, usize)>,
     picker: Option<Picker>,
 }
 
 impl LayoutView {
+    /// The Page layout screen over the whole of `screen`.
     pub fn new(t: &Theme, screen: Rect, layout: &PageLayout, typography: &Typography) -> Self {
         let mut top_bar = TopBar::new("Page layout", true);
         top_bar.place(screen, t);
         let body_y = top_bar.rect().bottom();
-        let body = Rect::new(screen.x, body_y, screen.w, screen.bottom() - body_y);
+        let frame = Rect::new(screen.x, body_y, screen.w, screen.bottom() - body_y);
+        Self::build(t, screen, frame, Some(top_bar), layout, typography)
+    }
+
+    /// The editor inside `frame` (already clear of the screen's margins),
+    /// with no top bar and only the bar rows: setup's Your page.
+    pub fn embedded(t: &Theme, screen: Rect, frame: Rect, layout: &PageLayout, typography: &Typography) -> Self {
+        Self::build(t, screen, frame, None, layout, typography)
+    }
+
+    fn build(
+        t: &Theme,
+        screen: Rect,
+        frame: Rect,
+        top_bar: Option<TopBar>,
+        layout: &PageLayout,
+        typography: &Typography,
+    ) -> Self {
+        let full = top_bar.is_some();
         let (pad, row_h) = (t.mm(4.0), t.mm(11.0));
+        // Embedded, the frame already keeps clear of the margins and edges.
+        let (edge, inset) = if full { (pad, t.margin) } else { (0, 0) };
+        let count = if full { LABELS.len() } else { SETUP_ROWS };
         // The sketch on top, the controls below: one column in portrait,
-        // two columns of three in landscape.
+        // two columns in landscape.
         let columns = if screen.w > screen.h { 2 } else { 1 };
-        let per_column = 7usize.div_ceil(columns);
+        let per_column = count.div_ceil(columns);
         let controls_h = per_column as i32 * row_h;
-        let inner_w = screen.w - 2 * t.margin;
-        let controls = Rect::new(screen.x + t.margin, screen.bottom() - pad - controls_h, inner_w, controls_h);
-        let area = Rect::new(controls.x, body.y + pad, inner_w, controls.y - pad - body.y - pad);
+        let inner_w = frame.w - 2 * inset;
+        let controls = Rect::new(frame.x + inset, frame.bottom() - edge - controls_h, inner_w, controls_h);
+        let area_y = frame.y + edge;
+        let area = Rect::new(controls.x, area_y, inner_w, controls.y - pad - area_y);
         // 6" landscape: a narrower gap, so each column keeps room for its
         // labels and full-size controls.
         let narrow = columns == 2 && inner_w < t.mm(125.0);
         let column_rects = controls.columns(columns, t.mm(if narrow { 4.0 } else { 8.0 }));
-        let rows: [Rect; 7] = std::array::from_fn(|i| {
-            let column = column_rects[i / per_column];
-            Rect::new(column.x, column.y + (i % per_column) as i32 * row_h, column.w, row_h)
-        });
+        let rows: Vec<Rect> = (0..count)
+            .map(|i| {
+                let column = column_rects[i / per_column];
+                Rect::new(column.x, column.y + (i % per_column) as i32 * row_h, column.w, row_h)
+            })
+            .collect();
         // Near full width, so the bars show their real text and fitting. Each
         // half must hold the largest top or bottom margin with its bar.
         let half = (area.h - t.mm(SKETCH_GAP_MM)) / 2;
+        let caption = Rect::new(area.x, area.y + half, inner_w, area.h - 2 * half);
         let tallest = t.mm(MAX_MARGIN_MM as f32 / 2.0 + BAR_MM + 2.0);
         let scale = (area.w as f32 / screen.w as f32).min(half as f32 / tallest as f32).min(1.0);
         let sketch_w = (screen.w as f32 * scale) as i32;
@@ -104,17 +163,20 @@ impl LayoutView {
         let bars = [layout.top.on, layout.bottom.on].map(Toggle::new);
         let mut progress = Segmented::texts(&["Off", "Top", "Bottom"], line_index(layout.progress));
         progress.place(control(2, progress_w));
-        let margins = std::array::from_fn(|k| {
-            let label = |text: &str| SideLabel { text: text.into(), style: t.heading };
-            let mut stepper = Stepper::new(label("−"), label("+"), "");
-            stepper.place(control(4 + k, control_w), side_w);
-            stepper
-        });
+        let margins = (4..rows.len())
+            .map(|i| {
+                let label = |text: &str| SideLabel { text: text.into(), style: t.heading };
+                let mut stepper = Stepper::new(label("−"), label("+"), "");
+                stepper.place(control(i, control_w), side_w);
+                stepper
+            })
+            .collect();
         let spacing = [1.0, 1.2, 1.4][typography.spacing.min(2)];
         let font_px = typography.font_px(t.dpi);
         let mut view = Self {
             layout: layout.clone(),
             screen,
+            frame,
             font_px,
             line_pitch: font_px as f32 * 1.2 * spacing,
             justify: typography.justify,
@@ -123,20 +185,21 @@ impl LayoutView {
             half,
             scale,
             target: t.target,
-            rows,
+            caption,
             label_w: rows[0].w - control_w - label_gap,
             bars,
             marks: Toggle::new(layout.chapter_marks),
             progress,
             margins,
+            rows,
             press: Press::default(),
             pressed: None,
             picker: None,
         };
         for (k, toggle) in view.bars.iter_mut().enumerate() {
-            toggle.place(rows[k].right(), rows[k].center().y, t);
+            toggle.place(view.rows[k].right(), view.rows[k].center().y, t);
         }
-        view.marks.place(rows[3].right(), rows[3].center().y, t);
+        view.marks.place(view.rows[3].right(), view.rows[3].center().y, t);
         view.sync();
         view
     }
@@ -156,7 +219,7 @@ impl LayoutView {
         self.bars[1].on = self.layout.bottom.on;
         self.marks.on = self.layout.chapter_marks;
         self.progress.selected = line_index(self.layout.progress);
-        for k in 0..3 {
+        for k in 0..self.margins.len() {
             let value = *self.margin(k);
             let stepper = &mut self.margins[k];
             stepper.value = format!("{value} mm");
@@ -246,16 +309,26 @@ impl LayoutView {
         self.picker = Some(Picker { bar, slot, menu });
     }
 
+    /// Shows `layout` (setup couldn't save a change).
+    pub fn reset(&mut self, layout: &PageLayout) {
+        self.layout = layout.clone();
+        self.sync();
+    }
+
+    pub fn picker_open(&self) -> bool {
+        self.picker.is_some()
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn visual_state(
         &self,
-    ) -> (Option<(usize, usize, Option<usize>)>, bool, Option<(usize, usize)>, PageLayout, [Option<Step>; 3]) {
+    ) -> (Option<(usize, usize, Option<usize>)>, bool, Option<(usize, usize)>, PageLayout, Vec<Option<Step>>) {
         (
             self.picker.as_ref().map(|p| (p.bar, p.slot, p.menu.is_pressed())),
-            self.top_bar.is_pressed(),
+            self.top_bar.as_ref().is_some_and(TopBar::is_pressed),
             self.pressed,
             self.layout.clone(),
-            [self.margins[0].pressed(), self.margins[1].pressed(), self.margins[2].pressed()],
+            self.margins.iter().map(Stepper::pressed).collect(),
         )
     }
 
@@ -272,7 +345,9 @@ impl LayoutView {
             }
             return None;
         }
-        if self.top_bar.on_gesture(g) {
+        if let Some(top_bar) = &mut self.top_bar
+            && top_bar.on_gesture(g)
+        {
             return Some(LayoutEvent::Close);
         }
         let slots = self.slot_rects(t.dpi);
@@ -303,7 +378,7 @@ impl LayoutView {
         if let Some(i) = self.progress.on_gesture(g) {
             self.set_line(LINES[i.min(2)]);
         }
-        for k in 0..3 {
+        for k in 0..self.margins.len() {
             if let Some(step) = self.margins[k].on_gesture(g) {
                 self.step(k, step);
             }
@@ -318,7 +393,7 @@ impl LayoutView {
     /// Repeats held steppers; true when a value changed.
     pub fn on_tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        for k in 0..3 {
+        for k in 0..self.margins.len() {
             if let Some(step) = self.margins[k].on_tick(now) {
                 self.step(k, step);
                 changed = true;
@@ -329,8 +404,10 @@ impl LayoutView {
 
     pub fn draw(&self, cx: &mut DrawCx, data: &BarData) {
         let t = cx.theme;
-        cx.fill(self.screen, PAPER);
-        self.top_bar.draw(cx);
+        cx.fill(if self.top_bar.is_some() { self.screen } else { self.frame }, PAPER);
+        if let Some(top_bar) = &self.top_bar {
+            top_bar.draw(cx);
+        }
         self.draw_sketch(cx, data);
         for (row, label) in self.rows.iter().zip(LABELS) {
             cx.line(label, t.body, Rect::new(row.x, row.y, self.label_w, row.h), HAlign::Left);
@@ -350,7 +427,8 @@ impl LayoutView {
 
     /// The page's top and bottom at near real size: margins to scale, grey
     /// lines for text, and the bars with their real values. Empty slots show
-    /// "+"; the middle of the page is left out.
+    /// "+" in a thin outline; the middle of the page is left out, and the
+    /// caption goes there.
     fn draw_sketch(&self, cx: &mut DrawCx, data: &BarData) {
         let t = cx.theme;
         let s = self.scale;
@@ -371,11 +449,7 @@ impl LayoutView {
         );
         let gap = Rect::new(top.x - 2 * t.border, top.bottom(), top.w + 4 * t.border, bottom.y - top.bottom());
         cx.fill(gap, PAPER);
-        for k in 0..3 {
-            let dot = t.mm(0.8);
-            let x = gap.center().x + (k - 1) * t.mm(3.0);
-            cx.canvas.fill_circle(x as f32, gap.center().y as f32, dot as f32 / 2.0, INK3);
-        }
+        cx.line(CAPTION, t.small.gray(INK2), self.caption, HAlign::Center);
         let g = self.layout.geometry(self.screen.w, self.screen.h, t.dpi, self.font_px);
         let (width, height) = (self.screen.w, self.screen.h);
         let half_page = self.half_page();
@@ -428,7 +502,17 @@ impl LayoutView {
                     cx.hint(r, RefreshMode::Fast);
                 }
                 let (text, gray) = match bar.slots[slot] {
-                    None => (ItemText::short("+".into()), INK2),
+                    None => {
+                        // A small "+" box where the slot's text would start.
+                        let h = (rect.h * 4 / 5).max(t.mm(2.5));
+                        let w = 2 * h;
+                        let x = [rect.x, rect.center().x - w / 2, rect.right() - w][slot];
+                        let r = Rect::new(x, rect.center().y - h / 2, w, h);
+                        let ink = if down { PAPER } else { INK3 };
+                        cx.canvas.stroke_rounded_rect(r, h as f32 / 3.0, (t.border as f32 / 2.0).max(1.0), ink);
+                        cx.line("+", style.text.gray(if down { PAPER } else { INK2 }), r, HAlign::Center);
+                        return None;
+                    }
                     Some(item) => match data.text(item) {
                         Some(text) => (text, style.text.gray),
                         // Items without a value yet show their name.
@@ -439,6 +523,22 @@ impl LayoutView {
             });
             bars::slots(cx, &texts, rect, &style);
         }
+    }
+}
+
+/// Tap points for setup's tests.
+#[cfg(test)]
+impl LayoutView {
+    pub(crate) fn bar_toggle(&self, k: usize) -> Rect {
+        self.bars[k].rect()
+    }
+    pub(crate) fn slot(&self, t: &Theme, bar: usize, slot: usize) -> Rect {
+        self.slot_rects(t.dpi).into_iter().find(|s| (s.0, s.1) == (bar, slot)).expect("the bar is on").2
+    }
+    /// Item `i` of the open picker, after "Nothing".
+    pub(crate) fn picker_item(&self, t: &Theme, item: BarItem) -> Rect {
+        let i = BarItem::ALL.iter().position(|&b| b == item).unwrap() + 1;
+        self.picker.as_ref().expect("a picker is open").menu.item_rects(t)[i]
     }
 }
 
@@ -466,6 +566,7 @@ mod tests {
         view.on_gesture(&Gesture::Down(p), t, data);
         view.on_gesture(&Gesture::Tap(p), t, data)
     }
+    /// The Page layout screen and setup's embedded editor on each screen.
     fn views() -> Vec<(Theme, LayoutView)> {
         [
             (1272, 1696, 300),
@@ -477,12 +578,24 @@ mod tests {
             (2480, 1860, 300),
         ]
         .into_iter()
-        .map(|(w, h, dpi)| {
+        .flat_map(|(w, h, dpi)| {
+            let screen = Rect::new(0, 0, w, h);
             let t = Theme::for_dpi(dpi);
-            let view = LayoutView::new(&t, Rect::new(0, 0, w, h), &PageLayout::default(), &Typography::default());
-            (t, view)
+            let full = like(None, &t, screen, &PageLayout::default());
+            let embedded = like(Some(&full), &t, screen, &PageLayout::default());
+            [(t.clone(), full), (t, embedded)]
         })
         .collect()
+    }
+    /// A full view, or with `embedded_like` an embedded one in setup's body.
+    fn like(embedded_like: Option<&LayoutView>, t: &Theme, screen: Rect, layout: &PageLayout) -> LayoutView {
+        match embedded_like {
+            None => LayoutView::new(t, screen, layout, &Typography::default()),
+            Some(_) => {
+                let body = crate::screens::setup::body_rect(t, screen);
+                LayoutView::embedded(t, screen, body, layout, &Typography::default())
+            }
+        }
     }
 
     #[test]
@@ -511,20 +624,28 @@ mod tests {
         for (t, view) in views() {
             let screen = view.screen;
             let size = (screen.w, screen.h);
-            assert!(view.sketch.y >= view.top_bar.rect().bottom(), "{size:?}");
-            assert!(view.rows[6].bottom() <= screen.bottom() && view.rows[0].y >= view.top_bar.rect().bottom());
+            let frame = view.frame;
+            let last = *view.rows.last().unwrap();
+            assert!(view.sketch.y >= frame.y && last.bottom() <= frame.bottom() && view.rows[0].y >= frame.y);
             assert!(view.sketch.w >= t.mm(20.0), "{size:?}: the sketch is big enough to read ({:?})", view.sketch);
-            let controls = view.rows[0].union(&view.rows[6]);
+            let controls = view.rows[0].union(&last);
             assert!(view.sketch.intersect(&controls).is_none(), "{size:?}");
+            let [top, bottom] = view.pieces();
+            assert!(view.caption.y >= top.bottom() && view.caption.bottom() <= bottom.y, "{size:?}");
+            // Each half of the sketch shows a bar and its margin legibly.
+            assert!(view.half >= t.mm(5.0), "{size:?}: half {}", view.half);
             // Slot taps are full targets and stay off the top bar and the controls.
             let mut layout = PageLayout::default();
             layout.top.on = true;
-            let view = LayoutView::new(&t, screen, &layout, &Typography::default());
+            let embedded = view.top_bar.is_none().then_some(&view);
+            let view = like(embedded, &t, screen, &layout);
+            // Embedded, a slot may reach into the gap under setup's top bar.
+            let top_limit = if embedded.is_some() { screen.y + t.top_bar } else { frame.y };
             let slots = view.slot_rects(t.dpi);
             assert_eq!(slots.len(), 6);
             for (_, _, r) in &slots {
                 assert!(r.h >= t.target, "{size:?}");
-                assert!(r.y >= view.top_bar.rect().bottom(), "{size:?}: {r:?}");
+                assert!(r.y >= top_limit, "{size:?}: {r:?}");
                 assert!(r.intersect(&controls).is_none(), "{size:?}: {r:?}");
                 assert!(r.intersect(&view.bars[0].rect()).is_none());
             }
@@ -537,7 +658,7 @@ mod tests {
             vec![TocEntry { title: "The Desert Planet".into(), level: 1, page: 2, position: Position::default() }];
         let data = data(&toc);
         for (t, mut view) in views() {
-            // The bottom bar's centre slot is empty by default.
+            // The bottom bar's centre slot.
             let (_, _, centre) = view.slot_rects(t.dpi).into_iter().find(|s| (s.0, s.1) == (1, 1)).unwrap();
             assert!(tap(&mut view, centre.center(), &t, &data).is_none());
             let picker = view.picker.as_ref().expect("a tap opens the picker");
@@ -557,8 +678,9 @@ mod tests {
             let nothing = item_center(&view, &t, 0);
             tap(&mut view, nothing, &t, &data);
             assert_eq!(view.layout.bottom.slots, [None, Some(BarItem::PageTotal), Some(BarItem::Percent)]);
-            // Tapping outside closes the picker unchanged.
+            // An empty slot opens the picker too; tapping outside closes it unchanged.
             tap(&mut view, left.center(), &t, &data);
+            assert!(view.picker.is_some());
             let outside = Point::new(view.screen.x + 1, view.screen.y + 1);
             tap(&mut view, outside, &t, &data);
             assert!(view.picker.is_none());
@@ -624,7 +746,7 @@ mod tests {
         tap(&mut view, marks, &t, &d);
         assert!(!view.layout.chapter_marks && !view.marks.on);
         // The back arrow closes.
-        let back = Point::new(t.margin + t.target / 2 - t.mm(2.0), view.top_bar.rect().center().y);
+        let back = Point::new(t.margin + t.target / 2 - t.mm(2.0), view.top_bar.as_ref().unwrap().rect().center().y);
         assert!(matches!(tap(&mut view, back, &t, &d), Some(LayoutEvent::Close)));
     }
 

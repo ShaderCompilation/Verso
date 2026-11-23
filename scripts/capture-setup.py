@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Captures first-time setup in portrait: Welcome, Library (folders found in
 a fake Kindle storage), Turning pages (after trying the back zone on the
-sketch) and Ready, on a 300 and a 167 dpi screen. Writes screenshots/setup/."""
+sketch), Your page and Ready, on a 300 and a 167 dpi screen. Writes screenshots/setup/."""
 import sim
 
-PAGES = ('welcome', 'library', 'turning', 'ready')
+PAGES = ('welcome', 'library', 'turning', 'page', 'ready')
 
 
 def steps(size, page):

@@ -55,7 +55,7 @@ LAYOUTS = {
 }
 
 # The bottom bar's centre slot in the sketch, for the picker.
-CENTRE_SLOT = {'portrait': '636,758', 'landscape': '848,720'}
+CENTRE_SLOT = {'portrait': '636,649', 'landscape': '848,613'}
 
 
 def main():

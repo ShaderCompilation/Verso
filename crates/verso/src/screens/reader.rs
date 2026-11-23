@@ -3,7 +3,7 @@ mod annotations;
 mod bars;
 mod end;
 mod koreader;
-mod layout;
+pub(crate) mod layout;
 mod search;
 mod selection;
 use crate::document::{
@@ -1345,6 +1345,11 @@ impl Reader {
         let _ = self.flush_text_settings();
     }
     fn changed(&mut self) {
+        self.relayout();
+        self.save_text_settings();
+    }
+    /// Lays the book out again (debounced) for new text settings.
+    fn relayout(&mut self) {
         self.koreader_answer(koreader::Answer::Stay, None);
         self.koreader.abandon();
         self.pending_turn = false;
@@ -1360,7 +1365,6 @@ impl Reader {
         self.annotations.invalidate_import("Text layout changed. Preview the import again.");
         self.cache.reset(self.cache.generation + 1);
         self.layout_at = Some(Instant::now() + Duration::from_millis(180));
-        self.save_text_settings();
     }
     fn flush_text_settings(&mut self) -> anyhow::Result<()> {
         if !self.settings_save_pending {
@@ -1386,6 +1390,15 @@ impl Reader {
         self.settings.tap_zones = saved.tap_zones;
         self.settings.bookmark_corner = saved.bookmark_corner;
         self.settings.developer = saved.developer;
+        // Setup run over this book may change the bars (unless this reader's
+        // own layout is still waiting to be saved).
+        if saved.page_layout != self.settings.page_layout && !self.settings_save_pending {
+            let moves_text = saved.page_layout.moves_text(&self.settings.page_layout);
+            self.settings.page_layout = saved.page_layout.clone();
+            if moves_text {
+                self.relayout();
+            }
+        }
         if self.settings.page_flash != saved.page_flash {
             self.settings.page_flash = saved.page_flash;
             self.refresh.set_every(saved.page_flash);
@@ -4997,12 +5010,16 @@ mod tests {
         settings.tap_zones = crate::reader::TapZones::Halves;
         settings.page_flash = 3;
         settings.developer = true;
+        settings.page_layout.top.on = true;
         r.store.save_settings(&settings)?;
         let size = r.settings.typography.size_pt;
+        r.layout_at = None;
         test_cx(&theme, |cx| r.on_background(cx));
         assert_eq!(r.settings.tap_zones, crate::reader::TapZones::Halves);
         assert_eq!(r.settings.page_flash, 3);
         assert!(r.settings.developer);
+        // Setup turned a bar on: the text moves, so the book is laid out again.
+        assert!(r.settings.page_layout.top.on && r.layout_at.is_some());
         assert_eq!(r.settings.typography.size_pt, size, "the reader keeps its own typography");
         // The new refresh interval applies to the next turns.
         let start = Instant::now();
