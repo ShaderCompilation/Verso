@@ -10,8 +10,13 @@ from zipfile import ZipFile
 LONG_PARAGRAPHS = 21
 
 
-def fixture_tar(path, count, long=False):
-    """`long`: each record covers 21 whole paragraphs (several pages), starting
+def fixture_tar(path, count, long=False, kind='highlight'):
+    """`kind='bookmark'` writes page bookmarks: the same 12-character passages
+    (a bookmark's range runs from its page start to the end of its opening
+    words, and the check is only that this text reads as its quotation), with
+    `"kind":"bookmark"` in each record.
+
+    `long`: each record covers 21 whole paragraphs (several pages), starting
     at a different paragraph, so every page carries ~100 overlapping ranges."""
     raw = path.read_bytes()
     with ZipFile(path) as epub:
@@ -45,7 +50,8 @@ def fixture_tar(path, count, long=False):
                                      fingerprint=hashlib.sha256(raw).hexdigest(),
                                      range=passages[position][0], quotation=passages[position][1],
                                      created='2026-11-15 00:00:00 UTC', chapter='Fixture',
-                                     note=None, provenance=None)
+                                     note=None, provenance=None,
+                                     **({'kind': 'bookmark'} if kind == 'bookmark' else {}))
     records['book-' + book + '.json'] = dict(version=1, records=[f'fixture-{i:04}' for i in range(count)], sources=[])
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w') as archive:

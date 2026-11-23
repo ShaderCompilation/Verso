@@ -405,6 +405,14 @@ with the Kindle awake and no reader open. They restore the Kindle UI at the end.
 - `redraw.py --experiment annotations --annotation-count N --annotation-fixture
   reader.epub`: page-turn request latency with N short highlights.
 
+- `bookmarks.py --binary … --probe … --output DIR`: page-bookmark lifecycle with
+  injected touches (corner tap, menu ribbon, restart, live size change, jump and
+  back, removals, blocked save flushed on sleep, landscape).
+- `bookmarks_koreader.py --book KINDLE_EPUB …`: imports a real KOReader sidecar's
+  bookmarks from a copy and checks each lands on the same passage in the EPUB.
+- `redraw.py … --annotation-kind bookmark`: the same page-turn run with N
+  synthetic page bookmarks.
+
 `annotation_fixture.py` builds the synthetic records from `reader.epub`; numeric
 results are in `docs/research/highlights-2026-11-15/`.
 

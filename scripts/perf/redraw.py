@@ -128,6 +128,8 @@ def main():
                         help='Allow updates after subsequent touches; require 24 taps, frames and saved-page advances')
     parser.add_argument('--annotation-count', type=int, choices=[0, 100, 1000])
     parser.add_argument('--annotation-fixture', type=Path, help='Local original reader.epub for synthetic records')
+    parser.add_argument('--annotation-kind', choices=['highlight', 'bookmark'], default='highlight',
+                        help='Whether the synthetic records are highlights or page bookmarks')
     parser.add_argument('--dictionary-cache', metavar='STATE',
                         help='Copy STATE/dictionary-cache (e.g. a dictionary.py cold state) into the run state')
     args = parser.parse_args()
@@ -174,7 +176,7 @@ def main():
         assert args.experiment == 'annotations' and args.annotation_fixture
         from annotation_fixture import fixture_tar
         remote(f'mkdir -p {state}/annotations')
-        remote(f'tar -xf - -C {state}/annotations', fixture_tar(args.annotation_fixture, args.annotation_count))
+        remote(f'tar -xf - -C {state}/annotations', fixture_tar(args.annotation_fixture, args.annotation_count, kind=args.annotation_kind))
     wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
                f'export RUST_LOG=info,verso=debug,verso::app=trace\n'
                f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
@@ -244,7 +246,7 @@ def main():
                    'render_log': remote(f'grep "rendered in" {APP}/verso.log || true'),
                    'bars_log': remote(f'grep "bars drawn in" {APP}/verso.log || true'),
                    'startup_log': remote(f'grep -E "startup stage:|book .*parse|book .*layout" {APP}/{run}.setup.log || true'),
-                   'annotation_count': args.annotation_count,
+                   'annotation_count': args.annotation_count, 'annotation_kind': args.annotation_kind,
                    'annotation_setup': remote(f'grep -E "annotation resolution:|book first page" {APP}/{run}.setup.log || true'),
                    'turn_delay_us': args.turn_delay_us,
                    'persistence': remote(f'grep -E "position write:|after_present:" {APP}/verso.log || true'),
