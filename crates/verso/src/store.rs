@@ -1,4 +1,14 @@
 //! Small, versioned JSON records. Rename replaces a complete file atomically.
+//!
+//! `Store` owns paths under `<data>/` (`settings.json`, `library.json`,
+//! `home.json`, `opened.json`, `library-navigation.json`, `reading-speed.json`,
+//! `books/<id>.json`, `covers/`, `annotations/`, `dictionaries.json`,
+//! `dictionary-folders.json`), caches normalized `Settings`, and coordinates
+//! shared lazy handles (`dictionary_service`, `library_worker`, `updates`).
+//! Atomic counters (`settings_saves`, `book_saves`, `bulk_saves`) keep cached
+//! readers/writers coherent without polling FUSE. Worker clones strip service
+//! handles so threads never hold `Arc` cycles. `Store::freeze` silences all
+//! writes before `EXIT_RESTART` after developer live-data edits.
 mod dictionary_folders;
 mod home;
 pub mod navigation;

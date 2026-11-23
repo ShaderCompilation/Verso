@@ -1,4 +1,12 @@
 //! The only thread that touches crengine. Results carry a book/layout generation.
+//!
+//! Startup waits for `Command::Start` (sent after the first frame) before
+//! registering fonts. Rendered pages reuse buffers from a bounded `PixelPool`
+//! (at most 4 buffers / 32 MiB) and closing a book drops pooled buffers and
+//! calls `malloc_trim(0)` so glibc returns freed arenas to the OS. Before any
+//! book open, `prelayout.before_open` kills any idle pre-layout child and
+//! reloads crengine's cache index. Search and annotation resolution run in
+//! bounded slices so user turns stay responsive.
 use super::prelayout::{self, Job, Runner};
 use super::{
     CreDocument, CreEngine, Document, FontFace, Layout, Link, Metadata, Opening, Paths, Position, SearchBatch,

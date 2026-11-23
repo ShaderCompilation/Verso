@@ -1,4 +1,12 @@
 //! Kindle backend: FBInk for the screen, evdev for touch.
+//!
+//! `poll` waits on the touchscreen fd, optional Oasis/Voyage button fd and an
+//! `eventfd` `Waker` shared with background workers, the `lipc-wait-event`
+//! `powerd` listener (`PowerEvents`) and the one-shot startup frontlight thread
+//! (`verso-frontlight`). Battery and cable state read `/sys/class/power_supply`
+//! directly (<1 ms) with a cached `battStateInfo` `lipc` fallback. Native
+//! Amazon sleep handoff signals `verso.sh` via acknowledged `SIGUSR1`/`SIGUSR2`
+//! so the launcher remains the sole owner of Amazon UI process state.
 
 mod display;
 mod input;

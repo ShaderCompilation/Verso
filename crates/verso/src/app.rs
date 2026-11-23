@@ -1,5 +1,12 @@
 //! The app: owns the canvas and the screen stack, turns gestures and timers
 //! into redraws, and works out which parts of the display to refresh.
+//!
+//! App-wide overlays draw in fixed z-order over the active screen: `TopDrawer`,
+//! queued startup `Notice`s (rollback, untested model), `UsbPrompt`,
+//! `ExitPrompt` and `Toast`. `fast_debt` queues areas last refreshed with
+//! `RefreshMode::Fast` (1-bit DU) for an automatic `Ui` pass once the finger
+//! lifts. Live orientation changes save screens via `prepare_orientation`, drop
+//! the old stack so workers stop cleanly, and rebuild from `RelayoutState`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

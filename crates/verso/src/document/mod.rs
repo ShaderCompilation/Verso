@@ -1,5 +1,11 @@
 //! Books. The rest of the app talks to the `Document` trait and never to the
 //! engine directly, so the engine could be swapped (e.g. for MuPDF) later.
+//!
+//! `crengine` owns the C++ wrapper and `fonts.list` registration cache (every
+//! discovered font must register so crengine's `font_list_hash` stays stable
+//! across runs); `thread` serializes all engine work on `verso-book`;
+//! `prelayout` runs an interruptible child process at idle to warm `.cr3`
+//! layouts in crengine's disk cache.
 
 mod crengine;
 pub mod prelayout;

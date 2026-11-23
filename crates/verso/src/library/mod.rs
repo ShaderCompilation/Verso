@@ -1,4 +1,11 @@
 //! The library index is independent of the reading engine.
+//!
+//! `epub` parses OPF metadata/covers without opening crengine; `worker` scans
+//! configured roots incrementally by `(size, mtime)`, generates cover and tile
+//! thumbnails (`covers`), builds the folder hierarchy (`collections`) and runs
+//! off-thread Home/Library warm-up (`home`, `previews`). Each book keeps a
+//! stable `id` (preserved across moves), an `annotation_id` (content-based),
+//! and `legacy_id` for state lookup; `search` filters cached metadata in memory.
 
 pub mod collections;
 pub mod covers;
