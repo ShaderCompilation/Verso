@@ -864,12 +864,7 @@ impl Worker {
                             let pages = d.page_count();
                             let current = d.current_page();
                             let metadata = d.metadata();
-                            log::info!(
-                                "book {:?}, authors {:?}, language {:?}",
-                                metadata.title,
-                                metadata.authors,
-                                metadata.language
-                            );
+                            log::info!("book language {:?}", metadata.language);
                             let toc = d.toc()?;
                             let chapters: Vec<_> =
                                 toc.iter().filter(|e| e.level <= 2).map(|e| e.position.clone()).collect();

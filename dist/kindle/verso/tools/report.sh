@@ -234,6 +234,10 @@ redact_stream() {
         if (index(line, "library folders changed:") > 0) {
             sub(/library folders changed: \[.*\]/, "library folders changed: [<redacted>]", line)
         }
+        # Redact legacy metadata log lines ("book \"...\", authors \"...\", language ...").
+        if (index(line, "book \"") > 0 && index(line, ", authors \"") > 0 && index(line, ", language ") > 0) {
+            sub(/book ".*", authors ".*", language /, "book <redacted>, language ", line)
+        }
         # Redact crengine cache filenames that embed the book filename (e.g. "File Book_Name.epub.571d7876.0.cr3").
         if (index(line, ".epub.") > 0 && index(line, ".cr3") > 0) {
             gsub(/[^ \t\/]+\.[eE][pP][uU][bB]\.[0-9a-fA-F]+\.[0-9]+\.cr3/, "<cache>", line)

@@ -182,6 +182,7 @@ mod tests {
             "moved /mnt/us/documents/A.epub to /mnt/us/documents/B.epub",
             "opened /mnt/us/documents/Gwynne, John - Malice [Gwynne, John] (2024).epub: parse 186 ms",
             "ERROR ldomDocCache::openExisting - File Gwynne_John_Malice.epub.571d7876.0.cr3 is not found",
+            "book \"The Secret Title\", authors \"Jane Doe\", language \"EN-US\"",
             "library folders changed: [\"/mnt/us/Secret Shelf\"]",
         ]
         .join("\n");
@@ -248,6 +249,8 @@ mod tests {
         assert!(text.contains("moved <book 3> to <book 4>"));
         assert!(text.contains("opened <book 5>: parse 186 ms"));
         assert!(text.contains("File <cache> is not found"));
+        assert!(!text.contains("The Secret Title") && !text.contains("Jane Doe"), "metadata log leaked:\n{text}");
+        assert!(text.contains("book <redacted>, language \"EN-US\""));
         assert!(text.contains("library folders changed: [<redacted>]"));
 
         // 6. Diagnostics output included.
