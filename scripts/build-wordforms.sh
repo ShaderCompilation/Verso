@@ -31,18 +31,25 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Stamp the inputs that determine ru.vwf's bytes so cache hits skip both
+# compiling vwf-build and rebuilding the pack.
+STAMP="$({
+    cat "$SOURCE" "$0"
+    LC_ALL=C find crates/verso-wordforms/src -type f | sort | xargs cat
+    echo "$ENCODING"
+} | sha256sum | cut -d' ' -f1)"
+
+if [ "$CHECK_ONLY" = 0 ] && [ "$FORCE" = 0 ] && [ -f "$PACK" ] && [ "$(cat "$OUT/.stamp" 2>/dev/null)" = "$STAMP" ]; then
+    echo "==> word forms are up to date ($PACK)"
+    exit 0
+fi
+
 # The host build, never cross-compiled: the pack is plain data.
 cargo build --release --quiet -p verso-wordforms --bin vwf-build
 BUILDER=target/release/vwf-build
 
 if [ "$CHECK_ONLY" = 1 ]; then
     exec "$BUILDER" --pack "$PACK" --check "$CHECK"
-fi
-
-STAMP="$(cat "$SOURCE" "$BUILDER" "$0" <(echo "$ENCODING") | sha256sum | cut -d' ' -f1)"
-if [ "$FORCE" = 0 ] && [ -f "$PACK" ] && [ "$(cat "$OUT/.stamp" 2>/dev/null)" = "$STAMP" ]; then
-    echo "==> word forms are up to date ($PACK)"
-    exit 0
 fi
 
 echo "==> building $PACK ($ENCODING)"

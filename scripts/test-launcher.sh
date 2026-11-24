@@ -29,6 +29,13 @@ else
     W="${2:-$(mktemp -d "${TMPDIR:-/tmp}/verso-launcher-test.XXXXXX")}"
 fi
 STEP_EVERY="${STEP_EVERY:-1}"
+if [ -n "${KEEP:-}" ] || [ -n "${STEP_FROM:-}" ]; then
+    JOBS=1
+elif [ -z "${JOBS:-}" ]; then
+    JOBS="$(nproc 2>/dev/null || echo 1)"
+    case "${JOBS}" in '' | *[!0-9]*) JOBS=1 ;; esac
+    [ "${JOBS}" -gt 8 ] && JOBS=8
+fi
 FAILED=0
 CASES=0
 
@@ -108,22 +115,34 @@ esac
 EOF
     for c in mv rm cp mkdir sync; do
         real="$(command -v "${c}")"
-        [ "${c}" = sync ] && real=true # Don't sync this machine's disks hundreds of times.
-        [ "${c}" = sync ] && [ -n "${REAL_SYNC:-}" ] && real="$(command -v sync)"
+        if [ "${c}" = sync ] && [ -z "${REAL_SYNC:-}" ]; then
+            finish="exit 0" # Don't sync this machine's disks hundreds of times.
+        else
+            finish="exec ${real} \"\$@\""
+        fi
         cat >"${B}/${c}" <<EOF
 #!/bin/sh
-T="\${VERSO_TEST_DIR}"
-case "\$(tr '\\0' ' ' </proc/\${PPID}/cmdline 2>/dev/null)" in
-    */verso-launcher-[0-9]*.sh*)
-        n=\$((\$(cat "\${T}/steps" 2>/dev/null || echo 0) + 1))
+if [ "\${COUNT_STEPS:-}" = 1 ] && [ -z "\${VERSO_TEST_STAGE:-}" ]; then
+    count=0
+    if [ "\${PPID}" = "\${VERSO_LAUNCHER_PID:-}" ]; then
+        count=1
+    else
+        case "\$(tr '\\0' ' ' </proc/\${PPID}/cmdline 2>/dev/null)" in
+            */verso-launcher-[0-9]*.sh*) count=1 ;;
+        esac
+    fi
+    if [ "\${count}" = 1 ]; then
+        T="\${VERSO_TEST_DIR}"
+        read -r n <"\${T}/steps" 2>/dev/null || n=0
+        n=\$((n + 1))
         echo "\${n}" >"\${T}/steps"
         if [ "\${n}" = "\${CRASH_AT:-}" ]; then
             echo "power loss before step \${n}: ${c} \$*" >>"\${T}/calls"
             kill -KILL 0
         fi
-        ;;
-esac
-exec ${real} "\$@"
+    fi
+fi
+${finish}
 EOF
     done
     chmod 755 "${B}"/*
@@ -197,8 +216,11 @@ fi
 
 # Every file under $1 with its checksum, leaving out the log, update/ and reports/.
 snapshot() {
-    (cd "$1" && find . -type f ! -path './verso/update/*' ! -path './verso/reports/*' ! -name 'verso.log*' | sort |
-        while IFS= read -r f; do echo "${f} $(cksum <"${f}")"; done)
+    (
+        cd "$1" || exit 1
+        files="$(find . -type f ! -path './verso/update/*' ! -path './verso/reports/*' ! -name 'verso.log*' | sort)"
+        [ -z "${files}" ] || printf '%s\n' "${files}" | xargs cksum
+    )
 }
 
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
@@ -220,7 +242,7 @@ fresh() {
 launch() {
     : >"${W}/steps"
     (
-        CRASH_AT="${1:-}" VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
+        COUNT_STEPS="${COUNT_STEPS:-}" CRASH_AT="${1:-}" VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
@@ -280,8 +302,11 @@ no_update_state() {
 # The previous/ folder holds exactly version 1's replaced and removed files.
 previous_is_v1() {
     present "${U}/previous/plan.txt"
-    (cd "${U}/previous/files" 2>/dev/null && find . -type f | sort |
-        while IFS= read -r f; do echo "${f} $(cksum <"${f}")"; done) >"${W}/got-prev.snap"
+    (
+        cd "${U}/previous/files" 2>/dev/null || exit 0
+        files="$(find . -type f | sort)"
+        [ -z "${files}" ] || printf '%s\n' "${files}" | xargs cksum
+    ) >"${W}/got-prev.snap"
     cmp -s "${W}/got-prev.snap" "${W}/expect-prev.snap" || {
         fail "previous/ isn't version 1's replaced files:"
         diff "${W}/expect-prev.snap" "${W}/got-prev.snap" | sed 's/^/    /' | head -n 20
@@ -333,7 +358,7 @@ snapshot "${W}/v2" >"${W}/expect-2.snap"
     echo pattern >verso/cre/hyph/a.pat
     echo menu1 >extensions/verso/menu.json
     echo "installed 0.1.0" >verso/installed.json
-    find . -type f | sort | while IFS= read -r f; do echo "${f} $(cksum <"${f}")"; done
+    find . -type f | sort | xargs cksum
 ) >"${W}/expect-prev.snap"
 rm -rf "${W}/prev" "${W}/v2"
 
@@ -622,6 +647,23 @@ fi
 
 # Power loss before every step of a job, then a normal start: the job is
 # finished (or undone) and nothing is lost.
+sweep_step() {
+    name="$1"
+    setup="$2"
+    verify="$3"
+    n="$4"
+    total="$5"
+    begin "power loss: ${name}, before step ${n} of ${total}"
+    fresh
+    ${setup}
+    COUNT_STEPS=1 launch "${n}"
+    # KUAL can always start the launcher, which finishes the job.
+    present "${R}/verso/verso.sh" "${R}/extensions/verso/menu.json"
+    reboot
+    launch
+    ${verify}
+}
+
 sweep() {
     name="$1"
     setup="$2"
@@ -629,26 +671,62 @@ sweep() {
     case "${name}" in *"${SWEEP:-}"*) ;; *) return ;; esac
     fresh
     ${setup}
-    launch
+    COUNT_STEPS=1 launch
     total="$(cat "${W}/steps")"
     if [ "${total:-0}" -lt 5 ]; then
         begin "power loss: ${name}"
         fail "only ${total:-0} launcher steps were counted; can this shell's mv be wrapped?"
         return
     fi
-    n="${STEP_FROM:-1}"
-    while [ "${n}" -le "$((total + 1))" ]; do
-        begin "power loss: ${name}, before step ${n} of ${total}"
-        fresh
-        ${setup}
-        launch "${n}"
-        # KUAL can always start the launcher, which finishes the job.
-        present "${R}/verso/verso.sh" "${R}/extensions/verso/menu.json"
-        reboot
-        launch
-        ${verify}
-        n=$((n + STEP_EVERY))
-    done
+    if [ "${JOBS}" -le 1 ]; then
+        n="${STEP_FROM:-1}"
+        while [ "${n}" -le "$((total + 1))" ]; do
+            sweep_step "${name}" "${setup}" "${verify}" "${n}" "${total}"
+            n=$((n + STEP_EVERY))
+        done
+    else
+        w_parent="${W}"
+        pids=""
+        j=0
+        while [ "${j}" -lt "${JOBS}" ]; do
+            (
+                W="${w_parent}/w-${j}"
+                R="${W}/root"
+                U="${R}/verso/update"
+                mkdir -p "${W}"
+                cp "${w_parent}/launcher-1.sh" "${w_parent}/launcher-2.sh" \
+                    "${w_parent}/expect-1.snap" "${w_parent}/expect-2.snap" \
+                    "${w_parent}/expect-prev.snap" "${W}/"
+                make_bin
+                CASES=0
+                FAILED=0
+                n=$((1 + j * STEP_EVERY))
+                stride=$((JOBS * STEP_EVERY))
+                while [ "${n}" -le "$((total + 1))" ]; do
+                    sweep_step "${name}" "${setup}" "${verify}" "${n}" "${total}"
+                    n=$((n + stride))
+                done
+                printf '%s %s\n' "${CASES}" "${FAILED}" >"${w_parent}/res-${j}"
+            ) >"${w_parent}/out-${j}" 2>&1 &
+            pids="${pids} $!"
+            j=$((j + 1))
+        done
+        for p in ${pids}; do
+            wait "${p}"
+        done
+        j=0
+        while [ "${j}" -lt "${JOBS}" ]; do
+            [ -s "${w_parent}/out-${j}" ] && cat "${w_parent}/out-${j}"
+            if read -r c f <"${w_parent}/res-${j}" 2>/dev/null; then
+                CASES=$((CASES + c))
+                FAILED=$((FAILED + f))
+            else
+                fail "worker ${j} exited without reporting results"
+            fi
+            j=$((j + 1))
+        done
+        rm -rf "${w_parent}"/w-* "${w_parent}"/res-* "${w_parent}"/out-*
+    fi
     echo "    ${name}: ${total} steps"
 }
 

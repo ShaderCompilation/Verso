@@ -10,6 +10,20 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const LINK_ORDER: &[&str] = &[
+    "verso_crengine",
+    "verso_lunasvg",
+    "verso_plutovg",
+    "verso_harfbuzz",
+    "verso_freetype",
+    "verso_png",
+    "verso_jpeg",
+    "verso_z",
+    "verso_unibreak",
+    "verso_utf8proc",
+];
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -18,12 +32,21 @@ fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let arm = env::var("CARGO_CFG_TARGET_ARCH").unwrap() == "arm";
 
+    println!("cargo:rerun-if-env-changed=VERSO_NATIVE_CACHE");
     println!("cargo:rerun-if-changed=config");
     println!("cargo:rerun-if-changed=shim");
     println!("cargo:rerun-if-changed=lunasvg");
     for lib in LIBS {
         // Rebuild when a submodule moves to another commit.
         println!("cargo:rerun-if-changed={}", tp.join(lib).join(".git").display());
+    }
+
+    let cache_entry = native_cache_entry(&manifest, &tp, arm);
+    if let Some(ref entry) = cache_entry
+        && restore_cached_libs(entry, &out, LINK_ORDER)
+    {
+        emit_link_directives(&out, arm);
+        return;
     }
 
     // Generated headers.
@@ -44,14 +67,148 @@ fn main() {
     ctx.zlib(&mut link_order);
     ctx.libunibreak(&mut link_order);
     ctx.utf8proc(&mut link_order);
+    assert_eq!(link_order, LINK_ORDER);
 
+    if let Some(ref entry) = cache_entry {
+        save_cached_libs(entry, &out, LINK_ORDER);
+    }
+
+    emit_link_directives(&out, arm);
+}
+
+fn emit_link_directives(out: &Path, arm: bool) {
     println!("cargo:rustc-link-search=native={}", out.display());
-    for lib in link_order {
+    for lib in LINK_ORDER {
         println!("cargo:rustc-link-lib=static={lib}");
     }
     // C++ runtime: Zig's libc++ (linked statically) on the Kindle, the system
     // libstdc++ on the desktop.
     println!("cargo:rustc-link-lib={}", if arm { "c++" } else { "stdc++" });
+}
+
+/// Content-addressed cache directory under `VERSO_NATIVE_CACHE` so CI can reuse
+/// the compiled static archives when submodules and build inputs are unchanged.
+fn native_cache_entry(manifest: &Path, tp: &Path, arm: bool) -> Option<PathBuf> {
+    let root = env::var_os("VERSO_NATIVE_CACHE").filter(|v| !v.is_empty())?;
+    let target = env::var("TARGET").ok()?;
+    let opt = env::var("OPT_LEVEL").ok()?;
+    let debug = env::var("DEBUG").ok()?;
+
+    let mut h = Fnv128::new();
+    h.field(b"crengine-sys-v1");
+    h.field(target.as_bytes());
+    h.field(opt.as_bytes());
+    h.field(debug.as_bytes());
+    h.field(env::var("PROFILE").unwrap_or_default().as_bytes());
+    for var in ["CFLAGS", "CXXFLAGS", "TARGET_CFLAGS", "TARGET_CXXFLAGS", "ZIG_VERSION"] {
+        h.field(var.as_bytes());
+        h.field(env::var(var).unwrap_or_default().as_bytes());
+    }
+    for cpp in [false, true] {
+        let mut b = cc::Build::new();
+        b.cpp(cpp);
+        let out = b.get_compiler().to_command().arg("--version").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        h.field(&out.stdout);
+        h.field(&out.stderr);
+    }
+    if arm && let Ok(out) = Command::new("zig").arg("version").output() {
+        h.field(&out.stdout);
+    }
+    for lib in LIBS {
+        let out = Command::new("git").args(["-C", tp.join(lib).to_str()?, "rev-parse", "HEAD"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        h.field(lib.as_bytes());
+        h.field(&out.stdout);
+    }
+    for rel in ["build.rs", "config", "shim", "lunasvg"] {
+        hash_tree(&mut h, manifest, &manifest.join(rel))?;
+    }
+    Some(PathBuf::from(root).join("crengine-sys").join(format!("{target}-O{opt}-d{debug}-{}", h.finish_hex())))
+}
+
+fn restore_cached_libs(entry: &Path, out: &Path, libs: &[&str]) -> bool {
+    if !entry.join(".complete").is_file() {
+        return false;
+    }
+    for lib in libs {
+        if !entry.join(format!("lib{lib}.a")).is_file() {
+            return false;
+        }
+    }
+    for lib in libs {
+        let name = format!("lib{lib}.a");
+        let src = entry.join(&name);
+        let dst = out.join(&name);
+        let _ = fs::remove_file(&dst);
+        if fs::hard_link(&src, &dst).is_err() && fs::copy(&src, &dst).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn save_cached_libs(entry: &Path, out: &Path, libs: &[&str]) {
+    if fs::create_dir_all(entry).is_err() {
+        return;
+    }
+    let pid = std::process::id();
+    for lib in libs {
+        let name = format!("lib{lib}.a");
+        let tmp = entry.join(format!("{name}.tmp.{pid}"));
+        let dst = entry.join(&name);
+        if fs::copy(out.join(&name), &tmp).is_err() || fs::rename(&tmp, &dst).is_err() {
+            let _ = fs::remove_file(&tmp);
+            return;
+        }
+    }
+    let tmp = entry.join(format!(".complete.tmp.{pid}"));
+    if fs::write(&tmp, b"ok\n").is_ok() && fs::rename(&tmp, entry.join(".complete")).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+fn hash_tree(h: &mut Fnv128, base: &Path, path: &Path) -> Option<()> {
+    if path.is_file() {
+        let rel = path.strip_prefix(base).ok()?;
+        h.field(rel.to_string_lossy().replace('\\', "/").as_bytes());
+        h.field(&fs::read(path).ok()?);
+        return Some(());
+    }
+    let mut entries: Vec<PathBuf> = fs::read_dir(path).ok()?.filter_map(|e| Some(e.ok()?.path())).collect();
+    entries.sort();
+    for entry in entries {
+        hash_tree(h, base, &entry)?;
+    }
+    Some(())
+}
+
+struct Fnv128(u128);
+
+impl Fnv128 {
+    fn new() -> Self {
+        Self(0x6c62272e07bb014262b821756295c58d)
+    }
+
+    fn field(&mut self, bytes: &[u8]) {
+        self.update(&(bytes.len() as u64).to_le_bytes());
+        self.update(bytes);
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u128::from(b);
+            self.0 = self.0.wrapping_mul(0x0000000001000000000000000000013b);
+        }
+    }
+
+    fn finish_hex(&self) -> String {
+        format!("{:032x}", self.0)
+    }
 }
 
 const LIBS: &[&str] =

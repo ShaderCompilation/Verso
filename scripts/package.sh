@@ -41,14 +41,15 @@ echo "==> building"
 cargo kindle-build
 scripts/build-ssh.sh
 scripts/build-wordforms.sh
-# The packaging tool runs on this computer.
-cargo build --release --quiet -p verso-update --bin verso-release
+# The packaging tool runs on this computer. Dev profile already compiles its
+# compression/hashing deps at -O2 (Cargo.toml) without paying release LTO.
+cargo build --quiet -p verso-update --bin verso-release
 scripts/stage.sh
 
 OUT="target/package/$VERSION"
 echo "==> packaging Verso $VERSION ($RELEASED) in $OUT"
 rm -rf "$OUT"
-target/release/verso-release pack --components dist/components.json --stage target/package/stage \
+target/debug/verso-release pack --components dist/components.json --stage target/package/stage \
     --out "$OUT" --version "$VERSION" --released "$RELEASED" --notes "$NOTES"
 ls -l "$OUT"
 echo "==> next: scripts/sign-release.sh, then publish"

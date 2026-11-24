@@ -13,17 +13,53 @@ jobs:
   rust:
     name: Test, lint & format
     runs-on: ubuntu-latest
+    env:
+      VERSO_NATIVE_CACHE: /tmp/verso-native-cache
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init --depth=1 --jobs=8 \
+            third_party/crengine third_party/freetype third_party/harfbuzz \
+            third_party/hunspell third_party/libjpeg-turbo third_party/libpng \
+            third_party/libunibreak third_party/utf8proc third_party/xxhash \
+            third_party/zlib
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Install mold linker
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mold
+
+      - name: Compute native cache key
+        id: native-key
+        run: |
+          KEY="$({
+            git submodule status -- \
+              third_party/crengine third_party/freetype third_party/harfbuzz \
+              third_party/hunspell third_party/libjpeg-turbo third_party/libpng \
+              third_party/libunibreak third_party/utf8proc third_party/xxhash \
+              third_party/zlib
+            cc --version
+            c++ --version
+          } | sha256sum | cut -d' ' -f1)"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Cache native C/C++ libraries
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VERSO_NATIVE_CACHE }}
+          key: native-desktop-${{ runner.os }}-${{ steps.native-key.outputs.key }}-${{ hashFiles('crates/crengine-sys/**', 'crates/hunspell-sys/**') }}
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
