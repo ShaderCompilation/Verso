@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds a Verso release in target/package/<version>/: one archive per
-# component, latest.json (the manifest) and verso-<version>.zip (the
-# first install). Sign it afterwards with scripts/sign-release.sh.
+# component, latest.json (the manifest), verso-<version>.zip (the first
+# install) and verso-<version>.kpkg (the KPM package). Sign it afterwards
+# with scripts/sign-release.sh.
 #
 #   scripts/package.sh                   package the version in Cargo.toml
 #   scripts/package.sh --allow-dirty     package uncommitted changes, for testing
@@ -50,6 +51,6 @@ OUT="target/package/$VERSION"
 echo "==> packaging Verso $VERSION ($RELEASED) in $OUT"
 rm -rf "$OUT"
 target/debug/verso-release pack --components dist/components.json --stage target/package/stage \
-    --out "$OUT" --version "$VERSION" --released "$RELEASED" --notes "$NOTES"
+    --out "$OUT" --version "$VERSION" --released "$RELEASED" --notes "$NOTES" --kpm dist/kindle/kpm
 ls -l "$OUT"
 echo "==> next: scripts/sign-release.sh, then publish"

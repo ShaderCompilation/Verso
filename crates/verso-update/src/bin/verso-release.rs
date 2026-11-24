@@ -2,17 +2,18 @@
 //! run it.
 //!
 //! ```text
-//! verso-release pack --components dist/components.json --stage DIR --out DIR --version 0.3.0 --released 2026-12-01 --notes FILE
+//! verso-release pack --components dist/components.json --stage DIR --out DIR --version 0.3.0 --released 2026-12-01 --notes FILE [--kpm DIR]
 //! verso-release installed --components dist/components.json --stage DIR --version 0.3.0 [--dev] --out FILE
 //! verso-release trusted-comment --manifest latest.json
 //! verso-release verify --release DIR [--key FILE]...
 //! ```
 //!
-//! `pack` writes one archive per component, `latest.json` and the
-//! first-install zip. `installed` writes an `installed.json` for the staged
-//! files and prints `id hash` lines. `trusted-comment` prints what the
-//! signature must carry. `verify` checks a signed release folder with the keys
-//! built into this binary, or with `--key` files.
+//! `pack` writes one archive per component, `latest.json`, the first-install
+//! zip, and (with `--kpm`) `verso-<version>.kpkg`. `installed` writes an
+//! `installed.json` for the staged files and prints `id hash` lines.
+//! `trusted-comment` prints what the signature must carry. `verify` checks a
+//! signed release folder with the keys built into this binary, or with `--key`
+//! files.
 use anyhow::{Context, Result, bail, ensure};
 use std::{fs, path::PathBuf};
 use verso_update::{
@@ -22,7 +23,7 @@ use verso_update::{
 };
 
 const USAGE: &str =
-    "usage: verso-release pack --components FILE --stage DIR --out DIR --version V --released DATE --notes FILE
+    "usage: verso-release pack --components FILE --stage DIR --out DIR --version V --released DATE --notes FILE [--kpm DIR]
        verso-release installed --components FILE --stage DIR --version V [--dev] --out FILE
        verso-release trusted-comment --manifest FILE
        verso-release verify --release DIR [--key FILE]...";
@@ -42,6 +43,7 @@ struct Args {
     version: Option<Version>,
     released: Option<String>,
     notes: Option<PathBuf>,
+    kpm: Option<PathBuf>,
     manifest: Option<PathBuf>,
     release: Option<PathBuf>,
     keys: Vec<PathBuf>,
@@ -61,6 +63,7 @@ fn run() -> Result<()> {
             "--version" => args.version = Some(value()?.parse()?),
             "--released" => args.released = Some(value()?),
             "--notes" => args.notes = Some(value()?.into()),
+            "--kpm" => args.kpm = Some(value()?.into()),
             "--manifest" => args.manifest = Some(value()?.into()),
             "--release" => args.release = Some(value()?.into()),
             "--key" => args.keys.push(value()?.into()),
@@ -83,6 +86,7 @@ fn run() -> Result<()> {
                 version: args.version.context("pack needs --version")?,
                 released: args.released.context("pack needs --released")?,
                 notes,
+                kpm: args.kpm.as_deref(),
             })?;
             for c in &manifest.components {
                 println!("{:<14} {:>9} bytes  {}", c.id, c.archive.size, &c.hash[..16]);

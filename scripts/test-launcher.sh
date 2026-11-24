@@ -28,6 +28,7 @@ else
     LAUNCHER="${1:-${HERE}/../dist/kindle/verso/verso.sh}"
     W="${2:-$(mktemp -d "${TMPDIR:-/tmp}/verso-launcher-test.XXXXXX")}"
     SCRIPTLET="${VERSO_TEST_SCRIPTLET:-${HERE}/../dist/kindle/documents/Verso.sh}"
+    KPM_DIR="${VERSO_TEST_KPM_DIR:-${HERE}/../dist/kindle/kpm}"
 fi
 STEP_EVERY="${STEP_EVERY:-1}"
 if [ -n "${KEEP:-}" ] || [ -n "${STEP_FROM:-}" ]; then
@@ -466,6 +467,157 @@ if [ -f "${SCRIPTLET}" ]; then
     [ "$(grep -c 'killall -CONT volumd' "${W}/calls")" = 3 ] || fail "expected 3 volumd resumes"
     absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
     [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
+fi
+
+if [ -d "${KPM_DIR}" ]; then
+    # Builds an unpacked KPM package folder matching verso-<v>.kpkg layout.
+    make_kpm_pkg() {
+        pkg="$1"
+        ver="$2"
+        rm -rf "${pkg}"
+        mkdir -p "${pkg}/payload/documents" "${pkg}/payload/extensions/verso" \
+            "${pkg}/payload/verso/bin" "${pkg}/payload/verso/data/cre/hyph" \
+            "${pkg}/payload/verso/fonts" "${pkg}/payload/verso/update" \
+            "${pkg}/payload/verso/wordforms"
+        cp "${KPM_DIR}/install.sh" "${KPM_DIR}/launch.sh" "${KPM_DIR}/uninstall.sh" "${pkg}/"
+        chmod 755 "${pkg}/install.sh" "${pkg}/launch.sh" "${pkg}/uninstall.sh"
+        if [ "${ver}" = 1 ]; then
+            make_app 0.1.0 >"${pkg}/payload/verso/verso"
+            cp "${W}/launcher-1.sh" "${pkg}/payload/verso/verso.sh"
+            printf '#!/bin/sh\n# Name: Verso\n# v1\n' >"${pkg}/payload/documents/Verso.sh"
+            echo "config v1" >"${pkg}/payload/extensions/verso/config.xml"
+            echo "menu v1" >"${pkg}/payload/extensions/verso/menu.json"
+            echo "mdns v1" >"${pkg}/payload/verso/bin/verso-mdns"
+            echo "css v1" >"${pkg}/payload/verso/data/cre/epub.css"
+            echo "pat v1" >"${pkg}/payload/verso/data/cre/hyph/en.pat"
+            echo "literata v1" >"${pkg}/payload/verso/fonts/Literata-Regular.ttf"
+            echo "old font v1" >"${pkg}/payload/verso/fonts/Old.ttf"
+            echo "ru v1" >"${pkg}/payload/verso/wordforms/ru.vwf"
+            echo '{"format":1,"version":"0.1.0","dev":false,"components":[]}' >"${pkg}/payload/verso/installed.json"
+        else
+            make_app 0.2.0 >"${pkg}/payload/verso/verso"
+            cp "${W}/launcher-2.sh" "${pkg}/payload/verso/verso.sh"
+            printf '#!/bin/sh\n# Name: Verso\n# v2\n' >"${pkg}/payload/documents/Verso.sh"
+            echo "config v2" >"${pkg}/payload/extensions/verso/config.xml"
+            echo "menu v2" >"${pkg}/payload/extensions/verso/menu.json"
+            echo "mdns v2" >"${pkg}/payload/verso/bin/verso-mdns"
+            echo "css v2" >"${pkg}/payload/verso/data/cre/epub.css"
+            echo "pat v2" >"${pkg}/payload/verso/data/cre/hyph/en.pat"
+            echo "literata v2" >"${pkg}/payload/verso/fonts/Literata-Regular.ttf"
+            echo "new font v2" >"${pkg}/payload/verso/fonts/New.ttf"
+            echo "ru v2" >"${pkg}/payload/verso/wordforms/ru.vwf"
+            echo '{"format":1,"version":"0.2.0","dev":false,"components":[]}' >"${pkg}/payload/verso/installed.json"
+        fi
+        : >"${pkg}/payload/verso/update/hand-install"
+        chmod 755 "${pkg}/payload/verso/verso" "${pkg}/payload/verso/verso.sh" \
+            "${pkg}/payload/documents/Verso.sh" "${pkg}/payload/verso/bin/verso-mdns"
+        (cd "${pkg}/payload" && find . -type f | sed 's|^\./||' | sort) >"${pkg}/files.txt"
+    }
+
+    make_kpm_pkg "${W}/kpm-v1" 1
+    make_kpm_pkg "${W}/kpm-v2" 2
+
+    begin "kpm install.sh installs required files and preserves verso/data and verso/ssh"
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls"
+    mkdir -p "${R}/verso/data/books" "${R}/verso/ssh" "${R}/verso/fonts" \
+        "${R}/documents" "${R}/extensions/other" "${W}/tmp"
+    echo "user settings" >"${R}/verso/data/settings.json"
+    echo "book state" >"${R}/verso/data/books/b1.json"
+    echo "ssh-ed25519 AAAA" >"${R}/verso/ssh/authorized_keys"
+    echo "user font" >"${R}/verso/fonts/User.ttf"
+    echo "a book" >"${R}/documents/book.epub"
+    echo "other ext" >"${R}/extensions/other/menu.json"
+    (cd "${W}/kpm-v1" && VERSO_STORAGE_ROOT="${R}" ${SH} ./install.sh >/dev/null) || fail "install.sh exited non-zero"
+    present "${R}/verso/verso" "${R}/verso/verso.sh" "${R}/verso/installed.json" \
+        "${R}/verso/update/hand-install" "${R}/documents/Verso.sh" \
+        "${R}/extensions/verso/config.xml" "${R}/extensions/verso/menu.json" \
+        "${R}/verso/bin/verso-mdns" "${R}/verso/data/cre/epub.css" \
+        "${R}/verso/fonts/Literata-Regular.ttf" "${R}/verso/fonts/Old.ttf" \
+        "${R}/verso/wordforms/ru.vwf"
+    [ -x "${R}/verso/verso" ] && [ -x "${R}/verso/verso.sh" ] && [ -x "${R}/documents/Verso.sh" ] ||
+        fail "installed executables lost +x bit"
+    [ "$(cat "${R}/verso/data/settings.json")" = "user settings" ] || fail "settings.json modified"
+    [ "$(cat "${R}/verso/data/books/b1.json")" = "book state" ] || fail "book state modified"
+    [ "$(cat "${R}/verso/ssh/authorized_keys")" = "ssh-ed25519 AAAA" ] || fail "ssh keys modified"
+    [ "$(cat "${R}/verso/fonts/User.ttf")" = "user font" ] || fail "user font modified"
+    [ "$(cat "${R}/documents/book.epub")" = "a book" ] || fail "book modified"
+
+    begin "kpm upgrade replaces app files without touching verso/data or verso/ssh"
+    (cd "${W}/kpm-v1" && VERSO_STORAGE_ROOT="${R}" ${SH} ./uninstall.sh upgrade >/dev/null) ||
+        fail "uninstall.sh upgrade exited non-zero"
+    (cd "${W}/kpm-v2" && VERSO_STORAGE_ROOT="${R}" ${SH} ./install.sh upgrade >/dev/null) ||
+        fail "install.sh upgrade exited non-zero"
+    present "${R}/verso/verso" "${R}/verso/verso.sh" "${R}/verso/installed.json" \
+        "${R}/verso/update/hand-install" "${R}/documents/Verso.sh" \
+        "${R}/extensions/verso/menu.json" "${R}/verso/fonts/New.ttf"
+    absent "${R}/verso/fonts/Old.ttf"
+    grep -q '"0.2.0"' "${R}/verso/installed.json" || fail "installed.json not updated to 0.2.0"
+    grep -q '# v2' "${R}/documents/Verso.sh" || fail "Verso.sh not updated to v2"
+    [ "$(cat "${R}/verso/data/cre/epub.css")" = "css v2" ] || fail "crengine-data not updated to v2"
+    [ "$(cat "${R}/verso/data/settings.json")" = "user settings" ] || fail "settings.json touched by upgrade"
+    [ "$(cat "${R}/verso/data/books/b1.json")" = "book state" ] || fail "book state touched by upgrade"
+    [ "$(cat "${R}/verso/ssh/authorized_keys")" = "ssh-ed25519 AAAA" ] || fail "ssh keys touched by upgrade"
+    [ "$(cat "${R}/verso/fonts/User.ttf")" = "user font" ] || fail "user font touched by upgrade"
+
+    begin "kpm full uninstall removes app, KUAL and scriptlet while preserving verso/data"
+    mkdir -p "${R}/documents/Verso.sh.sdr" "${R}/verso/cache" "${R}/verso/update/staged"
+    echo "thumb" >"${R}/documents/Verso.sh.sdr/icon.png"
+    echo "cache" >"${R}/verso/cache/book.cr3"
+    echo "plan" >"${R}/verso/update/staged/plan.txt"
+    echo "log" >"${R}/verso/verso.log"
+    (cd "${W}/kpm-v2" && VERSO_STORAGE_ROOT="${R}" ${SH} ./uninstall.sh >/dev/null) ||
+        fail "uninstall.sh exited non-zero"
+    absent "${R}/verso/verso" "${R}/verso/verso.sh" "${R}/verso/installed.json" \
+        "${R}/verso/update" "${R}/verso/cache" "${R}/verso/verso.log" \
+        "${R}/verso/bin" "${R}/verso/data/cre" "${R}/verso/wordforms" \
+        "${R}/verso/fonts/Literata-Regular.ttf" "${R}/verso/fonts/New.ttf" \
+        "${R}/extensions/verso" "${R}/documents/Verso.sh" "${R}/documents/Verso.sh.sdr"
+    present "${W}/kpm-v2/uninstall.sh" "${R}/verso/data/settings.json" "${R}/verso/data/books/b1.json" \
+        "${R}/verso/ssh/authorized_keys" "${R}/verso/fonts/User.ttf" \
+        "${R}/documents/book.epub" "${R}/extensions/other/menu.json"
+    [ "$(cat "${R}/verso/data/settings.json")" = "user settings" ] || fail "settings.json damaged on uninstall"
+    [ "$(cat "${R}/verso/data/books/b1.json")" = "book state" ] || fail "book state damaged on uninstall"
+    [ "$(cat "${R}/verso/ssh/authorized_keys")" = "ssh-ed25519 AAAA" ] || fail "ssh keys damaged on uninstall"
+
+    begin "kpm launch.sh invokes verso.sh cleanly"
+    fresh
+    # Direct launch (e.g. kpm launch verso from search bar / SSH without SH_Integration).
+    (
+        cd "${W}/kpm-v1" || exit 1
+        VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
+            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
+            ${SH} ./launch.sh </dev/null >/dev/null 2>&1
+    ) || fail "launch.sh exited non-zero"
+    wait_scriptlet 1 || fail "launch.sh did not finish running verso.sh"
+    runs_are "0.1.0"
+    ui_restored_once
+    # Launch while SH_Integration is active must wait until it unloads.
+    : >"${W}/calls"
+    : >"${W}/sh-active"
+    (
+        cd "${W}/kpm-v1" || exit 1
+        VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
+            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
+            ${SH} ./launch.sh </dev/null >/dev/null 2>&1
+    ) || fail "launch.sh (sh-active) exited non-zero"
+    usleep 250000 2>/dev/null || sleep 0.25 2>/dev/null || sleep 1
+    [ ! -s "${W}/calls" ] || fail "launch.sh paused Kindle UI before SH_Integration unloaded: $(cat "${W}/calls")"
+    rm -f "${W}/sh-active"
+    wait_scriptlet 2 || fail "launch.sh (sh-active) did not finish"
+    runs_are "0.1.0 0.1.0"
+    ui_restored_once
+    absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
+    [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
+    # Missing verso.sh fails cleanly.
+    rm -f "${R}/verso/verso.sh"
+    if (cd "${W}/kpm-v1" && VERSO_STORAGE_ROOT="${R}" ${SH} ./launch.sh </dev/null >/dev/null 2>&1); then
+        fail "launch.sh should fail when verso.sh is missing"
+    fi
+    rm -rf "${W}/kpm-v1" "${W}/kpm-v2"
 fi
 
 begin "crash report on signal exit"

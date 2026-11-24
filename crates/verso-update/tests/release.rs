@@ -42,7 +42,12 @@ fn stage(root: &Path) -> PathBuf {
     stage
 }
 
+fn kpm_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/kindle/kpm")
+}
+
 fn pack(stage: &Path, out: &Path) -> Manifest {
+    let kpm = kpm_dir();
     release::pack(&PackOptions {
         specs: &specs(),
         stage,
@@ -50,6 +55,7 @@ fn pack(stage: &Path, out: &Path) -> Manifest {
         version: "0.3.0".parse().unwrap(),
         released: "2026-12-01".into(),
         notes: "  Faster page turns.\n".into(),
+        kpm: Some(&kpm),
     })
     .unwrap()
 }
@@ -88,6 +94,7 @@ fn packs_a_release() {
             "latest.json",
             "launcher-0.3.0.tar.gz",
             "scriptlet-0.3.0.tar.gz",
+            "verso-0.3.0.kpkg",
             "verso-0.3.0.zip"
         ]
     );
@@ -152,6 +159,114 @@ fn zip_installs_required_components() {
         installed.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
         ["app", "launcher", "scriptlet", "fonts"]
     );
+}
+
+#[test]
+fn kpkg_matches_kpm_v2_schema_and_pre_release_version() {
+    let tmp = TempDir::new().unwrap();
+    let stage_dir = stage(tmp.path());
+    let out = tmp.path().join("out");
+    let m = pack(&stage_dir, &out);
+
+    let kpkg_bytes = fs::read(out.join("verso-0.3.0.kpkg")).unwrap();
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(kpkg_bytes.as_slice()));
+    let mut entries: Vec<(String, u32, Vec<u8>)> = Vec::new();
+    for entry in tar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_str().unwrap().to_string();
+        let mode = entry.header().mode().unwrap();
+        let mut data = Vec::new();
+        if entry.header().entry_type() == tar::EntryType::Regular {
+            entry.read_to_end(&mut data).unwrap();
+        }
+        entries.push((path, mode, data));
+    }
+
+    // manifest.json is first so KPM reads it without decompressing the payload.
+    assert_eq!(entries[0].0, "manifest.json");
+    assert_eq!(entries[0].1, MODE_FILE);
+    let kpm_manifest: serde_json::Value = serde_json::from_slice(&entries[0].2).unwrap();
+    assert_eq!(kpm_manifest["manifest_version"], 2);
+    assert_eq!(kpm_manifest["id"], "verso");
+    assert_eq!(kpm_manifest["name"], "Verso");
+    assert_eq!(kpm_manifest["author"], "Verso");
+    assert_eq!(kpm_manifest["version"], serde_json::json!([0, 3, 0]));
+    assert_eq!(kpm_manifest["dependencies"], serde_json::json!([]));
+    assert_eq!(kpm_manifest["supported_platforms"], serde_json::json!(["kindlehf"]));
+
+    let by_path = |name: &str| entries.iter().find(|(p, _, _)| p == name).unwrap();
+    for hook in ["install.sh", "launch.sh", "uninstall.sh"] {
+        assert_eq!(by_path(hook).1, MODE_EXEC, "{hook} must be executable");
+    }
+    let files_txt = std::str::from_utf8(&by_path("files.txt").2).unwrap();
+    let listed: Vec<&str> = files_txt.lines().collect();
+    assert_eq!(
+        listed,
+        [
+            "documents/Verso.sh",
+            "verso/fonts/Literata-Regular.ttf",
+            "verso/fonts/licences/OFL.txt",
+            "verso/installed.json",
+            "verso/update/hand-install",
+            "verso/verso",
+            "verso/verso.sh",
+        ]
+    );
+    assert_eq!(by_path("payload/documents/Verso.sh").1, MODE_EXEC);
+    assert_eq!(by_path("payload/verso/verso").1, MODE_EXEC);
+    assert_eq!(by_path("payload/verso/installed.json").1, MODE_FILE);
+    let installed = Installed::parse(&by_path("payload/verso/installed.json").2).unwrap();
+    assert!(!installed.dev);
+    assert_eq!(installed.version, m.version);
+
+    // Unpack the real .kpkg and run its install.sh against a temporary storage root.
+    let unpacked = tmp.path().join("unpacked");
+    tar::Archive::new(flate2::read::GzDecoder::new(kpkg_bytes.as_slice())).unpack(&unpacked).unwrap();
+    let root = tmp.path().join("kindle-root");
+    write(&root.join("verso/data/settings.json"), b"user", 0o644);
+    let status = std::process::Command::new("/bin/sh")
+        .arg(unpacked.join("install.sh"))
+        .current_dir(&unpacked)
+        .env("VERSO_STORAGE_ROOT", &root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "install.sh from unpacked .kpkg failed");
+    assert_eq!(fs::read(root.join("verso/data/settings.json")).unwrap(), b"user");
+    assert!(root.join("documents/Verso.sh").is_file());
+    assert!(root.join("verso/installed.json").is_file());
+    assert!(root.join("verso/update/hand-install").is_file());
+
+    // Pre-release versions encode [major, minor, patch] in KPM's manifest.json
+    // while keeping the full pre-release version inside installed.json.
+    let pre_out = tmp.path().join("out-pre");
+    let kpm = kpm_dir();
+    release::pack(&PackOptions {
+        specs: &specs(),
+        stage: &stage_dir,
+        out: &pre_out,
+        version: "0.1.0-beta.3".parse().unwrap(),
+        released: "2026-12-01".into(),
+        notes: String::new(),
+        kpm: Some(&kpm),
+    })
+    .unwrap();
+    let pre_bytes = fs::read(pre_out.join("verso-0.1.0-beta.3.kpkg")).unwrap();
+    let mut pre_tar = tar::Archive::new(flate2::read::GzDecoder::new(pre_bytes.as_slice()));
+    let mut pre_manifest = None;
+    let mut pre_installed = None;
+    for entry in pre_tar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_str().unwrap().to_string();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        if path == "manifest.json" {
+            pre_manifest = Some(serde_json::from_slice::<serde_json::Value>(&data).unwrap());
+        } else if path == "payload/verso/installed.json" {
+            pre_installed = Some(Installed::parse(&data).unwrap());
+        }
+    }
+    assert_eq!(pre_manifest.unwrap()["version"], serde_json::json!([0, 1, 0]));
+    assert_eq!(pre_installed.unwrap().version.to_string(), "0.1.0-beta.3");
 }
 
 #[test]
@@ -238,6 +353,7 @@ fn out_folder_must_be_empty() {
             version: "0.3.0".parse().unwrap(),
             released: "2026-12-01".into(),
             notes: String::new(),
+            kpm: None,
         })
         .is_err()
     );
@@ -313,6 +429,9 @@ fn verify_release_checks_signature_then_archives() {
     assert!(err_of(&[key]).contains("app-0.3.0.tar.gz"));
     copy("app-0.3.0.tar.gz");
     copy("fonts-0.3.0.tar.gz");
+    // Extra artifacts like the zip and .kpkg alongside the signed manifest
+    // must not break release verification.
+    fs::write(dir.join("verso-0.3.0.kpkg"), b"kpkg").unwrap();
     let m = release::verify_release(dir, &[key]).unwrap();
     assert_eq!(m.version.to_string(), "0.3.0");
 

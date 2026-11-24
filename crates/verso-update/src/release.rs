@@ -1,13 +1,13 @@
 //! Writing releases: staged component folders → reproducible archives,
-//! `latest.json`, `installed.json` and the first-install zip. Used by
-//! `verso-release` (scripts/package.sh and scripts/deploy.sh).
+//! `latest.json`, `installed.json`, the first-install zip and the KPM `.kpkg`.
+//! Used by `verso-release` (scripts/package.sh and scripts/deploy.sh).
 use crate::{
     Archive, Component, FORMAT, FileEntry, INSTALLED_PATH, Installed, InstalledComponent, MODE_EXEC, MODE_FILE,
     Manifest, Version, component_hash, is_safe_path, sha256_hex, verify_manifest,
 };
 use anyhow::{Context, Result, bail, ensure};
 use flate2::{Compression, GzBuilder, read::GzDecoder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,6 +52,11 @@ pub fn archive_name(id: &str, version: &Version) -> String {
 /// The first-install zip's name.
 pub fn zip_name(version: &Version) -> String {
     format!("verso-{version}.zip")
+}
+
+/// The KPM package's name.
+pub fn kpkg_name(version: &Version) -> String {
+    format!("verso-{version}.kpkg")
 }
 
 /// Lists the regular files under `dir`, sorted by path, with their sizes and
@@ -120,11 +125,14 @@ pub struct PackOptions<'a> {
     pub version: Version,
     pub released: String,
     pub notes: String,
+    /// When set, holds the KPM hooks (`install.sh`, `launch.sh`, `uninstall.sh`)
+    /// and `pack` also emits `verso-<version>.kpkg`.
+    pub kpm: Option<&'a Path>,
 }
 
-/// Builds a release in `out`: one archive per component, `latest.json` and
-/// the first-install zip (the required components plus `installed.json`).
-/// Signing is a separate step.
+/// Builds a release in `out`: one archive per component, `latest.json`, the
+/// first-install zip (the required components plus `installed.json`), and
+/// optionally `verso-<version>.kpkg`. Signing is a separate step.
 pub fn pack(opts: &PackOptions) -> Result<Manifest> {
     check_stage(opts.specs, opts.stage)?;
     fs::create_dir_all(opts.out)?;
@@ -159,7 +167,11 @@ pub fn pack(opts: &PackOptions) -> Result<Manifest> {
 
     let required: Vec<&str> = manifest.components.iter().filter(|c| c.required).map(|c| c.id.as_str()).collect();
     let installed = Installed::from_manifest(&manifest, &required, false);
-    write_zip(opts.stage, &manifest, &installed, &opts.out.join(zip_name(&opts.version)))?;
+    let entries = collect_install_entries(opts.stage, &manifest, &installed)?;
+    write_zip(&entries, &opts.out.join(zip_name(&opts.version)))?;
+    if let Some(kpm_dir) = opts.kpm {
+        write_kpkg(kpm_dir, &entries, &opts.version, &opts.out.join(kpkg_name(&opts.version)))?;
+    }
     Ok(manifest)
 }
 
@@ -197,9 +209,14 @@ fn check_stage(specs: &[ComponentSpec], stage: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A zip that mirrors the Kindle's storage: unpacked at its root, it installs
-/// Verso. Folders, then files, sorted, with fixed times.
-fn write_zip(stage: &Path, manifest: &Manifest, installed: &Installed, out: &Path) -> Result<()> {
+/// Collects every file installed on a fresh Kindle install (required components
+/// plus `verso/installed.json` and `verso/update/hand-install`), sorted by path.
+/// Shared by `write_zip` and `write_kpkg` so both install the exact same files.
+fn collect_install_entries(
+    stage: &Path,
+    manifest: &Manifest,
+    installed: &Installed,
+) -> Result<BTreeMap<String, (Vec<u8>, u32)>> {
     let mut entries: BTreeMap<String, (Vec<u8>, u32)> = BTreeMap::new();
     for c in manifest.components.iter().filter(|c| installed.component(&c.id).is_some()) {
         for f in &c.files {
@@ -219,6 +236,12 @@ fn write_zip(stage: &Path, manifest: &Manifest, installed: &Installed, out: &Pat
         "a component owns {}",
         crate::launcher::HAND_INSTALL_PATH
     );
+    Ok(entries)
+}
+
+/// A zip that mirrors the Kindle's storage: unpacked at its root, it installs
+/// Verso. Folders, then files, sorted, with fixed times.
+fn write_zip(entries: &BTreeMap<String, (Vec<u8>, u32)>, out: &Path) -> Result<()> {
     let mut folders = BTreeSet::new();
     for path in entries.keys() {
         let mut p = path.as_str();
@@ -237,10 +260,115 @@ fn write_zip(stage: &Path, manifest: &Manifest, installed: &Installed, out: &Pat
         zip.add_directory(folder, options.unix_permissions(0o755))?;
     }
     for (path, (bytes, mode)) in entries {
-        zip.start_file(path, options.unix_permissions(mode))?;
-        zip.write_all(&bytes)?;
+        zip.start_file(path, options.unix_permissions(*mode))?;
+        zip.write_all(bytes)?;
     }
     zip.finish()?.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    Ok(())
+}
+
+/// KPM v2 package manifest (`manifest.json` at the root of a `.kpkg`).
+/// KPM's `version` field is strictly three integers `[major, minor, patch]`
+/// (no pre-release suffix); `payload/verso/installed.json` carries the full
+/// Verso version string.
+#[derive(Serialize)]
+struct KpmManifest<'a> {
+    manifest_version: u32,
+    id: &'a str,
+    name: &'a str,
+    author: &'a str,
+    description: &'a str,
+    version: [u64; 3],
+    dependencies: [&'a str; 0],
+    supported_platforms: [&'a str; 1],
+}
+
+const KPM_HOOKS: [&str; 3] = ["install.sh", "launch.sh", "uninstall.sh"];
+
+/// Reproducible KPM v2 `.kpkg` (`.tar.gz`) containing `manifest.json`,
+/// `files.txt`, the POSIX `sh` hooks (`install.sh`, `launch.sh`, `uninstall.sh`)
+/// and `payload/` holding the exact files shipped in the first-install zip.
+fn write_kpkg(kpm_dir: &Path, entries: &BTreeMap<String, (Vec<u8>, u32)>, version: &Version, out: &Path) -> Result<()> {
+    let mut hooks = Vec::with_capacity(KPM_HOOKS.len());
+    for name in KPM_HOOKS {
+        let path = kpm_dir.join(name);
+        let meta = fs::symlink_metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+        ensure!(meta.is_file(), "{} must be a regular file", path.display());
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        hooks.push((name, bytes));
+    }
+
+    let kpm_manifest = KpmManifest {
+        manifest_version: 2,
+        id: "verso",
+        name: "Verso",
+        author: "Verso",
+        description: "A calm, lightweight e-reader for jailbroken Kindles",
+        version: [version.major, version.minor, version.patch],
+        dependencies: [],
+        supported_platforms: ["kindlehf"],
+    };
+    let mut manifest_json = serde_json::to_vec_pretty(&kpm_manifest)?;
+    manifest_json.push(b'\n');
+
+    let mut files_txt = String::new();
+    for path in entries.keys() {
+        files_txt.push_str(path);
+        files_txt.push('\n');
+    }
+
+    let mut folders = BTreeSet::new();
+    folders.insert("payload/".to_string());
+    for path in entries.keys() {
+        let full = format!("payload/{path}");
+        let mut p = full.as_str();
+        while let Some((parent, _)) = p.rsplit_once('/') {
+            folders.insert(format!("{parent}/"));
+            p = parent;
+        }
+    }
+
+    let file = BufWriter::new(File::create(out).with_context(|| format!("creating {}", out.display()))?);
+    let gz = GzBuilder::new().mtime(0).operating_system(255).write(file, Compression::best());
+    let mut tar = tar::Builder::new(gz);
+    // Put manifest.json first so KPM's Internal_GetManifest reads it without
+    // decompressing the payload binaries.
+    append_tar_file(&mut tar, "manifest.json", &manifest_json, MODE_FILE)?;
+    append_tar_file(&mut tar, "files.txt", files_txt.as_bytes(), MODE_FILE)?;
+    for (name, bytes) in &hooks {
+        append_tar_file(&mut tar, name, bytes, MODE_EXEC)?;
+    }
+    for folder in folders {
+        append_tar_dir(&mut tar, &folder)?;
+    }
+    for (path, (bytes, mode)) in entries {
+        append_tar_file(&mut tar, &format!("payload/{path}"), bytes, *mode)?;
+    }
+    tar.into_inner()?.finish()?.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    Ok(())
+}
+
+fn append_tar_file<W: Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8], mode: u32) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(bytes.len() as u64);
+    header.set_mode(mode);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(FIXED_MTIME);
+    tar.append_data(&mut header, path, bytes)?;
+    Ok(())
+}
+
+fn append_tar_dir<W: Write>(tar: &mut tar::Builder<W>, path: &str) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(FIXED_MTIME);
+    tar.append_data(&mut header, path, io::empty())?;
     Ok(())
 }
 

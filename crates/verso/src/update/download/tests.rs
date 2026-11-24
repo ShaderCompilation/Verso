@@ -59,6 +59,7 @@ fn build(version: &str, app_size: usize) -> Release {
         version: version.parse().unwrap(),
         released: "2026-12-01".into(),
         notes: String::new(),
+        kpm: None,
     })
     .unwrap();
     Release { dir, manifest }
