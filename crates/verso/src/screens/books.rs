@@ -2264,7 +2264,7 @@ impl CrashSheet {
 
     fn message(&self) -> String {
         format!(
-            "A crash report was saved to:\n{}\n\nConnect your Kindle over USB (or use Wi-Fi transfer) to copy it and attach it to a bug report. For full device details, use Settings → Device → Create problem report.",
+            "A crash report was saved to:\n{}\n\nCopy it with Wi-Fi transfer → Files → Reports (or over USB) and attach it to a bug report. For full device details, use Settings → Advanced → Create problem report.",
             self.notice.display_path(),
         )
     }

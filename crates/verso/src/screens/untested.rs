@@ -29,7 +29,7 @@ pub fn mark_seen(store: &Store, key: &str) -> Result<()> {
 
 pub fn message(model: &DeviceModel) -> String {
     format!(
-        "Verso hasn’t been tested on {} yet. If something looks wrong, Settings → Device → Create problem report.",
+        "Verso hasn’t been tested on {} yet. If something looks wrong, Settings → Advanced → Create problem report.",
         model.name
     )
 }
@@ -115,7 +115,7 @@ mod tests {
     fn message_names_the_model_and_the_report() {
         assert_eq!(
             message(&model(true)),
-            "Verso hasn’t been tested on Kindle Basic 4 (2022) yet. If something looks wrong, Settings → Device → Create problem report."
+            "Verso hasn’t been tested on Kindle Basic 4 (2022) yet. If something looks wrong, Settings → Advanced → Create problem report."
         );
     }
 }
