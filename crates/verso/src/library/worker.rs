@@ -573,18 +573,26 @@ impl Background {
         added
     }
 
-    /// Makes missing thumbnails, visible books first. True when a scan
-    /// request, folder edit or shutdown interrupted it.
+    /// Makes missing thumbnails, visible books first, then Home's. Home shows
+    /// its covers once they are all there, not after the whole library's, and
+    /// not one by one. True when a scan request, folder edit or shutdown
+    /// interrupted it.
     fn covers(&mut self, errors: &mut Vec<String>) -> bool {
         let covers_started = Instant::now();
         let mut pending: BTreeSet<_> =
             self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
         let id_indices: HashMap<_, _> = self.index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
+        let home_books = |store: &Store| -> Vec<usize> {
+            let books = store.home_summary().unwrap_or_default().books;
+            books.iter().filter_map(|e| id_indices.get(&e.book.id).copied()).collect()
+        };
+        let mut home = home_books(&self.store);
         let mut since_publish = Instant::now();
         let (mut confirmed, mut changed, mut unsaved) = (0, 0, 0);
         while !pending.is_empty() {
             if self.channel.take_home_request() {
                 self.rebuild_home();
+                home = home_books(&self.store);
             }
             if let Some(request) = self.channel.take_warm_request() {
                 self.warm(request);
@@ -597,7 +605,7 @@ impl Background {
                 self.changed();
                 unsaved += 1;
             }
-            let next = match self.next_cover(&pending, &id_indices) {
+            let next = match self.next_cover(&pending, &id_indices, &home) {
                 Next::Interrupted => return true,
                 Next::Repairs => continue,
                 Next::Cover(i) => i,
@@ -613,6 +621,12 @@ impl Background {
                 Ok(_) => confirmed += 1,
                 Err(e) => push_error(errors, format!("Couldn't cache cover: {e}")),
             }
+            if !home.is_empty() {
+                home.retain(|i| pending.contains(i));
+                if home.is_empty() && std::mem::take(&mut self.home_stale) {
+                    self.refresh_home_metadata();
+                }
+            }
             if unsaved >= SAVE_EVERY {
                 self.save(errors, "covers");
                 unsaved = 0;
@@ -627,7 +641,7 @@ impl Background {
         false
     }
 
-    fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>) -> Next {
+    fn next_cover(&self, pending: &BTreeSet<usize>, id_indices: &HashMap<String, usize>, home: &[usize]) -> Next {
         let mut state = self.channel.lock();
         while (state.paused || state.covers_paused > 0) && !state.stop && !state.requested && state.changes.is_empty() {
             state = self.channel.wait(state);
@@ -646,8 +660,9 @@ impl Background {
         if !state.repairs.is_empty() {
             return Next::Repairs;
         }
-        let visible = state.priority.iter().filter_map(|id| id_indices.get(id).copied()).find(|i| pending.contains(i));
-        Next::Cover(visible.unwrap_or_else(|| *pending.first().unwrap()))
+        let visible = state.priority.iter().filter_map(|id| id_indices.get(id).copied());
+        let first = visible.chain(home.iter().copied()).find(|i| pending.contains(i));
+        Next::Cover(first.unwrap_or_else(|| *pending.first().unwrap()))
     }
 
     fn change_paths(&mut self, changes: &[(u64, PathChange, bool)]) {
@@ -1743,6 +1758,50 @@ mod tests {
         wait(&|| store.tile_cover_path(&key, 250, 375).exists());
         drop(worker);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn home_gets_its_covers_at_once_before_the_rest_of_the_library() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let books = dir.path().join("books");
+        std::fs::create_dir_all(&books)?;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        // The shelf is the newest books, the last ones by name.
+        for i in 0..10 {
+            let path = books.join(format!("{i}.epub"));
+            std::fs::copy(&fixture, &path)?;
+            std::fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i))?;
+        }
+        let store = Store::at(dir.path().join("state"));
+        // What Home could show at each wake: covers of the shelf, and in all.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let waker = {
+            let (seen, store) = (seen.clone(), store.clone());
+            Waker::new(move || {
+                let home = store.home_summary().unwrap_or_default();
+                let ready = home.books.iter().filter(|e| matches!(e.book.cover, Cover::Ready(_))).count();
+                let made = std::fs::read_dir(store.cover_path("x").parent().unwrap()).map_or(0, |dir| {
+                    dir.flatten().filter(|f| store.small_cover_path("x").parent() != Some(&f.path())).count()
+                });
+                seen.lock().unwrap().push((ready, made));
+            })
+        };
+        let worker = Worker::new(store.clone(), vec![books], waker);
+        let started = Instant::now();
+        while !worker.take_status().is_some_and(|s| !s.working) {
+            assert!(started.elapsed().as_secs() < 20, "worker timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(worker);
+        let seen = seen.lock().unwrap();
+        let all = seen.iter().map(|(_, made)| *made).max().unwrap();
+        let shelf: Vec<_> = seen.iter().filter(|(ready, _)| *ready > 0).collect();
+        assert!(shelf.iter().all(|(ready, _)| *ready == super::super::home::SHELF), "all at once: {seen:?}");
+        assert!(shelf[0].1 < all, "before the last covers: {seen:?}");
         Ok(())
     }
 

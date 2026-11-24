@@ -15,7 +15,7 @@ out = sim.out_dir("home", clean=True)
 fixtures = sim.FIXTURES
 library = out / "fixtures/Library"
 library.mkdir(parents=True)
-names = ["Quiet Harbour", "The Long Way", "Notes", "Field Guide", "Letters", "Morning", "Unopened"]
+names = ["Quiet Harbour", "The Long Way", "Notes", "Field Guide", "Letters", "Morning", "Unopened", "Tides", "Evening"]
 sources = ["library3.epub", "library2.epub", "reader.epub"]
 for i, name in enumerate(names):
     shutil.copyfile(fixtures / sources[i % len(sources)], library / f"{name}.epub")
@@ -50,7 +50,11 @@ capture("populated-landscape", populated, landscape=True)
 capture("populated-small", populated, small=True)
 capture("resume-only", [("Quiet Harbour", 1, ())])
 capture("recents-only", [("Quiet Harbour", 3, ("finished",)), ("The Long Way", 2, ("hidden",))])
-capture("empty", [])
+# The shelf of unopened books: alone, and (resume-only) under Continue reading.
+capture("shelf", [])
+capture("shelf-landscape", [], landscape=True)
+capture("shelf-small", [], small=True)
+capture("resume-only-landscape", [("Quiet Harbour", 1, ())], landscape=True)
 # No books, with an empty folder that the Library card still counts.
 (out / "fixtures/None/Empty").mkdir(parents=True)
 for name, kind in [("no-books", {}), ("no-books-landscape", {"landscape": True}), ("no-books-small", {"small": True})]:

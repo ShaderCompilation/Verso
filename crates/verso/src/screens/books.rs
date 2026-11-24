@@ -718,6 +718,14 @@ impl Books {
         self.prioritize();
         log::debug!("startup stage: view books={} elapsed_us={}", self.books.len(), started.elapsed().as_micros());
     }
+    /// Home's grid: the recents, or the shelf while there are none. Never both.
+    fn home_grid_books(&self, recents: usize, shelf: usize) -> Vec<Book> {
+        let mut entries = self.home.recents(recents);
+        if entries.is_empty() {
+            entries = self.home.shelf(shelf);
+        }
+        entries.iter().map(|e| e.book.clone()).collect()
+    }
     fn refresh_home(&mut self, t: &Theme) {
         let width = self.screen.w - 2 * t.margin;
         let landscape = self.screen.w > self.screen.h;
@@ -767,7 +775,7 @@ impl Books {
             let gap_x = t.mm(if right_w < t.mm(60.0) { 2.4 } else { 3.0 });
             let cell_w = (right_w - gap_x * (cols as i32 - 1)).max(1) / cols as i32;
             let ideal_grid_h = cell_w * 3 / 2 + recent_labels_h;
-            self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
+            self.books = self.home_grid_books(cols, cols);
             self.grid = Grid::new(self.books.len(), cols, 1);
             let grid_y = self.header.bottom() + header_gap;
             let grid_h = (content_bottom - grid_y).min(ideal_grid_h).max(t.target);
@@ -778,8 +786,17 @@ impl Books {
             let gap_x = t.mm(if narrow { 2.6 } else { 3.4 });
             let cell_w = (width - gap_x * (cols as i32 - 1)).max(1) / cols as i32;
             let ideal_grid_h = cell_w * 3 / 2 + recent_labels_h;
-            self.books = self.home.recents(cols).iter().map(|e| e.book.clone()).collect();
-            self.grid = Grid::new(self.books.len(), cols, 1);
+            // A shelf alone on Home takes two rows where they fit, with
+            // covers a little smaller on a short screen.
+            let gap_y = t.mm(3.4);
+            let alone_h = content_bottom - content_top - header_h - header_gap;
+            let two_rows = self.continue_id.is_none()
+                && self.home.recents(1).is_empty()
+                && (alone_h - gap_y) / 2 >= ideal_grid_h * 85 / 100;
+            let rows = if two_rows { 2 } else { 1 };
+            self.books = self.home_grid_books(cols, cols * rows);
+            self.grid = Grid::new(self.books.len(), cols, rows);
+            let ideal_grid_h = if two_rows { 2 * ideal_grid_h + gap_y } else { ideal_grid_h };
 
             if self.continue_id.is_some() {
                 let div_gap_top = t.mm(if narrow { 3.2 } else { 5.2 });
@@ -801,7 +818,7 @@ impl Books {
             }
             let grid_y = self.header.bottom() + header_gap;
             let grid_h = (content_bottom - grid_y).min(ideal_grid_h).max(t.target);
-            self.grid.place(Rect::new(t.margin, grid_y, width, grid_h), gap_x, 0);
+            self.grid.place(Rect::new(t.margin, grid_y, width, grid_h), gap_x, gap_y);
             self.notice_rect = Rect::new(t.margin, notice_y, width, notice_h);
         }
         self.prioritize();
@@ -2121,8 +2138,8 @@ fn cover_outline(t: &Theme) -> i32 {
     t.mm(0.17).max(1)
 }
 
-/// Home's Recent books row fills each column flush with the margins (2:3 cover
-/// with 1-line title + 1-line author below).
+/// Home's Recent books row and shelf fill each column flush with the margins
+/// (2:3 cover with 1-line title + 1-line author below).
 fn home_recent_cover_rect(grid: &Grid, cell: Rect, t: &Theme) -> Rect {
     let (w, h) = grid.base_cell_size();
     let cover_h = (h - t.mm(HOME_RECENT_LABELS_MM)).min(w * 3 / 2).max(1);
@@ -2821,7 +2838,8 @@ impl Screen for Books {
             }
         }
         if self.is_home() && !self.books.is_empty() {
-            cx.line("Recent books", t.heading, self.header, HAlign::Left);
+            let heading = if self.home.recents(1).is_empty() { "Start reading" } else { "Recent books" };
+            cx.line(heading, t.heading, self.header, HAlign::Left);
         }
         let shared_names = self.shared_names();
         for (i, cell) in self.grid.cells() {
@@ -5730,13 +5748,14 @@ mod tests {
         let covers = books.apply_warm(warm, &t);
         assert!(covers > 0);
         assert!(books.warm_at().is_none(), "once per visit to Home");
-        assert!(books.is_home() && !books.browsing_ready && books.books.len() <= 4);
+        assert!(books.is_home() && !books.browsing_ready && books.books.len() <= library::home::SHELF);
         let after = draw(&mut books);
         let changed: Vec<_> = (0..home.len()).filter(|&i| home[i] != after[i]).collect();
         let rows = changed.first().zip(changed.last()).map(|(a, b)| (a / 1272, b / 1272));
         assert!(changed.is_empty(), "Home looks the same; rows {rows:?} changed");
         books.thumbnails.wait_prefetch();
-        assert_eq!(books.thumbnails.images.len(), covers, "the first page of the remembered folder");
+        let shelf = books.home_covers(&t).len();
+        assert_eq!(books.thumbnails.images.len(), shelf + covers, "Home and the first page of the remembered folder");
         // The first visit draws from memory: with the files gone, nothing fails.
         let covers = store.cover_path("0").parent().unwrap().to_owned();
         std::fs::rename(&covers, root.join("covers-away"))?;
@@ -6578,8 +6597,27 @@ mod tests {
             });
         }
 
-        // 2. Recents-only (no Continue reading): Recent books starts near the top; card stays at bottom.
+        // The shelf: two rows while nothing was opened, one under the first
+        // book opened, gone with the second.
         let index = store.library();
+        for (opened, continues, shown) in [(0, false, 8), (1, true, 4), (2, true, 1)] {
+            if opened > 0 {
+                let state = BookState {
+                    position: crate::document::Position("p".into()),
+                    last_opened: opened,
+                    ..Default::default()
+                };
+                store.save_book(&index.books[opened as usize].id, &state)?;
+            }
+            store.rebuild_home_summary(&index)?;
+            books.home = store.home_summary().unwrap();
+            books.refresh(&t);
+            assert_eq!((books.continue_id.is_some(), books.books.len()), (continues, shown), "{opened} opened");
+            assert_eq!(books.home_message(), None);
+            assert_eq!(books.home.shelf(8).is_empty(), opened == 2);
+        }
+
+        // 2. Recents-only (no Continue reading): Recent books starts near the top; card stays at bottom.
         for (i, b) in index.books.iter().take(3).enumerate() {
             store.save_book(
                 &b.id,
@@ -6683,6 +6721,27 @@ mod tests {
             }
             let mut canvas = crate::gfx::Canvas::new(w as u32, h as u32);
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+
+            // The shelf instead: two rows alone in portrait, one otherwise.
+            let history = std::mem::take(&mut books.home);
+            let unopened = index.books.iter().map(|b| library::home::Entry::new(b, &BookState::default()));
+            let resume = history.books.iter().find(|e| e.can_resume()).cloned();
+            for resume in [None, resume] {
+                books.home = Summary::select(unopened.clone().chain(resume.clone()));
+                books.refresh(&t);
+                assert_eq!(books.continue_id.is_some(), resume.is_some(), "{w}x{h}");
+                let cols = books.grid.cells().iter().filter(|(_, c)| c.y == books.grid.cells()[0].1.y).count();
+                let rows = if landscape || resume.is_some() { 1 } else { 2 };
+                assert_eq!(books.books.len(), cols * rows, "{w}x{h}: {rows} shelf rows");
+                assert!(books.header.y >= t.top_bar && books.header.bottom() < books.grid.rect().y, "{w}x{h}");
+                assert!(books.grid.rect().bottom() < books.notice_rect.y, "{w}x{h}");
+                for (_, cell) in books.grid.cells() {
+                    let cover = books.cover_rect(cell, &t);
+                    assert!(cover.h * 100 >= cell.w * 3 / 2 * 80, "{w}x{h}: covers fill the cell: {cover:?} {cell:?}");
+                }
+                books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+            }
+            books.home = history;
 
             // Search: header, pager and grid clear each other; the battery stays put.
             let home_battery = books.battery_rect;

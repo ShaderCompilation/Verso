@@ -123,6 +123,13 @@ impl Summary {
             .take(limit.min(4))
             .collect()
     }
+    /// Books to start with, newest first: only while there are no recents.
+    pub fn shelf(&self, limit: usize) -> Vec<&Entry> {
+        if !self.recents(1).is_empty() {
+            return Vec::new();
+        }
+        self.books.iter().filter(|entry| entry.can_start()).take(limit).collect()
+    }
     /// Keeps the recents and the resume book. Without recents it also keeps
     /// never-opened books, so an empty selection means an empty library.
     pub fn select(candidates: impl IntoIterator<Item = Entry>) -> Self {
@@ -209,8 +216,11 @@ mod tests {
         let summary = Summary::select(unopened.clone());
         assert_eq!(ids(&summary), ["7", "6", "5", "4", "3", "2", "1", "0"]);
         assert_eq!(Summary::select(summary.books.clone()), summary, "a save selects from the summary's own books");
+        assert_eq!(summary.shelf(3).iter().map(|e| e.book.id.as_str()).collect::<Vec<_>>(), ["7", "6", "5"]);
         // Books that can't be started still say the library has books.
-        assert_eq!(ids(&Summary::select(unopened[8..].to_vec())), ["9", "8"]);
+        let unreadable = Summary::select(unopened[8..].to_vec());
+        assert_eq!(ids(&unreadable), ["9", "8"]);
+        assert!(unreadable.shelf(8).is_empty());
         // The first book opened leaves them; a second one is a recent.
         let mut books = summary.books.clone();
         books.push(opened(7, 5));
@@ -218,6 +228,7 @@ mod tests {
         let one = Summary::select(books);
         assert!(one.valid() && one.resume().is_some_and(|e| e.book.id == "7"));
         assert_eq!(ids(&one), ["7", "6", "5", "4", "3", "2", "1", "0"]);
+        assert_eq!(one.shelf(8).len(), 7, "the opened book left the shelf");
         let mut books = one.books.clone();
         books.insert(0, opened(6, 9));
         assert_eq!(ids(&Summary::select(books)), ["6", "7"]);
