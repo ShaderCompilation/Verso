@@ -1,0 +1,4 @@
+Third closed beta of Verso.
+
+- Check for updates automatically when the Kindle wakes from sleep (at most every 6 hours, waiting for Wi-Fi to reconnect in the background).
+- Highlight available updates in Settings with a dot on the Device tab and an Update card at the top of the tab.
