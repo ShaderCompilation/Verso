@@ -1443,7 +1443,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
         assert_eq!(zip.len(), 1, "only library books with highlights");
         let mut entry = zip.by_index(0).unwrap();
-        assert_eq!(entry.name(), export::file_name("Война и мир", &ann1));
+        assert_eq!(entry.name().unwrap(), export::file_name("Война и мир", &ann1));
         let mut zipped = String::new();
         entry.read_to_string(&mut zipped).unwrap();
         let strip = |s: &str| s.lines().filter(|l| !l.contains("exported from Verso")).collect::<Vec<_>>().join("\n");

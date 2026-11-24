@@ -101,7 +101,7 @@ fn xml(bytes: &[u8]) -> Result<Node> {
                 let replacement = quick_xml::escape::unescape(&format!("&{value};"))?.into_owned();
                 stack.last_mut().unwrap().text.push_str(&replacement);
             }
-            Event::DocType(e) => ensure!(!e.as_ref().contains(&b'['), "EPUB XML entity declarations are unsupported"),
+            Event::DocType(e) => ensure!(!e.contains(&b'['), "EPUB XML entity declarations are unsupported"),
             Event::Eof => break,
             _ => {}
         }

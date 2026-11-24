@@ -615,12 +615,13 @@ mod tests {
         out.write_all(b"calibre_current_page_bookmark^5#body|0.000000").unwrap();
         for i in 0..source.len() {
             let mut entry = source.by_index(i).unwrap();
-            if entry.name() == "mimetype" || entry.is_dir() {
+            let name = entry.name().unwrap().into_owned();
+            if name == "mimetype" || entry.is_dir() {
                 continue;
             }
             let mut data = Vec::new();
             entry.read_to_end(&mut data).unwrap();
-            out.start_file(entry.name(), options).unwrap();
+            out.start_file(&name, options).unwrap();
             out.write_all(&data).unwrap();
         }
         out.finish().unwrap();

@@ -469,7 +469,10 @@ impl Dictionaries {
             tracker.count_entry()?;
             let mut entry =
                 archive.by_index(i).map_err(|e| err(400, &format!("Couldn't read entry from .zip archive: {e}")))?;
-            let raw_name = entry.name().to_owned();
+            let raw_name = entry
+                .name()
+                .map_err(|e| err(400, &format!("Couldn't read entry name from .zip archive: {e}")))?
+                .into_owned();
             let clean = validate_archive_path(&raw_name)?;
             if let Some(mode) = entry.unix_mode() {
                 let file_type = mode & 0o170000;

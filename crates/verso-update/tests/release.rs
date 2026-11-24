@@ -117,7 +117,7 @@ fn zip_installs_required_components() {
     let out = tmp.path().join("out");
     let m = pack(&stage(tmp.path()), &out);
     let mut zip = zip::ZipArchive::new(fs::File::open(out.join("verso-0.3.0.zip")).unwrap()).unwrap();
-    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
     assert_eq!(
         names,
         [
