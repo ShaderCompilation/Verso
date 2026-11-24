@@ -71,7 +71,7 @@ Verso → Create problem report**) writes a redacted hardware and log report to
    storage so it creates `verso/` and `extensions/verso/` next to `documents/`.
 4. Safely eject the Kindle and start Verso from **KUAL → Verso → Start Verso**.
 
-Once installed, Verso checks for signed updates over HTTPS (daily when Wi-Fi is
+Once installed, Verso checks for signed updates over HTTPS (every 6 hours when Wi-Fi is
 connected, or manually from **Settings → Device → Check for updates**). Updates
 verify minisign signatures and SHA-256 hashes, switch files atomically through
 the launcher and roll back automatically if a new version fails to start. You

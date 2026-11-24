@@ -30,6 +30,10 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// An archive download gives up when no data arrives for this long; a
 /// retry continues where it stopped.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+/// After a wake Wi-Fi takes about a minute to reconnect, so a due check
+/// looks at it every [`WAKE_POLL`] until [`WAKE_WINDOW`] has passed.
+const WAKE_POLL: Duration = Duration::from_secs(5);
+const WAKE_WINDOW: Duration = Duration::from_secs(120);
 
 /// This build's version.
 pub fn app_version() -> Version {
@@ -108,11 +112,20 @@ pub struct Timeouts {
     pub total: Duration,
     /// For archives: the longest wait for more data.
     pub idle: Duration,
+    /// After a wake: how often to look for a network, and for how long.
+    pub wake_poll: Duration,
+    pub wake_window: Duration,
 }
 
 impl Default for Timeouts {
     fn default() -> Self {
-        Self { connect: CONNECT_TIMEOUT, total: CHECK_TIMEOUT, idle: IDLE_TIMEOUT }
+        Self {
+            connect: CONNECT_TIMEOUT,
+            total: CHECK_TIMEOUT,
+            idle: IDLE_TIMEOUT,
+            wake_poll: WAKE_POLL,
+            wake_window: WAKE_WINDOW,
+        }
     }
 }
 
@@ -171,6 +184,11 @@ impl CheckError {
     /// Wi-Fi wasn't ready, so nothing was tried.
     fn before_network(&self) -> bool {
         matches!(self, CheckError::WifiOff | CheckError::NotConnected)
+    }
+
+    /// The network didn't answer, which is usual while Wi-Fi reconnects.
+    fn no_answer(&self) -> bool {
+        matches!(self, CheckError::Fetch(FetchError::Timeout | FetchError::Unreachable(_)))
     }
 }
 
@@ -285,8 +303,18 @@ struct Inner {
     /// Settings asked for a check (the worker skips the automatic rules).
     manual: bool,
     checking: bool,
+    /// A thread waits for Wi-Fi after a wake, until then.
+    wake_until: Option<Instant>,
     problem: Option<CheckError>,
     revision: u64,
+}
+
+impl Inner {
+    /// Whether an automatic check should run. Never on development installs.
+    fn auto_due(&self, now: u64) -> bool {
+        let dev = self.installed.as_ref().and_then(Option::as_ref).is_none_or(|i| i.dev);
+        !dev && check::auto_check_due(&self.state, now)
+    }
 }
 
 /// What the updater asks of the device; tests replace it.
@@ -340,6 +368,7 @@ impl Updates {
             download: None,
             manual: false,
             checking: false,
+            wake_until: None,
             problem: None,
             revision: 0,
         };
@@ -394,6 +423,58 @@ impl Updates {
         }
     }
 
+    /// After the Kindle wakes: like `check_on_start`, but a due check waits
+    /// a while for Wi-Fi to reconnect. Waking again restarts that wait.
+    pub fn check_on_wake(self: &Arc<Self>, waker: &Waker) {
+        if !self.begin_wake() {
+            return;
+        }
+        let this = self.clone();
+        let waker = waker.clone();
+        let spawned = std::thread::Builder::new().name("update-wake".into()).spawn(move || this.run_after_wake(&waker));
+        if let Err(e) = spawned {
+            log::error!("starting the update check after a wake: {e}");
+            self.inner.lock().unwrap_or_else(|e| e.into_inner()).wake_until = None;
+        }
+    }
+
+    /// Starts or restarts the wait; true when a thread should start.
+    fn begin_wake(&self) -> bool {
+        let until = Instant::now() + self.timeouts.wake_window;
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.wake_until.replace(until).is_none()
+    }
+
+    /// The job of the thread `check_on_wake` starts. It isn't the worker
+    /// while it waits, so Settings can check and downloads can start.
+    fn run_after_wake(&self, waker: &Waker) {
+        loop {
+            let now = (self.device.clock)();
+            let until = {
+                let mut inner = self.lock();
+                let until = inner.wake_until.filter(|until| Instant::now() < *until);
+                if until.is_none() || !inner.auto_due(now) {
+                    inner.wake_until = None;
+                    return;
+                }
+                until
+            };
+            // Wait first: an address kept from before the sleep may be stale.
+            std::thread::sleep(self.timeouts.wake_poll);
+            match self.wifi_ready() {
+                Ok(()) if self.begin(false) => {
+                    self.run(until);
+                    waker.wake();
+                }
+                Err(CheckError::WifiOff) => {
+                    self.lock().wake_until = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Records the request; true when a worker should start.
     fn begin(&self, manual: bool) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -415,7 +496,7 @@ impl Updates {
         let this = self.clone();
         let waker = waker.clone();
         let spawned = std::thread::Builder::new().name("update-check".into()).spawn(move || {
-            this.run();
+            this.run(None);
             waker.wake();
         });
         if let Err(e) = spawned {
@@ -428,16 +509,17 @@ impl Updates {
 
     /// The worker's job. Returns whether a check actually ran. Every exit
     /// bumps `revision` and wakes the loop, so a waiting update download can
-    /// start even when an automatic check was not due.
-    fn run(&self) -> bool {
+    /// start even when an automatic check was not due. Until `retry_until`
+    /// an automatic check that got no answer isn't recorded, so the caller
+    /// can try again.
+    fn run(&self, retry_until: Option<Instant>) -> bool {
         let now = (self.device.clock)();
         {
             let mut inner = self.lock();
-            let dev = inner.installed.as_ref().and_then(Option::as_ref).is_none_or(|i| i.dev);
-            if !inner.manual && (dev || !check::auto_check_due(&inner.state, now)) {
+            if !inner.manual && !inner.auto_due(now) {
                 inner.running = false;
                 inner.revision += 1;
-                log::debug!("update check: not due (dev install: {dev})");
+                log::debug!("update check: not due");
                 return false;
             }
         }
@@ -461,7 +543,12 @@ impl Updates {
         manual |= inner.manual;
         let current = inner.installed.as_ref().and_then(Option::as_ref).map_or(&self.app, |i| &i.version).clone();
         match result {
-            Err(e) if e.before_network() => {
+            Err(e)
+                if e.before_network()
+                    || !manual
+                        && e.no_answer()
+                        && retry_until.is_some_and(|t| Instant::now() + self.timeouts.wake_poll < t) =>
+            {
                 log::info!("update check: skipped, {e:?}");
                 // Only someone who asked hears about Wi-Fi.
                 inner.problem = manual.then_some(e);
@@ -512,7 +599,7 @@ impl Updates {
     }
 
     /// "Later" on the update sheet: hides Home's notice until the next
-    /// successful check (the next day's, for automatic checks).
+    /// successful check.
     pub fn postpone(&self) {
         let now = (self.device.clock)();
         let mut inner = self.lock();

@@ -57,8 +57,8 @@ pub struct Settings {
     pub hostname: String,
     /// Settings → Advanced. Applies from the next book open.
     pub text_shaping: TextShaping,
-    /// Check for updates when Verso starts (at most daily, only with Wi-Fi
-    /// already connected). Settings → Device.
+    /// Check for updates when Verso starts or the Kindle wakes (at most every
+    /// `CHECK_EVERY`, never turning Wi-Fi on). Settings → Device.
     pub check_updates: bool,
     /// How folder tiles in Collections look. Older files read as Covers.
     pub folder_preview: FolderPreview,

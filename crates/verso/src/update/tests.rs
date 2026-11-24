@@ -81,7 +81,13 @@ fn bench(server: Server) -> Bench {
     };
     let mut updates = Updates::with(Paths { root: root.path().to_owned() }, source, v("0.1.0"), device);
     let short = Duration::from_millis(500);
-    updates.timeouts = Timeouts { connect: short, total: short, idle: short };
+    updates.timeouts = Timeouts {
+        connect: short,
+        total: short,
+        idle: short,
+        wake_poll: Duration::from_millis(20),
+        wake_window: Duration::from_millis(1200),
+    };
     Bench { root, server, now, link, awake, free, updates: Arc::new(updates) }
 }
 
@@ -109,7 +115,13 @@ impl Bench {
     /// What `check_now` / `check_on_start` do, on this thread.
     fn check(&self, manual: bool) -> bool {
         assert!(self.updates.begin(manual), "a check is already running");
-        self.updates.run()
+        self.updates.run(None)
+    }
+
+    /// What `check_on_wake` does, on this thread.
+    fn wake(&self) {
+        assert!(self.updates.begin_wake(), "already waiting after a wake");
+        self.updates.run_after_wake(&Waker::new(|| {}));
     }
 
     fn saved(&self) -> State {
@@ -150,7 +162,7 @@ fn finds_an_update_and_saves_it() {
 }
 
 #[test]
-fn automatic_checks_skip_dev_installs_and_run_once_a_day() {
+fn automatic_checks_skip_dev_installs_and_wait_between_checks() {
     let b = bench(serve(MANIFEST, SIG));
     // No installed.json, then a development install: never automatic.
     assert!(!b.check(false));
@@ -159,20 +171,61 @@ fn automatic_checks_skip_dev_installs_and_run_once_a_day() {
     assert!(!b.check(false));
     assert!(b.server.paths().is_empty());
     assert!(b.root.path().join(check::STATE_PATH).metadata().is_err(), "nothing saved");
-    // A release install checks, then not again for a day.
+    // A release install checks, then not again until the next one is due.
     b.install("0.1.0", false, &[]);
     b.updates.forget();
     assert!(b.check(false));
     assert_eq!(b.server.paths().len(), 2);
-    b.now.store(START + 23 * HOUR, Ordering::Relaxed);
+    b.now.store(START + check::CHECK_EVERY - 1, Ordering::Relaxed);
     assert!(!b.check(false));
     assert_eq!(b.server.paths().len(), 2);
     // Settings can always check.
     assert!(b.check(true));
     assert_eq!(b.server.paths().len(), 4);
-    b.now.store(START + 47 * HOUR + 1, Ordering::Relaxed);
+    b.now.store(START + 2 * check::CHECK_EVERY - 1, Ordering::Relaxed);
     assert!(b.check(false));
     assert_eq!(b.server.paths().len(), 6);
+}
+
+#[test]
+fn a_wake_waits_for_wifi_to_reconnect() {
+    // Wi-Fi joins a network during the wait.
+    let b = bench(serve(MANIFEST, SIG));
+    b.install("0.1.0", false, &[]);
+    b.link.store(1, Ordering::Relaxed);
+    let link = b.link.clone();
+    let joined = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        link.store(2, Ordering::Relaxed);
+    });
+    b.wake();
+    joined.join().unwrap();
+    assert!(b.saved().available.is_some());
+    assert!(b.updates.inner.lock().unwrap().wake_until.is_none());
+    // Not due again: another wake ends at once, without the network.
+    b.wake();
+    assert_eq!(b.server.paths().len(), 2);
+
+    // Wi-Fi off: no waiting. Never connected: gives up, and no attempt counts.
+    for link in [0, 1] {
+        let b = bench(serve(MANIFEST, SIG));
+        b.install("0.1.0", false, &[]);
+        b.link.store(link, Ordering::Relaxed);
+        let started = Instant::now();
+        b.wake();
+        assert_eq!(started.elapsed() < b.updates.timeouts.wake_window, link == 0);
+        assert!(b.server.paths().is_empty());
+        assert_eq!(b.updates.status().state, State::default());
+        assert!(b.updates.begin_wake(), "the next wake waits again");
+    }
+
+    // Connected but no answer (a stale address): tried again, and only the
+    // last failure in the window counts.
+    let b = bench(Server::start(vec![("/latest.json", Reply::Silent)]));
+    b.install("0.1.0", false, &[]);
+    b.wake();
+    assert!(b.server.paths().len() >= 2, "retried");
+    assert_eq!(b.saved().error.as_deref(), Some("The update server took too long to answer."));
 }
 
 #[test]
@@ -195,7 +248,7 @@ fn wifi_off_is_quiet_unless_asked() {
     assert!(b.updates.begin(true));
     assert_eq!(b.updates.status().problem, None);
     assert_eq!(b.note(), "Checking…");
-    b.updates.run();
+    b.updates.run(None);
     assert!(b.updates.status().state.available.is_some());
 }
 
@@ -292,7 +345,7 @@ fn one_check_at_a_time() {
     assert_eq!(b.note(), "Checking…");
     // The running automatic check now counts as asked for: it runs even
     // though this is a development install.
-    assert!(b.updates.run());
+    assert!(b.updates.run(None));
     assert!(b.updates.status().state.available.is_some());
     assert!(b.updates.begin(false));
 }
@@ -454,7 +507,7 @@ fn checks_and_downloads_run_one_at_a_time() {
     let waker = Waker::new(|| {});
     assert!(b.updates.begin(false));
     assert!(!b.updates.download(&v("0.3.0"), CHARGED, &waker), "a check is running");
-    b.updates.run();
+    b.updates.run(None);
     {
         let mut inner = b.updates.lock();
         (inner.running, inner.downloading) = (true, true);

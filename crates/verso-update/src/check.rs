@@ -9,8 +9,8 @@ use std::fmt;
 pub const STATE_PATH: &str = "verso/update/state.json";
 /// The component holding the app itself. Its version is the release version.
 pub const APP: &str = "app";
-/// Automatic checks run at most this often (seconds)…
-pub const CHECK_EVERY: u64 = 24 * 60 * 60;
+/// Automatic checks run at most this often (seconds, whole hours)…
+pub const CHECK_EVERY: u64 = 6 * 60 * 60;
 /// …and after a failed one, wait at least this long before trying again.
 pub const RETRY_AFTER: u64 = 60 * 60;
 
@@ -262,19 +262,19 @@ mod tests {
         }
     }
 
-    const DAY: u64 = CHECK_EVERY;
+    const EVERY: u64 = CHECK_EVERY;
     const HOUR: u64 = RETRY_AFTER;
 
     #[test]
-    fn schedules_once_a_day_and_retries_failures_after_an_hour() {
+    fn schedules_checks_and_retries_failures_after_an_hour() {
         let now = 1_800_000_000;
         assert!(auto_check_due(&State::default(), now), "never checked");
         let ok = |checked: u64| State { checked: Some(checked), attempted: Some(checked), ..State::default() };
         assert!(!auto_check_due(&ok(now), now));
-        assert!(!auto_check_due(&ok(now - DAY + 1), now));
-        assert!(auto_check_due(&ok(now - DAY), now));
-        // A failure after an old success: retry after an hour, not a day.
-        let failed = |at: u64| State { attempted: Some(at), error: Some("x".into()), ..ok(now - 2 * DAY) };
+        assert!(!auto_check_due(&ok(now - EVERY + 1), now));
+        assert!(auto_check_due(&ok(now - EVERY), now));
+        // A failure after an old success: retry after an hour, not a whole interval.
+        let failed = |at: u64| State { attempted: Some(at), error: Some("x".into()), ..ok(now - 2 * EVERY) };
         assert!(!auto_check_due(&failed(now - HOUR + 1), now));
         assert!(auto_check_due(&failed(now - HOUR), now));
         // Times in the future: the clock went back, so check.

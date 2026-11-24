@@ -26,6 +26,7 @@ use crate::ui::widgets::{
 };
 use crate::update::{self, Updates};
 use verso_update::Version;
+use verso_update::check::CHECK_EVERY;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -849,12 +850,13 @@ impl SystemSettings {
             col.note(cx, &note, &[]);
         }
         col.y += t.mm(3.0);
+        let every = format!("Every {} hours, at start or wake with Wi-Fi on.", CHECK_EVERY / 3600);
         let auto = if !self.auto_check.on {
             "Off. Verso checks only when you ask."
         } else if self.update_status.dev {
             "Off for development installs."
         } else {
-            "Once a day, when Verso starts with Wi-Fi on."
+            &every
         };
         col.y = switch_row(cx, &mut self.auto_check, ("Check automatically", auto), col.x, col.y, col.w);
     }

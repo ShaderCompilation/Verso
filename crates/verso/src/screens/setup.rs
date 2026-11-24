@@ -44,6 +44,7 @@ use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK2, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{Button, ButtonKind, List, ListEvent, Pager, PagerEvent, Row, Segmented, Toggle, TopBar};
+use verso_update::check::CHECK_EVERY;
 
 /// True until setup was finished or skipped once.
 pub fn due(settings: &Settings) -> bool {
@@ -664,7 +665,8 @@ impl SetupScreen {
             y += h + t.mm(5.0);
         }
         y += t.mm(3.0);
-        let updates = ("Check for updates automatically", "Once a day, only when Wi-Fi is already on.");
+        let every = format!("Every {} hours, only when Wi-Fi is already on.", CHECK_EVERY / 3600);
+        let updates = ("Check for updates automatically", every.as_str());
         y = switch_row(cx, &mut self.auto_check, updates, c.x, y, c.w);
         cx.paragraph(
             "Run setup again: Settings → Advanced.",

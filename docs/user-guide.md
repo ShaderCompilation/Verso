@@ -313,9 +313,9 @@ KOReader's files.
 
 ## 9. Updates and rollback
 
-Verso checks GitHub Releases over HTTPS once a day at startup when Wi-Fi is
-already connected (**Settings → Device → Check automatically**), or on demand
-via **Check for updates**.
+Verso checks GitHub Releases over HTTPS when it starts or the Kindle wakes, at
+most every 6 hours and only over Wi-Fi that is already on (**Settings → Device →
+Check automatically**), or on demand via **Check for updates**.
 
 - Every release manifest is verified with a built-in **minisign** key before
   parsing, and every downloaded component is checked by SHA-256.

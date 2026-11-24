@@ -475,6 +475,9 @@ fn run() -> Result<i32> {
                     if let Some(connected) = platform.usb_connected() {
                         app.on_usb(connected);
                     }
+                    if store.settings().check_updates {
+                        store.updates().check_on_wake(&platform.waker());
+                    }
                 }
                 Some(Event::WakeRepaint) => app.schedule_wake_cleanup(),
                 Some(Event::PowerChanged) => {
