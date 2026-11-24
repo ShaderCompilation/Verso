@@ -20,8 +20,10 @@ are refused before touching the Kindle UI.
 **Optional alternatives:**
 
 - **KPM** (useful on firmware 5.19.4+ if `.sh` items don't index in the library,
-  or if you prefer a package manager): install `verso-<version>.kpkg` and launch
-  with `;kpm launch verso`.
+  or if you prefer a package manager): copy `verso-<version>.kpkg` to `/mnt/us/`
+  over USB, eject, run `;kpm install file:///mnt/us/verso-<version>.kpkg` in the
+  Kindle search bar (or `kpm install file:///mnt/us/verso-<version>.kpkg` over
+  SSH / kterm), and launch with `;kpm launch verso`.
 - **KUAL:** open **KUAL → Verso → Start Verso** (included in the same zip).
 
 While Verso runs, its launcher pauses Amazon's UI and USB drive daemon so your

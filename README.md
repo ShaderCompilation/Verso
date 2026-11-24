@@ -74,8 +74,11 @@ Verso → Create problem report**) writes a redacted hardware and log report to
 **Optional alternatives:**
 
 - **KPM** (helpful on firmware 5.19.4+ if `.sh` items don't show up in the
-  library, or if you prefer a package manager): install `verso-<version>.kpkg`
-  and launch with `;kpm launch verso`.
+  library, or if you prefer a package manager): copy `verso-<version>.kpkg` to
+  the root of the Kindle over USB, eject, run
+  `;kpm install file:///mnt/us/verso-<version>.kpkg` in the Kindle search bar
+  (or `kpm install file:///mnt/us/verso-<version>.kpkg` over SSH / kterm), and
+  launch with `;kpm launch verso`.
 - **KUAL:** if you already use KUAL, you can also start Verso from
   **KUAL → Verso → Start Verso** (included in the same zip).
 
