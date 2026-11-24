@@ -27,6 +27,7 @@ if [ -n "${VERSO_TEST_STAGE:-}" ]; then
 else
     LAUNCHER="${1:-${HERE}/../dist/kindle/verso/verso.sh}"
     W="${2:-$(mktemp -d "${TMPDIR:-/tmp}/verso-launcher-test.XXXXXX")}"
+    SCRIPTLET="${VERSO_TEST_SCRIPTLET:-${HERE}/../dist/kindle/documents/Verso.sh}"
 fi
 STEP_EVERY="${STEP_EVERY:-1}"
 if [ -n "${KEEP:-}" ] || [ -n "${STEP_FROM:-}" ]; then
@@ -89,8 +90,26 @@ make_bin() {
     B="${W}/bin"
     rm -rf "${B}"
     mkdir -p "${B}"
-    printf '#!/bin/sh\nexit 1\n' >"${B}/pidof"
-    printf '#!/bin/sh\necho active\n' >"${B}/lipc-get-prop"
+    cat >"${B}/pidof" <<'EOF'
+#!/bin/sh
+if [ "$1" = "sh_integration_launcher" ] && [ -f "${VERSO_TEST_DIR}/sh-active" ]; then
+    echo 4242
+    exit 0
+fi
+exit 1
+EOF
+    cat >"${B}/lipc-get-prop" <<'EOF'
+#!/bin/sh
+if [ "$1" = "com.lab126.appmgrd" ] && [ "$2" = "activeApp" ]; then
+    if [ -f "${VERSO_TEST_DIR}/sh-active" ]; then
+        echo com.notmarek.shell_integration.launcher
+    else
+        echo com.lab126.KPPMainApp
+    fi
+    exit 0
+fi
+echo active
+EOF
     for c in killall lipc-set-prop eips; do
         printf '#!/bin/sh\necho "%s $*" >>"${VERSO_TEST_DIR}/calls"\n' "${c}" >"${B}/${c}"
     done
@@ -226,7 +245,7 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}"/queue-* \
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}"/queue-* \
         "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
@@ -249,6 +268,39 @@ launch() {
             setsid ${SH} "${R}/verso/verso.sh" </dev/null >/dev/null 2>&1 &
         wait $!
     ) 2>/dev/null
+}
+
+# Runs the library scriptlet (documents/Verso.sh) like SH_Integration does.
+# Verso.sh detaches and returns immediately; call wait_scriptlet to wait for
+# the launched verso.sh to complete.
+launch_scriptlet() {
+    cp "${SCRIPTLET}" "${R}/documents/Verso.sh"
+    chmod 755 "${R}/documents/Verso.sh"
+    (
+        VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
+            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
+            ${SH} "${R}/documents/Verso.sh" </dev/null >/dev/null 2>&1
+    )
+}
+
+# Waits until verso.sh started by launch_scriptlet has run and finished restoring.
+wait_scriptlet() {
+    want_runs="${1:-1}"
+    i=0
+    while [ "${i}" -lt 80 ]; do
+        got_runs="$(wc -l <"${W}/runs" | tr -d ' ')"
+        if [ "${got_runs}" -ge "${want_runs}" ] &&
+            [ ! -e "${W}/tmp/verso-launcher.lock" ] &&
+            [ ! -e "${W}/tmp/verso-launcher.pid" ] &&
+            [ -z "$(ls "${W}/tmp"/verso-launcher-*.sh 2>/dev/null)" ]; then
+            return 0
+        fi
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    return 1
 }
 
 # A reboot after a power loss: /tmp is empty again.
@@ -376,6 +428,40 @@ no_update_state
 ! grep -q 'iptables\|preventScreenSaver' "${W}/calls" || fail "touched the firewall or keep-awake"
 grep -q "Verso ended: bye (code 0)" "${R}/verso/verso.log" || fail "clean exit not logged as bye"
 [ -z "$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null)" ] || fail "clean exit created a crash report"
+
+if [ -f "${SCRIPTLET}" ]; then
+    begin "scriptlet headers and SH_Integration handoff"
+    fresh
+    # readScriptHeader in SH_Integration stops after 6 lines.
+    hdr="$(head -n 6 "${SCRIPTLET}")"
+    printf '%s\n' "${hdr}" | grep -qx "# Name: Verso" || fail "missing '# Name: Verso' in first 6 lines"
+    printf '%s\n' "${hdr}" | grep -qx "# Author: Verso" || fail "missing '# Author: Verso' in first 6 lines"
+    printf '%s\n' "${hdr}" | grep -qx "# DontUseFBInk" || fail "missing '# DontUseFBInk' in first 6 lines"
+    printf '%s\n' "${hdr}" | grep -q "^# Icon: data:image/png;base64," || fail "missing '# Icon:' data URI in first 6 lines"
+    : >"${W}/sh-active"
+    launch_scriptlet || fail "Verso.sh exited non-zero"
+    usleep 250000 2>/dev/null || sleep 0.25 2>/dev/null || sleep 1
+    [ ! -s "${W}/calls" ] || fail "verso.sh paused Kindle UI before SH_Integration unloaded: $(cat "${W}/calls")"
+    rm -f "${W}/sh-active"
+    wait_scriptlet 1 || fail "scriptlet launch did not finish"
+    runs_are "0.1.0"
+    ui_restored_once
+    absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
+    [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
+
+    begin "scriptlet repeated launches leave clean state"
+    fresh
+    for i in 1 2 3; do
+        launch_scriptlet || fail "Verso.sh failed on run ${i}"
+        wait_scriptlet "${i}" || fail "scriptlet run ${i} did not finish"
+    done
+    runs_are "0.1.0 0.1.0 0.1.0"
+    [ "$(grep -c 'killall -STOP awesome' "${W}/calls")" = 3 ] || fail "expected 3 UI pauses"
+    [ "$(grep -c 'appmgrd start' "${W}/calls")" = 3 ] || fail "expected 3 UI restores"
+    [ "$(grep -c 'killall -CONT volumd' "${W}/calls")" = 3 ] || fail "expected 3 volumd resumes"
+    absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
+    [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
+fi
 
 begin "crash report on signal exit"
 fresh
