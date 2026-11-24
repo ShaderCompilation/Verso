@@ -126,6 +126,17 @@ rather than stopping it:
   and a 120 s trial waiting for `/tmp/verso-started`; crash, hang or two
   interrupted starts roll back automatically. Non-zero/signal/panic exits write
   a crash report via `tools/report.sh`.
+- **Direct library scriptlet (`documents/Verso.sh`, measured):** `SH_Integration`
+  (PW6 5.18.5.0.1) scans only the first 6 lines (`# Name:`, `# Author:`,
+  `# DontUseFBInk`, `# Icon: data:image/…` base64 only), unloads via `kill -9`
+  on pause and loops `sleep(1)` → `waitpid` → `popAppHistory`. `Verso.sh`
+  detaches via `setsid`, exits `0` and waits for `sh_integration_launcher` to
+  exit and `activeApp` to clear (+200 ms) before `exec`ing `verso.sh`, avoiding
+  both mid-restore `SIGKILL` and frozen-`awesome` `popAppHistory` wedges.
+- **KPM `.kpkg` (5.19.4+):** KUAL is broken on 5.19.4+ and `.sh` indexing can
+  be unreliable there. Releases ship `verso-<version>.kpkg` (manifest v2,
+  `kindlehf`, `[major, minor, patch]`) with POSIX `sh` hooks (`launch.sh`
+  shares the `SH_Integration` handoff; `uninstall.sh` keeps `verso/data/` and `verso/ssh/`).
 
 ---
 

@@ -4,8 +4,8 @@ A calm, lightweight EPUB reader for jailbroken Kindles, written in Rust.
 
 Verso is an alternative to [KOReader](https://koreader.rocks/) for people who
 want good typography, fast page turns and simple controls instead of endless
-settings. It runs alongside Amazon's Kindle software (started from KUAL),
-pausing the Kindle UI while you read and restoring it cleanly on exit or crash.
+settings. It runs alongside Amazon's Kindle software (from your Kindle library,
+KPM or KUAL), pausing the Kindle UI while you read and restoring it on exit.
 
 <table>
   <tr>
@@ -49,8 +49,8 @@ pausing the Kindle UI while you read and restoring it cleanly on exit or crash.
 
 ## Supported Kindles
 
-Verso requires a **jailbroken Kindle with KUAL** running **hard-float firmware
-(5.16.3 or later)**.
+Verso requires a **jailbroken Kindle** on **hard-float firmware (5.16.3+)**
+with the **Universal Hotfix** (`SH_Integration`), **KPM** (5.19.4+) or **KUAL**.
 
 | Status | Models |
 | --- | --- |
@@ -65,11 +65,13 @@ Verso → Create problem report**) writes a redacted hardware and log report to
 
 ## Install and update
 
-1. Install a Kindle jailbreak and **KUAL** (not covered here).
-2. Download `verso-<version>.zip` from [GitHub Releases](https://github.com/ShaderCompilation/Verso/releases).
-3. Connect the Kindle by USB and unpack the zip into the root of its USB
-   storage so it creates `verso/` and `extensions/verso/` next to `documents/`.
-4. Safely eject the Kindle and start Verso from **KUAL → Verso → Start Verso**.
+1. Jailbreak your Kindle with the **Universal Hotfix** (direct library launch),
+   **KPM** (firmware 5.19.4+) or **KUAL** (not covered here).
+2. Download `verso-<version>.zip` from [GitHub Releases](https://github.com/ShaderCompilation/Verso/releases) (or `verso-<version>.kpkg` for KPM).
+3. Unpack the zip into the root of the Kindle's USB storage so it adds `verso/`,
+   `extensions/verso/` and `documents/Verso.sh`.
+4. Eject and open **Verso** from your Kindle library, `;kpm launch verso`, or
+   **KUAL → Verso → Start Verso**.
 
 Once installed, Verso checks for signed updates over HTTPS (every 6 hours when Wi-Fi is
 connected, or manually from **Settings → Device → Check for updates**). Updates
@@ -77,8 +79,8 @@ verify minisign signatures and SHA-256 hashes, switch files atomically through
 the launcher and roll back automatically if a new version fails to start. You
 can also revert manually from **Settings → Device → Go back**.
 
-To uninstall, delete `verso/` and `extensions/verso/` over USB. Verso never
-modifies system partitions, `/etc`, `/var/local`, jailbreak files or your books.
+To uninstall, delete `verso/`, `extensions/verso/` and `documents/Verso.sh`
+(or run `;kpm uninstall verso`). Verso never modifies system files or books.
 
 ## Build from source
 

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing Verso on another Kindle! Please run through the checks below and attach a redacted problem report from **Settings → Advanced → Create problem report** (or **KUAL → Verso → Create problem report**, saved in `verso/reports/`).
+        Thanks for testing Verso on another Kindle! Please run through the checks below and attach a redacted problem report from **Settings → Advanced → Create problem report** (or **KUAL → Verso → Create problem report** if using KUAL; saved in `verso/reports/`).
 
   - type: input
     id: device
@@ -37,7 +37,7 @@ body:
     attributes:
       label: What worked?
       options:
-        - label: Launches from KUAL and restores Kindle UI cleanly on exit
+        - label: Launches (Kindle library, KPM or KUAL) and restores Kindle UI cleanly on exit
         - label: Display resolution, orientation, and text clarity look right
         - label: Touch coordinates and page turns feel accurate
         - label: Sleep / wake (power button or cover) works cleanly

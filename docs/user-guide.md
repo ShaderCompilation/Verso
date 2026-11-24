@@ -8,13 +8,13 @@ books over Wi-Fi, importing from KOReader, updating and reporting problems.
 
 ## 1. Install, launch and uninstall
 
-**Requirements:** a jailbroken Kindle with **KUAL** running **hard-float
-firmware (5.16.3 or later)**. Older soft-float Kindles cannot run Verso; the
-launcher detects this before touching the Kindle UI and writes a problem report.
+**Requirements:** a jailbroken Kindle on **hard-float firmware (5.16.3+)** with
+the **Universal Hotfix** (`SH_Integration`), **KPM** (for 5.19.4+ where KUAL is
+broken) or **KUAL**. Soft-float Kindles are refused before touching the Kindle UI.
 
-1. Unpack `verso-<version>.zip` into the root of your Kindle's USB storage
-   (`/mnt/us/`), creating `verso/` and `extensions/verso/` next to `documents/`.
-2. Eject the Kindle and open **KUAL → Verso → Start Verso**.
+1. Unpack `verso-<version>.zip` into `/mnt/us/` over USB, adding `verso/`,
+   `extensions/verso/` and `documents/Verso.sh` (or install `verso-<version>.kpkg` via KPM).
+2. Eject and tap **Verso** in your Kindle library, `;kpm launch verso`, or **KUAL → Verso → Start Verso**.
 
 While Verso runs, its launcher pauses Amazon's UI and USB drive daemon so your
 book storage stays mounted. Exiting (or any crash) always restores Amazon's home
@@ -25,15 +25,16 @@ asleep.
   with **Exit to connect to computer** (returns to Amazon's UI for USB transfer)
   and **Keep reading** (charges while staying in Verso). Wall chargers charge
   silently without prompting.
-- **Where files live:** app binaries and logs in `/mnt/us/verso/`, user data in
-  `/mnt/us/verso/data/`, KUAL entry in `/mnt/us/extensions/verso/`, crash and
-  problem reports in `/mnt/us/verso/reports/`.
+- **Where files live:** app and logs in `/mnt/us/verso/`, user data in
+  `/mnt/us/verso/data/`, library launcher in `/mnt/us/documents/Verso.sh`, KUAL
+  in `/mnt/us/extensions/verso/`, reports in `/mnt/us/verso/reports/`.
 - **First launch:** a short setup (Welcome, Library folders, tap zones, page
   layout, KOReader import when KOReader is installed, gestures) runs over Home.
   Every choice saves at once and can be skipped; **Settings → Advanced → Run
   setup again** reopens it. Folders holding EPUBs are found and ticked for you.
-- **Uninstall:** delete `/mnt/us/verso` and `/mnt/us/extensions/verso` over USB.
-  Verso never touches system files or your books.
+- **Uninstall:** delete `/mnt/us/verso`, `/mnt/us/extensions/verso` and
+  `/mnt/us/documents/Verso.sh` over USB (or `;kpm uninstall verso`, keeping
+  `/mnt/us/verso/data/`). Verso never touches system files or your books.
 
 ---
 
