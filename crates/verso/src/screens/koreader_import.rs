@@ -1,7 +1,8 @@
 //! Settings → Library → KOReader → *Import* (progress and highlights): the
 //! sheet that reads KOReader's data for the whole library, shows what it
 //! found and imports it after the user confirms. The work runs on a
-//! [`Job`] thread; nothing is written before *Import*.
+//! [`Job`] thread; nothing is written before *Import*. [`Flow`] is that
+//! work without the sheet, which setup's From KOReader page also shows.
 use crate::geom::Rect;
 use crate::gfx::HAlign;
 use crate::koreader::bulk::{Event, Imported, Job, Preview, Scan, UNREADABLE_SHOWN};
@@ -18,8 +19,121 @@ enum Stage {
     Preview(Box<Scan>),
     /// Writing this many books' states.
     Importing(usize),
-    /// What went wrong, shown until OK.
+    /// What was imported.
+    Done(String),
+    /// What went wrong.
     Failed(String),
+}
+
+/// The scan, the preview and the import, without the sheet: Settings'
+/// sheet and setup's From KOReader page each drive one.
+pub(crate) struct Flow {
+    store: Store,
+    waker: Waker,
+    stage: Stage,
+    job: Option<Job>,
+}
+
+impl Flow {
+    /// Starts the scan. `open` is the book open in the reader: it's left out.
+    pub(crate) fn scan(store: Store, waker: Waker, open: Option<String>) -> Self {
+        let job = Job::scan(store.clone(), open, waker.clone());
+        Self { store, waker, stage: Stage::Scanning(0, 0), job: Some(job) }
+    }
+
+    /// A preview with something to import.
+    pub(crate) fn importable(&self) -> bool {
+        matches!(&self.stage, Stage::Preview(scan) if scan.preview.importable())
+    }
+
+    pub(crate) fn importing(&self) -> bool {
+        matches!(self.stage, Stage::Importing(_))
+    }
+
+    /// Finished: a preview, the import's result or an error.
+    fn settled(&self) -> bool {
+        matches!(self.stage, Stage::Preview(_) | Stage::Done(_) | Stage::Failed(_))
+    }
+
+    /// Imports what the preview shows.
+    pub(crate) fn import(&mut self) {
+        if !self.importable() {
+            return;
+        }
+        let Stage::Preview(scan) = std::mem::replace(&mut self.stage, Stage::Importing(0)) else { return };
+        self.stage = Stage::Importing(scan.preview.changes.max(scan.preview.highlight_books));
+        self.job = Some(Job::import(self.store.clone(), *scan, self.waker.clone()));
+    }
+
+    /// Stops a scan; nothing was written.
+    fn cancel(&mut self) {
+        self.job = None;
+    }
+
+    /// Takes the job's events: whether the stage or the progress changed,
+    /// and what was imported once the import finished.
+    pub(crate) fn on_background(&mut self) -> (bool, Option<String>) {
+        let Some(job) = self.job.as_ref() else { return (false, None) };
+        let finished = job.finished();
+        let (mut changed, mut imported) = (false, None);
+        for event in job.events() {
+            changed = true;
+            match event {
+                Event::Scanning(done, total) => self.stage = Stage::Scanning(done, total),
+                Event::Scanned(scan) => self.stage = Stage::Preview(scan),
+                Event::Imported(result) => match &result.error {
+                    None => {
+                        let text = imported_text(&result);
+                        self.stage = Stage::Done(text.clone());
+                        imported = Some(text);
+                    }
+                    Some(e) => {
+                        log::error!("KOReader import: {e:#}");
+                        self.stage = Stage::Failed(format!(
+                            "{}, then couldn't save: {e}.\n\nRun the import again to finish the rest.",
+                            failed_text(&result),
+                        ));
+                    }
+                },
+            }
+        }
+        if finished {
+            self.job = None;
+            // The thread ended without its result: it couldn't start.
+            match self.stage {
+                Stage::Scanning(..) => self.stage = Stage::Failed("Couldn't read KOReader data.".into()),
+                Stage::Importing(_) => self.stage = Stage::Failed("Couldn't import from KOReader.".into()),
+                _ => {}
+            }
+            changed = true;
+        }
+        (changed, imported)
+    }
+
+    /// The main text and the note under it.
+    pub(crate) fn text(&self) -> (String, &'static str) {
+        match &self.stage {
+            Stage::Scanning(_, 0) => ("Reading KOReader data…".into(), ""),
+            Stage::Scanning(done, total) => (format!("Reading KOReader data… {done} of {total}"), ""),
+            Stage::Preview(scan) => preview_text(&scan.preview),
+            Stage::Importing(n) => (format!("Importing {}…", counted(*n, "book")), ""),
+            Stage::Done(text) => (format!("{text}."), ""),
+            Stage::Failed(message) => (message.clone(), ""),
+        }
+    }
+
+    /// The scan or the import is running.
+    pub(crate) fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preview(&self) -> Option<&Preview> {
+        match &self.stage {
+            Stage::Preview(scan) => Some(&scan.preview),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,10 +155,7 @@ pub enum Outcome {
 
 pub struct ImportSheet {
     sheet: Sheet,
-    store: Store,
-    waker: Waker,
-    stage: Stage,
-    job: Option<Job>,
+    flow: Flow,
     /// The text area above the buttons.
     body: Rect,
     buttons: Vec<(Button, Act)>,
@@ -59,29 +170,21 @@ impl ImportSheet {
         let full = screen.h - t.top_bar;
         let height = if full - t.mm(80.0) < t.mm(19.0) { full } else { t.mm(80.0) };
         let sheet = Sheet::open("Import from KOReader", height, screen, t);
-        let job = Job::scan(store.clone(), open, waker.clone());
-        let mut this = Self {
-            sheet,
-            store,
-            waker,
-            stage: Stage::Scanning(0, 0),
-            job: Some(job),
-            body: Rect::default(),
-            buttons: Vec::new(),
-        };
+        let mut this = Self { sheet, flow: Flow::scan(store, waker, open), body: Rect::default(), buttons: Vec::new() };
         this.place(t);
         this
     }
 
     /// Lays out the buttons for the stage, and the text above them.
     fn place(&mut self, t: &Theme) {
-        let acts: &[(&str, ButtonKind, Act)] = match &self.stage {
-            Stage::Scanning(..) => &[("Cancel", ButtonKind::Secondary, Act::Cancel)],
-            Stage::Preview(scan) if scan.preview.importable() => {
-                &[("Cancel", ButtonKind::Secondary, Act::Cancel), ("Import", ButtonKind::Primary, Act::Import)]
-            }
-            Stage::Preview(_) | Stage::Failed(_) => &[("OK", ButtonKind::Primary, Act::Close)],
-            Stage::Importing(_) => &[],
+        let acts: &[(&str, ButtonKind, Act)] = if self.flow.importable() {
+            &[("Cancel", ButtonKind::Secondary, Act::Cancel), ("Import", ButtonKind::Primary, Act::Import)]
+        } else if self.flow.importing() {
+            &[]
+        } else if self.flow.settled() {
+            &[("OK", ButtonKind::Primary, Act::Close)]
+        } else {
+            &[("Cancel", ButtonKind::Secondary, Act::Cancel)]
         };
         let c = self.sheet.content(t);
         let y = c.bottom() - t.margin - t.button_h;
@@ -100,32 +203,10 @@ impl ImportSheet {
         self.body = Rect { h: (y - c.y - t.mm(3.0)).max(0), ..c };
     }
 
-    /// The main text and the note under it.
-    fn text(&self) -> (String, &'static str) {
-        match &self.stage {
-            Stage::Scanning(_, 0) => ("Reading KOReader data…".into(), ""),
-            Stage::Scanning(done, total) => (format!("Reading KOReader data… {done} of {total}"), ""),
-            Stage::Preview(scan) => preview_text(&scan.preview),
-            Stage::Importing(n) => (format!("Importing {}…", counted(*n, "book")), ""),
-            Stage::Failed(message) => (message.clone(), ""),
-        }
-    }
-
     pub fn draw(&self, cx: &mut DrawCx) {
-        let t = cx.theme;
         self.sheet.draw(cx);
-        let (text, note) = self.text();
-        // Paragraphs are centred in their rect: give each its own height.
-        let b = self.body;
-        let (_, h) = cx.text.measure(&text, t.body, Some(b.w as f32));
-        let h = (h.ceil() as i32).min(b.h);
-        cx.paragraph(&text, t.body, Rect { h, ..b }, HAlign::Left);
-        if !note.is_empty() {
-            let y = b.y + h + t.mm(3.0);
-            let (_, note_h) = cx.text.measure(note, t.small, Some(b.w as f32));
-            let note_h = (note_h.ceil() as i32).min(b.bottom() - y).max(0);
-            cx.paragraph(note, t.small.gray(INK2), Rect { y, h: note_h, ..b }, HAlign::Left);
-        }
+        let (text, note) = self.flow.text();
+        draw_text(cx, &text, note, self.body);
         for (b, _) in &self.buttons {
             b.draw(cx);
         }
@@ -134,7 +215,7 @@ impl ImportSheet {
     /// Touches go here first while the sheet is open. Nothing closes it
     /// while the import writes.
     pub fn on_gesture(&mut self, g: &Gesture, t: &Theme) -> Option<Outcome> {
-        if matches!(self.stage, Stage::Importing(_)) {
+        if self.flow.importing() {
             return None;
         }
         let act = if self.sheet.on_gesture(g) {
@@ -143,17 +224,12 @@ impl ImportSheet {
             self.buttons.iter_mut().find_map(|(b, act)| b.on_gesture(g).then_some(*act))
         };
         match act? {
-            // Dropping the job cancels the scan; nothing was written.
             Act::Cancel | Act::Close => {
-                self.job = None;
+                self.flow.cancel();
                 Some(Outcome::Close)
             }
             Act::Import => {
-                let Stage::Preview(scan) = std::mem::replace(&mut self.stage, Stage::Importing(0)) else {
-                    return None;
-                };
-                self.stage = Stage::Importing(scan.preview.changes.max(scan.preview.highlight_books));
-                self.job = Some(Job::import(self.store.clone(), *scan, self.waker.clone()));
+                self.flow.import();
                 self.place(t);
                 None
             }
@@ -163,42 +239,12 @@ impl ImportSheet {
     /// Takes the job's events. Some when the sheet should close; redraws
     /// when the stage or the progress changed (returns true in `changed`).
     pub fn on_background(&mut self, t: &Theme, changed: &mut bool) -> Option<Outcome> {
-        let job = self.job.as_ref()?;
-        let finished = job.finished();
-        let mut outcome = None;
-        for event in job.events() {
-            *changed = true;
-            match event {
-                Event::Scanning(done, total) => self.stage = Stage::Scanning(done, total),
-                Event::Scanned(scan) => self.stage = Stage::Preview(scan),
-                Event::Imported(imported) => match &imported.error {
-                    None => outcome = Some(Outcome::Imported(imported_text(&imported))),
-                    Some(e) => {
-                        log::error!("KOReader import: {e:#}");
-                        self.stage = Stage::Failed(format!(
-                            "{}, then couldn't save: {e}.\n\nRun the import again to finish the rest.",
-                            failed_text(&imported),
-                        ));
-                    }
-                },
-            }
-        }
-        if finished {
-            self.job = None;
-            // The thread ended without its result: it couldn't start.
-            match self.stage {
-                Stage::Scanning(..) => self.stage = Stage::Failed("Couldn't read KOReader data.".into()),
-                Stage::Importing(_) if outcome.is_none() => {
-                    self.stage = Stage::Failed("Couldn't import from KOReader.".into())
-                }
-                _ => {}
-            }
-            *changed = true;
-        }
-        if *changed {
+        let (moved, imported) = self.flow.on_background();
+        *changed |= moved;
+        if moved {
             self.place(t);
         }
-        outcome
+        imported.map(Outcome::Imported)
     }
 
     #[cfg(test)]
@@ -208,7 +254,22 @@ impl ImportSheet {
 
     /// The scan or the import is running (scripted screenshots wait).
     pub fn busy(&self) -> bool {
-        self.job.is_some()
+        self.flow.busy()
+    }
+}
+
+/// A flow's text in `body`, with its note under it in small gray.
+pub(crate) fn draw_text(cx: &mut DrawCx, text: &str, note: &str, b: Rect) {
+    let t = cx.theme;
+    // Paragraphs are centred in their rect: give each its own height.
+    let (_, h) = cx.text.measure(text, t.body, Some(b.w as f32));
+    let h = (h.ceil() as i32).min(b.h);
+    cx.paragraph(text, t.body, Rect { h, ..b }, HAlign::Left);
+    if !note.is_empty() {
+        let y = b.y + h + t.mm(3.0);
+        let (_, note_h) = cx.text.measure(note, t.small, Some(b.w as f32));
+        let note_h = (note_h.ceil() as i32).min(b.bottom() - y).max(0);
+        cx.paragraph(note, t.small.gray(INK2), Rect { y, h: note_h, ..b }, HAlign::Left);
     }
 }
 
@@ -307,17 +368,23 @@ fn fullest_preview() -> Preview {
     }
 }
 
+/// The fullest preview's text and note (setup's page checks it fits).
+#[cfg(test)]
+pub(crate) fn fullest_text() -> (String, &'static str) {
+    preview_text(&fullest_preview())
+}
+
 /// The preview with every line, for `screens/fit_tests.rs`.
 #[cfg(test)]
 pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
     let dir = std::env::temp_dir().join("verso-import-fit");
     let mut sheet = ImportSheet::open(t, screen, Store::at(dir), Waker::new(|| {}), None);
-    sheet.job = None;
+    sheet.flow.job = None;
     let mut scan = Scan::default();
     scan.preview = fullest_preview();
-    sheet.stage = Stage::Preview(Box::new(scan));
+    sheet.flow.stage = Stage::Preview(Box::new(scan));
     sheet.place(t);
-    let (main, note) = sheet.text();
+    let (main, note) = sheet.flow.text();
     let w = sheet.body.w;
     let needed =
         crate::ui::fit::text_h(text, &main, t.body, w) + t.mm(3.0) + crate::ui::fit::text_h(text, note, t.small, w);

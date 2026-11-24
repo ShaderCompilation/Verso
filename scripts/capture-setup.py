@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Captures first-time setup in portrait: Welcome, Library (folders found in
 a fake Kindle storage), Turning pages (after trying the back zone on the
-sketch), Your page and Ready, on a 300 and a 167 dpi screen. Writes screenshots/setup/."""
+sketch), Your page and Ready, on a 300 and a 167 dpi screen; then, with
+KOReader installed, From KOReader's import preview in both orientations. Writes screenshots/setup/."""
 import sim
 
 PAGES = ('welcome', 'library', 'turning', 'page', 'ready')
@@ -40,6 +41,27 @@ def storage(root):
     return root
 
 
+def koreader_books(folder):
+    """Two books with KOReader progress (one with a highlight and a note)
+    and one without."""
+    folder.mkdir(parents=True, exist_ok=True)
+    fixture = (sim.FIXTURES / 'selection.epub').read_bytes()
+    marks = ('    annotations = {\n'
+             '        { drawer = "lighten", pos0 = "/body/DocFragment[1]/body/p[2]/text().0", pos1 = "/body/DocFragment[1]/body/p[2]'
+             '/text().20", text = "A highlighted line" },\n'
+             '        { drawer = "lighten", pos0 = "/body/DocFragment[1]/body/p[3]/text().0", pos1 = "/body/DocFragment[1]/body/p[3]'
+             '/text().20", text = "A noted line", note = "Worth rereading" },\n    },\n')
+    for n, (name, extra) in enumerate((('Current', marks), ('Started', ''), ('Plain', None))):
+        # Distinct sizes give distinct ids.
+        (folder / f'{name}.epub').write_bytes(fixture + b'\0' * n)
+        if extra is not None:
+            (folder / f'{name}.sdr').mkdir(exist_ok=True)
+            (folder / f'{name}.sdr/metadata.epub.lua').write_text(
+                f'return {{\n{extra}    last_xpointer = "/body/DocFragment[1]/body/p[5]/text().0",\n'
+                '    percent_finished = 0.4,\n    summary = { status = "reading" },\n}\n')
+    return folder
+
+
 def main():
     out = sim.out_dir('setup', clean=True)
     root = storage(out / 'state/storage')
@@ -52,6 +74,13 @@ def main():
             if name == 'library':
                 env, library = {'VERSO_STORAGE': str(root), 'VERSO_KOREADER': str(root / 'koreader')}, None
             sim.run(out / f'{device}-{name}.png', steps(((w, h), dpi), page), data, library, device=device, env=env)
+        # From KOReader comes before Ready when KOReader is installed; in
+        # landscape its text takes a column of its own.
+        for orientation, size in (('portrait', (w, h)), ('landscape', (h, w))):
+            data = sim.state(out / f'state/{device}-koreader-{orientation}',
+                             settings={'setup_done': False, 'orientation': orientation})
+            sim.run(out / f'{device}-koreader-{orientation}.png', steps((size, dpi), 4), data,
+                    koreader_books(out / 'state/koreader'), device=device, env={'VERSO_KOREADER': str(root / 'koreader')})
     print(out)
 
 

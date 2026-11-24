@@ -18,6 +18,7 @@ fn every_sheet_fits_every_screen() {
         samples.extend(super::update::fit_samples(&t, screen, &mut text));
         samples.extend(super::untested::fit_samples(&t, screen, &mut text));
         samples.extend(super::koreader_import::fit_samples(&t, screen, &mut text));
+        samples.extend(super::setup::fit_samples(&t, screen, &mut text));
         samples.extend(super::footnote::fit_samples(&t, screen));
         samples.extend(super::text_sheet::fit_samples(&t, screen));
         samples.extend(super::reader_menu::fit_samples(&t, screen));

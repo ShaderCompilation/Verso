@@ -1,6 +1,6 @@
 //! First-time setup: a few pages over Home on the first launch (Welcome,
-//! Library, Turning pages, Your page, Ready), with Back / Skip / Next and
-//! "2 of 5". Every choice
+//! Library, Turning pages, Your page, From KOReader, Ready), with Back /
+//! Skip / Next and "2 of 6". Every choice
 //! is saved the moment it is made, through the same settings as Settings;
 //! only Skip and Ready set `Settings::setup_done`, so quitting midway
 //! shows setup again from Welcome with the choices in place. Settings →
@@ -16,16 +16,25 @@
 //! (the walk starts when setup opens). On a first setup, before any folder
 //! list was saved, folders found with books start ticked; the list is
 //! saved when the walk ends or a row is ticked, whichever comes first.
+//!
+//! From KOReader shows only when KOReader is installed (decided when setup
+//! opens, so the page count stays). Leaving the Library page hands the
+//! chosen folders to the library worker; the page waits until a scan of
+//! exactly those folders has finished (the bulk scan reads `library.json`),
+//! then shows the bulk import's preview and *Import*. While a book is open
+//! the worker is paused, so the page reads the saved index as it is.
 
 use std::path::{Path, PathBuf};
 
 use crate::document::TocEntry;
 use crate::geom::Rect;
-use crate::gfx::{HAlign, Icon};
+use crate::gfx::{HAlign, Icon, TextRenderer};
 use crate::library::discovery::{self, COUNT_CAP, Discovery, Folder};
+use crate::library::worker::Worker as LibraryWorker;
 use crate::platform::{DeviceModel, RefreshMode, Waker};
 use crate::reader::{BOOKMARK_CORNER_MM, Zone, tap_zone};
 use crate::screens::folders::{FolderPicker, display_folder};
+use crate::screens::koreader_import::{self, Flow};
 use crate::screens::reader::layout::{LayoutView, sample_data, sample_toc};
 use crate::screens::system::{draw_zones, switch_row};
 use crate::screens::transfer::TransferScreen;
@@ -66,6 +75,8 @@ pub struct SetupResume {
     pub page: usize,
     /// The untested-model line on Welcome.
     pub note: Option<String>,
+    /// The From KOReader page is shown.
+    pub koreader: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +85,7 @@ enum Page {
     Library,
     Turning,
     Layout,
+    Koreader,
     Ready,
 }
 
@@ -84,6 +96,7 @@ impl Page {
             Page::Library => "Library",
             Page::Turning => "Turning pages",
             Page::Layout => "Your page",
+            Page::Koreader => "From KOReader",
             Page::Ready => "Ready",
         }
     }
@@ -95,6 +108,9 @@ const GESTURES: [(Icon, &str); 4] = [
     (Icon::BookOpen, "Long-press a word to look it up in the dictionary."),
     (Icon::BookmarkFilled, "Tap the top-right corner to bookmark a page."),
 ];
+
+const KOREADER_INTRO: &str =
+    "Bring reading progress, highlights, notes and bookmarks over from KOReader, for every book in your library.";
 
 /// The status line under the Library page's rows: two lines of small text.
 const STATUS_MM: f32 = 12.0;
@@ -158,6 +174,14 @@ pub struct SetupScreen {
     // Your page, with sample bar values.
     layout: LayoutView,
     sample_toc: Vec<TocEntry>,
+    // From KOReader: the library worker (only with the page), the import
+    // once the library was scanned, and the folders it scanned.
+    library: Option<LibraryWorker>,
+    /// The book open in the reader under Settings: the import leaves it out.
+    open: Option<String>,
+    flow: Option<Flow>,
+    flow_folders: Vec<PathBuf>,
+    import: Button,
     // Ready
     auto_check: Toggle,
     finish: Button,
@@ -165,8 +189,28 @@ pub struct SetupScreen {
 
 impl SetupScreen {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker, note: Option<String>) -> Self {
+        let koreader = crate::koreader::bulk::koreader_dir().is_dir();
+        Self::build(t, screen, store, waker, note, koreader)
+    }
+
+    /// The book open in the reader underneath, which the import leaves out.
+    /// A scan started before (setup resumed on From KOReader) starts again.
+    pub fn with_open_book(mut self, open: Option<String>) -> Self {
+        self.open = open;
+        if !self.importing() {
+            self.flow = None;
+        }
+        self.sync_koreader();
+        self
+    }
+
+    fn build(t: &Theme, screen: Rect, store: Store, waker: Waker, note: Option<String>, koreader: bool) -> Self {
         let settings = store.settings();
-        let pages = vec![Page::Welcome, Page::Library, Page::Turning, Page::Layout, Page::Ready];
+        let mut pages = vec![Page::Welcome, Page::Library, Page::Turning, Page::Layout, Page::Ready];
+        if koreader {
+            pages.insert(4, Page::Koreader);
+        }
+        let library = koreader.then(|| store.library_worker(waker.clone()));
         let mut top = TopBar::new("", false);
         top.place(screen, t);
         let content = screen.split_top(t.top_bar).1.inset(t.margin);
@@ -243,6 +287,11 @@ impl SetupScreen {
         // Placed under the rows when drawn.
         let status = Rect::new(body.x, list_rect.bottom(), body.w, t.mm(STATUS_MM));
         let transfer = Button::new("Wi-Fi transfer", ButtonKind::Primary).with_icon(Icon::Wifi);
+        // From KOReader: at the bottom of the body, or of its left column in
+        // landscape (the text takes the right one).
+        let mut import = Button::new("Import", ButtonKind::Primary);
+        let import_w = if landscape { (body.w - t.mm(6.0)) / 3 } else { body.w };
+        import.place(Rect { w: import_w, ..add_folder.rect() }, t);
         let overridden = Store::library_folders_overridden();
         let folders = store.library_folders();
         let auto_tick = !overridden && settings.library_folders.is_none() && settings.library_folder.is_none();
@@ -284,6 +333,11 @@ impl SetupScreen {
             switches,
             layout,
             sample_toc: sample_toc(),
+            library,
+            open: None,
+            flow: None,
+            flow_folders: Vec::new(),
+            import,
             auto_check,
             finish,
         };
@@ -294,7 +348,7 @@ impl SetupScreen {
 
     /// Setup rebuilt after the display turned, on the page it showed.
     pub fn resume(t: &Theme, screen: Rect, store: Store, waker: Waker, state: &SetupResume) -> Self {
-        let mut this = Self::new(t, screen, store, waker, state.note.clone());
+        let mut this = Self::build(t, screen, store, waker, state.note.clone(), state.koreader);
         this.go(state.page);
         this
     }
@@ -307,6 +361,7 @@ impl SetupScreen {
         self.page = page.min(self.pages.len() - 1);
         self.top.title = self.current().title().into();
         self.tried = None;
+        self.sync_koreader();
     }
 
     fn save(&self, cx: &mut EventCx, what: &str, change: impl FnOnce(&mut Settings)) -> bool {
@@ -619,6 +674,72 @@ impl SetupScreen {
         );
     }
 
+    // ---- From KOReader ----
+
+    /// Hands the chosen folders to the library and, on the page, starts the
+    /// KOReader scan once the library scanned them. A preview for other
+    /// folders (the user went back and changed them) starts again.
+    fn sync_koreader(&mut self) {
+        let Some(library) = &self.library else { return };
+        let folders = self.store.library_folders();
+        library.set_roots(folders.clone());
+        if self.current() != Page::Koreader {
+            return;
+        }
+        if self.flow.as_ref().is_some_and(|f| !f.importing()) && self.flow_folders != folders {
+            self.flow = None;
+        }
+        if self.flow.is_none() && (library.scanned().as_ref() == Some(&folders) || library.paused()) {
+            self.flow = Some(Flow::scan(self.store.clone(), self.waker.clone(), self.open.clone()));
+            self.flow_folders = folders;
+        }
+    }
+
+    fn importing(&self) -> bool {
+        self.flow.as_ref().is_some_and(Flow::importing)
+    }
+
+    /// From KOReader's intro, and the area for the import's text under it.
+    /// In landscape the intro and *Import* share the left column.
+    fn koreader_areas(&self, text: &mut TextRenderer, t: &Theme) -> (Rect, Rect) {
+        let c = self.body;
+        let w = self.import.rect().w;
+        let h = text.measure(KOREADER_INTRO, t.body, Some(w as f32)).1.ceil() as i32;
+        let intro = Rect { w, h, ..c };
+        if w < c.w {
+            // No button under the text: it may run to just above Back / Next.
+            let x = c.x + w + t.mm(6.0);
+            return (intro, Rect { x, w: c.right() - x, h: self.back.rect().y - t.mm(2.0) - c.y, ..c });
+        }
+        let y = c.y + h + t.mm(6.0);
+        (intro, Rect::new(c.x, y, c.w, self.import.rect().y - t.mm(3.0) - y))
+    }
+
+    fn draw_koreader(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        let (intro, text) = self.koreader_areas(cx.text, t);
+        cx.paragraph(KOREADER_INTRO, t.body, intro, HAlign::Left);
+        match &self.flow {
+            None => koreader_import::draw_text(cx, "Waiting for the library scan…", "", text),
+            Some(flow) => {
+                let (main, note) = flow.text();
+                koreader_import::draw_text(cx, &main, note, text);
+            }
+        }
+        if self.flow.as_ref().is_some_and(Flow::importable) {
+            self.import.draw(cx);
+        }
+    }
+
+    fn koreader_gesture(&mut self, g: &Gesture) {
+        if let Some(flow) = &mut self.flow
+            && flow.importable()
+            && self.import.on_gesture(g)
+        {
+            flow.import();
+        }
+    }
+
     /// Your page: the editor takes the gesture; a change is saved at once.
     fn layout_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
         self.layout.on_gesture(g, cx.theme, &sample_data(&self.sample_toc));
@@ -657,8 +778,15 @@ impl Screen for SetupScreen {
         true
     }
 
-    /// Takes the folders the walk found; saves the ticked ones when it ends.
+    /// Takes the folders the walk found and saves the ticked ones when it
+    /// ends; follows the library scan and the KOReader import.
     fn on_background(&mut self, cx: &mut EventCx) {
+        let waiting = self.flow.is_none();
+        self.sync_koreader();
+        let (moved, _) = self.flow.as_mut().map_or((false, None), Flow::on_background);
+        if self.current() == Page::Koreader && (moved || waiting != self.flow.is_none()) {
+            cx.redraw();
+        }
         let Some(walk) = &self.discovery else { return };
         let finished = walk.finished();
         let found = walk.take();
@@ -685,13 +813,16 @@ impl Screen for SetupScreen {
         cx.redraw();
     }
 
-    /// Scripted screenshots wait for the walk.
+    /// Scripted screenshots wait for the walk, and on From KOReader for the
+    /// library scan and the KOReader scan.
     fn busy(&self) -> bool {
-        self.discovery.is_some()
+        let koreader = self.current() == Page::Koreader && self.flow.as_ref().is_none_or(Flow::busy);
+        self.discovery.is_some() || koreader
     }
 
     fn relayout_state(&self, state: &mut RelayoutState) {
-        state.setup = Some(SetupResume { page: self.page, note: self.note.clone() });
+        let koreader = self.library.is_some();
+        state.setup = Some(SetupResume { page: self.page, note: self.note.clone(), koreader });
     }
 
     fn draw(&mut self, cx: &mut DrawCx) {
@@ -710,6 +841,7 @@ impl Screen for SetupScreen {
             Page::Turning => self.draw_turning(cx),
             // Below: its slot picker opens over the buttons.
             Page::Layout => {}
+            Page::Koreader => self.draw_koreader(cx),
             Page::Ready => self.draw_ready(cx),
         }
         self.back.draw(cx);
@@ -735,6 +867,10 @@ impl Screen for SetupScreen {
             if self.skip_setup.on_gesture(&g) {
                 return self.finish(cx);
             }
+            return Action::None;
+        }
+        // Nothing leaves the page while the import writes (it takes seconds).
+        if self.importing() {
             return Action::None;
         }
         // An open slot picker takes every gesture, also over the buttons.
@@ -768,10 +904,24 @@ impl Screen for SetupScreen {
             Page::Library => return self.library_gesture(&g, cx),
             Page::Turning => self.turning_gesture(&g, cx),
             Page::Layout => self.layout_gesture(&g, cx),
+            Page::Koreader => self.koreader_gesture(&g),
             _ => {}
         }
         Action::None
     }
+}
+
+/// From KOReader with the fullest preview, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::text_h;
+    let store = Store::at(std::env::temp_dir().join("verso-setup-fit"));
+    let s = SetupScreen::build(t, screen, store, Waker::new(|| {}), None, false);
+    let (_, area) = s.koreader_areas(text, t);
+    let (main, note) = koreader_import::fullest_text();
+    let needed = text_h(text, &main, t.body, area.w) + t.mm(3.0) + text_h(text, note, t.small, area.w);
+    let buttons = [s.import.rect(), s.back.rect(), s.next.rect(), s.skip.rect()];
+    vec![crate::ui::fit::Parts::new("Setup: From KOReader", screen, buttons).body(area, needed)]
 }
 
 #[cfg(test)]
@@ -978,6 +1128,43 @@ mod tests {
         std::fs::write(root.join("Other/a.epub"), b"")?;
         walk(&mut s, &t, vec![root.join("documents")], &root);
         assert!(!s.no_books());
+        Ok(())
+    }
+
+    #[test]
+    fn from_koreader_shows_with_koreader_and_waits_for_the_chosen_folders() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let t = Theme::for_dpi(300);
+        let store = Store::at(dir.path().join("data"));
+        let without = SetupScreen::build(&t, SCREEN, store.clone(), Waker::new(|| {}), None, false);
+        assert_eq!(without.pages.len(), 5, "no KOReader, no page");
+
+        // A book in each folder; only the second has KOReader progress.
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let (first, second) = (dir.path().join("us/First"), dir.path().join("us/Second"));
+        for (folder, name) in [(&first, "library2.epub"), (&second, "library3.epub")] {
+            std::fs::create_dir_all(folder)?;
+            std::fs::copy(fixtures.join(name), folder.join(name))?;
+        }
+        let sidecar = crate::koreader::metadata_path(&second.join("library3.epub")).unwrap();
+        std::fs::create_dir_all(sidecar.parent().unwrap())?;
+        std::fs::write(&sidecar, "return { last_xpointer = '/k', percent_finished = 0.5 }")?;
+        store.save_library_folders(vec![first.clone()])?;
+
+        let mut s = SetupScreen::build(&t, SCREEN, store.clone(), Waker::new(|| {}), None, true);
+        assert_eq!(s.pages[4], Page::Koreader);
+        // The Library page added the second folder.
+        store.save_library_folders(vec![first, second])?;
+        s.go(4);
+        assert!(s.flow.is_none() && s.busy(), "waits for the library scan");
+        let started = Instant::now();
+        while s.flow.as_ref().is_none_or(|f| f.preview().is_none()) {
+            assert!(started.elapsed().as_secs() < 20, "no preview");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            with_cx(&t, |cx| s.on_background(cx));
+        }
+        let preview = s.flow.as_ref().and_then(Flow::preview).unwrap();
+        assert_eq!(preview.not_started, 1, "the second folder's book is in the scan");
         Ok(())
     }
 

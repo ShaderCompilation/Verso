@@ -1055,9 +1055,12 @@ impl Books {
             if self.is_home() {
                 self.warm_due = true;
             }
-            self.library.set_roots(roots);
-            self.scanning = true;
-            self.working = true;
+            // Setup may have asked for this list already: its pass's status
+            // is still in the mailbox.
+            if self.library.set_roots(roots) {
+                self.scanning = true;
+                self.working = true;
+            }
             if self.browsing_ready {
                 // Folders outside the new list leave Collections at once.
                 self.rebuild_collections();
@@ -3529,10 +3532,11 @@ fn relayout_stack_from(
     let mut screens: Vec<Box<dyn Screen>> = vec![Box::new(books)];
     if state.in_settings {
         let settings = crate::screens::system::SystemSettings::new(t, screen, store.clone(), waker.clone());
-        screens.push(Box::new(settings.on_display_tab().with_open_book(open)));
+        screens.push(Box::new(settings.on_display_tab().with_open_book(open.clone())));
     }
     if let Some(setup) = &state.setup {
-        screens.push(Box::new(crate::screens::setup::SetupScreen::resume(t, screen, store, waker, setup)));
+        let setup = crate::screens::setup::SetupScreen::resume(t, screen, store, waker, setup);
+        screens.push(Box::new(setup.with_open_book(open)));
     }
     screens
 }
@@ -4048,7 +4052,7 @@ mod tests {
         with_cx(&t, portrait, |cx| books.open(id.clone(), cx));
         let settings = crate::screens::system::SystemSettings::new(&t, portrait, store.clone(), worker.waker());
         // Setup run again over Settings keeps its page.
-        let resume = crate::screens::setup::SetupResume { page: 1, note: None };
+        let resume = crate::screens::setup::SetupResume { page: 1, ..Default::default() };
         let setup = crate::screens::setup::SetupScreen::resume(&t, portrait, store.clone(), worker.waker(), &resume);
         let state = snapshot(&[&books, &settings, &setup]);
         assert!(state.in_settings && state.open_book.as_deref() == Some(id.as_str()));

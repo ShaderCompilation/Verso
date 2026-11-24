@@ -122,6 +122,10 @@ struct Shared {
     applied_revision: u64,
     /// A new folder list from Settings, used from the next pass.
     roots: Option<Vec<PathBuf>>,
+    /// The folder list last asked for (at start or by `set_roots`).
+    wanted: Vec<PathBuf>,
+    /// The folders of the last scan pass that finished.
+    scanned: Option<Vec<PathBuf>>,
     /// Cover sizes the library screen drew since the worker last looked.
     drawn_sizes: Vec<(u32, u32)>,
     /// Pending Home warm-up request and its completed result.
@@ -224,6 +228,12 @@ impl Channel {
         if wake {
             self.waker.wake();
         }
+    }
+    /// A pass over `roots` finished and saved its index. Always wakes: the
+    /// screen waiting for it (setup) doesn't empty the other mailboxes.
+    fn scanned(&self, roots: &[PathBuf]) {
+        self.lock().scanned = Some(roots.to_vec());
+        self.waker.wake();
     }
     fn status(&self, status: Status) {
         if self.lock().status.replace(status).is_none() {
@@ -443,6 +453,7 @@ impl Background {
             self.rebuild_home();
         }
         self.save(&mut errors, "library");
+        self.channel.scanned(&self.roots);
         self.publish();
         self.set_status(false, true, &errors);
         if let Some(request) = self.channel.take_warm_request() {
@@ -982,7 +993,7 @@ pub struct Worker {
 impl Worker {
     pub fn new(store: Store, roots: Vec<PathBuf>, waker: Waker) -> Self {
         let shared = Arc::new(SyncState {
-            state: Mutex::new(Shared { requested: true, ..Shared::default() }),
+            state: Mutex::new(Shared { requested: true, wanted: roots.clone(), ..Shared::default() }),
             wake: Condvar::new(),
             applied: Condvar::new(),
         });
@@ -1099,12 +1110,27 @@ impl Worker {
     }
     /// Scan a new folder list. A running pass stops at its next cover or
     /// identity check; books outside the new folders become unavailable but
-    /// keep their entries, so adding a folder back restores them.
-    pub fn set_roots(&self, roots: Vec<PathBuf>) {
+    /// keep their entries, so adding a folder back restores them. The list
+    /// already asked for starts no pass: returns whether this one did.
+    pub fn set_roots(&self, roots: Vec<PathBuf>) -> bool {
         let mut state = self.state();
+        if state.wanted == roots {
+            return false;
+        }
+        state.wanted = roots.clone();
         state.roots = Some(roots);
         state.requested = true;
         self.inner.shared.wake.notify_all();
+        true
+    }
+    /// The folders of the last scan pass that finished: `library.json`
+    /// covers them.
+    pub fn scanned(&self) -> Option<Vec<PathBuf>> {
+        self.state().scanned.clone()
+    }
+    /// Paused behind an open book: a scan waits until it closes.
+    pub fn paused(&self) -> bool {
+        self.state().paused
     }
     /// Recompute resume selection after finished/hidden flags change without a
     /// filesystem rescan. Authoritative book records stay on the save path.

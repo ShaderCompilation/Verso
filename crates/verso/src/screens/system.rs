@@ -989,13 +989,8 @@ impl SystemSettings {
             self.shaping.selected = TextShaping::ALL.iter().position(|&m| m == current).unwrap_or(1);
         }
         if self.setup_button.on_gesture(g) {
-            return Action::Push(Box::new(SetupScreen::new(
-                cx.theme,
-                self.screen,
-                self.store.clone(),
-                self.waker.clone(),
-                None,
-            )));
+            let setup = SetupScreen::new(cx.theme, self.screen, self.store.clone(), self.waker.clone(), None);
+            return Action::Push(Box::new(setup.with_open_book(self.open_book.clone())));
         }
         if self.report_rx.is_none() && self.report_button.on_gesture(g) {
             self.start_report();
