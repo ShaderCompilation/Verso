@@ -1632,7 +1632,12 @@ impl Books {
         self.warm_due = true;
         self.previews.forget_order();
         self.opened_touched = true;
+        // A summary the worker left while another screen was on top predates
+        // the import and would replace what's read here. One it is about to
+        // leave is followed by the fresh one asked for.
+        self.library.take_home();
         self.reload_home();
+        self.library.refresh_home();
         // An open book's return to the library reloads the rest then.
         if self.reader.is_none() {
             self.apply_pending(cx);
@@ -4790,10 +4795,15 @@ mod tests {
             ..Default::default()
         };
         let finished = BookState { finished: true, ..store.book("3") };
+        // A scan that ended under Settings or setup left its summary untaken.
+        books.library.post_home(store.home_summary().unwrap());
         let (written, error) = store.save_books(&[("7".into(), imported), ("3".into(), finished)]);
         assert_eq!((written, error.is_none()), (2, true));
         store.rebuild_home_summary(&index)?;
-        with_cx(&t, screen, |cx| books.on_return(cx));
+        with_cx(&t, screen, |cx| {
+            books.on_return(cx);
+            books.on_background(cx);
+        });
         assert!(books.states["3"].finished);
         assert_eq!(books.states["7"].progress, 4000);
         assert_eq!(books.home.resume().unwrap().book.id, "7", "Continue reading");

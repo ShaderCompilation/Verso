@@ -1141,6 +1141,11 @@ impl Worker {
     pub fn take_home(&self) -> Option<(Summary, u64)> {
         self.state().latest_home.take()
     }
+    /// Leaves `summary` for the UI, as a finished rebuild does.
+    #[cfg(test)]
+    pub fn post_home(&self, summary: Summary) {
+        self.state().latest_home = Some((summary, 0));
+    }
     /// True once after a rebuild changed `opened.json`; read it again then.
     pub fn take_opened_changed(&self) -> bool {
         std::mem::take(&mut self.state().opened_changed)
