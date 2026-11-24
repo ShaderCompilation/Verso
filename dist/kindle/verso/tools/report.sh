@@ -151,9 +151,7 @@ library_roots() {
     fi
     printf '%s\n' \
         "/mnt/us/documents" \
-        "/mnt/us/My Library" \
-        "${ROOT}/documents" \
-        "${ROOT}/My Library"
+        "${ROOT}/documents"
 }
 
 # Redacts book paths under any library root on stdin -> stdout.

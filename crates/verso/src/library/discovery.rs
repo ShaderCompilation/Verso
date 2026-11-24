@@ -1,5 +1,5 @@
 //! Finding the folders that hold books, for the setup's Library page.
-//! [`discover`] lists the fixed folders (the defaults and the saved list),
+//! [`discover`] lists the fixed folders (the default and the saved list),
 //! KOReader's home folder (`home_dir` in its `settings.reader.lua`), and
 //! every top-level folder of the storage root with EPUBs anywhere below it,
 //! counting each folder's EPUBs up to [`COUNT_CAP`]. It walks like the
@@ -46,7 +46,7 @@ pub struct Folder {
 
 /// Where to look.
 pub struct Sources {
-    /// Listed even without books: the default folders and the saved list.
+    /// Listed even without books: the default folder and the saved list.
     pub fixed: Vec<PathBuf>,
     /// The storage root whose top-level folders are walked
     /// (`store::storage_root`); None discovers nothing (`VERSO_BOOKS`).
@@ -231,7 +231,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
         epubs(&root.join("documents"), 1)?;
-        std::fs::create_dir_all(root.join("My Library"))?;
+        std::fs::create_dir_all(root.join("Saved"))?;
         epubs(&root.join("Books/Fiction/Tolkien"), 2)?;
         std::fs::write(root.join("Books/notes.txt"), b"")?;
         std::fs::write(root.join("Books/Upper.EPUB"), b"")?;
@@ -249,7 +249,7 @@ mod tests {
             std::os::unix::fs::symlink(root.join("Books/Upper.EPUB"), root.join("documents/link.epub"))?;
         }
         let sources = Sources {
-            fixed: vec![root.join("documents"), root.join("My Library")],
+            fixed: vec![root.join("documents"), root.join("Saved")],
             root: Some(root.to_path_buf()),
             koreader_settings: None,
         };
@@ -257,7 +257,7 @@ mod tests {
             found(&sources),
             [
                 ("documents".into(), 1, false, false),
-                ("My Library".into(), 0, false, false),
+                ("Saved".into(), 0, false, false),
                 ("Books".into(), 3, false, true),
             ]
         );

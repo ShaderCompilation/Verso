@@ -705,7 +705,14 @@ fn destination_folders(index: &LibraryIndex, roots: &[PathBuf]) -> (Option<PathB
             existing.push(root.clone());
         }
     }
-    let default_folder = existing.first().cloned().or_else(|| roots.first().cloned());
+    // Where the books are; the first folder on a tie (max_by_key takes the
+    // last), as in an empty library.
+    let default_folder = existing
+        .iter()
+        .rev()
+        .max_by_key(|root| tree.folders.get(*root).map_or(0, |f| f.count))
+        .or_else(|| roots.first())
+        .cloned();
     let mut subs: Vec<PathBuf> = tree.folders.keys().filter(|p| !seen.contains(*p) && p.is_dir()).cloned().collect();
     subs.sort_by_cached_key(|p| {
         let root_pos = roots.iter().position(|r| p.starts_with(r)).unwrap_or(usize::MAX);
@@ -1219,6 +1226,23 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "cover wasn't generated after unpausing");
             std::thread::sleep(Duration::from_millis(15));
         }
+    }
+
+    #[test]
+    fn uploads_go_to_the_library_folder_with_the_most_books_by_default() {
+        let env = Env::new();
+        let roots = [env.outside_dir.join("missing"), env.outside_dir.clone(), env.library_dir.clone()];
+        let default = || destination_folders(&env.worker.current(), &roots[1..]).0;
+        assert_eq!(default(), Some(env.outside_dir.clone()), "the first one in an empty library");
+        assert_eq!(
+            destination_folders(&env.worker.current(), &[roots[0].clone(), roots[2].clone()]).0,
+            Some(env.library_dir.clone())
+        );
+        // Books in subfolders count.
+        let sub = env.library_dir.join("Novels");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(env.upload(&sub, "Anna.epub", &epub_bytes("Anna Karenina", "Leo Tolstoy", &[])).0, 201);
+        assert_eq!(default(), Some(env.library_dir.clone()));
     }
 
     #[test]

@@ -54,8 +54,8 @@ Verso opens on **Home**:
 
 ### Folder browser
 
-By default, Verso scans `/mnt/us/documents` and `/mnt/us/My Library`
-recursively for `.epub` files (ignoring dotfiles, `.sdr` folders and symlinks).
+By default, Verso scans `/mnt/us/documents`, plus any folders setup found books
+in, recursively for `.epub` files (ignoring dotfiles, `.sdr` folders and symlinks).
 Manage scanned folders in **Settings → Library → Add folder**; removing a folder
 hides its books without deleting any files or reading progress.
 
@@ -272,8 +272,8 @@ signs in automatically; otherwise enter the code at `http://verso.local` or the
 shown IP address). The server stops on **Done**, sleep, USB exit or after 10
 minutes idle.
 
-- **Books:** drag-and-drop EPUBs into any folder (with **+ New folder**),
-  search, download or delete books. Switch to **Highlights** to download
+- **Books:** drag-and-drop EPUBs into any folder (with **+ New folder**; the
+  library folder with the most books is preselected), search, download or delete books. Switch to **Highlights** to download
   per-book Markdown or **Download all (.zip)**.
 - **Dictionaries:** upload StarDict archives or loose files and remove
   installed dictionaries (rescans automatically on **Done**).
