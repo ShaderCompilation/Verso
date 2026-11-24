@@ -17,8 +17,12 @@ are refused before touching the Kindle UI.
    `extensions/verso/` and `documents/Verso.sh`.
 2. Eject the Kindle and tap **Verso** in your Kindle library.
 
-*Alternatives:* install `verso-<version>.kpkg` with **KPM** and launch via
-`;kpm launch verso`, or open **KUAL → Verso → Start Verso**.
+**Optional alternatives:**
+
+- **KPM** (useful on firmware 5.19.4+ if `.sh` items don't index in the library,
+  or if you prefer a package manager): install `verso-<version>.kpkg` and launch
+  with `;kpm launch verso`.
+- **KUAL:** open **KUAL → Verso → Start Verso** (included in the same zip).
 
 While Verso runs, its launcher pauses Amazon's UI and USB drive daemon so your
 book storage stays mounted. Exiting (or any crash) always restores Amazon's home

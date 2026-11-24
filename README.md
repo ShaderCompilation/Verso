@@ -71,9 +71,13 @@ Verso → Create problem report**) writes a redacted hardware and log report to
    it adds `verso/`, `extensions/verso/` and `documents/Verso.sh`.
 3. Safely eject the Kindle and tap **Verso** in your Kindle library.
 
-On firmware 5.19.4+ (or with a package manager), install `verso-<version>.kpkg`
-via **KPM** and launch with `;kpm launch verso`. If you use **KUAL**, open
-**KUAL → Verso → Start Verso**.
+**Optional alternatives:**
+
+- **KPM** (helpful on firmware 5.19.4+ if `.sh` items don't show up in the
+  library, or if you prefer a package manager): install `verso-<version>.kpkg`
+  and launch with `;kpm launch verso`.
+- **KUAL:** if you already use KUAL, you can also start Verso from
+  **KUAL → Verso → Start Verso** (included in the same zip).
 
 Once installed, Verso checks for signed updates over HTTPS (every 6 hours when Wi-Fi is
 connected, or manually from **Settings → Device → Check for updates**). Updates
