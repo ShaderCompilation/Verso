@@ -36,6 +36,7 @@ package manager) and make sure `zig` is on `PATH`.
 | Command | What it does |
 | --- | --- |
 | `cargo sim` | Build and run the desktop simulator (defaults to Paperwhite 6). |
+| `scripts/sim.sh` | The same, with flags for the model, colour preview and start screen (`--help`). |
 | `cargo test` | Run workspace unit and integration tests. |
 | `cargo test -p verso <filter>` | Run targeted tests while iterating. |
 | `cargo kindle-build` | Release build for hard-float Kindles (`verso` + `verso-mdns`). |
@@ -60,7 +61,9 @@ Copy any test EPUBs into the gitignored `testbooks/` folder (or pass
   `PgDn` trigger hardware page-turn buttons; `C` toggles the Kaleido 3 color
   preview on `colorsoft`.
 - **Device presets:** `--device basic-167|basic-300|pw5|pw6|oasis3|colorsoft|scribe`
-  (or `VERSO_SIM_DEVICE`).
+  (or `VERSO_SIM_DEVICE`). `scripts/sim.sh` wraps this: `--help` lists its
+  flags, `-l` the models, and `-k`/`-g`/`-s` pick the Kaleido preview, start
+  screen and window scale.
 - **Headless screenshots:** `--screenshot out.png` renders at device size
   without opening a window and accepts scripted `--screen`, `--tap`,
   `--long-press`, `--hold-drag`, `--press`, `--swipe`, `--key`, `--text` and
