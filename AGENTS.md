@@ -79,7 +79,8 @@ It's someone's own reading device (`ssh kindle`). The full readiness and
 verification steps are in the `verify` skill (`notes/skills/verify/`) where you
 have it; these rules always hold:
 
-- Write only inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`.
+- Write only inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`, plus
+  the one file `/mnt/us/documents/Verso.sh` (the library launcher).
   Writing `/dev/fb0` and sending touches to `/dev/input/event1` while Verso has
   grabbed it are fine.
 - Never run `mntroot`, `dd`, a factory reset or a firmware update, and never
