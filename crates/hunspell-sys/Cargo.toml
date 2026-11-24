@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 # Hunspell is MPL 1.1 / GPL 2.0+ / LGPL 2.1+; Verso uses it under the GPL/LGPL terms.
 license = "GPL-2.0-or-later"
+repository.workspace = true
 links = "hunspell"
 build = "build.rs"
 

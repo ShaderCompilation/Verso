@@ -4,6 +4,7 @@ description = "A calm, lightweight e-reader for jailbroken Kindles."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"

@@ -4,6 +4,7 @@ description = "crengine (KOReader's EPUB layout engine) and its C libraries, bui
 version.workspace = true
 edition.workspace = true
 license = "AGPL-3.0-or-later"
+repository.workspace = true
 links = "crengine"
 build = "build.rs"
 

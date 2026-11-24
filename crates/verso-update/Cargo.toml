@@ -4,6 +4,7 @@ description = "Verso's release manifests: versions, component hashes and signatu
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 minisign-verify = "0.3"

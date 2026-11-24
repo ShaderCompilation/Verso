@@ -4,6 +4,7 @@ description = "Raw bindings to FBInk (e-ink framebuffer library), built from sou
 version.workspace = true
 edition.workspace = true
 license = "GPL-3.0-or-later"
+repository.workspace = true
 links = "fbink"
 build = "build.rs"
 
