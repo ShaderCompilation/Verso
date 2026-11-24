@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v0.1.0-beta.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build & package draft release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Skip if already published
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh release view "$TAG" -R "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null || true)" = "false" ]; then
+            echo "Release $TAG is already published; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust toolchain
+        if: steps.check.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Install Zig
+        if: steps.check.outputs.skip != 'true'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Install cargo-zigbuild
+        if: steps.check.outputs.skip != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.1
+
+      - name: Cache Cargo
+        if: steps.check.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml and release notes exist
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION="$(cargo pkgid -p verso | sed 's/.*[#@]//')"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "Tag $TAG does not match Cargo.toml version $VERSION" >&2
+            exit 1
+          fi
+          NOTES="dist/release-notes/$VERSION.txt"
+          if [ ! -s "$NOTES" ]; then
+            echo "Missing or empty release notes: $NOTES" >&2
+            exit 1
+          fi
+
+      - name: Validate
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          scripts/test-launcher.sh
+
+      - name: Package release
+        if: steps.check.outputs.skip != 'true'
+        run: scripts/package.sh
+
+      - name: Create or update draft GitHub Release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OUT="target/package/$VERSION"
+          NOTES="dist/release-notes/$VERSION.txt"
+          if STATE="$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
+            if [ "$STATE" != "true" ]; then
+              echo "Release $TAG is already published; refusing to overwrite." >&2
+              exit 1
+            fi
+            gh release upload "$TAG" "$OUT"/* --clobber
+            gh release edit "$TAG" --title "Verso $VERSION" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" "$OUT"/* \
+              --draft \
+              --title "Verso $VERSION" \
+              --notes-file "$NOTES"
+          fi
