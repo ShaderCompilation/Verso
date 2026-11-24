@@ -31,7 +31,16 @@ const CAPTION: &str = "Tap a slot to change what it shows";
 
 /// Bar values for the editor when no book is open.
 pub(crate) fn sample_toc() -> Vec<TocEntry> {
-    vec![TocEntry { title: "The Lighthouse Keeper".into(), level: 1, page: 4, position: Position::default() }]
+    [
+        ("The Lighthouse Keeper", 4),
+        ("Low Tide", 58),
+        ("The Letters", 121),
+        ("Storm Season", 196),
+        ("The Long Way Home", 268),
+    ]
+    .into_iter()
+    .map(|(title, page)| TocEntry { title: title.into(), level: 1, page, position: Position::default() })
+    .collect()
 }
 pub(crate) fn sample_data(toc: &[TocEntry]) -> BarData<'_> {
     BarData {
