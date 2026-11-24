@@ -131,6 +131,10 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+          # setup-zig restores its cache into .zig-cache inside the checkout,
+          # which trips package.sh's clean-worktree check on tags without it
+          # in .gitignore (e.g. workflow_dispatch on older tags).
+          use-cache: false
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
