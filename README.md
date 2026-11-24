@@ -43,7 +43,6 @@ pausing the Kindle UI while you read and restoring it cleanly on exit or crash.
 
 **What Verso intentionally leaves out:**
 
-- **EPUB only.** No PDF, DjVu, CBZ/CBR or comic reflow.
 - **Not a general system shell.** No plugin ecosystem, terminal, RSS reader or
   cloud sync service. If you want every format and every tweak, KOReader is
   excellent and lives peacefully next to Verso on the same Kindle.
