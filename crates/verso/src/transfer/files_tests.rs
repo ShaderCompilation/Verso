@@ -340,6 +340,29 @@ fn lists_with_permissions_shortcuts_and_hidden_files() {
 }
 
 #[test]
+fn reports_have_a_shortcut_and_download_but_stay_read_only() {
+    let env = Env::new();
+    let shortcut = || {
+        let (_, root) = env.list("");
+        root["shortcuts"].as_array().unwrap().iter().find(|s| s["label"] == "Reports").cloned()
+    };
+    assert_eq!(shortcut(), None, "no reports yet");
+    let report = "verso/reports/crash-20261122-123000.txt";
+    fs::create_dir_all(env.root.join("verso/reports")).unwrap();
+    fs::write(env.root.join(report), "report").unwrap();
+    assert_eq!(shortcut().unwrap()["path"], "verso/reports");
+
+    assert_eq!(env.list("verso/reports").1["writable"], false);
+    assert_eq!(env.entry("verso/reports", "crash-20261122-123000.txt")["writable"], false);
+    let (status, _, body) = env.req("GET", &format!("/api/files/download?path={report}"), b"");
+    assert_eq!((status, body.as_slice()), (200, &b"report"[..]));
+    assert_eq!(env.put(report, true, b"x").0, 403);
+    assert_eq!(env.put("verso/reports/new.txt", false, b"x").0, 403);
+    assert_eq!(env.delete(report, false).0, 403);
+    assert_eq!(fs::read(env.root.join(report)).unwrap(), b"report");
+}
+
+#[test]
 fn developers_see_jailbreak_and_system_folders_read_only() {
     let env = Env::with_developer(true);
     assert_eq!(

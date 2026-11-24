@@ -585,7 +585,8 @@ impl Files {
         })
     }
 
-    /// Books · Fonts · Dictionaries · Exports · Everything, where they exist.
+    /// Books · Fonts · Dictionaries · Exports · Reports · Everything, where
+    /// they exist.
     fn shortcuts(&self, canon_root: &Path, library_roots: &[PathBuf]) -> Vec<Value> {
         let mut out = Vec::new();
         let books = library_roots.iter().find_map(|r| {
@@ -595,9 +596,12 @@ impl Files {
         if let Some(books) = books {
             out.push(json!({ "label": "Books", "path": join(&books) }));
         }
-        for (label, path) in
-            [("Fonts", "fonts"), ("Dictionaries", "verso/data/dictionaries"), ("Exports", "verso/data/exports")]
-        {
+        for (label, path) in [
+            ("Fonts", "fonts"),
+            ("Dictionaries", "verso/data/dictionaries"),
+            ("Exports", "verso/data/exports"),
+            ("Reports", "verso/reports"),
+        ] {
             if self.root.join(path).is_dir() {
                 out.push(json!({ "label": label, "path": path }));
             }

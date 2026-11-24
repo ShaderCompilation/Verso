@@ -1347,7 +1347,7 @@ impl ReportSheet {
 
     fn message(&self) -> String {
         format!(
-            "Saved to:\nverso/reports/{}\n\nConnect your Kindle over USB (or use Wi-Fi transfer) to copy it and attach it to a bug report. Book names have been removed.",
+            "Saved to:\nverso/reports/{}\n\nCopy it with Wi-Fi transfer → Files → Reports (or over USB) and attach it to a bug report. Book names have been removed.",
             self.filename,
         )
     }

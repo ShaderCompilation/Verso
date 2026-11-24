@@ -282,7 +282,7 @@ minutes idle.
 - **Dictionaries:** upload StarDict archives or loose files and remove
   installed dictionaries (rescans automatically on **Done**).
 - **Files:** browse `/mnt/us` with shortcuts (*Books*, *Fonts*, *Dictionaries*,
-  *Exports*, *Everything*), upload, download, rename, move and delete. System
+  *Exports*, *Reports*, *Everything*), upload, download, rename, move and delete. System
   and jailbreak paths are hidden, Verso's own app and live data are read-only
   unless developer mode is on, and deleting library or KOReader folders asks
   for a second confirmation.
