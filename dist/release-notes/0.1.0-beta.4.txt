@@ -1,0 +1,5 @@
+Fourth closed beta of Verso.
+
+- Launch Verso directly from the Kindle library via `documents/Verso.sh` (no KUAL needed with the Universal Hotfix); existing installs receive it automatically on update.
+- Publish a KPM v2 package (`verso-0.1.0-beta.4.kpkg`) alongside the install zip for installing and launching via Kindle Package Manager (5.19.4+).
+- Protect `documents/Verso.sh` in the Wi-Fi transfer Files tab so it cannot be accidentally deleted or overwritten.
