@@ -16,6 +16,8 @@ pub enum Segment {
 pub struct Segmented {
     pub items: Vec<Segment>,
     pub selected: usize,
+    /// Optional dot indicator on an unselected segment (e.g. an available update).
+    pub dot: Option<usize>,
     rect: Rect,
     /// The segment the current touch started on.
     down_on: Option<usize>,
@@ -23,7 +25,7 @@ pub struct Segmented {
 
 impl Segmented {
     pub fn new(items: Vec<Segment>, selected: usize) -> Self {
-        Self { items, selected, rect: Rect::default(), down_on: None }
+        Self { items, selected, dot: None, rect: Rect::default(), down_on: None }
     }
 
     pub fn texts(labels: &[&str], selected: usize) -> Self {
@@ -105,6 +107,11 @@ impl Segmented {
                 Segment::Text(s) => cx.line(s, style.gray(fg), seg.inset_xy(pad, 0), HAlign::Center),
                 Segment::Icon(icon) => cx.icon(*icon, *seg, t.icon_small, fg),
                 Segment::Glyph(draw) => draw(cx, *seg, fg),
+            }
+            if self.dot == Some(i) && !selected {
+                let r = t.mm(0.8) as f32;
+                let inset = t.mm(2.0) as f32;
+                cx.canvas.fill_circle(seg.right() as f32 - inset, seg.y as f32 + inset, r, INK);
             }
         }
         cx.canvas.stroke_rounded_rect(self.rect, t.radius, t.border as f32, INK);

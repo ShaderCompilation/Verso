@@ -8,7 +8,7 @@ use crate::clock::LocalDateTime;
 use crate::document::TextShaping;
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
-use crate::platform::{Waker, ssh, wifi};
+use crate::platform::{RefreshMode, Waker, ssh, wifi};
 use crate::reader::Zone;
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
@@ -19,7 +19,7 @@ use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
+use crate::ui::theme::{FILL, INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
     Button, ButtonKind, IconButton, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, Toggle, TopBar,
@@ -222,7 +222,10 @@ pub struct SystemSettings {
     // Updates
     updates: Arc<Updates>,
     update_status: update::Status,
-    /// "Check for updates", or "Update" while an update is available.
+    /// Framed callout card at the top of Device while an update is available.
+    update_card: Rect,
+    update_card_press: Press,
+    /// "Check for updates", or "Update" inside the callout card while an update is available.
     check_button: Button,
     auto_check: Toggle,
     /// The installed version and the previous one, while "Go back" can
@@ -365,6 +368,8 @@ impl SystemSettings {
             ssh_read_on_wake: false,
             updates,
             update_status,
+            update_card: Rect::default(),
+            update_card_press: Press::default(),
             check_button: Button::new("Check for updates", ButtonKind::Secondary),
             auto_check: Toggle::new(settings.check_updates),
             go_back,
@@ -785,13 +790,23 @@ impl SystemSettings {
 
     fn draw_device(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
+        let has_update = self.update_status.update().is_some();
+        if !has_update {
+            self.update_card = Rect::default();
+        }
+        let portrait = self.left == self.right;
+        let gap = if portrait && has_update { t.mm(4.0) } else { t.mm(SECTION_GAP_MM) };
         let mut col = Column::new(self.left, self.body);
+        if portrait && has_update {
+            self.draw_updates(cx, &mut col);
+            col.y += gap;
+        }
         col.label(cx, "Sleep screen");
         self.sleep.place(col.control(t));
         self.sleep.draw(cx);
         let note = "Show the current book’s cover while asleep. When no cover is available, use Amazon’s sleep screen.";
         col.note(cx, note, &[]);
-        col.gap(t);
+        col.y += gap;
         // The Wi-Fi switch, then its note with Wi-Fi transfer beside it.
         let row = col.take(t.mm(6.0));
         cx.line("Wi-Fi", t.body, Rect { w: row.w - Toggle::size(t).0 - t.mm(3.0), ..row }, HAlign::Left);
@@ -800,14 +815,14 @@ impl SystemSettings {
         let transfer_w = button_w(cx, &[&self.transfer.label], col.w);
         // The button clear of the switch above it, and of its touch area.
         note_beside(cx, &mut col, self.wifi_note(), &mut self.transfer, transfer_w, t.mm(2.5));
-        // Updates below, or heading the right column in landscape.
-        let mut col = if self.left == self.right {
+        // Updates below in portrait (when up to date), or heading the right column in landscape.
+        if !portrait {
+            let mut right = Column::new(self.right, self.body);
+            self.draw_updates(cx, &mut right);
+        } else if !has_update {
             col.gap(t);
-            col
-        } else {
-            Column::new(self.right, self.body)
-        };
-        self.draw_updates(cx, &mut col);
+            self.draw_updates(cx, &mut col);
+        }
     }
 
     // ---- Updates (on the Device tab) ----
@@ -818,38 +833,114 @@ impl SystemSettings {
     }
 
     /// The download checks again anyway, so with an update available the
-    /// button opens the update sheet instead of checking.
+    /// button opens the update sheet instead of checking, and the Device tab
+    /// carries the update dot.
     fn sync_check_button(&mut self) {
         self.check_button.enabled = !self.update_status.checking;
         let available = self.update_status.update().is_some();
         self.check_button.label = if available { "Update" } else { "Check for updates" }.into();
         self.check_button.kind = if available { ButtonKind::Primary } else { ButtonKind::Secondary };
+        self.tabs.dot = available.then(|| TABS.iter().position(|&t| t == Tab::Device)).flatten();
+    }
+
+    /// Framed callout at the top of Updates while an update is available.
+    fn draw_update_card(&mut self, cx: &mut DrawCx, col: &mut Column, offer: &verso_update::check::Offer) {
+        let t = cx.theme;
+        let pad_x = t.mm(3.0);
+        let pad_y = t.mm(2.2);
+        let gap_x = t.mm(3.0);
+        let btn_h = t.mm(CONTROL_MM);
+        let btn_w = button_w(cx, &["Update"], col.w - 2 * pad_x);
+        let text_w = (col.w - 2 * pad_x - btn_w - gap_x).max(0);
+        let title = format!("Verso {} is available", offer.version);
+        let now = LocalDateTime::at(update::unix_now());
+        let checked = self.update_status.state.checked.map(|at| match (LocalDateTime::at(at), now) {
+            (Some(at), Some(now)) => at.since(now),
+            _ => "earlier".into(),
+        });
+        let mut sub = format!("{} download", update::file_size(offer.download));
+        if self.update_status.state.is_skipped(&offer.version) {
+            sub.push_str(" · Skipped");
+        } else if let Some(when) = checked {
+            sub.push_str(&format!(" · Checked {when}"));
+        }
+        let title_h = cx.text.measure(&title, t.button, Some(text_w as f32)).1.ceil() as i32;
+        let sub_h = note_h(cx, &sub, text_w);
+        let text_gap = t.mm(0.6);
+        let text_h = title_h + text_gap + sub_h;
+        let card = col.take(text_h.max(btn_h) + 2 * pad_y);
+        self.update_card = card;
+        if self.update_card_press.is_down() {
+            cx.canvas.fill_rounded_rect(card, t.radius, FILL);
+            cx.hint(card, RefreshMode::Fast);
+        }
+        cx.canvas.stroke_rounded_rect(card, t.radius, t.border as f32, INK);
+        let text_x = card.x + pad_x;
+        let text_y = card.y + (card.h - text_h) / 2;
+        cx.paragraph(&title, t.button.gray(INK), Rect::new(text_x, text_y, text_w, title_h), HAlign::Left);
+        cx.paragraph(
+            &sub,
+            t.small.gray(INK2),
+            Rect::new(text_x, text_y + title_h + text_gap, text_w, sub_h),
+            HAlign::Left,
+        );
+        let btn_rect = Rect::new(card.right() - pad_x - btn_w, card.y + (card.h - btn_h) / 2, btn_w, btn_h);
+        self.check_button.place(btn_rect, t);
+        self.check_button.draw(cx);
     }
 
     /// The version and the check button, the check's note (with "Go back
     /// to …" beside it, under the check button), and the automatic check.
+    /// When an update is available, the framed callout card heads the section.
     fn draw_updates(&mut self, cx: &mut DrawCx, col: &mut Column) {
         let t = cx.theme;
-        col.label(cx, "Updates");
-        let check_w = button_w(cx, &["Check for updates", &self.go_back_button.label], col.w);
-        let (check, version) = col.control(t).split_right(check_w);
-        // The installed release, which a data-only release moves past the app's own version.
-        self.version = Rect { w: version.w - t.mm(3.0), ..version };
-        cx.line(&format!("Verso {}", self.update_status.current), t.body, self.version, HAlign::Left);
-        self.check_button.place(check, t);
-        self.check_button.draw(cx);
-        let now = LocalDateTime::at(update::unix_now());
-        let note = self.update_status.note(|at| match (LocalDateTime::at(at), now) {
-            (Some(at), Some(now)) => at.since(now),
-            _ => "earlier".into(),
-        });
-        if self.go_back.is_some() {
-            col.y += t.mm(NOTE_GAP_MM);
-            note_beside(cx, col, &note, &mut self.go_back_button, check_w, 0);
+        if let Some(offer) = self.update_status.update().cloned() {
+            self.draw_update_card(cx, col, &offer);
+            col.y += t.mm(2.0);
+            if self.go_back.is_some() {
+                let go_w = button_w(cx, &[&self.go_back_button.label], col.w);
+                let (go_rect, version) = col.control(t).split_right(go_w);
+                self.version = Rect { w: version.w - t.mm(3.0), ..version };
+                cx.line(
+                    &format!("Installed: Verso {}", self.update_status.current),
+                    t.body,
+                    self.version,
+                    HAlign::Left,
+                );
+                self.go_back_button.place(go_rect, t);
+                self.go_back_button.draw(cx);
+            } else {
+                self.version = col.take(t.mm(5.5));
+                cx.line(
+                    &format!("Installed: Verso {}", self.update_status.current),
+                    t.body,
+                    self.version,
+                    HAlign::Left,
+                );
+            }
+            col.y += t.mm(2.0);
         } else {
-            col.note(cx, &note, &[]);
+            col.label(cx, "Updates");
+            let check_w = button_w(cx, &["Check for updates", &self.go_back_button.label], col.w);
+            let (check, version) = col.control(t).split_right(check_w);
+            // The installed release, which a data-only release moves past the app's own version.
+            self.version = Rect { w: version.w - t.mm(3.0), ..version };
+            cx.line(&format!("Verso {}", self.update_status.current), t.body, self.version, HAlign::Left);
+            self.check_button.place(check, t);
+            self.check_button.draw(cx);
+            let now = LocalDateTime::at(update::unix_now());
+            let note = self.update_status.note(|at| match (LocalDateTime::at(at), now) {
+                (Some(at), Some(now)) => at.since(now),
+                _ => "earlier".into(),
+            });
+            if self.go_back.is_some() {
+                col.y += t.mm(NOTE_GAP_MM);
+                note_beside(cx, col, &note, &mut self.go_back_button, check_w, 0);
+            } else {
+                col.note(cx, &note, &[]);
+            }
+            col.y += t.mm(3.0);
         }
-        col.y += t.mm(3.0);
         let every = format!("Every {} hours, at start or wake with Wi-Fi on.", CHECK_EVERY / 3600);
         let auto = if !self.auto_check.on {
             "Off. Verso checks only when you ask."
@@ -862,7 +953,14 @@ impl SystemSettings {
     }
 
     fn updates_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
-        if self.check_button.on_gesture(g) {
+        let card_body = if self.update_card.w > 0 {
+            Rect { w: (self.check_button.rect().x - self.update_card.x).max(0), ..self.update_card }
+        } else {
+            Rect::default()
+        };
+        let button_tapped = self.check_button.on_gesture(g);
+        let card_tapped = self.update_card_press.on_gesture(g, card_body) == Some(PressEvent::Tap);
+        if button_tapped || card_tapped {
             if let Some(offer) = self.update_status.update() {
                 self.offer = Some(OfferSheet::new(cx.theme, self.screen, offer.clone()));
             } else {
@@ -1239,8 +1337,9 @@ impl Screen for SystemSettings {
             }
         }
         if self.updates.revision() != self.update_status.revision {
+            let had_dot = self.tabs.dot;
             self.refresh_update_status();
-            if self.tab == Tab::Device {
+            if self.tab == Tab::Device || self.tabs.dot != had_dot {
                 cx.redraw();
             }
         }
@@ -1561,6 +1660,33 @@ mod tests {
                 let margin = &canvas.gray_data()[(s.content.bottom() * w) as usize..];
                 assert!(margin.iter().all(|&g| g == PAPER), "{w}x{h}: {tab:?} reaches the bottom margin");
             }
+            // Device tab with an available update card and Go back button also fits.
+            s.update_status.state.available = Some(verso_update::check::Offer {
+                version: "99.0.0".parse()?,
+                released: "2026-12-01".into(),
+                notes: "Faster page turns.".into(),
+                components: vec!["app".into()],
+                download: 6_100_000,
+                unpacked: 7_000_000,
+            });
+            s.go_back = Some(("0.2.0".parse()?, "0.1.0".parse()?));
+            s.go_back_button.label = "Go back to 0.1.0".into();
+            s.sync_check_button();
+            assert_eq!(s.tabs.dot, Some(3), "Device tab carries the update dot");
+            s.tab = Tab::Device;
+            let canvas = draw(&mut s, &t, w, h);
+            let margin = &canvas.gray_data()[(s.content.bottom() * w) as usize..];
+            assert!(margin.iter().all(|&g| g == PAPER), "{w}x{h}: Device with update card reaches the bottom margin");
+            assert!(s.update_card.y == s.body, "{w}x{h}: update card sits at the top of Device");
+            // Tapping the card body opens the offer sheet.
+            let card_left = Rect::new(s.update_card.x, s.update_card.y, t.mm(10.0), s.update_card.h);
+            tap(&mut s, &t, screen, card_left);
+            assert!(s.offer.is_some(), "{w}x{h}: tapping update card opens offer sheet");
+            s.offer = None;
+            s.update_status.state.available = None;
+            s.go_back = None;
+            s.sync_check_button();
+            assert_eq!(s.tabs.dot, None);
             s.tab = Tab::Reading;
             draw(&mut s, &t, w, h);
             let (corner, koreader) = (s.corner.rect(), s.koreader.rect());
