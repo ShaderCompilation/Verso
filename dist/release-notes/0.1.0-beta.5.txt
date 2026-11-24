@@ -1,0 +1,3 @@
+Fifth closed beta of Verso.
+
+- Kindle builds now target glibc 2.20, so Verso runs on older Kindle firmware that failed to start the previous build.
