@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/verso", "crates/verso-mdns", "crates/verso-update", "crates/verso-wordforms", "crates/fbink-sys", "crates/crengine-sys", "crates/hunspell-sys"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 

@@ -1,0 +1,6 @@
+First closed beta of Verso for jailbroken Kindles (hard-float firmware 5.16.3+).
+
+- EPUB reading with bundled Literata, system and custom fonts, footnotes, book search, highlights, notes and bookmarks.
+- Calm library with Home, folder browser, search, finished books and KOReader progress and highlight import.
+- Offline StarDict dictionaries with English and Russian word forms, and built-in Wi-Fi transfer.
+- Signed in-app updates with automatic rollback, plus problem reports via Settings or KUAL (downloadable from Wi-Fi transfer → Files → Reports).
