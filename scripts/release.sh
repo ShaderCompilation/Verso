@@ -27,7 +27,8 @@ cmd_tag() {
     git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "tag $tag already exists locally"
     git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && die "tag $tag already exists on origin"
     git tag -a "$tag" -m "Verso $version"
-    git push origin master "$tag"
+    git push origin master
+    git push origin "$tag"
     echo "==> pushed $tag; GitHub Actions is building the draft release"
     echo "    watch:   gh run watch"
     echo "    publish: scripts/release.sh publish $version"
