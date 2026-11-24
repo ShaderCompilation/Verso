@@ -28,6 +28,10 @@ asleep.
 - **Where files live:** app binaries and logs in `/mnt/us/verso/`, user data in
   `/mnt/us/verso/data/`, KUAL entry in `/mnt/us/extensions/verso/`, crash and
   problem reports in `/mnt/us/verso/reports/`.
+- **First launch:** a short setup (Welcome, Library folders, tap zones, page
+  layout, KOReader import when KOReader is installed, gestures) runs over Home.
+  Every choice saves at once and can be skipped; **Settings → Advanced → Run
+  setup again** reopens it. Folders holding EPUBs are found and ticked for you.
 - **Uninstall:** delete `/mnt/us/verso` and `/mnt/us/extensions/verso` over USB.
   Verso never touches system files or your books.
 
@@ -330,7 +334,7 @@ via **Check for updates**.
 - **Library:** library folders, dictionaries, KOReader bulk import.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
   a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.
-- **Advanced:** text shaping, **Run setup again** and **Create problem
+- **Advanced:** text shaping, **Run setup again** (first-launch setup) and **Create problem
   report**, plus **Developer** options (hidden until you tap
   the version line in **Device** five times). Developer mode exposes the
   built-in **SSH server** (Dropbear + `sftp-server`, port 2222, key-only login
