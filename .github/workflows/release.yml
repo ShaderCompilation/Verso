@@ -15,17 +15,22 @@ permissions:
   contents: write
 
 jobs:
-  package:
-    name: Build & package draft release
+  preflight:
+    name: Preflight checks
     runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.verify.outputs.version }}
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - name: Skip if already published
+      - name: Check if already published
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           if [ "$(gh release view "$TAG" -R "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null || true)" = "false" ]; then
             echo "Release $TAG is already published; skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -38,37 +43,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-          submodules: recursive
           fetch-depth: 1
 
-      - name: Install Rust toolchain
-        if: steps.check.outputs.skip != 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-          targets: armv7-unknown-linux-gnueabihf
-
-      - name: Install Zig
-        if: steps.check.outputs.skip != 'true'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.1
-
-      - name: Install cargo-zigbuild
-        if: steps.check.outputs.skip != 'true'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.24.1
-
-      - name: Cache Cargo
-        if: steps.check.outputs.skip != 'true'
-        uses: Swatinem/rust-cache@v2
-
       - name: Verify tag matches Cargo.toml and release notes exist
+        id: verify
         if: steps.check.outputs.skip != 'true'
         run: |
-          VERSION="$(cargo pkgid -p verso | sed 's/.*[#@]//')"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          VERSION="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          [ -n "$VERSION" ] || { echo "Could not read workspace version from Cargo.toml" >&2; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if [ "$TAG" != "v$VERSION" ]; then
             echo "Tag $TAG does not match Cargo.toml version $VERSION" >&2
             exit 1
@@ -79,34 +62,159 @@ jobs:
             exit 1
           fi
 
+  validate:
+    name: Desktop tests, lint & format
+    needs: preflight
+    if: needs.preflight.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
+          save-if: true
+
       - name: Validate
-        if: steps.check.outputs.skip != 'true'
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
-          scripts/test-launcher.sh
+
+  launcher:
+    name: Launcher tests
+    needs: preflight
+    if: needs.preflight.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Launcher tests
+        run: scripts/test-launcher.sh
+
+  package:
+    name: Build & package Kindle release
+    needs: preflight
+    if: needs.preflight.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    env:
+      ZIG_VERSION: 0.17.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}
+          save-if: true
+
+      - name: Compute SSH cache key
+        id: ssh-key
+        run: |
+          KEY="$({
+            git -C third_party/dropbear rev-parse HEAD
+            git -C third_party/openssh-portable rev-parse HEAD
+            cat scripts/ssh/localoptions.h scripts/build-ssh.sh
+            echo "$ZIG_VERSION"
+          } | sha256sum | cut -d' ' -f1)"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Kindle SSH binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/kindle-ssh/bin
+            target/kindle-ssh/.stamp
+          key: kindle-ssh-${{ steps.ssh-key.outputs.key }}
+
+      - name: Cache Russian word-form pack
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/wordforms/ru.vwf
+            target/wordforms/.stamp
+          key: wordforms-${{ hashFiles('assets/wordforms/opencorpora/dict.opcorpora.xml.bz2', 'scripts/build-wordforms.sh', 'crates/verso-wordforms/**') }}
+          restore-keys: wordforms-
 
       - name: Package release
-        if: steps.check.outputs.skip != 'true'
         run: scripts/package.sh
 
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: target/package/${{ needs.preflight.outputs.version }}/*
+          retention-days: 1
+
+  draft-release:
+    name: Create draft GitHub Release
+    needs: [preflight, validate, launcher, package]
+    if: needs.preflight.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.preflight.outputs.tag }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: release-out
+
       - name: Create or update draft GitHub Release
-        if: steps.check.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          OUT="target/package/$VERSION"
           NOTES="dist/release-notes/$VERSION.txt"
           if STATE="$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
             if [ "$STATE" != "true" ]; then
               echo "Release $TAG is already published; refusing to overwrite." >&2
               exit 1
             fi
-            gh release upload "$TAG" "$OUT"/* --clobber
+            gh release upload "$TAG" release-out/* --clobber
             gh release edit "$TAG" --title "Verso $VERSION" --notes-file "$NOTES"
           else
-            gh release create "$TAG" "$OUT"/* \
+            gh release create "$TAG" release-out/* \
               --draft \
               --title "Verso $VERSION" \
               --notes-file "$NOTES"

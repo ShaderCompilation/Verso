@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Test, lint, format & launcher
+  rust:
+    name: Test, lint & format
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,6 +27,8 @@ jobs:
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
 
       - name: Check formatting
         run: cargo fmt --check
@@ -36,6 +38,15 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  launcher:
+    name: Launcher tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Launcher tests
         run: scripts/test-launcher.sh
