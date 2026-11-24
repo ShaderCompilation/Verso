@@ -95,7 +95,7 @@ fn native_cache_entry(manifest: &Path, tp: &Path, arm: bool) -> Option<PathBuf> 
     let debug = env::var("DEBUG").ok()?;
 
     let mut h = Fnv128::new();
-    h.field(b"crengine-sys-v1");
+    h.field(b"crengine-sys-v2");
     h.field(target.as_bytes());
     h.field(opt.as_bytes());
     h.field(debug.as_bytes());
@@ -107,7 +107,11 @@ fn native_cache_entry(manifest: &Path, tp: &Path, arm: bool) -> Option<PathBuf> 
     for cpp in [false, true] {
         let mut b = cc::Build::new();
         b.cpp(cpp);
-        let out = b.get_compiler().to_command().arg("--version").output().ok()?;
+        let compiler = b.get_compiler();
+        if let Some(name) = compiler.path().file_name() {
+            h.field(name.to_string_lossy().as_bytes());
+        }
+        let out = compiler.to_command().arg("--version").output().ok()?;
         if !out.status.success() {
             return None;
         }

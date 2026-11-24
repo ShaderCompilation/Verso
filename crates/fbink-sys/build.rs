@@ -67,7 +67,7 @@ fn native_cache_entry(manifest: &Path, fbink: &Path, version: &str) -> Option<Pa
     let debug = env::var("DEBUG").ok()?;
 
     let mut h = Fnv128::new();
-    h.field(b"fbink-sys-v1");
+    h.field(b"fbink-sys-v2");
     h.field(target.as_bytes());
     h.field(opt.as_bytes());
     h.field(debug.as_bytes());
@@ -77,7 +77,11 @@ fn native_cache_entry(manifest: &Path, fbink: &Path, version: &str) -> Option<Pa
         h.field(var.as_bytes());
         h.field(env::var(var).unwrap_or_default().as_bytes());
     }
-    let ver = cc::Build::new().get_compiler().to_command().arg("--version").output().ok()?;
+    let compiler = cc::Build::new().get_compiler();
+    if let Some(name) = compiler.path().file_name() {
+        h.field(name.to_string_lossy().as_bytes());
+    }
+    let ver = compiler.to_command().arg("--version").output().ok()?;
     if !ver.status.success() {
         return None;
     }

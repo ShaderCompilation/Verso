@@ -80,7 +80,7 @@ fn native_cache_entry(manifest: &Path, hunspell: &Path, arm: bool) -> Option<Pat
     let debug = env::var("DEBUG").ok()?;
 
     let mut h = Fnv128::new();
-    h.field(b"hunspell-sys-v1");
+    h.field(b"hunspell-sys-v2");
     h.field(target.as_bytes());
     h.field(opt.as_bytes());
     h.field(debug.as_bytes());
@@ -91,7 +91,11 @@ fn native_cache_entry(manifest: &Path, hunspell: &Path, arm: bool) -> Option<Pat
     }
     let mut b = cc::Build::new();
     b.cpp(true);
-    let ver = b.get_compiler().to_command().arg("--version").output().ok()?;
+    let compiler = b.get_compiler();
+    if let Some(name) = compiler.path().file_name() {
+        h.field(name.to_string_lossy().as_bytes());
+    }
+    let ver = compiler.to_command().arg("--version").output().ok()?;
     if !ver.status.success() {
         return None;
     }

@@ -200,6 +200,7 @@ jobs:
               third_party/harfbuzz third_party/hunspell third_party/libjpeg-turbo \
               third_party/libpng third_party/libunibreak third_party/utf8proc \
               third_party/xxhash third_party/zlib
+            cat .cargo/config.toml
             echo "$ZIG_VERSION"
           } | sha256sum | cut -d' ' -f1)"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
@@ -213,7 +214,7 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}
+          shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}-glibc2.20
           save-if: true
 
       - name: Compute SSH cache key

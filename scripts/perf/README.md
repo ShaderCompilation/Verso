@@ -9,8 +9,8 @@ when a run ends. Runs use isolated state under `/mnt/us/verso/*-check`.
   injects touches (`probe`). Build both with zig:
 
   ```sh
-  zig cc -target arm-linux-gnueabihf.2.35 -O2 -DPRELOAD -shared -fPIC scripts/perf/probe.c -o /tmp/probe.so -ldl
-  zig cc -target arm-linux-gnueabihf.2.35 -O2 scripts/perf/probe.c -o /tmp/probe
+  zig cc -target arm-linux-gnueabihf.2.20 -O2 -DPRELOAD -shared -fPIC scripts/perf/probe.c -o /tmp/probe.so -ldl
+  zig cc -target arm-linux-gnueabihf.2.20 -O2 scripts/perf/probe.c -o /tmp/probe
   ```
 
 - `redraw.py`: page-turn runs (24 turns, isolated state), also the helper module

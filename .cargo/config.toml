@@ -11,4 +11,4 @@ rustflags = ["-C", "target-cpu=cortex-a9"]
 #   cargo kindle-build  -> release build for the Kindle (needs zig + cargo-zigbuild)
 [alias]
 sim = "run -p verso"
-kindle-build = "zigbuild -p verso -p verso-mdns --release --no-default-features --features verso/kindle --target armv7-unknown-linux-gnueabihf.2.35"
+kindle-build = "zigbuild -p verso -p verso-mdns --release --no-default-features --features verso/kindle --target armv7-unknown-linux-gnueabihf.2.20"

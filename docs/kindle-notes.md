@@ -9,10 +9,11 @@ behaviour on other models is **(to verify)**.
 
 ## 1. Target ABI, firmware and models
 
-- **Build target:** `armv7-unknown-linux-gnueabihf`, glibc **2.35**,
-  `-C target-cpu=cortex-a9` (`.cargo/config.toml` and `crengine-sys`
-  `-mcpu=cortex-a9`). Cortex-A9 enables NEON/VFPv3-D32 without emitting VFPv4
-  or hardware integer division that i.MX6SLL models (PW4, Basic 3) lack.
+- **Build target:** `armv7-unknown-linux-gnueabihf`, glibc **2.20** (floor for
+  i.MX armhf models like Oasis 3), `-C target-cpu=cortex-a9` (`.cargo/config.toml`
+  and `crengine-sys` `-mcpu=cortex-a9`). Cortex-A9 enables NEON/VFPv3-D32
+  without emitting VFPv4 or hardware integer division that i.MX6SLL models
+  (PW4, Basic 3) lack.
 - **Hard-float firmware only (5.16.3+):** requires `/lib/ld-linux-armhf.so.3`.
   `verso.sh` checks for it before pausing the Kindle UI; if absent, it prints
   via `eips` (avoiding apostrophes, which `eips` cannot draw), saves a problem
