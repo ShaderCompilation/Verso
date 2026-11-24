@@ -168,8 +168,8 @@ EOF
 }
 
 # The files of version 1 (0.1.0) or 2 (0.2.0) as installed under $1. Version
-# 2 changes the app, the launcher, a font and the KUAL menu, removes a font,
-# adds one, and turns the hyph folder into a file.
+# 2 changes the app, the launcher, a font, the KUAL menu and the library
+# scriptlet, removes a font, adds one, and turns the hyph folder into a file.
 install_files() {
     d="$1"
     mkdir -p "${d}/verso/fonts" "${d}/verso/cre" "${d}/verso/tools" "${d}/extensions/verso" "${d}/documents"
@@ -188,6 +188,7 @@ install_files() {
         mkdir -p "${d}/verso/cre/hyph"
         echo pattern >"${d}/verso/cre/hyph/a.pat"
         echo menu1 >"${d}/extensions/verso/menu.json"
+        echo scriptlet1 >"${d}/documents/Verso.sh"
         echo "installed 0.1.0" >"${d}/verso/installed.json"
     else
         make_app 0.2.0 >"${d}/verso/verso"
@@ -196,18 +197,20 @@ install_files() {
         echo C2 >"${d}/verso/fonts/C.ttf"
         echo hyph2 >"${d}/verso/cre/hyph"
         echo menu2 >"${d}/extensions/verso/menu.json"
+        echo scriptlet2 >"${d}/documents/Verso.sh"
         echo "installed 0.2.0" >"${d}/verso/installed.json"
     fi
-    chmod 755 "${d}/verso/verso" "${d}/verso/verso.sh"
+    chmod 755 "${d}/verso/verso" "${d}/verso/verso.sh" "${d}/documents/Verso.sh"
 }
 
 # Version 2, staged the way Verso stages it (crates/verso-update/src/stage.rs).
 stage_v2() {
     s="${U}/staged"
-    mkdir -p "${s}/app" "${s}/launcher" "${s}/fonts" "${s}/crengine-data" "${s}/kual"
+    mkdir -p "${s}/app" "${s}/launcher" "${s}/fonts" "${s}/crengine-data" "${s}/kual" "${s}/scriptlet"
     make_app 0.2.0 >"${s}/app/verso"
     cp "${W}/launcher-2.sh" "${s}/launcher/verso.sh"
-    chmod 755 "${s}/app/verso" "${s}/launcher/verso.sh"
+    echo scriptlet2 >"${s}/scriptlet/Verso.sh"
+    chmod 755 "${s}/app/verso" "${s}/launcher/verso.sh" "${s}/scriptlet/Verso.sh"
     echo A2 >"${s}/fonts/A.ttf"
     echo C2 >"${s}/fonts/C.ttf"
     echo hyph2 >"${s}/crengine-data/hyph"
@@ -223,6 +226,7 @@ stage_v2() {
         printf 'install\t%s/fonts/C.ttf\tverso/fonts/C.ttf\n' "${p}"
         printf 'install\t%s/crengine-data/hyph\tverso/cre/hyph\n' "${p}"
         printf 'replace\t%s/kual/menu.json\textensions/verso/menu.json\n' "${p}"
+        printf 'replace\t%s/scriptlet/Verso.sh\tdocuments/Verso.sh\n' "${p}"
         printf 'install\t%s/installed.json\tverso/installed.json\n' "${p}"
     } >"${s}/plan.txt"
     echo '{"format":1}' >"${s}/staged.json"
@@ -400,11 +404,12 @@ snapshot "${R}" >"${W}/expect-1.snap"
 rm -rf "${W}/v2" && install_files "${W}/v2" 2
 snapshot "${W}/v2" >"${W}/expect-2.snap"
 (
-    mkdir -p "${W}/prev/verso/fonts" "${W}/prev/verso/cre/hyph" "${W}/prev/extensions/verso"
+    mkdir -p "${W}/prev/verso/fonts" "${W}/prev/verso/cre/hyph" "${W}/prev/extensions/verso" "${W}/prev/documents"
     cd "${W}/prev" || exit 1
     make_app 0.1.0 >verso/verso
     cp "${W}/launcher-1.sh" verso/verso.sh
-    chmod 755 verso/verso verso/verso.sh
+    echo scriptlet1 >documents/Verso.sh
+    chmod 755 verso/verso verso/verso.sh documents/Verso.sh
     echo A1 >verso/fonts/A.ttf
     echo B1 >verso/fonts/B.ttf
     echo pattern >verso/cre/hyph/a.pat
@@ -573,6 +578,19 @@ no_update_state
 absent "${U}/previous"
 rollback_says '"from":"0.2.0"' '"to":"0.1.0"' '"reason":"exit"' '"status":139' 'fake Verso 0.2.0 running'
 ui_restored_once
+
+begin "rollback removes first-time scriptlet addition"
+fresh
+rm -f "${R}/documents/Verso.sh"
+echo stage >"${W}/queue-0.1.0"
+echo crash >"${W}/default-0.2.0"
+launch
+runs_are "0.1.0 0.2.0 0.1.0"
+absent "${R}/documents/Verso.sh" "${U}/previous"
+no_update_state
+rollback_says '"from":"0.2.0"' '"to":"0.1.0"' '"reason":"exit"'
+[ "$(cat "${R}/verso/installed.json")" = "installed 0.1.0" ] || fail "installed.json wasn't restored"
+present "${R}/documents/book.epub"
 
 begin "panic"
 fresh
@@ -743,8 +761,8 @@ sweep_step() {
     fresh
     ${setup}
     COUNT_STEPS=1 launch "${n}"
-    # KUAL can always start the launcher, which finishes the job.
-    present "${R}/verso/verso.sh" "${R}/extensions/verso/menu.json"
+    # KUAL and the library scriptlet can always start the launcher, which finishes the job.
+    present "${R}/verso/verso.sh" "${R}/extensions/verso/menu.json" "${R}/documents/Verso.sh"
     reboot
     launch
     ${verify}

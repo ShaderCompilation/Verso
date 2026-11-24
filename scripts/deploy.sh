@@ -14,6 +14,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${VERSO_KINDLE_HOST:-kindle}"
 APP=/mnt/us/verso
 EXT=/mnt/us/extensions/verso
+DOCS=/mnt/us/documents
 PIDFILE=/tmp/verso-launcher.pid
 
 RUN=yes
@@ -55,7 +56,7 @@ echo "Verso did not stop; deployment cancelled before copying files" >&2
 exit 1
 EOF
 
-echo "==> copying to $HOST:$APP and $EXT"
+echo "==> copying to $HOST:$APP, $EXT and $DOCS"
 # Each component's hash on the device, from its installed.json (written last
 # by a deploy, an update or the release zip), read before it is removed. An
 # update replaces components too, so this, not a marker of our own, says
@@ -73,9 +74,10 @@ device_hash_of() { awk -v id="$1" '$1 == id { print $2 }' <<<"$DEVICE_HASHES"; }
 # start, and an earlier update's previous files, trial or journal would "go
 # back" over it. A development install starts clean.
 U=$APP/update
-ssh "$HOST" "mkdir -p $APP $EXT && rm -f $APP/installed.json $APP/data/cre/.version $APP/wordforms/.version &&
+ssh "$HOST" "mkdir -p $APP $EXT $DOCS && rm -f $APP/installed.json $APP/data/cre/.version $APP/wordforms/.version &&
     rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json $U/rollback.json.new $U/journal-*"
 tar -C "$STAGE/kual" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $EXT"
+ssh "$HOST" "cat > $APP/Verso.sh.new && chmod 755 $APP/Verso.sh.new && mv -f $APP/Verso.sh.new $DOCS/Verso.sh" <"$STAGE/scriptlet/Verso.sh"
 tar -C "$STAGE/launcher" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP"
 # crengine's style sheets and hyphenation patterns, only when they changed.
 if [ "$(device_hash_of crengine-data)" != "$(hash_of crengine-data)" ]; then
@@ -110,7 +112,7 @@ ssh "$HOST" "cat > $APP/verso.new && chmod 755 $APP/verso.new && mv -f $APP/vers
 ssh "$HOST" "cat > $APP/installed.json.new && mv -f $APP/installed.json.new $APP/installed.json" <"$INSTALLED"
 
 if [ "$RUN" = no ]; then
-    echo "==> copied; start it from KUAL → Verso → Start Verso"
+    echo "==> copied; start it from the Kindle library (Verso) or KUAL → Verso → Start Verso"
     exit 0
 fi
 

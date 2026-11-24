@@ -87,7 +87,7 @@ impl OfferSheet {
         skip.place(Rect::new(c.right() - w, bottom, w, t.button_h), t);
         let mut update = Button::new("Update", ButtonKind::Primary);
         update.place(Rect::new(c.x, bottom - t.mm(3.0) - t.button_h, c.w, t.button_h), t);
-        let blocked = (!update::can_install()).then_some("Start Verso from KUAL to install updates.");
+        let blocked = (!update::can_install()).then_some("Start Verso normally to install updates.");
         update.enabled = blocked.is_none();
         // Room for two lines: the meta line splits on 800x600.
         let meta = Rect { h: t.mm(7.0), ..c };

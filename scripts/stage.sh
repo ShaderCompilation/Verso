@@ -34,6 +34,7 @@ copy launcher dist/kindle/verso/tools/report.sh tools/report.sh
 copy launcher scripts/collect-diagnostics.sh tools/collect-diagnostics.sh
 copy kual dist/kindle/extensions/verso/config.xml
 copy kual dist/kindle/extensions/verso/menu.json
+copy scriptlet dist/kindle/documents/Verso.sh
 copy tools "$KINDLE/verso-mdns"
 for f in dropbear sftp-server LICENSE-dropbear LICENCE-openssh; do
     copy tools "$SSH/$f"

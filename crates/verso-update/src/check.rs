@@ -285,17 +285,19 @@ mod tests {
     #[test]
     fn offers_only_changed_components() {
         let old = release("0.2.0", &[("app", "1"), ("fonts", "1"), ("wordforms-ru", "1")]);
-        let new = release("0.3.0", &[("app", "2"), ("fonts", "1"), ("wordforms-ru", "2")]);
+        let new = release("0.3.0", &[("app", "2"), ("fonts", "1"), ("wordforms-ru", "2"), ("scriptlet", "1")]);
         let installed = installed_from(&old);
+        // Existing installed.json without a newly added required component
+        // (`scriptlet`) is offered it alongside changed components.
         let o = offer(evaluate(&new, Some(&installed), &v("0.2.0"), None));
         assert_eq!(o.version, v("0.3.0"));
-        assert_eq!(o.components, ["app", "wordforms-ru"]);
-        assert_eq!(o.download, 100 + 300);
-        assert_eq!(o.unpacked, 4000 + 13000);
+        assert_eq!(o.components, ["app", "wordforms-ru", "scriptlet"]);
+        assert_eq!(o.download, 100 + 300 + 400);
+        assert_eq!(o.unpacked, 4000 + 13000 + 10000);
         assert_eq!(o.notes, "Verso 0.3.0");
         // No installed.json: every required component.
         let o = offer(evaluate(&new, None, &v("0.2.0"), None));
-        assert_eq!(o.components, ["app", "fonts", "wordforms-ru"]);
+        assert_eq!(o.components, ["app", "fonts", "wordforms-ru", "scriptlet"]);
     }
 
     #[test]

@@ -17,6 +17,7 @@ fn specs() -> Vec<ComponentSpec> {
         r#"[
             {"id": "app", "install": "verso", "required": true},
             {"id": "launcher", "install": "verso", "required": true},
+            {"id": "scriptlet", "install": "documents", "required": true},
             {"id": "fonts", "install": "verso/fonts", "required": true},
             {"id": "extra", "install": "verso/extra", "required": false, "description": "Optional"}
         ]"#,
@@ -34,6 +35,7 @@ fn stage(root: &Path) -> PathBuf {
     let stage = root.join("stage");
     write(&stage.join("app/verso"), b"\x7fELF app", 0o775);
     write(&stage.join("launcher/verso.sh"), b"#!/bin/sh\n", 0o700);
+    write(&stage.join("scriptlet/Verso.sh"), b"#!/bin/sh\n# Name: Verso\n", 0o755);
     write(&stage.join("fonts/Literata-Regular.ttf"), &[7; 5000], 0o600);
     write(&stage.join("fonts/licences/OFL.txt"), b"SIL Open Font License", 0o644);
     write(&stage.join("extra/data.bin"), b"extra", 0o644);
@@ -85,6 +87,7 @@ fn packs_a_release() {
             "fonts-0.3.0.tar.gz",
             "latest.json",
             "launcher-0.3.0.tar.gz",
+            "scriptlet-0.3.0.tar.gz",
             "verso-0.3.0.zip"
         ]
     );
@@ -97,6 +100,7 @@ fn packs_a_release() {
     );
     assert_eq!(m.component("app").unwrap().files[0].mode, MODE_EXEC);
     assert_eq!(m.component("launcher").unwrap().files[0].mode, MODE_EXEC);
+    assert_eq!(m.component("scriptlet").unwrap().files[0].mode, MODE_EXEC);
     assert_eq!(fonts.files[0].mode, MODE_FILE);
 
     // Every archive holds exactly its component's files.
@@ -121,10 +125,12 @@ fn zip_installs_required_components() {
     assert_eq!(
         names,
         [
+            "documents/",
             "verso/",
             "verso/fonts/",
             "verso/fonts/licences/",
             "verso/update/",
+            "documents/Verso.sh",
             "verso/fonts/Literata-Regular.ttf",
             "verso/fonts/licences/OFL.txt",
             "verso/installed.json",
@@ -133,6 +139,7 @@ fn zip_installs_required_components() {
             "verso/verso.sh"
         ]
     );
+    assert_eq!(zip.by_name("documents/Verso.sh").unwrap().unix_mode().unwrap() & 0o777, 0o755);
     assert_eq!(zip.by_name("verso/verso").unwrap().unix_mode().unwrap() & 0o777, 0o755);
     assert_eq!(zip.by_name("verso/installed.json").unwrap().unix_mode().unwrap() & 0o777, 0o644);
     let mut json = Vec::new();
@@ -141,7 +148,10 @@ fn zip_installs_required_components() {
     assert!(!installed.dev);
     assert_eq!(installed.version, m.version);
     // The optional component isn't installed by the zip.
-    assert_eq!(installed.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["app", "launcher", "fonts"]);
+    assert_eq!(
+        installed.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        ["app", "launcher", "scriptlet", "fonts"]
+    );
 }
 
 #[test]

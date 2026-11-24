@@ -158,9 +158,9 @@ impl Staged {
 /// The plan format the launcher reads; it refuses others.
 pub const PLAN_FORMAT: u32 = 1;
 
-/// The components whose files start Verso: the launcher, and the KUAL menu
-/// that runs it. Their paths must never be empty, even for a moment.
-pub const ENTRY_COMPONENTS: [&str; 2] = ["launcher", "kual"];
+/// The components whose files start Verso: the launcher, the KUAL menu
+/// and the library scriptlet. Their paths must never be empty, even for a moment.
+pub const ENTRY_COMPONENTS: [&str; 3] = ["launcher", "kual", "scriptlet"];
 
 /// Writes `name` in `dir` through a synced temporary file and a rename.
 fn write_synced(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
@@ -516,17 +516,25 @@ mod tests {
                 comp("fonts", "verso/fonts2", &["A.ttf", "OFL.txt"]),
                 comp("data", "verso/data", &["x.bin"]),
                 comp("launcher", "verso", &["verso.sh"]),
+                comp("scriptlet", "documents", &["Verso.sh"]),
             ],
         );
-        let staged = Staged::plan(&new, &["app".into(), "fonts".into(), "launcher".into()], Some(&installed));
+        let staged = Staged::plan(
+            &new,
+            &["app".into(), "fonts".into(), "launcher".into(), "scriptlet".into()],
+            Some(&installed),
+        );
         assert_eq!(staged.version.to_string(), "0.3.0");
-        assert_eq!(staged.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["app", "fonts", "launcher"]);
+        assert_eq!(
+            staged.components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["app", "fonts", "launcher", "scriptlet"]
+        );
         assert_eq!(staged.remove, ["verso/fonts/A.ttf", "verso/fonts/B.ttf", "verso/fonts/OFL.txt"]);
         let after = &staged.installed;
         assert!(!after.dev);
         assert_eq!(after.version.to_string(), "0.3.0");
         let ids: Vec<&str> = after.components.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["app", "fonts", "data", "launcher", "gone"]);
+        assert_eq!(ids, ["app", "fonts", "data", "launcher", "scriptlet", "gone"]);
         assert_eq!(after.component("fonts").unwrap().install, "verso/fonts2");
         assert_eq!(after.component("data").unwrap(), installed.component("data").unwrap(), "unchanged stays");
         // data's moved.bin is still listed by the old data record, and now
@@ -545,13 +553,14 @@ mod tests {
              install\tverso/update/staged/fonts/A.ttf\tverso/fonts2/A.ttf\n\
              install\tverso/update/staged/fonts/OFL.txt\tverso/fonts2/OFL.txt\n\
              replace\tverso/update/staged/launcher/verso.sh\tverso/verso.sh\n\
+             replace\tverso/update/staged/scriptlet/Verso.sh\tdocuments/Verso.sh\n\
              install\tverso/update/staged/installed.json\tverso/installed.json\n"
         );
 
         // Nothing installed: everything staged, nothing removed.
         let fresh = Staged::plan(&new, &ids_of(&new), None);
         assert!(fresh.remove.is_empty());
-        assert_eq!(fresh.installed.components.len(), 4);
+        assert_eq!(fresh.installed.components.len(), 5);
         assert!(fresh.plan_text().starts_with("verso-plan\t1\nversion\t0.3.0\ninstall\t"), "no from line");
     }
 
