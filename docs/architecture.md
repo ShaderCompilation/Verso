@@ -173,7 +173,7 @@ support are checked once per run).
 <data>/
   settings.json                Global Settings (field-by-field fallback on parse error)
   library.json                 LibraryIndex (v1): book paths, ids, stamps, metadata, covers
-  home.json                    Derived Home summary (v3, ≤64 KiB)
+  home.json                    Derived Home summary (v4, ≤64 KiB)
   opened.json                  Derived opened-order ranks for folder previews (≤256 KiB)
   library-navigation.json      Saved Library folder and page
   reading-speed.json           Global seed reading speed (chars/sec)

@@ -21,15 +21,14 @@ for i, name in enumerate(names):
     shutil.copyfile(fixtures / sources[i % len(sources)], library / f"{name}.epub")
 
 
-def run(state, png, *steps, small=False, landscape=False):
+def run(state, png, *steps, small=False, landscape=False, books=library):
     size = ((600, 800), 167) if small else ((1696, 1272), 300) if landscape else None
-    sim.run(png, steps, state, library, size=size, quiet=False)
+    sim.run(png, steps, state, books, size=size, quiet=False)
 
 
 def capture(name, history, small=False, landscape=False):
     """history: list of (file name, last_opened, flags) applied to book records."""
-    state = out / "state" / name
-    state.mkdir(parents=True)
+    state = sim.state(out / "state" / name)
     run(state, out / f"{name}-scan.png", small=small, landscape=landscape)  # Index and covers only.
     index = json.loads((state / "library.json").read_text())
     ids = {Path(b["path"]).stem: b["id"] for b in index["books"]}
@@ -52,6 +51,14 @@ capture("populated-small", populated, small=True)
 capture("resume-only", [("Quiet Harbour", 1, ())])
 capture("recents-only", [("Quiet Harbour", 3, ("finished",)), ("The Long Way", 2, ("hidden",))])
 capture("empty", [])
+# No books, with an empty folder that the Library card still counts.
+(out / "fixtures/None/Empty").mkdir(parents=True)
+for name, kind in [("no-books", {}), ("no-books-landscape", {"landscape": True}), ("no-books-small", {"small": True})]:
+    state = sim.state(out / "state" / name, out / "fixtures/None")
+    run(state, out / f"{name}.png", books=None, **kind)
+# Its buttons: Wi-Fi transfer, and Settings on the library folders.
+state = out / "state/no-books"
+run(state, out / "no-books-folders.png", *sim.tap((636, 948)), books=None)
 # Tap the bottom Library card from Home to open Library.
 state = out / "state/populated"
 run(state, out / "populated-library.png", *sim.tap(sim.library_card_center((1272, 1696), 300)))

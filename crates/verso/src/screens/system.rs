@@ -397,6 +397,13 @@ impl SystemSettings {
         self
     }
 
+    /// Settings opened to choose library folders.
+    pub fn on_library_tab(mut self) -> Self {
+        self.tab = Tab::Library;
+        self.tabs.selected = TABS.iter().position(|&t| t == Tab::Library).unwrap_or(0);
+        self
+    }
+
     // ---- Reading ----
 
     fn save(&mut self, cx: &mut EventCx, what: &str, change: impl FnOnce(&mut Settings)) -> bool {

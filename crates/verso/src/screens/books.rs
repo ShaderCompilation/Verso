@@ -224,6 +224,12 @@ pub struct Books {
     home_divider_y: Option<i32>,
     library_card: Rect,
     library_card_press: Press,
+    /// Where Home's message goes, and the two ways to get books under it.
+    home_prompt: Rect,
+    home_transfer: Button,
+    home_folders: Button,
+    /// Home's message and Library subtitle as last drawn.
+    drawn_home: Option<(Option<HomeMessage>, String)>,
     header: Rect,
     menu: Option<(Target, PopupMenu)>,
     name_sheet: Option<NameSheet>,
@@ -246,6 +252,8 @@ pub struct Books {
     pending: Option<Snapshot>,
     scanning: bool,
     working: bool,
+    /// The folders of the last finished scan (`LibraryWorker::scanned`).
+    scanned: Option<Vec<PathBuf>>,
     /// User tapped Refresh; toast once the scan completes.
     manual_rescan: bool,
     errors: Vec<String>,
@@ -415,6 +423,10 @@ impl Books {
             home_divider_y: None,
             library_card: Rect::default(),
             library_card_press: Press::default(),
+            home_prompt: Rect::default(),
+            home_transfer: Button::new("Send books over Wi-Fi", ButtonKind::Primary).with_icon(Icon::Wifi),
+            home_folders: Button::new("Choose folders", ButtonKind::Secondary).with_icon(Icon::Folder),
+            drawn_home: None,
             header: Rect::default(),
             menu: None,
             name_sheet: None,
@@ -432,6 +444,7 @@ impl Books {
             pending: None,
             scanning: true,
             working: true,
+            scanned: None,
             manual_rescan: false,
             errors: Vec::new(),
             thumbnails,
@@ -480,12 +493,46 @@ impl Books {
     }
     /// Subtitle for Home's Library card from cached counts, without touching the index.
     fn library_card_subtitle(&self) -> String {
-        if self.home.complete || self.home.library_folders > 0 || self.home.library_books > 0 {
+        if self.home.library_folders > 0 || self.home.library_books > 0 {
             smart_counts(self.home.library_folders, self.home.library_books)
-        } else if self.scanning {
+        } else if self.scanning || self.home_message() == Some(HomeMessage::Finding) {
             "Scanning…".into()
         } else {
             "Empty".into()
+        }
+    }
+    /// What Home says when it has no book to show. The worker marks the Home
+    /// of an unscanned, empty index complete, and the Library counts include
+    /// empty folders: only a finished scan of these folders says there are no
+    /// books.
+    fn home_message(&self) -> Option<HomeMessage> {
+        if self.continue_id.is_some() || !self.books.is_empty() {
+            return None;
+        }
+        if !self.home.books.is_empty() {
+            return Some(HomeMessage::OpenLibrary);
+        }
+        // Building Home failed: nothing is known either way.
+        if !self.home.complete && !self.scanning {
+            return Some(HomeMessage::OpenLibrary);
+        }
+        let scanned = !self.scanning && self.scanned.as_ref() == Some(&self.roots);
+        let unapplied = self.changes.last().is_some_and(|(revision, _)| *revision > self.worker_home_revision);
+        Some(if scanned && self.pending_home.is_none() && !unapplied {
+            HomeMessage::NoBooks
+        } else {
+            HomeMessage::Finding
+        })
+    }
+    fn home_status(&self) -> (Option<HomeMessage>, String) {
+        (self.home_message(), self.library_card_subtitle())
+    }
+    /// Scan results change Home's message and subtitle without changing its
+    /// books.
+    fn redraw_home_status(&self, cx: &mut EventCx) {
+        if self.is_home() && self.reader.is_none() && self.drawn_home.as_ref().is_some_and(|d| *d != self.home_status())
+        {
+            cx.redraw();
         }
     }
     /// `New folder` is shown inside any folder during normal browsing and
@@ -692,6 +739,15 @@ impl Books {
         let header_h = t.mm(4.5);
         let header_gap = t.mm(if narrow || short { 2.0 } else { 2.7 });
         let recent_labels_h = t.mm(HOME_RECENT_LABELS_MM);
+
+        let prompt_top = t.top_bar + t.mm(4.0);
+        self.home_prompt = Rect::new(t.margin, prompt_top, width, (notice_y - prompt_top).max(t.target));
+        let button_w = width.min(t.mm(70.0));
+        let button = Rect::new(self.screen.w / 2 - button_w / 2, 0, button_w, t.button_h);
+        let block_h = t.mm(HOME_PROMPT_MM) + 2 * t.button_h + t.mm(2.0);
+        let button_y = self.home_prompt.center().y - block_h / 2 + t.mm(HOME_PROMPT_MM);
+        self.home_transfer.place(Rect { y: button_y, ..button }, t);
+        self.home_folders.place(Rect { y: button_y + t.button_h + t.mm(2.0), ..button }, t);
 
         if landscape && self.continue_id.is_some() {
             // Continue reading on the left, Recent books + reserved notice on
@@ -1118,6 +1174,7 @@ impl Books {
                 cx.redraw();
             }
         }
+        self.redraw_home_status(cx);
         // Retain only the newest index while Home is visible. Do not prepare it.
         if self.is_home() {
             return;
@@ -1978,10 +2035,31 @@ impl Books {
     }
 }
 const HOME_RECENT_LABELS_MM: f32 = 8.0;
+/// The no-books line above its buttons, which it is centred over.
+const HOME_PROMPT_MM: f32 = 16.0;
 const LIBRARY_BOOK_LABELS_MM: f32 = 8.0;
 const LIBRARY_HEADER_TOP_MM: f32 = 2.2;
 const LIBRARY_HEADER_H_MM: f32 = 11.0;
 const LIBRARY_HEADER_GAP_MM: f32 = 2.9;
+
+/// What Home says in place of books.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HomeMessage {
+    /// No book known yet, and a scan is due or running.
+    Finding,
+    /// A finished scan found nothing.
+    NoBooks,
+    OpenLibrary,
+}
+impl HomeMessage {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Finding => "Finding your books…",
+            Self::NoBooks => "No books yet. Verso reads EPUB files.",
+            Self::OpenLibrary => "Open a book from Library to start reading",
+        }
+    }
+}
 
 /// Grid dimensions for Library and Search: 4 × 3 on Paperwhite portrait,
 /// 6 × 2 in landscape, and 3 × 3 on narrow 6" portrait screens (< 100 mm).
@@ -2338,7 +2416,7 @@ impl Books {
     fn normal_visual_state(
         &self,
     ) -> (
-        [bool; 13],
+        [bool; 15],
         Option<(bool, usize, bool, bool, bool, bool, bool)>,
         Option<(bool, bool, bool, bool, bool)>,
         (usize, usize, bool, bool, bool),
@@ -2357,6 +2435,8 @@ impl Books {
                 self.notice_press.is_down(),
                 self.library_card_press.is_down(),
                 self.continue_press.is_down(),
+                self.home_transfer.is_pressed(),
+                self.home_folders.is_pressed(),
                 self.scanning,
                 self.overlay_open(),
             ],
@@ -2476,6 +2556,22 @@ impl Books {
             self.open_library(cx);
             self.apply_pending(cx);
             return Action::None;
+        }
+        let no_books = self.is_home() && self.selection.is_none() && self.home_message() == Some(HomeMessage::NoBooks);
+        self.home_transfer.enabled = no_books;
+        self.home_folders.enabled = no_books && !Store::library_folders_overridden();
+        if self.home_transfer.on_gesture(g) {
+            return Action::Push(Box::new(crate::screens::transfer::TransferScreen::new(
+                cx.theme,
+                self.screen,
+                self.store.clone(),
+                self.worker.waker(),
+            )));
+        }
+        if self.home_folders.on_gesture(g) {
+            let (store, waker) = (self.store.clone(), self.worker.waker());
+            let settings = crate::screens::system::SystemSettings::new(cx.theme, self.screen, store, waker);
+            return Action::Push(Box::new(settings.on_library_tab()));
         }
         if !self.is_home() && self.search.is_none() {
             if self.show_new_folder()
@@ -2888,11 +2984,19 @@ impl Screen for Books {
             );
         }
         if self.is_home() {
-            if self.continue_id.is_none() && self.books.is_empty() {
-                let top = t.top_bar + t.mm(4.0);
-                let area =
-                    Rect::new(t.margin, top, self.screen.w - 2 * t.margin, (self.notice_rect.y - top).max(t.target));
-                cx.paragraph("Open a book from Library to start reading", t.body.gray(INK2), area, HAlign::Center);
+            let status = self.home_status();
+            if let Some(message) = status.0 {
+                let area = if message == HomeMessage::NoBooks {
+                    self.home_transfer.enabled = true;
+                    self.home_folders.enabled = !Store::library_folders_overridden();
+                    self.home_transfer.draw(cx);
+                    self.home_folders.draw(cx);
+                    let h = t.mm(HOME_PROMPT_MM);
+                    Rect { y: self.home_transfer.rect().y - h, h, ..self.home_prompt }
+                } else {
+                    self.home_prompt
+                };
+                cx.paragraph(message.text(), t.body.gray(INK2), area, HAlign::Center);
             }
             if self.selection.is_none() {
                 if self.crash_notice.is_some() {
@@ -2907,8 +3011,8 @@ impl Screen for Books {
                     draw_notice(cx, offer, self.notice_rect, self.notice_press.is_down());
                 }
             }
-            let subtitle = self.library_card_subtitle();
-            draw_library_card(cx, self.library_card, &subtitle, self.library_card_press.is_down());
+            draw_library_card(cx, self.library_card, &status.1, self.library_card_press.is_down());
+            self.drawn_home = Some(status);
         }
         if let Some(search) = &self.search {
             search.keyboard.draw(cx);
@@ -3344,6 +3448,10 @@ impl Screen for Books {
         if let Some(e) = self.navigation_writer.errors().last() {
             self.navigation_failed(e);
         }
+        // Before the Home the same pass left first: a status taken here never
+        // announces a finished scan whose Home isn't in hand.
+        let status = self.library.take_status();
+        self.scanned = self.library.scanned();
         self.apply_folder_changes(cx);
         if let Some((mut home, revision)) = self.library.take_home() {
             // Reading records can change after the worker assembled this summary.
@@ -3378,19 +3486,12 @@ impl Screen for Books {
             r.on_background(cx);
         }
         // Status only redraws when the displayed scanning label actually changes.
-        if let Some(status) = self.library.take_status() {
+        if let Some(status) = status {
             let was_scanning = self.scanning;
             self.scanning = status.scanning;
             self.working = status.working;
-            if self.reader.is_none() && was_scanning != status.scanning {
-                let shows_scanning = if self.is_home() {
-                    !(self.home.complete || self.home.library_folders > 0 || self.home.library_books > 0)
-                } else {
-                    self.search.is_none()
-                };
-                if shows_scanning {
-                    cx.redraw();
-                }
+            if self.reader.is_none() && was_scanning != status.scanning && !self.is_home() && self.search.is_none() {
+                cx.redraw();
             }
             for error in &status.errors {
                 if !self.errors.contains(error) {
@@ -3406,6 +3507,7 @@ impl Screen for Books {
             }
             self.errors = status.errors;
         }
+        self.redraw_home_status(cx);
         if let Some(snapshot) = self.library.take() {
             self.receive(snapshot, cx);
         }
@@ -6423,6 +6525,7 @@ mod tests {
         assert!(books.continue_id.is_none() && books.books.is_empty());
         assert!(books.home_divider_y.is_none());
         assert_eq!(books.library_card_subtitle(), "Scanning…");
+        assert_eq!(books.home_message(), Some(HomeMessage::Finding));
         assert_eq!(books.library_card.bottom(), screen.bottom() - t.margin);
         let empty_card = books.library_card;
         let empty_notice = books.notice_rect;
@@ -6434,9 +6537,46 @@ mod tests {
             .flat_map(|y| (t.margin..screen.right() - t.margin).map(move |x| gray[y as usize * 1272 + x as usize]))
             .any(|p| p < PAPER);
         assert!(prompt_ink, "empty Home shows the muted prompt above the Library card");
-        // Scan finishes empty -> "Empty".
+        // The worker calls the unscanned Home complete. Only a finished scan
+        // of these folders says there are no books.
+        books.home.complete = true;
+        let background = |books: &mut Books| {
+            let mut redraw = false;
+            with_cx(&t, screen, |cx| {
+                books.on_background(cx);
+                redraw = *cx.needs_redraw;
+            });
+            redraw
+        };
+        assert!(!background(&mut books), "nothing new to show");
+        assert_eq!(books.library_card_subtitle(), "Scanning…");
         books.scanning = false;
+        for roots in [None, Some(vec![PathBuf::from("/old")])] {
+            books.scanned = roots;
+            assert_eq!(books.home_message(), Some(HomeMessage::Finding));
+        }
+        books.scanned = Some(books.roots.clone());
+        for waiting in [true, false] {
+            books.pending_home = waiting.then(Summary::default);
+            let message = if waiting { HomeMessage::Finding } else { HomeMessage::NoBooks };
+            assert_eq!(books.home_message(), Some(message));
+        }
+        books.changes = vec![(1, PathChange::Remove("/books/x.epub".into()))];
+        assert_eq!(books.home_message(), Some(HomeMessage::Finding), "the worker's Home may still bring books");
+        books.changes.clear();
         assert_eq!(books.library_card_subtitle(), "Empty");
+        with_cx(&t, screen, |cx| {
+            books.redraw_home_status(cx);
+            assert!(*cx.needs_redraw, "an empty scan changes no book, but the message");
+        });
+        // No books: both ways to get some.
+        for button in [books.home_transfer.rect(), books.home_folders.rect()] {
+            assert!(button.y > t.top_bar && button.bottom() < books.notice_rect.y);
+            with_cx(&t, screen, |cx| {
+                books.on_gesture(Gesture::Down(button.center()), cx);
+                assert!(matches!(books.on_gesture(Gesture::Tap(button.center()), cx), Action::Push(_)));
+            });
+        }
 
         // 2. Recents-only (no Continue reading): Recent books starts near the top; card stays at bottom.
         let index = store.library();

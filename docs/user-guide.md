@@ -48,6 +48,8 @@ Verso opens on **Home**:
   being re-read), with cover, title, author, progress bar and percentage.
 - **Recent books:** up to four recently opened books (three beside Continue
   reading in landscape).
+- **No books:** *Finding your books…* while the first scan runs; when it finds no
+  EPUBs, **Send books over Wi-Fi** and **Choose folders** (Settings → Library).
 - **Notice bar:** appears above the Library card for an available update or an
   unexpected crash report.
 - **Library card:** tap to open the folder browser.
