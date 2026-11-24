@@ -60,8 +60,8 @@ pub enum Class {
     /// `verso/data/*.json`, `books`, `annotations`: read only; developer
     /// writes take effect after Restart to apply.
     LiveData,
-    /// Everything else in `verso`, and `extensions/verso`: read only;
-    /// developers may write.
+    /// Everything else in `verso`, `extensions/verso`, and
+    /// `documents/Verso.sh`: read only; developers may write.
     App,
     /// Jailbreak and system files: hidden, read only in developer mode.
     System,
@@ -123,7 +123,7 @@ pub fn classify(rel: &[String]) -> Class {
     if SYSTEM.contains(&first.as_str()) {
         return Class::System;
     }
-    if under(&rel, &["extensions", "verso"]) {
+    if under(&rel, &["extensions", "verso"]) || under(&rel, &["documents", "verso.sh"]) {
         return Class::App;
     }
     if first != "verso" {
@@ -147,29 +147,30 @@ pub fn classify(rel: &[String]) -> Class {
 }
 
 /// Whether `rel` is, or holds, a path that must stay: Verso's folder, its
-/// KUAL extension, the jailbreak and system folders, the pinned folders (and
-/// `verso/data`, which holds them) and the root. Classes depend only on
-/// paths, so comparing against these locations checks everything inside a
-/// folder without walking it.
+/// KUAL extension, `documents` (which holds `Verso.sh`), the jailbreak and
+/// system folders, the pinned folders (and `verso/data`, which holds them) and
+/// the root. Classes depend only on paths, so comparing against these
+/// locations checks everything inside a folder without walking it.
 fn holds_protected(rel: &[String]) -> bool {
     let rel = lower(rel);
     let prefix_of = |loc: &[&str]| rel.len() <= loc.len() && rel.iter().zip(loc).all(|(a, b)| a == b);
     rel.is_empty()
         || prefix_of(&["verso"])
         || prefix_of(&["extensions", "verso"])
+        || prefix_of(&["documents"])
         || SYSTEM.iter().any(|s| prefix_of(&[s]))
         || PINNED.iter().any(|p| prefix_of(p))
 }
 
 /// How many leading parts of `rel` decide its class by their spelling: the
-/// storage root's names (`verso`, `extensions`, the system folders), the
-/// names in `extensions`, and in `verso` the next two
-/// (`verso/data/settings.json`, `verso/data/covers`): developers may write
-/// app files, so `verso/data./settings.json` must not pass as one. Deeper
-/// names and names elsewhere don't change classes.
+/// storage root's names (`verso`, `extensions`, `documents`, the system
+/// folders), the names in `extensions` and `documents`, and in `verso` the
+/// next two (`verso/data/settings.json`, `verso/data/covers`): developers may
+/// write app files, so `verso/data./settings.json` must not pass as one.
+/// Deeper names and names elsewhere don't change classes.
 fn spelling_checked(rel: &[String]) -> usize {
     let checked = match rel.first() {
-        Some(first) if first.eq_ignore_ascii_case("extensions") => 2,
+        Some(first) if first.eq_ignore_ascii_case("extensions") || first.eq_ignore_ascii_case("documents") => 2,
         Some(first) if first.eq_ignore_ascii_case("verso") => 3,
         _ => 1,
     };

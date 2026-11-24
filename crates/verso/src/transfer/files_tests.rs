@@ -85,6 +85,7 @@ impl Env {
         for (f, body) in [
             ("documents/notes.txt", "notes"),
             ("documents/.hidden-note", "dot"),
+            ("documents/Verso.sh", "#!/bin/sh"),
             ("verso/data/settings.json", "{}"),
             ("verso/verso.sh", "#!/bin/sh"),
             ("verso/data/exports/Book.md", "# Book"),
@@ -245,6 +246,7 @@ fn classifies_every_class_ignoring_case() {
         (&["verso", "data"], Class::App),
         (&["verso", "data", "sub", "x.json"], Class::App),
         (&["extensions", "verso", "menu.json"], Class::App),
+        (&["documents", "Verso.sh"], Class::App),
         (&["verso", "cache", "x"], Class::Cache),
         (&["verso", "data", "covers"], Class::Cache),
         (&["verso", "data", "cre", "a.cache"], Class::Cache),
@@ -265,20 +267,31 @@ fn classifies_every_class_ignoring_case() {
         (&["VERSO", "DATA", "Dictionaries", "x"], Class::User),
         (&["Verso", "Data", "COVERS"], Class::Cache),
         (&["EXTENSIONS", "Verso"], Class::App),
+        (&["DOCUMENTS", "verso.sh"], Class::App),
         (&["System"], Class::System),
         (&["LIBKH"], Class::System),
     ];
     for (rel, class) in cases {
         assert_eq!(classify(&s(rel)), *class, "{rel:?}");
     }
-    for rel in
-        [&[][..], &["verso"], &["extensions"], &["extensions", "verso"], &["Verso", "data", "Exports"], &["system"]]
-    {
+    for rel in [
+        &[][..],
+        &["verso"],
+        &["extensions"],
+        &["extensions", "verso"],
+        &["documents"],
+        &["Verso", "data", "Exports"],
+        &["system"],
+    ] {
         assert!(holds_protected(&s(rel)), "{rel:?}");
     }
-    for rel in
-        [&["documents"][..], &["extensions", "koreader"], &["verso", "data", "exports", "Book.md"], &["koreader"]]
-    {
+    for rel in [
+        &["documents", "Russian"][..],
+        &["documents", "Verso.sh"],
+        &["extensions", "koreader"],
+        &["verso", "data", "exports", "Book.md"],
+        &["koreader"],
+    ] {
         assert!(!holds_protected(&s(rel)), "{rel:?}");
     }
 }
@@ -293,7 +306,8 @@ fn lists_with_permissions_shortcuts_and_hidden_files() {
     // Folders, sorted; jailbreak and system folders hidden for everyone.
     assert_eq!(names, ["documents", "extensions", "fonts", "koreader", "verso"]);
     let entry = |name: &str| root["entries"].as_array().unwrap().iter().find(|e| e["name"] == name).unwrap().clone();
-    assert_eq!(entry("documents")["writable"], true);
+    assert_eq!(entry("documents")["writable"], false, "it holds documents/Verso.sh");
+    assert_eq!(entry("documents")["readonly"], false, "but books go in");
     assert_eq!(entry("documents")["twice"], true, "the library folder asks twice");
     assert_eq!(entry("koreader")["twice"], true);
     assert_eq!(entry("verso")["writable"], false);
@@ -322,9 +336,15 @@ fn lists_with_permissions_shortcuts_and_hidden_files() {
     assert_eq!(env.list("libkh").0, 404);
     assert_eq!(env.json("GET", "/api/files/download?path=libkh/hotfix", b"").0, 404);
 
-    // Dotfiles only with the switch.
-    assert_eq!(env.names("documents", false), ["Russian", "notes.txt"]);
-    assert_eq!(env.names("documents", true), ["Russian", ".hidden-note", "notes.txt"]);
+    // Dotfiles only with the switch; documents/Verso.sh shows read-only.
+    let (_, docs) = env.list("documents");
+    assert_eq!(docs["writable"], true);
+    assert_eq!(env.names("documents", false), ["Russian", "notes.txt", "Verso.sh"]);
+    assert_eq!(env.names("documents", true), ["Russian", ".hidden-note", "notes.txt", "Verso.sh"]);
+    assert_eq!(env.entry("documents", "Verso.sh")["writable"], false);
+    assert_eq!(env.entry("documents", "Verso.sh")["readonly"], true);
+    let (status, _, body) = env.req("GET", "/api/files/download?path=documents/Verso.sh", b"");
+    assert_eq!((status, body.as_slice()), (200, &b"#!/bin/sh"[..]));
     assert_eq!(env.list("documents/notes.txt").0, 400, "a file isn't a folder");
     assert_eq!(env.list("documents/missing").0, 404);
 
@@ -387,6 +407,11 @@ fn developers_write_app_files_at_once_and_live_data_for_a_restart() {
     assert_eq!(env.entry("verso", "verso.sh")["readonly"], false);
     assert_eq!(env.put("verso/verso.sh", true, b"#!/bin/sh\necho new").0, 201);
     assert_eq!(env.put("extensions/verso/menu.json", true, b"{\"new\":1}").0, 201);
+    assert_eq!(env.entry("documents", "Verso.sh")["writable"], true);
+    assert_eq!(env.entry("documents", "Verso.sh")["readonly"], false);
+    assert_eq!(env.put("documents/Verso.sh", true, b"#!/bin/sh\necho dev").0, 201);
+    assert_eq!(env.post("rename", json!({ "path": "documents/Verso.sh", "name": "Verso.bak" })).0, 200);
+    assert_eq!(env.post("rename", json!({ "path": "documents/Verso.bak", "name": "Verso.sh" })).0, 200);
     assert_eq!(env.post("mkdir", json!({ "path": "verso/bin", "name": "tools" })).0, 201);
     assert_eq!(env.post("rename", json!({ "path": "verso/bin/tools", "name": "more" })).0, 200);
     assert_eq!(env.delete("verso/bin/more", false).0, 200);
@@ -396,7 +421,9 @@ fn developers_write_app_files_at_once_and_live_data_for_a_restart() {
 
     // Verso's own folders stay where they are, caches stay hidden, and the
     // jailbreak stays read-only.
-    for path in ["verso", "verso/data", "extensions/verso", "verso/data/dictionaries", "verso/data/exports"] {
+    for path in
+        ["verso", "verso/data", "extensions/verso", "documents", "verso/data/dictionaries", "verso/data/exports"]
+    {
         assert_eq!(env.post("rename", json!({ "path": path, "name": "renamed" })).0, 403, "rename {path}");
         assert_eq!(env.post("move", json!({ "path": path, "to": "documents" })).0, 403, "move {path}");
         assert_eq!(env.delete(path, true).0, 403, "delete {path}");
@@ -508,18 +535,22 @@ fn new_paths_under_verso_stay_read_only() {
         "verso/data/books/abc.json",
         "verso/bin/verso",
         "extensions/verso/menu.json",
+        "documents/Verso.sh",
+        "documents/verso.sh",
         "verso.txt/../verso/x",
     ] {
         let (status, body) = env.put(path, true, b"x");
         assert!(matches!(status, 400 | 403 | 404), "{path}: {status} {body}");
     }
     assert_eq!(fs::read(env.root.join("verso/data/settings.json")).unwrap(), settings);
+    assert_eq!(fs::read_to_string(env.root.join("documents/Verso.sh")).unwrap(), "#!/bin/sh");
     assert!(!env.root.join("verso/new.txt").exists());
     // A new folder under verso, or one named like Verso's in the root.
     assert_eq!(env.post("mkdir", json!({ "path": "verso", "name": "update" })).0, 403);
     assert_eq!(env.post("mkdir", json!({ "path": "verso/data", "name": "mine" })).0, 403);
     assert_eq!(env.post("mkdir", json!({ "path": "", "name": "VERSO" })).0, 403);
     assert_eq!(env.post("mkdir", json!({ "path": "extensions", "name": "Verso" })).0, 403);
+    assert_eq!(env.post("mkdir", json!({ "path": "documents", "name": "Verso.sh" })).0, 403);
     assert_eq!(env.post("mkdir", json!({ "path": "", "name": "system" })).0, 403);
     assert_eq!(env.post("mkdir", json!({ "path": "verso/data/exports", "name": "2026" })).0, 201);
     assert_eq!(env.post("mkdir", json!({ "path": "documents", "name": "Russian" })).0, 409);
@@ -556,19 +587,35 @@ fn fat_listing(dir: &Path) -> io::Result<Vec<String>> {
 #[test]
 fn other_fat_spellings_of_protected_folders_are_refused() {
     let env = Env::with_listing(fat_listing);
-    for d in ["verso./data", "EXTENS~1/verso", "extensions/verso.", "LOST_F~1", "documents/Old~1"] {
+    for d in ["verso./data", "EXTENS~1/verso", "extensions/verso.", "DOCUME~1", "LOST_F~1", "fonts/Old~1"] {
         fs::create_dir_all(env.root.join(d)).unwrap();
     }
-    for f in ["verso./data/settings.json", "EXTENS~1/verso/menu.json", "voice."] {
+    for f in [
+        "verso./data/settings.json",
+        "EXTENS~1/verso/menu.json",
+        "documents/Verso.sh.",
+        "documents/VERSO~1.SH",
+        "DOCUME~1/Verso.sh",
+        "voice.",
+    ] {
         fs::write(env.root.join(f), "{}").unwrap();
     }
     // Existing paths through those spellings.
     assert_eq!(env.put("verso./data/settings.json", true, b"x").0, 400);
     assert_eq!(env.put("EXTENS~1/verso/menu.json", true, b"x").0, 400);
     assert_eq!(env.put("extensions/verso./verso.sh", false, b"x").0, 400);
+    assert_eq!(env.put("DOCUME~1/Verso.sh", true, b"x").0, 400);
+    assert_eq!(env.put("documents/Verso.sh.", true, b"x").0, 409);
+    assert_eq!(env.put("documents/VERSO~1.SH", true, b"x").0, 409);
     assert_eq!(env.list("verso./data").0, 400);
     assert_eq!(env.delete("EXTENS~1", true).0, 400);
+    assert_eq!(env.delete("DOCUME~1", true).0, 400);
+    assert_eq!(env.delete("documents/Verso.sh.", false).0, 400);
+    assert_eq!(env.delete("documents/VERSO~1.SH", false).0, 400);
     assert_eq!(env.post("rename", json!({ "path": "verso.", "name": "mine" })).0, 400);
+    assert_eq!(env.post("rename", json!({ "path": "documents/Verso.sh.", "name": "x.sh" })).0, 400);
+    assert_eq!(env.post("rename", json!({ "path": "documents/VERSO~1.SH", "name": "x.sh" })).0, 400);
+    assert_eq!(env.post("move", json!({ "path": "documents/VERSO~1.SH", "to": "fonts" })).0, 400);
     assert_eq!(env.post("mkdir", json!({ "path": "LOST_F~1", "name": "x" })).0, 400);
     assert_eq!(env.post("move", json!({ "path": "documents/notes.txt", "to": "EXTENS~1/verso" })).0, 400);
     // And where a link leads.
@@ -578,14 +625,25 @@ fn other_fat_spellings_of_protected_folders_are_refused() {
     // New names that would reach something already there.
     assert_eq!(env.put("voice.", true, b"x").0, 409);
     assert_eq!(env.post("mkdir", json!({ "path": "", "name": "verso." })).0, 409);
+    assert_eq!(env.post("mkdir", json!({ "path": "documents", "name": "Verso.sh." })).0, 409);
     assert_eq!(env.post("rename", json!({ "path": "fonts", "name": "EXTENS~1" })).0, 409);
-    assert_eq!(env.post("move", json!({ "path": "documents/Old~1", "to": "" })).0, 200, "not there yet");
-    for f in ["verso./data/settings.json", "EXTENS~1/verso/menu.json", "voice."] {
+    assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": "Verso.sh." })).0, 409);
+    assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": "VERSO~1.SH" })).0, 409);
+    assert_eq!(env.post("move", json!({ "path": "fonts/Old~1", "to": "" })).0, 200, "not there yet");
+    for f in [
+        "verso./data/settings.json",
+        "EXTENS~1/verso/menu.json",
+        "documents/Verso.sh.",
+        "documents/VERSO~1.SH",
+        "DOCUME~1/Verso.sh",
+        "voice.",
+    ] {
         assert_eq!(fs::read_to_string(env.root.join(f)).unwrap(), "{}", "{f}");
     }
     assert!(env.root.join("fonts").is_dir() && env.root.join("EXTENS~1").is_dir());
     // Only the names classes depend on are checked.
     assert_eq!(env.put("documents/notes~1.txt", false, b"x").0, 201);
+    assert_eq!(env.put("documents/Russian/notes~1.txt", false, b"x").0, 201);
     assert_eq!(env.put("verso/data/exports/Book.", false, b"x").0, 201);
 }
 
@@ -602,27 +660,41 @@ fn names_that_are_only_names_elsewhere_stay_user_content() {
 #[test]
 fn verso_extensions_and_pinned_folders_cant_be_renamed_moved_or_deleted() {
     let env = Env::new();
-    for path in
-        ["verso", "extensions", "extensions/verso", "verso/data", "verso/data/dictionaries", "verso/data/exports"]
-    {
+    for path in [
+        "verso",
+        "extensions",
+        "extensions/verso",
+        "documents",
+        "documents/Verso.sh",
+        "verso/data",
+        "verso/data/dictionaries",
+        "verso/data/exports",
+    ] {
         assert_eq!(env.post("rename", json!({ "path": path, "name": "renamed" })).0, 403, "rename {path}");
-        assert_eq!(env.post("move", json!({ "path": path, "to": "documents" })).0, 403, "move {path}");
+        assert_eq!(env.post("move", json!({ "path": path, "to": "fonts" })).0, 403, "move {path}");
         assert_eq!(env.delete(path, true).0, 403, "delete {path}");
     }
     assert_eq!(env.delete("", true).0, 403, "the root");
     assert!(env.root.join("verso/data/dictionaries/Ozhegov").is_dir());
     assert!(env.root.join("extensions/verso/menu.json").exists());
-    // What's inside the pinned folders and other extensions is the user's.
+    assert!(env.root.join("documents/Verso.sh").exists());
+    // What's inside documents, the pinned folders and other extensions is the user's.
     assert_eq!(env.post("rename", json!({ "path": "verso/data/exports/Book.md", "name": "Old.md" })).0, 200);
     assert!(env.root.join("verso/data/exports/Old.md").exists());
     assert_eq!(env.delete("extensions/koreader", true).0, 200);
     assert!(!env.root.join("extensions/koreader").exists());
+    assert_eq!(env.post("rename", json!({ "path": "documents/Russian", "name": "Classics" })).0, 200);
+    assert!(env.root.join("documents/Classics").is_dir());
+    assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": "Verso.sh" })).0, 403);
+    assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": "verso.sh" })).0, 403);
+    assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": "Classics" })).0, 409);
+    assert_eq!(env.delete("documents/notes.txt", false).0, 200);
+    assert!(!env.root.join("documents/notes.txt").exists());
     // A user folder can't be renamed to a protected name.
     assert_eq!(env.post("rename", json!({ "path": "fonts", "name": "verso" })).0, 403);
     assert_eq!(env.post("rename", json!({ "path": "fonts", "name": "LIBKH" })).0, 403);
     assert_eq!(env.post("rename", json!({ "path": "fonts", "name": "Fonts" })).0, 200);
     assert!(env.root.join("Fonts").is_dir());
-    assert_eq!(env.post("rename", json!({ "path": "documents/notes.txt", "name": "Russian" })).0, 409);
 }
 
 #[test]
@@ -633,7 +705,7 @@ fn moves_check_the_source_and_destination() {
         assert!(matches!(status, 403 | 404), "{to}: {status} {body}");
     }
     assert!(env.root.join("documents/notes.txt").exists());
-    assert_eq!(env.post("move", json!({ "path": "documents", "to": "documents/Russian" })).0, 400, "into itself");
+    assert_eq!(env.post("move", json!({ "path": "koreader", "to": "koreader/data" })).0, 400, "into itself");
     assert_eq!(env.post("move", json!({ "path": "documents/notes.txt", "to": "documents" })).0, 400);
     let (status, moved) = env.post("move", json!({ "path": "documents/notes.txt", "to": "verso/data/exports" }));
     assert_eq!(status, 200, "{moved}");
@@ -648,9 +720,12 @@ fn moves_check_the_source_and_destination() {
         200
     );
     assert!(env.dictionaries_changed.load(Ordering::SeqCst));
-    // Verso's files can't be moved out either.
+    // Verso's files can't be moved out or replaced by moving into place.
     assert_eq!(env.post("move", json!({ "path": "verso/verso.sh", "to": "documents" })).0, 403);
     assert_eq!(env.post("move", json!({ "path": "verso/data/settings.json", "to": "documents" })).0, 403);
+    assert_eq!(env.post("move", json!({ "path": "documents/Verso.sh", "to": "fonts" })).0, 403);
+    fs::write(env.root.join("fonts/Verso.sh"), "other").unwrap();
+    assert_eq!(env.post("move", json!({ "path": "fonts/Verso.sh", "to": "documents" })).0, 403);
 }
 
 #[test]
@@ -667,7 +742,7 @@ fn symlinks_are_checked_where_they_lead() {
     std::os::unix::fs::symlink(env.root.join("missing"), env.root.join("documents/broken")).unwrap();
 
     // Links out of the storage, broken links and links into caches aren't listed.
-    assert_eq!(env.names("documents", false), ["data", "fonts", "Russian", "notes.txt"]);
+    assert_eq!(env.names("documents", false), ["data", "fonts", "Russian", "notes.txt", "Verso.sh"]);
     assert_eq!(env.list("documents/escape").0, 403);
     assert_eq!(env.json("GET", "/api/files/download?path=documents/secret", b"").0, 403);
     assert_eq!(env.put("documents/escape/new", false, b"x").0, 403);
@@ -720,14 +795,20 @@ fn refuses_dot_dot_and_bad_names() {
 #[test]
 fn koreader_and_library_folders_ask_twice() {
     let env = Env::new();
-    for path in ["koreader", "documents", "extensions/koreader"] {
+    fs::create_dir_all(env.root.join("books/sub")).unwrap();
+    fs::write(env.root.join("books/a.txt"), "a").unwrap();
+    fs::write(env.root.join("books/b.txt"), "b").unwrap();
+    env.store.save_library_folders(vec![env.root.join("documents"), env.root.join("books")]).unwrap();
+    for path in ["koreader", "books", "extensions/koreader"] {
         let (status, head, body) = env.req("DELETE", &format!("/api/files?path={path}"), b"");
         assert!(head.starts_with("HTTP/1.1 428 Precondition Required"), "{head}");
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!((status, body["twice"].clone()), (428, json!(true)), "{path}");
         assert!(env.root.join(path).exists());
     }
-    let (status, info) = env.json("GET", "/api/files/info?path=documents", b"");
+    // `documents` holds Verso.sh, so it can't be deleted even with confirm=2.
+    assert_eq!(env.delete("documents", true).0, 403);
+    let (status, info) = env.json("GET", "/api/files/info?path=books", b"");
     assert_eq!(status, 200);
     assert_eq!(
         (info["files"].clone(), info["folders"].clone(), info["twice"].clone()),
@@ -735,7 +816,7 @@ fn koreader_and_library_folders_ask_twice() {
     );
     assert_eq!(env.delete("koreader", true).0, 200);
     assert!(!env.root.join("koreader").exists());
-    assert_eq!(env.delete("documents", true).0, 200);
+    assert_eq!(env.delete("books", true).0, 200);
     assert!(env.library_changed.load(Ordering::SeqCst));
     // Other folders and files ask once.
     fs::create_dir_all(env.root.join("screenshots/2026")).unwrap();
