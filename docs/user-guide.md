@@ -9,12 +9,16 @@ books over Wi-Fi, importing from KOReader, updating and reporting problems.
 ## 1. Install, launch and uninstall
 
 **Requirements:** a jailbroken Kindle on **hard-float firmware (5.16.3+)** with
-the **Universal Hotfix** (`SH_Integration`), **KPM** (for 5.19.4+ where KUAL is
-broken) or **KUAL**. Soft-float Kindles are refused before touching the Kindle UI.
+the **Universal Hotfix** (for direct library launch — no KUAL needed), **KPM**
+(recommended on 5.19.4+ where KUAL is broken) or **KUAL**. Soft-float Kindles
+are refused before touching the Kindle UI.
 
 1. Unpack `verso-<version>.zip` into `/mnt/us/` over USB, adding `verso/`,
-   `extensions/verso/` and `documents/Verso.sh` (or install `verso-<version>.kpkg` via KPM).
-2. Eject and tap **Verso** in your Kindle library, `;kpm launch verso`, or **KUAL → Verso → Start Verso**.
+   `extensions/verso/` and `documents/Verso.sh`.
+2. Eject the Kindle and tap **Verso** in your Kindle library.
+
+*Alternatives:* install `verso-<version>.kpkg` with **KPM** and launch via
+`;kpm launch verso`, or open **KUAL → Verso → Start Verso**.
 
 While Verso runs, its launcher pauses Amazon's UI and USB drive daemon so your
 book storage stays mounted. Exiting (or any crash) always restores Amazon's home
