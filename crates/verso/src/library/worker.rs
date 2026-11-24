@@ -336,6 +336,10 @@ impl Background {
                     break;
                 }
                 let changes = std::mem::take(&mut state.changes);
+                // With the folders: a request made once the lock is released
+                // belongs to the next pass, which takes its folders too.
+                let requested = std::mem::take(&mut state.requested);
+                let retry = std::mem::take(&mut state.retry);
                 if let Some(roots) = state.roots.take()
                     && roots != self.roots
                 {
@@ -351,10 +355,10 @@ impl Background {
                 self.change_paths(&changes);
                 let mut state = self.channel.lock();
                 let covers_ok = !state.paused && state.covers_paused == 0;
-                let scan = std::mem::take(&mut state.requested) || needs_scan;
+                let scan = requested || needs_scan;
                 let run_covers = !scan && covers_ok && std::mem::take(&mut self.covers_needed);
                 let repairs = !scan && !run_covers && covers_ok && !state.repairs.is_empty();
-                (std::mem::take(&mut state.retry), scan, std::mem::take(&mut state.home_requested), run_covers, repairs)
+                (retry, scan, std::mem::take(&mut state.home_requested), run_covers, repairs)
             };
             if home {
                 self.rebuild_home();
