@@ -141,7 +141,15 @@ probe_crash_context() {
                 if [ "${probe_rc}" -ne 127 ]; then
                     log "early-crash ld.so probe (LD_DEBUG=files,libs, exit ${probe_rc}):"
                     if [ -n "${probe_out}" ]; then
-                        printf '%s\n' "${probe_out}" | tail -n 30 | cut -c 1-256 >>"${LOG}"
+                        # Both ends: the libraries found first, and where it died.
+                        printf '%s\n' "${probe_out}" | cut -c 1-256 | awk '
+                            { line[NR] = $0 }
+                            END {
+                                for (i = 1; i <= NR; i++) {
+                                    if (NR <= 80 || i <= 40 || i > NR - 40) print line[i]
+                                    else if (i == 41) printf "[%d lines left out]\n", NR - 80
+                                }
+                            }' >>"${LOG}"
                     else
                         log "ld.so probe produced no output"
                     fi

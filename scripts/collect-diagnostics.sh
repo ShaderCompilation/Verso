@@ -204,7 +204,8 @@ kindle_firmware() {
         return
     fi
     val=$(awk '
-        { gsub(/[^[:print:]\t]/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+        # Some firmware leaves a template placeholder: "Kindle 5.18.5 (~~otaVersion~~)".
+        { gsub(/[^[:print:]\t]/, ""); gsub(/[ \t]*\(~~[^~()]*~~\)/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
         $0 != "" { print substr($0, 1, 128); exit }
     ' "$pv_file" 2>/dev/null)
     if [ -n "$val" ]; then

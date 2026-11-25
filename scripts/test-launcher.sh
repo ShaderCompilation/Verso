@@ -58,11 +58,16 @@ TAB="$(printf '\t')"
 make_app() {
     printf '#!/bin/sh\n# Fake Verso %s (scripts/test-launcher.sh)\nV=%s\n' "$1" "$1"
     cat <<'EOF'
+T="${VERSO_TEST_DIR}"
 if [ "${1:-}" = "--version" ]; then
+    i=0
+    while [ -f "${T}/long-probe" ] && [ "${i}" -lt 200 ]; do
+        i=$((i + 1))
+        echo "probe line ${i}"
+    done
     echo "Verso ${V} (fake)"
     exit 0
 fi
-T="${VERSO_TEST_DIR}"
 echo "${V}" >>"${T}/runs"
 b=""
 if [ -s "${T}/queue-${V}" ]; then
@@ -258,7 +263,7 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}"/queue-* \
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}/long-probe" "${W}"/queue-* \
         "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
@@ -655,6 +660,19 @@ grep -q "dmesg (filtered):" "${crash_file}" || fail "filtered dmesg missing"
 grep -q "unhandled fault in ld-2.20.so" "${crash_file}" || fail "dmesg fault line missing"
 ! grep -q "unrelated wifi message" "${crash_file}" || fail "unrelated dmesg line leaked"
 grep -q "early-crash ld.so probe" "${crash_file}" || fail "early-crash ld.so probe missing"
+grep -q "Verso 0.1.0 (fake)" "${crash_file}" || fail "ld.so probe output missing"
+! grep -q "lines left out" "${crash_file}" || fail "short ld.so probe output was cut"
+
+begin "a long ld.so probe keeps its head and its tail"
+fresh
+: >"${W}/long-probe"
+echo silent_crash >"${W}/queue-0.1.0"
+launch
+sed -n '/early-crash ld.so probe/,/lines left out\]$/p' "${R}/verso/verso.log" >"${W}/probe-head"
+[ "$(wc -l <"${W}/probe-head")" -eq 42 ] || fail "the head of the ld.so probe isn't 40 lines: $(wc -l <"${W}/probe-head")"
+! grep -q "probe line 200" "${W}/probe-head" || fail "the head of the ld.so probe is its tail"
+[ "$(sed -n '/lines left out\]$/,/ launcher: /p' "${R}/verso/verso.log" | wc -l)" -eq 42 ] || fail "the tail of the ld.so probe isn't 40 lines"
+rm -f "${W}/probe-head"
 
 begin "crash report on panic exit"
 fresh

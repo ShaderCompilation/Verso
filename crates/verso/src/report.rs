@@ -353,6 +353,8 @@ mod tests {
         // Legacy hex serial: B0[17]... -> 0x17 (Kindle Paperwhite 2).
         let legacy_usid = root.join("usid-legacy");
         fs::write(&legacy_usid, "B017987654321012\n").unwrap();
+        // A placeholder the firmware never filled in is dropped, the version kept.
+        fs::write(&pv, "Kindle 5.18.5.0.1 (~~otaVersion~~)\n").unwrap();
         let leg_out = Command::new("sh")
             .arg(&collector)
             .arg("--identity")
@@ -363,7 +365,9 @@ mod tests {
         assert!(leg_out.status.success());
         let leg_text = String::from_utf8_lossy(&leg_out.stdout);
         assert!(leg_text.contains("Kindle model: Kindle Paperwhite 2 (2013) (code 17, id=0x17)"), "{leg_text}");
+        assert!(leg_text.contains("Kindle firmware: Kindle 5.18.5.0.1\n"), "{leg_text}");
         assert!(!leg_text.contains("987654321012"), "legacy serial digits leaked:\n{leg_text}");
+        fs::write(&pv, "Kindle 5.18.2.1.1 (4358970010)\n").unwrap();
 
         // Crash report embeds Installed version + Device identity even with no session header.
         let crash = Command::new("sh")
