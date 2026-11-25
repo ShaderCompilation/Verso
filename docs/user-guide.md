@@ -42,9 +42,11 @@ asleep.
   layout, KOReader import when KOReader is installed, gestures) runs over Home.
   Every choice saves at once and can be skipped; **Settings → Advanced → Run
   setup again** reopens it. Folders holding EPUBs are found and ticked for you.
-- **Uninstall:** delete `/mnt/us/verso`, `/mnt/us/extensions/verso` and
-  `/mnt/us/documents/Verso.sh` over USB (or `;kpm uninstall verso`, keeping
-  `/mnt/us/verso/data/`). Verso never touches system files or your books.
+- **Uninstall:** first copy `/mnt/us/verso/data/` to your computer if you want to
+  keep your progress, highlights, notes and exports. Then delete `/mnt/us/verso`,
+  `/mnt/us/extensions/verso` and `/mnt/us/documents/Verso.sh` over USB (or run
+  `;kpm uninstall verso`, which keeps `/mnt/us/verso/data/`). Verso never touches
+  system files or your books.
 
 ---
 
