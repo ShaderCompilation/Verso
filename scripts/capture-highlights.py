@@ -25,15 +25,18 @@ def main():
         sim.run(OUT / (name + '.png'), steps, sim.state(OUT / (name + '-state'), books), books, quiet=False)
     state = OUT / 'saved-state'
     resume = ['--tap', '200,550']
-    # The saved highlight now covers the whole first page (drags snap to
-    # pages), so a centre tap would open it; turn to the next page, then
-    # centre tap → Reader Menu → Highlights.
-    listing = [*resume, '--tap', '636,30', '--tap', '636,848', '--tap', '487,1584']
+    # The saved highlight covers page 1 and the top of page 2, where the book
+    # reopens: a centre tap there → Reader Menu → Notes.
+    listing = [*resume, '--tap', '636,848', '--tap', '487,1584']
     # Notes list rows (15 mm each) start under the All · Highlights ·
     # Bookmarks filter: the first is centred at y 548, then 726 and 903.
-    for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,548'],
-                        'jump': [*listing, '--tap', '400,548', '--tap', '300,1500']}.items():
+    for name, steps in {'restarted': resume, 'list': listing, 'details': [*listing, '--tap', '400,548']}.items():
         sim.run(OUT / (name + '.png'), steps, state, books, quiet=False)
+    # On a copy: jumping would move the book to page 1, all highlighted.
+    jump = OUT / 'jump-state'
+    shutil.rmtree(jump, ignore_errors=True)
+    sim.run(OUT / 'jump.png', [*listing, '--tap', '400,548', '--tap', '300,1500'], shutil.copytree(state, jump), books,
+            quiet=False)
     # Import only original fixture text. An edited source quotation must stay
     # readable/removable as unresolved; removing a valid import retains its ID.
     manifest = next((state / 'annotations').glob('book-*.json'))
@@ -99,7 +102,7 @@ def notes(passage, resume):
     run('note-editor', [*add_note, '--text', first], OUT / 'scratch-state', fresh=True)
     state = OUT / 'notes-state'
     run('note-saved', [*add_note, '--text', first, '--edit', 'submit'], state, fresh=True)
-    listing = [*resume, '--tap', '636,30', '--tap', '636,848', '--tap', '487,1584']
+    listing = [*resume, '--tap', '636,848', '--tap', '487,1584']
     edit = [*listing, '--tap', '400,548', '--tap', '300,1337', '--edit', 'clear', '--text',
             'An edited note that is long enough to wrap across more than one line of the note box, with ünïcödé.']
     run('notes-list', listing, state)
@@ -135,7 +138,7 @@ def notes(passage, resume):
     settings['orientation'] = 'landscape'
     (state / 'settings.json').write_text(json.dumps(settings))
     run('landscape-note-editor', [*resume, '--tap', '500,110', '--tap', '445,913', '--text', 'Landscape note'], state)
-    run('landscape-selection-bar', [*resume, '--hold-drag', '300,260,700,330'], state)
+    run('landscape-selection-bar', [*resume, '--hold-drag', '360,270,700,350'], state)
 
 
 if __name__ == '__main__':
