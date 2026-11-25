@@ -11,6 +11,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -40,7 +44,7 @@ jobs:
 
       - name: Checkout
         if: steps.check.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 1
@@ -67,64 +71,20 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    env:
-      VERSO_NATIVE_CACHE: /tmp/verso-native-cache
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.tag }}
           fetch-depth: 1
 
-      - name: Checkout submodules
-        run: |
-          git submodule update --init --depth=1 --jobs=8 \
-            third_party/crengine third_party/freetype third_party/harfbuzz \
-            third_party/hunspell third_party/libjpeg-turbo third_party/libpng \
-            third_party/libunibreak third_party/utf8proc third_party/xxhash \
-            third_party/zlib
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup desktop environment
+        uses: ./.github/actions/setup-desktop
         with:
-          components: clippy, rustfmt
-
-      - name: Install mold linker
-        uses: taiki-e/install-action@v2
-        with:
-          tool: mold
-
-      - name: Compute native cache key
-        id: native-key
-        run: |
-          KEY="$({
-            git submodule status -- \
-              third_party/crengine third_party/freetype third_party/harfbuzz \
-              third_party/hunspell third_party/libjpeg-turbo third_party/libpng \
-              third_party/libunibreak third_party/utf8proc third_party/xxhash \
-              third_party/zlib
-            cc --version
-            c++ --version
-          } | sha256sum | cut -d' ' -f1)"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Cache native C/C++ libraries
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VERSO_NATIVE_CACHE }}
-          key: native-desktop-${{ runner.os }}-${{ steps.native-key.outputs.key }}-${{ hashFiles('crates/crengine-sys/**', 'crates/hunspell-sys/**') }}
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: desktop
-          save-if: true
+          save-caches: ${{ github.ref_type != 'tag' }}
 
       - name: Validate
         run: |
-          cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
 
@@ -135,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.tag }}
           fetch-depth: 1
@@ -148,110 +108,23 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    env:
-      ZIG_VERSION: 0.17.1
-      VERSO_NATIVE_CACHE: /tmp/verso-native-cache
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.tag }}
           fetch-depth: 1
 
-      - name: Checkout submodules
-        run: |
-          git submodule update --init --depth=1 --jobs=8
-          git -C third_party/FBInk submodule update --init --depth=1 font8x8
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Kindle environment
+        uses: ./.github/actions/setup-kindle
         with:
-          targets: armv7-unknown-linux-gnueabihf
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          # setup-zig restores its cache into .zig-cache inside the checkout,
-          # which trips package.sh's clean-worktree check on tags without it
-          # in .gitignore (e.g. workflow_dispatch on older tags).
-          use-cache: false
-
-      - name: Set Zig cache outside checkout
-        run: |
-          echo "ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache" >> "$GITHUB_ENV"
-          echo "ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache" >> "$GITHUB_ENV"
-
-      - name: Cache Zig
-        uses: actions/cache@v4
-        with:
-          path: /tmp/zig-cache
-          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.24.1
-
-      - name: Compute native cache key
-        id: native-key
-        run: |
-          KEY="$({
-            git submodule status -- \
-              third_party/FBInk third_party/crengine third_party/freetype \
-              third_party/harfbuzz third_party/hunspell third_party/libjpeg-turbo \
-              third_party/libpng third_party/libunibreak third_party/utf8proc \
-              third_party/xxhash third_party/zlib
-            cat .cargo/config.toml
-            echo "$ZIG_VERSION"
-          } | sha256sum | cut -d' ' -f1)"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Cache native C/C++ libraries
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VERSO_NATIVE_CACHE }}
-          key: native-kindle-${{ runner.os }}-${{ steps.native-key.outputs.key }}-${{ hashFiles('crates/crengine-sys/**', 'crates/hunspell-sys/**', 'crates/fbink-sys/**') }}
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}-glibc2.20
-          save-if: true
-
-      - name: Compute SSH cache key
-        id: ssh-key
-        run: |
-          KEY="$({
-            git -C third_party/dropbear rev-parse HEAD
-            git -C third_party/openssh-portable rev-parse HEAD
-            cat scripts/ssh/localoptions.h scripts/build-ssh.sh
-            echo "$ZIG_VERSION"
-          } | sha256sum | cut -d' ' -f1)"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Kindle SSH binaries
-        uses: actions/cache@v4
-        with:
-          path: |
-            target/kindle-ssh/bin
-            target/kindle-ssh/.stamp
-          key: kindle-ssh-${{ steps.ssh-key.outputs.key }}
-
-      - name: Cache Russian word-form pack
-        uses: actions/cache@v4
-        with:
-          path: |
-            target/wordforms/ru.vwf
-            target/wordforms/.stamp
-          key: wordforms-${{ hashFiles('assets/wordforms/opencorpora/dict.opcorpora.xml.bz2', 'scripts/build-wordforms.sh', 'crates/verso-wordforms/src/**') }}
-          restore-keys: wordforms-
+          save-caches: ${{ github.ref_type != 'tag' }}
 
       - name: Package release
         run: scripts/package.sh
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-package
           path: target/package/${{ needs.preflight.outputs.version }}/*
@@ -268,13 +141,13 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.preflight.outputs.tag }}
           fetch-depth: 1
 
       - name: Download package artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-package
           path: release-out

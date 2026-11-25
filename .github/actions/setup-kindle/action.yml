@@ -1,0 +1,167 @@
+name: Setup Kindle cross-compile environment
+description: Checks out submodules, installs Rust armv7 target, Zig, and cargo-zigbuild, and restores Kindle build caches.
+
+inputs:
+  save-caches:
+    description: Whether to save caches on miss (set to 'false' on tag builds)
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Kindle build environment
+      shell: bash
+      run: |
+        {
+          echo "ZIG_VERSION=0.17.1"
+          echo "ZIG_SHA256=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a"
+          echo "ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache"
+          echo "ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache"
+          echo "VERSO_NATIVE_CACHE=/tmp/verso-native-cache"
+        } >> "$GITHUB_ENV"
+
+    - name: Checkout submodules
+      shell: bash
+      run: |
+        git submodule update --init --depth=1 --jobs=8
+        git -C third_party/FBInk submodule update --init --depth=1 font8x8
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: armv7-unknown-linux-gnueabihf
+
+    - name: Cache Zig toolchain
+      if: inputs.save-caches == 'true'
+      uses: actions/cache@v6
+      with:
+        path: /tmp/zig-toolchain/${{ env.ZIG_VERSION }}
+        key: zig-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}
+
+    - name: Restore Zig toolchain
+      if: inputs.save-caches != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: /tmp/zig-toolchain/${{ env.ZIG_VERSION }}
+        key: zig-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}
+
+    - name: Install Zig
+      shell: bash
+      run: |
+        set -euo pipefail
+        ZIG_DIR="/tmp/zig-toolchain/${ZIG_VERSION}"
+        if [ ! -x "${ZIG_DIR}/zig" ]; then
+          TARBALL="/tmp/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-all-errors \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            -o "${TARBALL}"
+          echo "${ZIG_SHA256}  ${TARBALL}" | sha256sum -c -
+          mkdir -p "${ZIG_DIR}"
+          tar -xJf "${TARBALL}" --strip-components=1 -C "${ZIG_DIR}"
+          rm -f "${TARBALL}"
+        fi
+        echo "${ZIG_DIR}" >> "$GITHUB_PATH"
+        "${ZIG_DIR}/zig" version
+
+    - name: Cache Zig
+      if: inputs.save-caches == 'true'
+      uses: actions/cache@v6
+      with:
+        path: /tmp/zig-cache
+        key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}
+
+    - name: Restore Zig
+      if: inputs.save-caches != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: /tmp/zig-cache
+        key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}
+
+    - name: Install cargo-zigbuild
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-zigbuild@0.24.1
+
+    - name: Compute native cache key
+      id: native-key
+      shell: bash
+      run: |
+        KEY="$({
+          git submodule status -- \
+            third_party/FBInk third_party/crengine third_party/freetype \
+            third_party/harfbuzz third_party/hunspell third_party/libjpeg-turbo \
+            third_party/libpng third_party/libunibreak third_party/utf8proc \
+            third_party/xxhash third_party/zlib
+          cat .cargo/config.toml
+          echo "$ZIG_VERSION"
+        } | sha256sum | cut -d' ' -f1)"
+        echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+    - name: Cache native C/C++ libraries
+      if: inputs.save-caches == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ env.VERSO_NATIVE_CACHE }}
+        key: native-kindle-${{ runner.os }}-${{ steps.native-key.outputs.key }}-${{ hashFiles('crates/crengine-sys/build.rs', 'crates/crengine-sys/config/**', 'crates/crengine-sys/shim/**', 'crates/crengine-sys/lunasvg/**', 'crates/hunspell-sys/build.rs', 'crates/hunspell-sys/shim/**', 'crates/fbink-sys/build.rs') }}
+
+    - name: Restore native C/C++ libraries
+      if: inputs.save-caches != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.VERSO_NATIVE_CACHE }}
+        key: native-kindle-${{ runner.os }}-${{ steps.native-key.outputs.key }}-${{ hashFiles('crates/crengine-sys/build.rs', 'crates/crengine-sys/config/**', 'crates/crengine-sys/shim/**', 'crates/crengine-sys/lunasvg/**', 'crates/hunspell-sys/build.rs', 'crates/hunspell-sys/shim/**', 'crates/fbink-sys/build.rs') }}
+
+    - name: Cache Cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}-glibc2.20
+        save-if: ${{ inputs.save-caches }}
+
+    - name: Compute SSH cache key
+      id: ssh-key
+      shell: bash
+      run: |
+        KEY="$({
+          git -C third_party/dropbear rev-parse HEAD
+          git -C third_party/openssh-portable rev-parse HEAD
+          cat scripts/ssh/localoptions.h scripts/build-ssh.sh
+          echo "$ZIG_VERSION"
+        } | sha256sum | cut -d' ' -f1)"
+        echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Kindle SSH binaries
+      if: inputs.save-caches == 'true'
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/kindle-ssh/bin
+          target/kindle-ssh/.stamp
+        key: kindle-ssh-${{ steps.ssh-key.outputs.key }}
+
+    - name: Restore Kindle SSH binaries
+      if: inputs.save-caches != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          target/kindle-ssh/bin
+          target/kindle-ssh/.stamp
+        key: kindle-ssh-${{ steps.ssh-key.outputs.key }}
+
+    - name: Cache Russian word-form pack
+      if: inputs.save-caches == 'true'
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/wordforms/ru.vwf
+          target/wordforms/.stamp
+        key: wordforms-${{ hashFiles('assets/wordforms/opencorpora/dict.opcorpora.xml.bz2', 'scripts/build-wordforms.sh', 'crates/verso-wordforms/src/**') }}
+
+    - name: Restore Russian word-form pack
+      if: inputs.save-caches != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          target/wordforms/ru.vwf
+          target/wordforms/.stamp
+        key: wordforms-${{ hashFiles('assets/wordforms/opencorpora/dict.opcorpora.xml.bz2', 'scripts/build-wordforms.sh', 'crates/verso-wordforms/src/**') }}
