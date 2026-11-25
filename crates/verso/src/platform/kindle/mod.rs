@@ -406,22 +406,22 @@ impl Platform for Kindle {
         Ok(())
     }
 
-    fn resume(&mut self) -> Result<()> {
+    fn resume(&mut self) -> Result<bool> {
         self.finish_startup()?;
-        if self.native_sleep {
+        let native = std::mem::take(&mut self.native_sleep);
+        if native {
             // Verso takes the screen back either way: a missed ack only means the
             // next draw may race the launcher's resume, not worth quitting for.
             if let Err(e) = launcher_handoff(false) {
                 log::warn!("wake handoff failed, resuming anyway: {e:#}");
             }
-            self.native_sleep = false;
         }
         self.inputs_mut().touch.grab(true)?;
         self.grab_buttons(true);
         self.queue.clear();
         self.sleeping = false;
         self.battery_due = Instant::now() + Duration::from_secs(60);
-        Ok(())
+        Ok(native)
     }
     fn waker(&self) -> Waker {
         fd_waker(self.wake_fd.clone())

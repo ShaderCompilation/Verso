@@ -141,7 +141,8 @@ against the previous frame in **16×16 tiles**:
   never stall same-frame chrome updates.
 - **Frame check (`frame_watch.rs`):** after the launch and wake frames the log
   says whether the framebuffer still holds Verso's frame (2 s later on the
-  Kindle, and at the first touch). It only reads and never repaints.
+  Kindle, and at the first touch). Only after Amazon's own sleep screen does it
+  also repaint: every 0.1 s for 5 s, the whole screen with `Ui` if overwritten.
 - **`fast_debt`:** every `Fast` (1-bit B&W `DU`) rect is remembered and given a
   clean `Ui` pass automatically once the finger lifts.
 

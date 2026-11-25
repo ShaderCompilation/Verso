@@ -289,8 +289,9 @@ pub trait Platform {
     fn prepare_sleep(&mut self, _cover: bool) -> Result<()> {
         Ok(())
     }
-    fn resume(&mut self) -> Result<()> {
-        Ok(())
+    /// Takes input and the display back; whether Amazon's UI had them.
+    fn resume(&mut self) -> Result<bool> {
+        Ok(false)
     }
     /// Simulator shortcuts run only after the focused screen declines entry.
     fn unhandled_text_input(&mut self, _input: &TextInput, _repeat: bool) {}

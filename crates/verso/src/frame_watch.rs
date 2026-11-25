@@ -3,6 +3,11 @@
 //! whether the framebuffer still holds what Verso drew, and then what that
 //! touch refreshed. "Overwritten" means something else drew over Verso;
 //! "intact" while the screen looked wrong points at the refresh or the panel.
+//!
+//! After Amazon's own sleep screen the frame is also guarded: Amazon's Home,
+//! which the launcher doesn't pause, redraws itself when the sleep screen
+//! closes, usually after Verso's frame is out. Nothing tells Verso when, so
+//! the framebuffer is checked often and drawn again where it was overwritten.
 
 use std::time::{Duration, Instant};
 
@@ -11,6 +16,10 @@ use crate::platform::{TouchPhase, Update};
 
 /// After the frame, and past the wake cleanup's repaint.
 const CHECK_AFTER: Duration = Duration::from_secs(2);
+/// How long after a native wake frame Amazon's Home may still draw over it,
+/// and how often to look.
+const GUARD_FOR: Duration = Duration::from_secs(5);
+const GUARD_EVERY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy)]
 enum Touch {
@@ -31,29 +40,43 @@ pub struct FrameWatch {
     /// When the frame was sent; `None` until then.
     shown: Option<Instant>,
     check_due: Option<Instant>,
+    /// Whether to guard the next frame; when the guard looks next.
+    guard: bool,
+    guard_due: Option<Instant>,
     touch: Touch,
 }
 
 impl FrameWatch {
     /// Watches for the first frame.
     pub fn new(timed: bool) -> Self {
-        Self { timed, after: "launch", shown: None, check_due: None, touch: Touch::Waiting }
+        Self {
+            timed,
+            after: "launch",
+            shown: None,
+            check_due: None,
+            guard: false,
+            guard_due: None,
+            touch: Touch::Waiting,
+        }
     }
 
     /// Going to sleep: nothing to watch until the next wake.
     pub fn sleep(&mut self) {
-        (self.shown, self.check_due, self.touch) = (None, None, Touch::Done);
+        (self.shown, self.check_due, self.guard_due, self.touch) = (None, None, None, Touch::Done);
     }
 
-    /// Watches for the first frame after a wake.
-    pub fn wake(&mut self) {
+    /// Watches for the first frame after a wake, and guards it after Amazon's
+    /// own sleep screen (`native`).
+    pub fn wake(&mut self, native: bool) {
         (self.after, self.shown, self.check_due, self.touch) = ("wake", None, None, Touch::Waiting);
+        (self.guard, self.guard_due) = (native, None);
     }
 
     pub fn presented(&mut self, updates: &[Update], now: Instant) {
         if self.shown.is_none() && matches!(self.touch, Touch::Waiting) {
             self.shown = Some(now);
             self.check_due = self.timed.then(|| now + CHECK_AFTER);
+            self.guard_due = std::mem::take(&mut self.guard).then(|| now + GUARD_EVERY);
         }
         if let Touch::Counting { refreshes, largest, .. } = &mut self.touch {
             *refreshes += updates.len();
@@ -66,7 +89,17 @@ impl FrameWatch {
     }
 
     pub fn deadline(&self) -> Option<Instant> {
-        self.check_due
+        [self.check_due, self.guard_due].into_iter().flatten().min()
+    }
+
+    /// Whether to look now if the guarded frame was overwritten: what to
+    /// call it in the log.
+    pub fn take_guard_due(&mut self, now: Instant) -> Option<String> {
+        let shown = self.shown?;
+        self.guard_due.take_if(|due| now >= *due)?;
+        let next = now + GUARD_EVERY;
+        self.guard_due = (next <= shown + GUARD_FOR).then_some(next);
+        Some(format!("frame check {:.1} s after the {} frame", (now - shown).as_secs_f32(), self.after))
     }
 
     /// When the timed check is due, once: what to call the frame in the log.
@@ -139,7 +172,7 @@ mod tests {
         watch.sleep();
         watch.presented(&[update(100, 100)], at(5000));
         assert_eq!((watch.deadline(), watch.touch(TouchPhase::Down, at(5100))), (None, None));
-        watch.wake();
+        watch.wake(false);
         assert_eq!(watch.touch(TouchPhase::Down, at(6000)), None, "the wake frame isn't out yet");
         watch.presented(&[update(100, 100)], at(6100));
         let first = watch.touch(TouchPhase::Down, at(6600));
@@ -149,5 +182,35 @@ mod tests {
         assert!(watch.take_due(at(8100)).is_some());
 
         assert_eq!(FrameWatch::new(false).deadline(), None);
+    }
+
+    #[test]
+    fn guards_only_the_frame_after_a_native_wake() {
+        let t = Instant::now();
+        let at = |ms| t + Duration::from_millis(ms);
+        let update = [Update { rect: Rect::new(0, 0, 100, 100), mode: RefreshMode::Full }];
+        let mut watch = FrameWatch::new(true);
+        watch.presented(&update, at(0));
+        assert_eq!(watch.take_guard_due(at(1000)), None, "launch");
+        watch.sleep();
+        watch.wake(false);
+        watch.presented(&update, at(10_000));
+        assert_eq!(watch.take_guard_due(at(11_000)), None, "a wake from Verso's own cover");
+        watch.sleep();
+        watch.wake(true);
+        assert_eq!(watch.take_guard_due(at(20_000)), None, "the wake frame isn't out yet");
+        watch.presented(&update, at(20_000));
+        assert_eq!(watch.deadline(), Some(at(20_100)));
+        assert_eq!(watch.take_guard_due(at(20_050)), None);
+        assert!(watch.take_guard_due(at(20_100)).is_some());
+        // The repaint it asks for doesn't start the window over.
+        watch.presented(&update, at(20_120));
+        let looks = (20_101..40_000).filter(|&ms| watch.take_guard_due(at(ms)).is_some()).count();
+        assert_eq!(looks, 49, "every 0.1 s until 5 s after the frame");
+        watch.sleep();
+        watch.wake(true);
+        watch.presented(&update, at(50_000));
+        watch.sleep();
+        assert_eq!((watch.take_guard_due(at(50_100)), watch.deadline()), (None, None), "asleep again");
     }
 }

@@ -131,9 +131,9 @@ rather than stopping it:
   last** (a pending USB plug may unmount `/mnt/us` immediately).
 - **Native sleep handoff:** Verso sends `SIGUSR1` to resume `awesome` for
   Amazon's screensaver and `SIGUSR2` to pause it on wake, waiting for
-  `$VERSO_SYSTEM_ACK`. *(Known issue: native Amazon wake has reproduced a
-  stale Home frame over the reader until the next turn; book-cover sleep
-  restores cleanly **(measured)**.)*
+  `$VERSO_SYSTEM_ACK`. Amazon's Home (`KPPMainApp`, never paused) redraws over
+  Verso 0.3–0.5 s after the wake frame **(measured)**; `frame_watch.rs`
+  repairs it. Cover sleep isn't affected **(measured)**.
 - **Exit codes & updates:** `0` normal, `85` install staged update, `86` go
   back to `update/previous/`, `87` restart without saving (protocol 2, after
   developer live-data edits), `88` unsupported hardware. Updates use empty

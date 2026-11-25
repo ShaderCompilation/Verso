@@ -412,6 +412,14 @@ fn run() -> Result<i32> {
             log::info!("{line}");
         }
         // The canvas is as last presented until the next `app.frame()`.
+        if let Some(what) = watch.take_guard_due(Instant::now())
+            && let Some(check) = platform.check_frame(app.canvas())
+            && check.changed > 0
+        {
+            log::info!("{what}: {check}; drawing it again");
+            app.refresh_all(RefreshMode::Ui);
+            continue;
+        }
         if let Some(what) = watch.take_due(Instant::now())
             && let Some(check) = platform.check_frame(app.canvas())
         {
@@ -503,11 +511,11 @@ fn run() -> Result<i32> {
                 }
                 Some(Event::Wake) => {
                     log::info!("wake");
-                    platform.resume()?;
+                    let native = platform.resume()?;
                     gestures.reset();
                     app.set_battery(platform.battery());
                     app.on_wake();
-                    watch.wake();
+                    watch.wake(native);
                     if let Some(connected) = platform.usb_connected() {
                         app.on_usb(connected);
                     }
