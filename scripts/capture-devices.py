@@ -39,17 +39,29 @@ def scenes(s):
     card_y = 0 if s.w > s.h else s.h - s.h * 4 // 5
     panel_swipe = (s.w - panel * 0.2, s.h * 0.6, s.w - panel * 0.8, s.h * 0.6)
     tab = lambda i: s.tap(s.w - panel + margin + (i + 0.5) * (panel - 2 * margin) / 3, card_y + s.mm(15.2))
-    row_y = card_y + s.mm(24.2)  # Wikipedia's matches and language
+    row_y = card_y + s.mm(24.2)  # Wikipedia's matches and language, Translate's languages
     inner = panel - 2 * margin
     other_matches = s.tap(s.w - panel + margin + inner * 0.29, row_y)
     language = s.tap(s.w - margin - inner * 0.21, row_y)
     close = s.tap(s.w - margin + s.mm(2) - s.mm(9) / 2, card_y + s.mm(6))
+    source = s.tap(s.w - panel + margin + inner * 0.25, row_y)
+    target = s.tap(s.w - margin - inner * 0.2, row_y)
+    first_row = s.tap(s.w - panel / 2, card_y + s.mm(36))
     edit = [*s.tap(s.w - panel + margin + s.mm(4), card_y + s.mm(6)), '--edit', 'clear']
     wifi = s.tap(margin + (s.w - 2 * margin) / (10 if s.w > s.h else 6), s.mm(27 if s.w > s.h else 36.5))
     offline = [*s.swipe(cx, 2, cx, s.h * 0.55), *wifi, *s.tap(cx, s.h * 0.95)]
     drag = lambda y: ['--hold-drag', f'{round(hello_x)},{s.mm(6)},{round(hello_x) + s.mm(30)},{y}']
     lookup = [*book, *s.long_press(hello_x, s.mm(6))]
     wikipedia = [*lookup, *tab(1)]
+    translate = [*lookup, *tab(2)]
+    german = {'footer': False, 'translate_language': 'de'}
+    # The passage bar's Translate, under a passage with its middle at x that ends at y.
+    bar = min(s.w - 2 * margin, s.mm(115))
+    translate_passage = lambda x, y: s.tap(max(margin, x - bar / 2) + 5.5 * bar / 7, y + s.mm(12.5))
+    short_passage = [*book, *drag(s.mm(6)), *translate_passage(hello_x + s.mm(18), s.mm(6))]
+    long_passage = [*book, *drag(s.mm(45)), *translate_passage(cx, s.mm(45))]
+    retry = s.tap(s.w - panel + margin + s.mm(15), card_y + s.mm(47.5))  # below one or two lines
+    retype = lambda words: [*translate, *edit, '--text', words, '--edit', 'submit']
     menu_button = lambda i: s.tap(margin + (i + 0.5) * column, s.h - margin - s.mm(10) / 2)
     return {
         'home': ('all', {}, []),
@@ -75,8 +87,19 @@ def scenes(s):
         'wikipedia-miss': ('one', {'footer': False}, [*wikipedia, *edit, '--text', 'nothing', '--edit', 'submit']),
         'wikipedia-offline': ('one', {'footer': False}, [*book, *offline, *wikipedia[len(book):]]),
         'wikipedia-closed': ('one', {'footer': False}, [*wikipedia, *close]),
-        'wikipedia-page': ('one', {'footer': False}, book),
-        'translate': ('one', {'footer': False}, [*lookup, *tab(2)]),
+        'lookup-page': ('one', {'footer': False}, book),
+        'translate-first': ('one', {'footer': False}, translate),
+        'translate-chosen': ('one', {'footer': False}, [*translate, *first_row]),
+        'translate': ('one', german, translate),
+        'translate-compact': ('one', {**german, 'dictionary_expanded': False}, short_passage),
+        'translate-passage': ('one', german, long_passage),
+        'translate-passage-end': ('one', german, [*long_passage, *s.swipe(*panel_swipe) * 9]),
+        'translate-sources': ('one', german, [*translate, *source]),
+        'translate-targets': ('one', german, [*translate, *target]),
+        'translate-same': ('one', {**german, 'translate_language': 'en'}, translate),
+        'translate-error': ('one', german, retype('busy')),
+        'translate-retried': ('one', german, [*retype('flaky'), *retry]),
+        'translate-closed': ('one', german, [*long_passage, *close]),
         'passage': ('one', {'footer': False}, [*book, *drag(s.mm(6))]),
         'passage-long': ('one', {'footer': False}, [*book, *drag(s.mm(45))]),
         'settings': ('all', {}, [], 'settings'),
@@ -96,7 +119,7 @@ def main():
             'a second line on every screen size.</def><def>A second meaning, for the card height.</def></ar>')
         for w in ['Hello', 'selection', 'foundation', 'typography', 'book', 'text']])
     made = {}
-    wikipedia = sim.wikipedia()
+    online = {'VERSO_WIKIPEDIA_URL': sim.wikipedia(), 'VERSO_TRANSLATE_URL': sim.translator()}
     for device, orientation, s in sim.device_screens(devices):
         for name, (folder, settings, steps, *screen) in scenes(s).items():
             if only and name not in only:
@@ -108,11 +131,12 @@ def main():
                              {'dictionary-folders.json': {'version': 1, 'folders': []}})
             shutil.copytree(dictionaries / 'dictionaries', data / 'dictionaries')
             sim.run(out, steps, data, books[folder], device=device, screen=screen[0] if screen else None,
-                    env={'VERSO_WIKIPEDIA_URL': wikipedia})
+                    env=online)
             made.setdefault(name, []).append(out)
     # Closing the card puts back the page exactly.
-    for closed, page in zip(made.get('wikipedia-closed', []), made.get('wikipedia-page', [])):
-        assert closed.read_bytes() == page.read_bytes(), f'{closed} differs from {page}'
+    for name in ['wikipedia-closed', 'translate-closed']:
+        for closed, page in zip(made.get(name, []), made.get('lookup-page', [])):
+            assert closed.read_bytes() == page.read_bytes(), f'{closed} differs from {page}'
     if shutil.which('montage'):
         for name, files in made.items():
             subprocess.run(['montage', *map(str, files), '-geometry', '+8+8', '-tile', 'x2', '-resize', 'x700',

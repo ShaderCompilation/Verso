@@ -50,14 +50,23 @@ pub struct GoogleGtx<'a> {
     pub url: &'a str,
 }
 
-/// Google's code for one of Verso's languages. It has no Nynorsk, and answers
-/// unknown codes with an error page.
-fn google_code(tag: &str) -> Result<&'static str, Error> {
+/// The languages that can be translated, by name. Google has no Nynorsk.
+pub fn languages() -> impl Iterator<Item = &'static str> {
+    all_languages().map(|(code, _)| code).filter(|code| *code != "nn")
+}
+
+/// The one a tag means.
+pub fn language(tag: &str) -> Option<&'static str> {
     let code = normalize_language(tag);
-    match all_languages().find(|(known, _)| *known == code) {
-        Some(("nn", _)) | None => Err(Error::Language(code)),
-        Some(("zh", _)) => Ok("zh-CN"),
-        Some((known, _)) => Ok(known),
+    languages().find(|known| *known == code)
+}
+
+/// Google's code for a language. It answers unknown ones with an error page.
+fn google_code(tag: &str) -> Result<&'static str, Error> {
+    match language(tag) {
+        Some("zh") => Ok("zh-CN"),
+        Some(code) => Ok(code),
+        None => Err(Error::Language(normalize_language(tag))),
     }
 }
 

@@ -1,10 +1,11 @@
 //! Lookup is an overlay over the unchanged cached book page: a card with
 //! three tabs. This file holds the card and its Dictionary tab; `tabs.rs`
-//! holds the online ones (Wikipedia's in `wikipedia.rs`), `pickers.rs` what
-//! they choose with and `passage_bar.rs` the bar beside a passage.
+//! holds the online ones (`wikipedia.rs` and `translate.rs`), `pickers.rs`
+//! what they choose with and `passage_bar.rs` the bar beside a passage.
 mod passage_bar;
 mod pickers;
 mod tabs;
+mod translate;
 mod wikipedia;
 
 pub use passage_bar::{SelectionAction, SelectionActions};
@@ -13,6 +14,7 @@ pub use tabs::{Languages, Tab, Tabs};
 use crate::{
     dictionary::{
         Block, BlockKind, Dictionary, Source, Style,
+        languages::language_name,
         sets::Set,
         worker::{Match, State, Worker},
     },
@@ -163,6 +165,8 @@ pub enum LookupEvent {
     Set(String),
     /// Another Wikipedia was chosen, for this book.
     Edition(Edition),
+    /// A language to translate into was chosen, for every book.
+    Target(&'static str),
     /// ⤢ expanded (true) or collapsed the card; the next lookup opens so.
     Resized(bool),
 }
@@ -203,9 +207,15 @@ struct WordPress {
     released: bool,
 }
 
-/// Whether two queries are the same word, ignoring case.
+/// Whether two queries are the same words, ignoring case and line breaks.
 fn same_query(a: &str, b: &str) -> bool {
-    a.trim().to_lowercase() == b.trim().to_lowercase()
+    one_line(a).to_lowercase() == one_line(b).to_lowercase()
+}
+
+/// A passage may have several paragraphs, which the header and the field
+/// (which drops line breaks) show as one line.
+fn one_line(query: &str) -> String {
+    query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// What the online tabs' chooser is for.
@@ -214,6 +224,10 @@ enum Choosing {
     Match,
     /// A Wikipedia, in the rows' order.
     Edition(Vec<Edition>),
+    /// A language to translate from (None detects it), in the rows' order.
+    Source(Vec<Option<&'static str>>),
+    /// A language to translate into, in the rows' order.
+    Target(Vec<&'static str>),
 }
 
 struct Picker {
@@ -260,8 +274,9 @@ pub struct Lookup {
     tab_pages: [usize; 3],
     picker: Option<Picker>,
     chooser: Option<(Choosing, Chooser)>,
-    /// Wikipedia's matches while they show as a list, paged by `pager`.
-    hits: Option<List>,
+    /// What the body lists instead of text, paged by `pager`: Wikipedia's
+    /// matches, or the languages to translate into while none is chosen.
+    list: Option<List>,
     /// Earlier lookups of a chain, newest last. Depth 0 (empty) is the
     /// word from the book.
     history: Vec<Visit>,
@@ -289,8 +304,14 @@ pub struct Lookup {
     other_matches: DropDown,
     hit_count: Rect,
     edition: DropDown,
+    /// Translate's row: the languages it translates from and into.
+    source: DropDown,
+    target: DropDown,
+    translate_row: Rect,
     /// Below an online tab's error.
     retry: Button,
+    /// In its place when the text is in the language to translate into.
+    another_language: Button,
     /// The divider under the header rows, and the one above the action
     /// strip while it shows.
     divider: i32,
@@ -346,7 +367,7 @@ impl Lookup {
         mut tabs: Tabs,
     ) -> Self {
         let mut field = TextField::new("Word");
-        field.edit(&TextInput::Insert(query.into()));
+        field.edit(&TextInput::Insert(one_line(query)));
         field.limit = Some(QUERY_LIMIT);
         if too_long(query) {
             tabs.show(Tab::Translate);
@@ -382,7 +403,7 @@ impl Lookup {
             tab_pages: [0; 3],
             picker: None,
             chooser: None,
-            hits: None,
+            list: None,
             history: Vec::new(),
             restore_page: None,
             session_live: true,
@@ -398,7 +419,11 @@ impl Lookup {
             other_matches: DropDown::default(),
             hit_count: Rect::default(),
             edition: DropDown::default(),
+            source: DropDown::default(),
+            target: DropDown::default(),
+            translate_row: Rect::default(),
             retry: Button::new("Retry", ButtonKind::Primary),
+            another_language: Button::new("Choose language", ButtonKind::Primary),
             divider: 0,
             actions_divider: None,
             field,
@@ -463,6 +488,16 @@ impl Lookup {
     pub(crate) fn edition_point(&self) -> Point {
         self.edition.rect().center()
     }
+    /// The middle of Translate's source and target buttons.
+    #[cfg(test)]
+    pub(crate) fn language_points(&self) -> (Point, Point) {
+        (self.source.rect().center(), self.target.rect().center())
+    }
+    /// The middle of a visible row of the body's list.
+    #[cfg(test)]
+    pub(crate) fn list_point(&self, row: usize) -> Point {
+        self.list.as_ref().unwrap().row_rect(row).center()
+    }
     /// The middle of a visible row of the open chooser.
     #[cfg(test)]
     pub(crate) fn choice_point(&self, row: usize) -> Point {
@@ -495,7 +530,7 @@ impl Lookup {
     /// picker or the keyboard needs the room.
     fn tall(&self) -> bool {
         let tab = if self.on_wikipedia() { !self.folded } else { self.expanded };
-        tab || self.picking() || self.keyboard.visible
+        tab || self.picking() || self.tabs.needs_target() || self.keyboard.visible
     }
     /// Portrait: compact (~54%) or 80%, at the edge away from the word in
     /// every state, so the tabs stay under the finger. Landscape: a
@@ -535,6 +570,10 @@ impl Lookup {
     fn retry_shown(&self) -> bool {
         !self.keyboard.visible && !self.picking() && self.tabs.error().is_some_and(Error::retryable)
     }
+    /// The way out of translating a text into its own language.
+    fn another_language_shown(&self) -> bool {
+        !self.keyboard.visible && !self.picking() && self.tabs.needs_another_language()
+    }
     /// Manage dictionaries, below anything but a definition.
     fn manage_shown(&self) -> bool {
         self.on_dictionary() && !self.definition_shown()
@@ -559,7 +598,7 @@ impl Lookup {
         let header = Rect::new(c.x, frame.y + t.mm(1.7), c.w, t.mm(8.6));
         let (side, cy) = (t.target, header.center().y);
         self.close.place(Rect::new(c.right() - side + t.mm(2.0), cy - side / 2, side, side));
-        let expandable = !landscape && !self.picking() && !typing;
+        let expandable = !landscape && !self.picking() && !self.tabs.needs_target() && !typing;
         self.expand.icon = if self.tall() { Icon::Collapse } else { Icon::Expand };
         self.expand.place(if expandable {
             Rect::new(self.close.rect().x - side, cy - side / 2, side, side)
@@ -599,7 +638,7 @@ impl Lookup {
             y = row.bottom();
         }
         // Wikipedia: Other matches · n ▾, language ▾
-        for hidden in [&mut self.other_matches, &mut self.edition] {
+        for hidden in [&mut self.other_matches, &mut self.edition, &mut self.source, &mut self.target] {
             hidden.place(Rect::default());
         }
         if let Some(row) = row.filter(|_| self.on_wikipedia()) {
@@ -609,6 +648,18 @@ impl Lookup {
             let found = self.tabs.wikipedia();
             if found.opened().is_some() && found.matches().len() > 1 {
                 self.other_matches.place(self.hit_count);
+            }
+            y = row.bottom();
+        }
+        // Translate: from ▾ → into ▾
+        if let Some(row) = row.filter(|_| self.tabs.current() == Tab::Translate) {
+            self.translate_row = row;
+            if !self.tabs.needs_target() {
+                let arrow = t.mm(4.4);
+                // "Auto (Language)" takes more room than the target.
+                let (source, rest) = row.split_left((row.w - arrow) * 56 / 100);
+                self.source.place(source);
+                self.target.place(rest.split_right(rest.w - arrow).0);
             }
             y = row.bottom();
         }
@@ -650,15 +701,17 @@ impl Lookup {
         };
         let pager = Rect::new(c.x, pager_bottom - t.mm(7.0), c.w, t.mm(7.0));
         self.pager.place(pager, t);
-        // Retry stands right below the message.
+        // Retry or Choose language stands right below the message.
         let retry_gap = t.mm(2.4);
-        let retry_h = if self.retry_shown() { t.target + retry_gap } else { 0 };
+        let retry_h = if self.retry_shown() || self.another_language_shown() { t.target + retry_gap } else { 0 };
         self.body_full = Rect::new(c.x, top, c.w, (lowest - top - retry_h).max(1));
         self.body_paged = Rect::new(c.x, top, c.w, (pager.y - t.mm(1.0) - top - retry_h).max(1));
-        self.place_hits(t);
+        self.place_list(t);
         self.body = if self.paged { self.body_paged } else { self.body_full };
         let message = self.text_height.map_or(self.body.h, |h| h.min(self.body.h));
-        self.retry.place(Rect::new(c.x, top + message + retry_gap, t.mm(30.0), t.target), t);
+        let below = Rect::new(c.x, top + message + retry_gap, t.mm(30.0), t.target);
+        self.retry.place(below, t);
+        self.another_language.place(Rect { w: t.mm(38.0), ..below }, t);
         if let Some((_, chooser)) = &mut self.chooser {
             let area = Rect::new(c.x, top, c.w, frame.bottom() - t.mm(2.4) - top);
             chooser.place(area, t);
@@ -677,16 +730,28 @@ impl Lookup {
             p.list.place(Rect::new(area.x, list_y, area.w, p.status.y - list_y), t.row2, 0);
         }
     }
-    /// Wikipedia's matches as a list in the body, with the pager once they
-    /// need it.
-    fn place_hits(&mut self, t: &Theme) {
-        let Some(matches) = self.tabs.wikipedia().listing().filter(|_| self.on_wikipedia()) else {
-            self.hits = None;
+    /// Wikipedia's matches, or the first choice of a language to translate
+    /// into, as a list in the body, with the pager once they need it.
+    fn place_list(&mut self, t: &Theme) {
+        let matches = self.tabs.wikipedia().listing().filter(|_| self.on_wikipedia());
+        if matches.is_none() && !self.tabs.needs_target() {
+            self.list = None;
             return;
+        }
+        let languages = self.tabs.languages();
+        let list = self.list.get_or_insert_with(|| {
+            List::new(match matches {
+                Some(matches) => matches.iter().map(Wikipedia::row).collect(),
+                None => target_rows(languages),
+            })
+        });
+        // Two matches a page even on a short side panel. Languages are dense,
+        // as in the chooser.
+        let row = match matches {
+            Some(_) if self.body_paged.h >= 2 * t.row2 => t.row2,
+            Some(_) => t.row,
+            None => t.target,
         };
-        let list = self.hits.get_or_insert_with(|| List::new(matches.iter().map(Wikipedia::row).collect()));
-        // Two rows a page even on a short side panel.
-        let row = if self.body_paged.h < 2 * t.row2 { t.row } else { t.row2 };
         list.place(self.body_full, row, 0);
         self.paged = list.paging().pages() > 1 && !self.keyboard.visible;
         if self.paged {
@@ -707,7 +772,7 @@ impl Lookup {
     }
     pub fn busy(&self) -> bool {
         let waiting = if self.on_dictionary() { !self.complete || self.pending } else { self.tabs.waiting() };
-        let laid_out = self.pages.is_some() || self.layout_error.is_some() || self.hits.is_some();
+        let laid_out = self.pages.is_some() || self.layout_error.is_some() || self.list.is_some();
         // Nothing is laid out under a picker.
         waiting || !laid_out && !self.picking() || self.paginating()
     }
@@ -771,7 +836,7 @@ impl Lookup {
     /// The content changed: it's laid out again, from its first page.
     fn reset_layout(&mut self) {
         self.pages = None;
-        self.hits = None;
+        self.list = None;
         self.layout_error = None;
         self.text_height = None;
         self.pager.set(0, 1);
@@ -876,7 +941,7 @@ impl Lookup {
         self.picker = None;
         self.chooser = None;
         self.field.edit(&TextInput::Clear);
-        self.field.edit(&TextInput::Insert(visit.query.clone()));
+        self.field.edit(&TextInput::Insert(one_line(&visit.query)));
         self.query = visit.query;
         self.tab_pages = visit.pages;
         self.restore_page = Some(visit.pages[visit.tab.index()]);
@@ -1031,6 +1096,26 @@ impl Lookup {
         let chooser = Chooser::new(rows.collect());
         self.chooser = Some((Choosing::Edition(editions), chooser));
     }
+    fn choose_source(&mut self) {
+        let languages = self.tabs.languages();
+        let sources = translate::sources(languages, self.tabs.translate().detected());
+        let rows = sources.iter().map(|&source| {
+            Row::new(source.map_or("Detect automatically", language_name)).value(if source == languages.source {
+                "Chosen"
+            } else if source.is_some() && source == languages.written {
+                "This book"
+            } else {
+                ""
+            })
+        });
+        let chooser = Chooser::new(rows.collect());
+        self.chooser = Some((Choosing::Source(sources), chooser));
+    }
+    fn choose_target(&mut self) {
+        let languages = self.tabs.languages();
+        let chooser = Chooser::new(target_rows(languages));
+        self.chooser = Some((Choosing::Target(translate::targets(languages)), chooser));
+    }
     fn chosen(&mut self, choosing: Choosing, row: usize) -> Option<LookupEvent> {
         match choosing {
             Choosing::Match => {
@@ -1051,7 +1136,30 @@ impl Lookup {
                 self.show_new_reply();
                 Some(LookupEvent::Edition(edition))
             }
+            Choosing::Source(sources) => {
+                if sources[row] != self.tabs.languages().source {
+                    self.tabs.set_source(sources[row]);
+                    self.forget_translations();
+                }
+                None
+            }
+            Choosing::Target(targets) => {
+                if self.tabs.languages().target == Some(targets[row]) {
+                    return None;
+                }
+                self.tabs.set_target(targets[row]);
+                self.forget_translations();
+                Some(LookupEvent::Target(targets[row]))
+            }
         }
+    }
+    /// The chain's earlier translations are between other languages.
+    fn forget_translations(&mut self) {
+        for visit in &mut self.history {
+            visit.online.forget_translation();
+            visit.pages[Tab::Translate.index()] = 0;
+        }
+        self.show_new_reply();
     }
     fn open_match(&mut self, index: usize) {
         if self.tabs.open_match(index) {
@@ -1313,6 +1421,14 @@ impl Lookup {
             self.choose_edition();
             return None;
         }
+        if self.source.on_gesture(g) {
+            self.choose_source();
+            return None;
+        }
+        if self.target.on_gesture(g) || self.another_language_shown() && self.another_language.on_gesture(g) {
+            self.choose_target();
+            return None;
+        }
         if self.retry_shown() && self.retry.on_gesture(g) {
             self.tabs.retry();
             self.show_new_reply();
@@ -1362,9 +1478,12 @@ impl Lookup {
         if let Gesture::Swipe { dir, .. } = g {
             self.pager.on_swipe(*dir);
         }
-        if let Some(list) = &mut self.hits {
+        if let Some(list) = &mut self.list {
             list.page = self.pager.page;
             if let Some(ListEvent::Tapped(index)) = list.on_gesture(g) {
+                if self.tabs.needs_target() {
+                    return self.chosen(Choosing::Target(translate::targets(self.tabs.languages())), index);
+                }
                 self.open_match(index);
             }
         }
@@ -1437,13 +1556,15 @@ impl Lookup {
             };
             cx.line(title, t.heading, r, HAlign::Left);
         } else {
-            let label = if self.query.trim().is_empty() { "Look up a word" } else { self.query.as_str() };
+            // As much as may show.
+            let words = one_line(&self.query.chars().take(2 * QUERY_LIMIT).collect::<String>());
+            let label = if words.is_empty() { "Look up a word" } else { words.as_str() };
             let style = t.dictionary_headword;
             let gap = t.mm(1.5);
             // Beside the query: ✎ at the book's word, "← previous" deeper, or
             // the length of a passage too long to edit.
             let crumb = match self.history.last() {
-                Some(v) => Some(format!("← {}", v.query)),
+                Some(v) => Some(format!("← {}", one_line(&v.query))),
                 None => too_long(&self.query).then(|| format!("{} words", self.query.split_whitespace().count())),
             };
             let crumb_style = t.small;
@@ -1504,6 +1625,17 @@ impl Lookup {
         }
         self.edition.draw(cx, self.tabs.languages().wikipedia.name(), "");
     }
+    fn draw_translate_row(&self, cx: &mut DrawCx) {
+        let (t, row) = (cx.theme, self.translate_row);
+        let languages = self.tabs.languages();
+        let Some(target) = languages.target else {
+            return cx.line("Translate into which language?", t.button, row, HAlign::Left);
+        };
+        let (from, into) = (self.source.rect(), self.target.rect());
+        self.source.draw(cx, &self.tabs.translate().source_label(languages), "");
+        cx.line("→", t.body, Rect::new(from.right(), row.y, into.x - from.right(), row.h), HAlign::Center);
+        self.target.draw(cx, language_name(target), "");
+    }
     /// Lays out the first page. A definition that fits one page uses the
     /// pager's row too; a longer one gives that row back to the pager,
     /// re-breaking the lines already shaped.
@@ -1516,7 +1648,7 @@ impl Lookup {
                 self.pages = None;
             }
         }
-        if self.pages.is_some() || self.layout_error.is_some() || self.hits.is_some() {
+        if self.pages.is_some() || self.layout_error.is_some() || self.list.is_some() {
             return;
         }
         let started = std::time::Instant::now();
@@ -1625,6 +1757,9 @@ impl Lookup {
         if !self.keyboard.visible && self.on_wikipedia() {
             self.draw_wikipedia_row(cx);
         }
+        if !self.keyboard.visible && self.tabs.current() == Tab::Translate {
+            self.draw_translate_row(cx);
+        }
         if self.edit_row() {
             self.field.draw(cx);
             self.search.draw(cx);
@@ -1656,11 +1791,14 @@ impl Lookup {
                 cx.hint(r, RefreshMode::Fast);
             }
         }
-        if let Some(list) = self.hits.as_ref().filter(|l| l.fits()) {
+        if let Some(list) = self.list.as_ref().filter(|l| l.fits()) {
             list.draw(cx);
         }
         if self.retry_shown() {
             self.retry.draw(cx);
+        }
+        if self.another_language_shown() {
+            self.another_language.draw(cx);
         }
         if let Some(error) = &self.layout_error {
             cx.text.draw(cx.canvas, error, t.body, self.body, HAlign::Left);
@@ -1670,6 +1808,19 @@ impl Lookup {
         }
         self.keyboard.draw(cx);
     }
+}
+
+fn target_rows(languages: &Languages) -> Vec<Row> {
+    let row = |code: &'static str| {
+        Row::new(language_name(code)).value(if languages.target == Some(code) {
+            "Chosen"
+        } else if languages.written == Some(code) {
+            "This book"
+        } else {
+            ""
+        })
+    };
+    translate::targets(languages).into_iter().map(row).collect()
 }
 
 /// The card on each tab, at both edges, with the pager where it has one.
@@ -1719,6 +1870,24 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts>
                 parts = parts.keyboard(l.keyboard.rect());
             }
             samples.push(parts);
+            if tab == Tab::Translate {
+                // First use: at least two languages a page.
+                let list = l.list.as_ref().unwrap();
+                let rows = (0..2).map(|i| list.row_rect(i));
+                let buttons = rows.chain([l.pager.rect()]).chain(l.actions.iter().map(Button::rect));
+                samples.push(Parts::new("Lookup first language", l.sheet.rect(), buttons).dense(t.mm(7.0)));
+                // The same language on both sides: its message and the way out.
+                let languages = Languages { source: Some("en"), ..Languages::for_test(None, Some("en")) };
+                l.tabs.set_languages(languages);
+                l.show_new_reply();
+                l.paged = false;
+                l.place(t);
+                let pickers = [l.source.rect(), l.target.rect(), l.another_language.rect()];
+                let buttons = pickers.into_iter().chain(l.actions.iter().map(Button::rect));
+                samples.push(
+                    Parts::new("Lookup same language", l.sheet.rect(), buttons).body(l.body, 3 * line).dense(t.mm(7.0)),
+                );
+            }
             if tab != Tab::Wikipedia || typing {
                 continue;
             }

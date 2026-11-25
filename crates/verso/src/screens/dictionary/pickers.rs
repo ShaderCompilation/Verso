@@ -25,7 +25,6 @@ impl DropDown {
         self.rect = rect;
     }
 
-    #[cfg(test)]
     pub fn rect(&self) -> Rect {
         self.rect
     }
@@ -52,12 +51,16 @@ impl DropDown {
         let (pad, icon) = (t.mm(2.2), t.icon_small);
         let chevron = Rect::new(r.right() - pad - icon, r.y, icon, r.h);
         cx.icon(Icon::ChevronDown, chevron, icon, quiet);
-        let note_style = t.small.gray(quiet);
-        let note_w = (cx.text.width(note, note_style).ceil() as i32).min(r.w / 2);
-        let note_rect = Rect::new(chevron.x - t.mm(1.0) - note_w, r.y, note_w + 1, r.h);
-        cx.line(note, note_style, note_rect, HAlign::Right);
+        let mut right = chevron.x - t.mm(1.0);
+        if !note.is_empty() {
+            let note_style = t.small.gray(quiet);
+            let note_w = (cx.text.width(note, note_style).ceil() as i32).min(r.w / 2);
+            let note_rect = Rect::new(right - note_w, r.y, note_w + 1, r.h);
+            cx.line(note, note_style, note_rect, HAlign::Right);
+            right = note_rect.x - t.mm(1.0);
+        }
         let left = r.x + pad;
-        let label_rect = Rect::new(left, r.y, (note_rect.x - t.mm(1.0) - left).max(0), r.h);
+        let label_rect = Rect::new(left, r.y, (right - left).max(0), r.h);
         // The label shrinks a little before it's cut short.
         let (style, _) = fit_label(cx.text, label, t.button, label_rect.w + 2 * t.mm(1.0), t);
         cx.line(label, style.gray(fg), label_rect, HAlign::Left);

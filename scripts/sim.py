@@ -225,22 +225,50 @@ def wikipedia():
         return {'pages': [{'title': title, 'extract': extract,
                            'canonicalurl': f'https://{language}.wikipedia.org/wiki/{title.replace(" ", "_")}'}]}
 
+    return _serve(lambda language, query: {'query': answer(language, query)}) + '/{lang}'
+
+
+def translator():
+    """A local Google Translate with original text, which finds everything to
+    be English: "busy" is refused, "flaky" (which is Portuguese) every other
+    time, and passages get several pages. Returns the value for VERSO_TRANSLATE_URL."""
+    text = 'Dies ist ein eigener Beispieltext für die Aufnahmen, mit Sätzen, die auf jedem Bildschirm umbrechen. '
+    asked = []
+
+    def answer(_, query):
+        words = query['q']
+        asked.append(words)
+        if words == 'busy' or words == 'flaky' and asked.count(words) % 2:
+            return None
+        answer = '\n'.join([text * 4] * 5) if len(words) > 60 else 'Übersetzung'
+        return [[[answer, words]], None, 'pt' if words == 'flaky' else 'en']
+
+    return _serve(answer) + '/translate'
+
+
+def _serve(answer):
+    """Serves `answer(path, parameters)` as JSON, or error 429 for None, and
+    returns the server's address."""
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
+        def do_GET(self, form=''):
             url = urlsplit(self.path)
-            query = {k: v[0] for k, v in parse_qs(url.query).items()}
-            body = json.dumps({'query': answer(url.path.strip('/'), query)}).encode()
-            self.send_response(200)
+            query = {k: v[0] for k, v in parse_qs(url.query + '&' + form).items()}
+            reply = answer(url.path.strip('/'), query)
+            body = json.dumps(reply).encode()
+            self.send_response(429 if reply is None else 200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            self.do_GET(self.rfile.read(int(self.headers['Content-Length'])).decode())
 
         def log_message(self, *args):
             pass
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return f'http://127.0.0.1:{server.server_port}/{{lang}}'
+    return f'http://127.0.0.1:{server.server_port}'
 
 
 def read_json(path):

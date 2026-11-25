@@ -579,14 +579,17 @@ impl Reader {
     }
     /// What the lookup card's online tabs look things up in.
     fn online_languages(&self, settings: &Settings) -> Languages {
-        use crate::online::wikipedia::Edition;
+        use crate::online::{translate, wikipedia::Edition};
         let chosen = self.store.book(&self.id).wikipedia_language;
-        let book = Edition::for_language(&self.book_language());
+        let language = self.book_language();
+        let book = Edition::for_language(&language);
         let wikipedia = chosen.as_deref().and_then(Edition::for_language).or(book);
         Languages {
             wikipedia: wikipedia.unwrap_or(Edition::ENGLISH),
             book,
-            translate: settings.translate_language.clone(),
+            source: None,
+            target: settings.translate_language.as_deref().and_then(translate::language),
+            written: translate::language(&language),
         }
     }
     pub(super) fn lookup(&mut self, query: &str, tab: Tab, cx: &mut EventCx) {
@@ -1700,6 +1703,15 @@ impl Reader {
                         if let Err(error) = self.save_choice(|state| state.wikipedia_language = Some(code)) {
                             log::error!("saving the Wikipedia language: {error:#}");
                             cx.toast("Couldn’t save the Wikipedia language for this book", None);
+                        }
+                        return Action::None;
+                    }
+                    if let LookupEvent::Target(code) = event {
+                        let mut settings = self.store.settings();
+                        settings.translate_language = Some(code.to_owned());
+                        if let Err(error) = self.store.save_settings(&settings) {
+                            log::error!("saving the translation language: {error:#}");
+                            cx.toast("Couldn’t save the translation language", None);
                         }
                         return Action::None;
                     }
@@ -3762,7 +3774,7 @@ mod tests {
         let (mut r, _commands) = test_reader("online-languages");
         let languages = |r: &Reader| {
             let languages = r.online_languages(&r.store.settings());
-            (languages.wikipedia.code(), languages.translate)
+            (languages.wikipedia.code(), languages.target)
         };
         r.language_tag = "x-klingon".into();
         assert_eq!(languages(&r), ("en", None), "no such Wikipedia; nothing chosen");
@@ -3774,7 +3786,7 @@ mod tests {
         let settings = Settings { translate_language: Some("de".into()), ..r.store.settings() };
         r.store.save_settings(&settings).unwrap();
         r.store = Store::at(std::env::temp_dir().join(format!("verso-online-languages-{}", std::process::id())));
-        assert_eq!(languages(&r), ("fr", Some("de".into())));
+        assert_eq!(languages(&r), ("fr", Some("de")));
         // The card's language list saves it: the book's own comes first.
         let offline = || Ok(crate::platform::wifi::Link::Off);
         let service = crate::online::Service::for_test("http://127.0.0.1:9", Duration::ZERO, Box::new(offline));
@@ -3790,6 +3802,20 @@ mod tests {
             });
         }
         assert_eq!(r.store.book("book").wikipedia_language.as_deref(), Some("no"));
+        assert!(matches!(&r.overlay, Overlay::Lookup(_)));
+        // Translate's first choice is saved for every book. Nynorsk can't be it.
+        let settings = Settings { translate_language: Some("nn".into()), ..r.store.settings() };
+        r.store.save_settings(&settings).unwrap();
+        assert_eq!(languages(&r).1, None);
+        test_cx(&theme, |cx| r.lookup("word", Tab::Translate, cx));
+        let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
+        let p = lookup.list_point(0);
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(p), cx);
+            r.on_gesture(Gesture::Tap(p), cx);
+        });
+        assert_eq!(r.store.settings().translate_language.as_deref(), Some("en"));
+        assert_eq!(languages(&r).1, Some("en"));
         assert!(matches!(&r.overlay, Overlay::Lookup(_)));
     }
 

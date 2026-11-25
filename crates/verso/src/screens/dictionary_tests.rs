@@ -4,7 +4,7 @@ use crate::{
     gfx::Icon,
     gfx::{Canvas, IconRenderer},
     net::tests::{Reply as Http, Server},
-    online::{Service, wikipedia::Edition},
+    online::Service,
     platform::{Waker, wifi::Link},
     store::Store,
     ui::gesture::Direction,
@@ -162,9 +162,36 @@ fn wikipedias() -> Server {
         )
     })
 }
-/// A card on Wikipedia for a French book whose reader chose English, with the
-/// link `state` (0 off, 1 connecting, 2 connected).
-fn wikipedia_card(query: &str, server: &Server, state: &Arc<AtomicU64>, t: &Theme, screen: Rect) -> Lookup {
+/// A card on Wikipedia for a French book whose reader chose English.
+fn wikipedia_card(query: &str, server: &Server, link: &Arc<AtomicU64>, t: &Theme, screen: Rect) -> Lookup {
+    let languages = Languages::for_test(Some("fr"), None);
+    online_card(Tab::Wikipedia, query, server, link, Duration::from_secs(5), languages, t, screen)
+}
+/// A card on Translate for a French book.
+fn translate_card(
+    query: &str,
+    server: &Server,
+    link: &Arc<AtomicU64>,
+    target: Option<&'static str>,
+    t: &Theme,
+    screen: Rect,
+) -> Lookup {
+    let languages = Languages::for_test(Some("fr"), target);
+    // "slow" waits this long.
+    online_card(Tab::Translate, query, server, link, Duration::from_secs(1), languages, t, screen)
+}
+/// With the link `state` (0 off, 1 connecting, 2 connected).
+#[allow(clippy::too_many_arguments)]
+fn online_card(
+    tab: Tab,
+    query: &str,
+    server: &Server,
+    state: &Arc<AtomicU64>,
+    timeout: Duration,
+    languages: Languages,
+    t: &Theme,
+    screen: Rect,
+) -> Lookup {
     let state = state.clone();
     let link = move || {
         Ok(match state.load(Ordering::Relaxed) {
@@ -173,10 +200,9 @@ fn wikipedia_card(query: &str, server: &Server, state: &Arc<AtomicU64>, t: &Them
             _ => Link::Connected,
         })
     };
-    let service = Service::for_test(&server.base, Duration::from_secs(5), Box::new(link));
-    let languages = Languages { wikipedia: Edition::ENGLISH, book: Edition::for_language("fr"), translate: None };
-    let tabs = Tabs::new(Tab::Wikipedia, &service, Waker::new(|| {}), languages);
-    let store = Store::at(std::env::temp_dir().join(format!("verso-wikipedia-card-{}", std::process::id())));
+    let service = Service::for_test(&server.base, timeout, Box::new(link));
+    let tabs = Tabs::new(tab, &service, Waker::new(|| {}), languages);
+    let store = Store::at(std::env::temp_dir().join(format!("verso-online-card-{}", std::process::id())));
     Lookup::new(query, Rc::new(Worker::new(store, Waker::new(|| {}))), t, screen, None, Default::default(), tabs)
 }
 fn submit(lookup: &mut Lookup, query: &str, t: &Theme, screen: Rect) {
@@ -220,10 +246,7 @@ fn tabs_ask_when_first_shown_and_once_per_word() {
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
     let server = online();
     let service = Service::for_test(&server.base, Duration::from_secs(5), Box::new(|| Ok(Link::Connected)));
-    let tabs = |tab, translate: Option<&str>| {
-        let languages = Languages { wikipedia: Edition::ENGLISH, book: None, translate: translate.map(Into::into) };
-        Tabs::new(tab, &service, Waker::new(|| {}), languages)
-    };
+    let tabs = |tab, translate| Tabs::new(tab, &service, Waker::new(|| {}), Languages::for_test(None, translate));
     let hits = || server.requests.lock().unwrap().len();
     let go = |lookup: &mut Lookup, tab| {
         let p = lookup.tab_point(tab);
@@ -295,7 +318,8 @@ fn tabs_ask_when_first_shown_and_once_per_word() {
     assert!(!lookup.asked);
     answered(&mut lookup, &t, screen);
     go(&mut lookup, Tab::Translate);
-    assert_eq!(online_text(&lookup, &t), "Translate into which language?");
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!(lookup.list.as_ref().unwrap().rows[0].label, "English");
     assert_eq!(hits(), 4);
     go(&mut lookup, Tab::Dictionary);
     wait(&mut lookup, &t, screen);
@@ -421,7 +445,7 @@ fn wikipedia_lists_matches_and_reports_misses_and_errors() {
         draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
         assert_eq!((hits(), lookup.depth()), (sent + 1, 0));
         assert!(!lookup.retry_shown() && !lookup.busy());
-        let list = lookup.hits.as_ref().unwrap();
+        let list = lookup.list.as_ref().unwrap();
         let per_page = list.paging().range(0).len();
         assert!(per_page >= 2 && lookup.paged && lookup.body.contains_rect(&list.row_rect(per_page - 1)));
         capture(&mut lookup, &t, screen, "wikipedia-list");
@@ -434,7 +458,7 @@ fn wikipedia_lists_matches_and_reports_misses_and_errors() {
             draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
         }
         assert_eq!(lookup.pager.page, 1);
-        let p = lookup.hits.as_ref().unwrap().row_rect(0).center();
+        let p = lookup.list_point(0);
         tap(&mut lookup, p, &t, screen);
         answered(&mut lookup, &t, screen);
         draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
@@ -492,6 +516,242 @@ fn a_late_wikipedia_reply_never_replaces_newer_words_or_languages() {
     tap(&mut lookup, p, &t, screen);
     answered(&mut lookup, &t, screen);
     assert!(online_text(&lookup, &t).ends_with("Wikipedia · French · CC BY-SA 4.0"));
+}
+
+/// A translator that finds everything to be French and answers with the text
+/// and the language asked for. "busy" is refused and "slow" never answered
+/// the first time; "long" gets pages.
+fn translator() -> Server {
+    let failed = AtomicU64::new(0);
+    Server::answering(move |request| {
+        let (text, target) = (request.param("q").unwrap(), request.param("tl").unwrap());
+        let bit = match text.as_str() {
+            "busy" => 1,
+            "slow" => 2,
+            _ => 0,
+        };
+        if bit != 0 && failed.fetch_xor(bit, Ordering::Relaxed) & bit == 0 {
+            return if bit == 1 { Http::Status(429) } else { Http::Silent };
+        }
+        let sentence = format!("{text} in {target}. ");
+        let answer = if text == "long" { format!("{}\n", sentence.repeat(40)).repeat(6) } else { sentence };
+        Http::Ok(serde_json::json!([[[answer, text]], null, "fr"]).to_string().into_bytes())
+    })
+}
+/// The languages of the last request, from and into.
+fn asked_between(server: &Server) -> (String, String) {
+    let requests = server.requests.lock().unwrap();
+    let last = requests.last().unwrap();
+    (last.param("sl").unwrap(), last.param("tl").unwrap())
+}
+/// Opens the source or target picker and taps a visible row.
+fn pick(lookup: &mut Lookup, source: bool, row: usize, t: &Theme, screen: Rect) -> Option<LookupEvent> {
+    let (from, into) = lookup.language_points();
+    tap(lookup, if source { from } else { into }, t, screen);
+    let p = lookup.choice_point(row);
+    tap(lookup, p, t, screen)
+}
+
+#[test]
+fn translate_waits_for_a_language_and_translates_between_the_chosen_ones() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let (server, link) = (translator(), Arc::new(AtomicU64::new(2)));
+    let hits = || server.requests.lock().unwrap().len();
+    let between = |from: &str, into: &str| assert_eq!(asked_between(&server), (from.into(), into.into()));
+    let mut text = TextRenderer::new();
+    // First use: the choice is in the body, and nothing is sent until it's made.
+    let mut lookup = translate_card("renard", &server, &link, None, &t, screen);
+    let compact = 1696 * 54 / 100;
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert!(!lookup.busy() && lookup.rect(&t).h == 1696 * 4 / 5);
+    submit(&mut lookup, "un renard", &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    let rows = &lookup.list.as_ref().unwrap().rows;
+    let first: Vec<_> = rows[..3].iter().map(|r| (r.label.as_str(), r.value.as_deref().unwrap_or(""))).collect();
+    assert_eq!(first, [("English", ""), ("French", "This book"), ("Afrikaans", "")]);
+    assert!(rows.iter().all(|r| !r.label.contains("Nynorsk")));
+    assert_eq!(hits(), 0);
+    capture(&mut lookup, &t, screen, "translate-first");
+    let p = lookup.list_point(0);
+    assert!(matches!(tap(&mut lookup, p, &t, screen), Some(LookupEvent::Target("en"))));
+    answered(&mut lookup, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!((hits(), lookup.rect(&t).h), (1, compact));
+    between("auto", "en");
+    assert_eq!(online_text(&lookup, &t), "un renard in en.\nGoogle Translate");
+    let label = |lookup: &Lookup| lookup.tabs.translate().source_label(lookup.tabs.languages());
+    assert_eq!(label(&lookup), "Auto (French)");
+    // Another source is only this card's; another target is every book's.
+    let p = lookup.language_points().0;
+    tap(&mut lookup, p, &t, screen);
+    let row = |label: &str, note: &str| (label.to_string(), note.to_string());
+    let rows = choices(&lookup);
+    assert_eq!(rows[..3], [row("Detect automatically", "Chosen"), row("French", "This book"), row("Afrikaans", "")]);
+    capture(&mut lookup, &t, screen, "translate-sources");
+    let p = lookup.choice_point(1);
+    assert!(tap(&mut lookup, p, &t, screen).is_none());
+    assert_eq!(label(&lookup), "French");
+    answered(&mut lookup, &t, screen);
+    between("fr", "en");
+    assert!(matches!(pick(&mut lookup, false, 2, &t, screen), Some(LookupEvent::Target("af"))));
+    answered(&mut lookup, &t, screen);
+    between("fr", "af");
+    assert!(pick(&mut lookup, false, 0, &t, screen).is_none(), "the one in use");
+    assert_eq!(hits(), 3);
+    // Into the language picked by hand: nothing is sent, another is one tap away.
+    assert!(matches!(pick(&mut lookup, false, 2, &t, screen), Some(LookupEvent::Target("fr"))));
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert!(online_text(&lookup, &t).starts_with("Both languages are the same"));
+    assert!(lookup.another_language_shown() && !lookup.retry_shown() && !lookup.busy());
+    assert_eq!(hits(), 3);
+    // Detected, it's known only from the reply.
+    pick(&mut lookup, true, 0, &t, screen);
+    answered(&mut lookup, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    between("auto", "fr");
+    assert!(online_text(&lookup, &t).starts_with("This is already French\n"));
+    capture(&mut lookup, &t, screen, "translate-same");
+    let p = lookup.another_language.rect().center();
+    tap(&mut lookup, p, &t, screen);
+    assert_eq!(choices(&lookup)[..2], [row("French", "Chosen"), row("English", "")]);
+    let p = lookup.choice_point(1);
+    tap(&mut lookup, p, &t, screen);
+    answered(&mut lookup, &t, screen);
+    between("auto", "en");
+    // The words edited earlier weren't translated into this language yet.
+    let sent = hits();
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    answered(&mut lookup, &t, screen);
+    assert_eq!((hits(), online_text(&lookup, &t).as_str()), (sent + 1, "renard in en.\nGoogle Translate"));
+    submit(&mut lookup, "chat", &t, screen);
+    answered(&mut lookup, &t, screen);
+    pick(&mut lookup, false, 2, &t, screen);
+    answered(&mut lookup, &t, screen);
+    tap(&mut lookup, back, &t, screen);
+    answered(&mut lookup, &t, screen);
+    assert_eq!(online_text(&lookup, &t), "renard in af.\nGoogle Translate");
+}
+
+#[test]
+fn translate_pages_long_answers_and_retries_errors() {
+    let (server, link) = (translator(), Arc::new(AtomicU64::new(2)));
+    let hits = || server.requests.lock().unwrap().len();
+    for (w, h, dpi) in [(1272, 1696, 300), (800, 600, 167)] {
+        let (t, screen) = (Theme::for_dpi(dpi), Rect::new(0, 0, w, h));
+        let mut text = TextRenderer::new();
+        // Over 4,000 characters, nothing is sent and there's nothing to retry.
+        let sent = hits();
+        let passage = "x".repeat(crate::online::translate::TEXT_LIMIT + 1);
+        let mut lookup = translate_card(&passage, &server, &link, Some("de"), &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut text);
+        assert!(!lookup.busy() && !lookup.retry_shown());
+        assert_eq!(online_text(&lookup, &t), "Too long to translate\nSelect up to 4,000 characters at a time.");
+        // A long answer is laid out while idle, paragraph by paragraph.
+        let mut lookup = translate_card("long", &server, &link, Some("de"), &t, screen);
+        answered(&mut lookup, &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut text);
+        assert_eq!(online_text(&lookup, &t).lines().count(), 7);
+        while lookup.paginating() {
+            lookup.on_idle(&mut text);
+        }
+        assert!(lookup.paged && lookup.pager.pages > 2 && !lookup.busy());
+        assert_eq!(hits(), sent + 1);
+        capture(&mut lookup, &t, screen, "translate-long");
+        let retry = |lookup: &mut Lookup| {
+            draw_hints(lookup, &t, screen, &mut TextRenderer::new());
+            assert!(lookup.retry_shown() && lookup.sheet.rect().contains_rect(&lookup.retry.rect()));
+            let p = lookup.retry.rect().center();
+            tap(lookup, p, &t, screen);
+            answered(lookup, &t, screen);
+        };
+        let mut sent = hits();
+        for (query, error) in [("busy", "Google Translate is busy\n"), ("slow", "Google Translate took too long")] {
+            submit(&mut lookup, query, &t, screen);
+            answered(&mut lookup, &t, screen);
+            assert!(online_text(&lookup, &t).starts_with(error), "{query}");
+            capture(&mut lookup, &t, screen, &format!("translate-{query}"));
+            retry(&mut lookup);
+            assert!(online_text(&lookup, &t).starts_with(&format!("{query} in de.")));
+            assert!(!lookup.retry_shown());
+            sent += 2;
+            assert_eq!(hits(), sent);
+        }
+        for (state, error) in [(0, "Wi-Fi is off\n"), (1, "Wi-Fi is still connecting\n")] {
+            link.store(state, Ordering::Relaxed);
+            submit(&mut lookup, error, &t, screen);
+            answered(&mut lookup, &t, screen);
+            assert!(online_text(&lookup, &t).starts_with(error));
+            assert_eq!(hits(), sent);
+            link.store(2, Ordering::Relaxed);
+            retry(&mut lookup);
+            sent += 1;
+            assert_eq!(hits(), sent);
+        }
+    }
+}
+
+#[test]
+fn paragraphs_are_translated_apart_but_edited_as_one_line() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let (server, link) = (translator(), Arc::new(AtomicU64::new(2)));
+    let mut lookup = translate_card("Un renard.\nUn chat.", &server, &link, Some("de"), &t, screen);
+    answered(&mut lookup, &t, screen);
+    assert_eq!(server.requests.lock().unwrap()[0].param("q").as_deref(), Some("Un renard.\nUn chat."));
+    assert_eq!(lookup.field.value(), "Un renard. Un chat.");
+    // In a book of unknown language no source is the book's.
+    let source = Some("fr");
+    lookup.tabs.set_languages(Languages { source, ..Languages::for_test(None, Some("de")) });
+    lookup.choose_source();
+    assert_eq!(choices(&lookup)[0], ("Detect automatically".into(), String::new()));
+    lookup.chooser = None;
+    // Submitted as it is, it's the same passage.
+    cx(&t, screen, |cx| {
+        lookup.start_editing();
+        lookup.on_text_input(&TextInput::Submit, cx);
+    });
+    assert_eq!((lookup.depth(), lookup.tabs.waiting()), (0, false));
+    submit(&mut lookup, "chat", &t, screen);
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    assert_eq!(lookup.field.value(), "Un renard. Un chat.");
+}
+
+#[test]
+fn a_late_translation_never_replaces_newer_words_or_languages() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let (server, link) = (translator(), Arc::new(AtomicU64::new(2)));
+    let arrived = |count| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.requests.lock().unwrap().len() < count {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        // It's in the card's mailbox, or about to be.
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let shows = |lookup: &mut Lookup, text: &str| {
+        answered(lookup, &t, screen);
+        assert_eq!(online_text(lookup, &t), format!("{text}\nGoogle Translate"));
+    };
+    let mut lookup = translate_card("renard", &server, &link, Some("de"), &t, screen);
+    arrived(1);
+    submit(&mut lookup, "chat", &t, screen);
+    arrived(2);
+    pick(&mut lookup, false, 1, &t, screen);
+    shows(&mut lookup, "chat in en.");
+    // Back asks: the first reply never counted.
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    arrived(4);
+    // Nor does the one for a source changed meanwhile.
+    pick(&mut lookup, true, 1, &t, screen);
+    assert!(lookup.tabs.waiting());
+    shows(&mut lookup, "renard in en.");
+    assert_eq!(asked_between(&server).0, "fr");
 }
 
 #[test]

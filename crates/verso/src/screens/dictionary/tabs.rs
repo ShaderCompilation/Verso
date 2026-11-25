@@ -1,11 +1,11 @@
 //! The lookup card's tabs, and what the online ones asked for the word shown.
 //! A tab asks when it's first shown, never before, and keeps its reply until
 //! the word changes; everything goes when the card does.
-use super::{plain, wikipedia::Wikipedia};
+use super::{plain, translate::Translate, wikipedia::Wikipedia};
 use crate::{
     geom::Rect,
     gfx::StyledBlock,
-    online::{Answer, Error, QUERY_LIMIT, Request, Service, Worker, wikipedia::Edition},
+    online::{Error, QUERY_LIMIT, Service, Worker, wikipedia::Edition},
     platform::Waker,
     ui::{
         gesture::Gesture,
@@ -41,8 +41,12 @@ pub struct Languages {
     pub wikipedia: Edition,
     /// The Wikipedia in the book's language, if there is one.
     pub book: Option<Edition>,
+    /// What Translate translates from; None detects it. Only for this card.
+    pub source: Option<&'static str>,
     /// None until the reader chooses; nothing is translated before.
-    pub translate: Option<String>,
+    pub target: Option<&'static str>,
+    /// The book's language, if it can be translated.
+    pub written: Option<&'static str>,
 }
 
 /// One request and what came of it.
@@ -69,7 +73,7 @@ impl<T> Slot<T> {
     }
 
     /// Keeps a finished reply only: the request behind another is cancelled.
-    fn finished(self) -> Self {
+    pub fn finished(self) -> Self {
         if matches!(self, Slot::Done(_)) { self } else { Slot::Unasked }
     }
 }
@@ -78,17 +82,22 @@ impl<T> Slot<T> {
 #[derive(Default)]
 pub struct Replies {
     wikipedia: Wikipedia,
-    translate: Slot<Answer>,
+    translate: Translate,
 }
 
 impl Replies {
     pub fn is_empty(&self) -> bool {
-        self.wikipedia.is_unasked() && matches!(self.translate, Slot::Unasked)
+        self.wikipedia.is_unasked() && self.translate.is_unasked()
     }
 
     /// After another Wikipedia was chosen.
     pub fn forget_wikipedia(&mut self) {
         self.wikipedia = Wikipedia::default();
+    }
+
+    /// After another language to translate from or into was chosen.
+    pub fn forget_translation(&mut self) {
+        self.translate = Translate::default();
     }
 }
 
@@ -156,12 +165,8 @@ impl Tabs {
                     self.replies.wikipedia.asked(self.wikipedia.request(request));
                 }
             }
-            Tab::Translate if matches!(self.replies.translate, Slot::Unasked) => {
-                let Some(target) = self.languages.translate.clone() else { return };
-                let request = Request::Translate { text: query.into(), source: None, target };
-                self.replies.translate = Slot::Waiting(self.translate.request(request));
-            }
-            _ => {}
+            Tab::Translate => self.replies.translate.ask(&self.translate, &self.languages, query),
+            Tab::Dictionary => {}
         }
     }
 
@@ -174,9 +179,8 @@ impl Tabs {
             shown |= self.current == Tab::Wikipedia;
         }
         if let Some(reply) = self.translate.receive()
-            && self.replies.translate.waits_for(reply.id)
+            && self.replies.translate.receive(reply)
         {
-            self.replies.translate = Slot::Done(reply.result);
             shown |= self.current == Tab::Translate;
         }
         shown
@@ -185,6 +189,10 @@ impl Tabs {
     /// What Wikipedia has for the word shown.
     pub fn wikipedia(&self) -> &Wikipedia {
         &self.replies.wikipedia
+    }
+
+    pub fn translate(&self) -> &Translate {
+        &self.replies.translate
     }
 
     pub fn languages(&self) -> &Languages {
@@ -211,6 +219,30 @@ impl Tabs {
         self.replies.forget_wikipedia();
     }
 
+    /// Translates from another language (None detects it); `ask` then asks.
+    pub fn set_source(&mut self, source: Option<&'static str>) {
+        self.languages.source = source;
+        self.translate.cancel();
+        self.replies.forget_translation();
+    }
+
+    /// Translates into another language; `ask` then asks.
+    pub fn set_target(&mut self, target: &'static str) {
+        self.languages.target = Some(target);
+        self.translate.cancel();
+        self.replies.forget_translation();
+    }
+
+    /// Translate shows, and what to translate into isn't chosen yet.
+    pub fn needs_target(&self) -> bool {
+        self.current == Tab::Translate && self.languages.target.is_none()
+    }
+
+    /// Translate shows, and the text is in the language to translate into.
+    pub fn needs_another_language(&self) -> bool {
+        self.current == Tab::Translate && self.replies.translate.needs_another_language(&self.languages)
+    }
+
     /// Why the tab shown has no answer.
     pub fn error(&self) -> Option<&Error> {
         match self.current {
@@ -225,7 +257,7 @@ impl Tabs {
         match self.current {
             Tab::Dictionary => {}
             Tab::Wikipedia => self.replies.wikipedia.retry(),
-            Tab::Translate => self.replies.translate = Slot::Unasked,
+            Tab::Translate => self.replies.forget_translation(),
         }
     }
 
@@ -254,41 +286,38 @@ impl Tabs {
         }
     }
 
-    /// What an online tab shows, apart from Wikipedia's list of matches. Its
-    /// words can't be looked up.
+    /// What an online tab shows, apart from its lists. Its words can't be
+    /// looked up.
     pub fn content(&self, t: &Theme) -> Vec<StyledBlock> {
-        let line = |s: &str| vec![plain(s.into(), t.body, true)];
         match self.current {
             Tab::Dictionary => Vec::new(),
             Tab::Wikipedia => self.replies.wikipedia.content(self.languages.wikipedia, t),
-            Tab::Translate => match &self.replies.translate {
-                _ if self.languages.translate.is_none() => line("Translate into which language?"),
-                Slot::Unasked => line("Edit the words above to translate them."),
-                Slot::Waiting(_) => line("Translating…"),
-                Slot::Done(Ok(Answer::Translation(translation))) => {
-                    let gap = t.dictionary_body.line_height() / 2.0;
-                    vec![
-                        plain(translation.text.clone(), t.dictionary_body, true),
-                        StyledBlock::Gap(gap),
-                        plain("Google Translate".into(), t.small.gray(INK2), true),
-                    ]
-                }
-                Slot::Done(Ok(_)) => message("No translation", "The answer couldn’t be read.", t),
-                Slot::Done(Err(e)) => message(&e.title("Google Translate"), &e.plain(), t),
-            },
+            Tab::Translate => self.replies.translate.content(&self.languages, t),
         }
     }
 }
 
 #[cfg(test)]
+impl Languages {
+    /// The English Wikipedia, in a book written in `book`.
+    pub fn for_test(book: Option<&str>, target: Option<&'static str>) -> Self {
+        let written = book.and_then(crate::online::translate::language);
+        Self { wikipedia: Edition::ENGLISH, book: book.and_then(Edition::for_language), source: None, target, written }
+    }
+}
+
+#[cfg(test)]
 impl Tabs {
+    pub fn set_languages(&mut self, languages: Languages) {
+        self.languages = languages;
+    }
+
     /// Tabs with Wi-Fi off.
     pub fn offline(current: Tab) -> Self {
         use crate::platform::wifi::Link;
         let service =
             Service::for_test("http://127.0.0.1:9", std::time::Duration::from_secs(1), Box::new(|| Ok(Link::Off)));
-        let languages = Languages { wikipedia: Edition::ENGLISH, book: None, translate: None };
-        Self::new(current, &service, Waker::new(|| {}), languages)
+        Self::new(current, &service, Waker::new(|| {}), Languages::for_test(None, None))
     }
 }
 
