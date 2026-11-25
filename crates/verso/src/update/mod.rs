@@ -48,13 +48,15 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// `/mnt/us` on the Kindle. The simulator uses a pretend storage root
-    /// in its data folder, `<data>/device`. `VERSO_STORAGE_ROOT` replaces
-    /// either.
+    /// `/mnt/us` on the Kindle. The simulator and unit tests (also those
+    /// built for the Kindle, which must not touch its real state) use a
+    /// pretend storage root in their data folder, `<data>/device`.
+    /// `VERSO_STORAGE_ROOT` replaces either.
     pub fn for_device(data: &Path) -> Self {
+        let on_kindle = cfg!(all(feature = "kindle", not(test)));
         let root = std::env::var_os("VERSO_STORAGE_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| if cfg!(feature = "kindle") { PathBuf::from("/mnt/us") } else { data.join("device") });
+            .unwrap_or_else(|| if on_kindle { PathBuf::from("/mnt/us") } else { data.join("device") });
         Self { root }
     }
 

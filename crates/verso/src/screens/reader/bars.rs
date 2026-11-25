@@ -200,10 +200,6 @@ mod tests {
         let geometry = layout.geometry(w as i32, h as i32, t.dpi, 42);
         let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
         draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]), &layout, &geometry, &data);
-        if let Some(dir) = std::env::var_os("VERSO_BAR_PNG") {
-            let name = format!("battery-{battery:?}.png").replace([' ', '{', '}', ':', ','], "");
-            crate::gfx::save_gray_png(&std::path::Path::new(&dir).join(name), w, h, canvas.gray_data()).unwrap();
-        }
         (canvas.gray_data().to_vec(), geometry.bottom_bar.unwrap())
     }
 
