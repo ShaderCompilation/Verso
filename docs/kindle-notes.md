@@ -178,7 +178,7 @@ rather than stopping it:
   (`bd71827_ac`) for cable presence. Ignores `Wireless` and `USB_WET`
   (`max20342_moisture`). `USB_DCP` (wall charger) never triggers the computer
   prompt. Battery `status` turns `Charging` ~0.2 s *after* powerd's `charging`,
-  and unplugging reads `Mains` online for ~0.1 s **(measured)**, so reads repeat
+  and unplugging reads `Mains` online for 0.1–0.2 s **(measured)**, so reads repeat
   after each cable event. Without sysfs: `battStateInfo`, `battLevel`, `isCharging`.
 
 ---

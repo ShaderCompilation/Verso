@@ -73,7 +73,7 @@ const RECHECKS: [Duration; 3] = [Duration::from_millis(500), Duration::from_mill
 /// The computer connection as reported to the app, and the reads still to do.
 /// Unplugging is believed at once; plugging in only when a read
 /// `RECHECKS[0]` later agrees: while a cable comes out, a wall charger too
-/// reads `Mains` and online for about 0.1 s (measured, PW6), which would
+/// reads `Mains` and online for 0.1-0.2 s (measured, PW6), which would
 /// open the computer prompt.
 #[derive(Default)]
 pub struct Cable {
