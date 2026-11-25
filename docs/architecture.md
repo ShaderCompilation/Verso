@@ -138,6 +138,9 @@ against the previous frame in **16×16 tiles**:
   hint (default `Ui`), merge into rectangles, drop rects subsumed by stronger
   forced updates, and sort **non-`Full` before `Full`** so non-blocking flashes
   never stall same-frame chrome updates.
+- **Frame check (`frame_watch.rs`):** after the launch and wake frames the log
+  says whether the framebuffer still holds Verso's frame (2 s later on the
+  Kindle, and at the first touch). It only reads and never repaints.
 - **`fast_debt`:** every `Fast` (1-bit B&W `DU`) rect is remembered and given a
   clean `Ui` pass automatically once the finger lifts.
 
@@ -192,8 +195,9 @@ support are checked once per run).
 
 App-level files sit beside `data/` in `/mnt/us/verso/`: `installed.json`,
 `cache/` (crengine `.cr3` cache capped at 64 MiB, `fonts.list`, `prepared.json`),
-`update/` (`state.json`, `staged/`, `previous/`, `trial`, `rollback.json`,
-`journal-*`), `reports/`, `ssh/`, `bin/`, `tools/`, `fonts/` and `wordforms/`.
+`running` (the launcher's session marker), `update/` (`state.json`, `staged/`,
+`previous/`, `trial`, `rollback.json`, `journal-*`), `reports/`, `ssh/`, `bin/`,
+`tools/`, `fonts/` and `wordforms/`.
 
 ### Position-writer ordering rule (`store/position.rs`)
 

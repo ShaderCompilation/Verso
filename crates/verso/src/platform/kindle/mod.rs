@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::kindle_profiles::{self, Lights};
-use super::{Battery, DeviceInfo, DeviceModel, Event, Frontlight, Orientation, Platform, Unsupported, Update, Waker};
+use super::{
+    Battery, DeviceInfo, DeviceModel, Event, FrameCheck, Frontlight, Orientation, Platform, Unsupported, Update, Waker,
+};
 use crate::gfx::Canvas;
 use display::Display;
 use input::{Buttons, Mapping, TouchInput};
@@ -483,6 +485,14 @@ impl Platform for Kindle {
     fn wait_for_complete(&mut self) -> Result<()> {
         self.display.wait_for_complete();
         Ok(())
+    }
+
+    fn check_frame(&mut self, canvas: &Canvas) -> Option<FrameCheck> {
+        Some(self.display.check_frame(canvas))
+    }
+
+    fn failed_refreshes(&self) -> u32 {
+        self.display.failed_refreshes
     }
 }
 

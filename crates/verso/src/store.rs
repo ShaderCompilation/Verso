@@ -484,10 +484,15 @@ impl Store {
     pub fn save_library(&self, index: &LibraryIndex) -> Result<()> {
         let started = std::time::Instant::now();
         let result = atomic(&self.root.join("library.json"), index);
-        log::info!(
+        // Every batch of covers saves the index: only a slow or failed save
+        // is worth a line in a problem report.
+        let elapsed = started.elapsed();
+        let notable = result.is_err() || elapsed >= std::time::Duration::from_millis(500);
+        log::log!(
+            if notable { log::Level::Warn } else { log::Level::Debug },
             "startup stage: index persistence books={} elapsed_us={} ok={}",
             index.books.len(),
-            started.elapsed().as_micros(),
+            elapsed.as_micros(),
             result.is_ok()
         );
         result

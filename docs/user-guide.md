@@ -364,7 +364,8 @@ problem report** if Verso cannot start) to write
 (`crash-*.txt`, newest five kept) are also saved automatically when Verso exits
 unexpectedly.
 
-Reports include version, update state, non-identifying settings, up to 1,000
-log lines and hardware diagnostics. Configured library folders, hostname and
-book paths are automatically omitted or replaced with `<book N>`, though you
-should still review the text file before sharing it publicly.
+Reports include a summary of recent sessions, version, update state,
+non-identifying settings, up to 1,000 log lines and hardware diagnostics.
+Configured library folders, hostname and book paths are automatically omitted or
+replaced with `<book N>`, though you should still review the text file before
+sharing it publicly.

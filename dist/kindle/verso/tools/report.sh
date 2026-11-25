@@ -8,6 +8,7 @@
 #
 #   sh report.sh report [--output FILE]
 #       Writes <root>/verso/reports/report-<date>-<time>.txt (or FILE):
+#         0. Sessions: how each started and ended, its timings and frame checks
 #         1. Verso version, commit and settings summary (no library folders/book names)
 #         2. Update state (installed, previous, trial, last rollback)
 #         3. Crash report list + newest crash report
@@ -451,6 +452,13 @@ combined_log_tail() {
     fi
 }
 
+# The lines that tell sessions apart and how each went, from both logs.
+session_lines() {
+    for f in "${LOG_OLD}" "${LOG}"; do
+        [ -r "${f}" ] && grep -E ' launcher: (launched from|the last session|active app|starting Verso|Verso ended)|\] (perf:|first frame on screen|frame check|first touch)' "${f}" 2>/dev/null
+    done | tail -n 60
+}
+
 # Lists crash-*.txt files, newest first.
 list_crash_reports() {
     [ -d "${REPORTS_DIR}" ] || return 0
@@ -493,7 +501,7 @@ do_crash() {
     tmp="${out}.tmp"
     {
         printf '%s\n' 'Verso crash report - format 1'
-        printf 'Created: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'Created: %s (log times are UTC)\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
         printf 'Ended: %s\n' "${ended}"
         installed_summary
         printf '\n== Device identity ==\n'
@@ -527,8 +535,11 @@ do_report() {
     {
         printf '%s\n' \
             'Verso problem report - format 1' \
-            "Created: $(date '+%Y-%m-%d %H:%M:%S')" \
+            "Created: $(date '+%Y-%m-%d %H:%M:%S %z') (log times are UTC)" \
             'Review this file before sharing. Book paths under your library folders have been replaced with <book N>.'
+
+        printf '\n== Sessions (newest last) ==\n'
+        session_lines | redact_stream
 
         printf '\n== 1. Verso version and settings ==\n'
         installed_summary
@@ -591,7 +602,7 @@ do_report() {
         exit 1
     }
     if [ -d "${APP_DIR}" ]; then
-        printf '%s report: created %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${out}" >>"${LOG}" 2>/dev/null || true
+        printf '%s report: created %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${out}" >>"${LOG}" 2>/dev/null || true
     fi
     printf '%s\n' "${out}"
 }

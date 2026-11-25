@@ -174,13 +174,27 @@ fn push_error(errors: &mut Vec<String>, error: String) {
 struct Channel {
     shared: Arc<SyncState>,
     waker: Waker,
+    /// How long the worker has waited, so far, for the log's timings.
+    waited: std::cell::Cell<Duration>,
+}
+/// `started.elapsed()` for the log, without the time spent paused.
+fn working_time(started: Instant, paused: Duration) -> String {
+    let working = started.elapsed().saturating_sub(paused);
+    if paused < Duration::from_millis(100) {
+        format!("{working:?}")
+    } else {
+        format!("{working:?} (paused {paused:?})")
+    }
 }
 impl Channel {
     fn lock(&self) -> MutexGuard<'_, Shared> {
         self.shared.state.lock().unwrap()
     }
     fn wait<'a>(&self, state: MutexGuard<'a, Shared>) -> MutexGuard<'a, Shared> {
-        self.shared.wake.wait(state).unwrap()
+        let started = Instant::now();
+        let state = self.shared.wake.wait(state).unwrap();
+        self.waited.set(self.waited.get() + started.elapsed());
+        state
     }
     fn notify_applied(&self) {
         self.shared.applied.notify_all();
@@ -471,7 +485,7 @@ impl Background {
             self.covers_needed = false;
         }
 
-        let identity_started = Instant::now();
+        let (identity_started, waited) = (Instant::now(), self.channel.waited.get());
         // Fingerprinting new additions is deferred until metadata and covers are
         // visible. Only possible moves need it before identity assignment. Identity
         // is persisted but not displayed, so it changes no UI publication.
@@ -490,7 +504,8 @@ impl Background {
             self.set_status(false, true, &errors);
             return true;
         }
-        log::info!("library identities: {fingerprinted} fingerprinted in {:?}", identity_started.elapsed());
+        let took = working_time(identity_started, self.channel.waited.get() - waited);
+        log::info!("library identities: {fingerprinted} fingerprinted in {took}");
         self.save(&mut errors, "library");
         if std::mem::take(&mut self.home_stale) {
             self.refresh_home_metadata();
@@ -578,7 +593,7 @@ impl Background {
     /// not one by one. True when a scan request, folder edit or shutdown
     /// interrupted it.
     fn covers(&mut self, errors: &mut Vec<String>) -> bool {
-        let covers_started = Instant::now();
+        let (covers_started, waited) = (Instant::now(), self.channel.waited.get());
         let mut pending: BTreeSet<_> =
             self.index.books.iter().enumerate().filter(|(_, b)| b.available).map(|(i, _)| i).collect();
         let id_indices: HashMap<_, _> = self.index.books.iter().enumerate().map(|(i, b)| (b.id.clone(), i)).collect();
@@ -637,7 +652,8 @@ impl Background {
             }
             self.set_status(false, true, errors);
         }
-        log::info!("library covers: {confirmed} confirmed, {changed} changed in {:?}", covers_started.elapsed());
+        let took = working_time(covers_started, self.channel.waited.get() - waited);
+        log::info!("library covers: {confirmed} confirmed, {changed} changed in {took}");
         false
     }
 
@@ -1016,7 +1032,7 @@ impl Worker {
             wake: Condvar::new(),
             applied: Condvar::new(),
         });
-        let channel = Channel { shared: shared.clone(), waker };
+        let channel = Channel { shared: shared.clone(), waker, waited: Default::default() };
         let join = std::thread::Builder::new()
             .name("verso-library".into())
             .spawn(move || {
@@ -1397,6 +1413,14 @@ pub fn scan_roots(
     mut checkpoint: impl FnMut(&LibraryIndex),
 ) -> Option<Scan> {
     let started = Instant::now();
+    // `cancelled` also waits while a book is open.
+    let paused = std::cell::Cell::new(Duration::ZERO);
+    let cancelled = &|| {
+        let asked = Instant::now();
+        let cancelled = cancelled();
+        paused.set(paused.get() + asked.elapsed());
+        cancelled
+    };
     let mut paths = Vec::new();
     let mut uncertain = Vec::new();
     let mut empty_folders = Vec::new();
@@ -1409,7 +1433,7 @@ pub fn scan_roots(
     log::info!(
         "startup stage: filesystem enumeration paths={} elapsed_us={}",
         paths.len(),
-        started.elapsed().as_micros()
+        started.elapsed().saturating_sub(paused.get()).as_micros()
     );
     let old: HashMap<_, _> = previous.books.iter().map(|b| (&b.path, b)).collect();
     let found: HashSet<_> = paths.iter().cloned().collect();
@@ -1544,9 +1568,9 @@ pub fn scan_roots(
         }
     }
     log::info!(
-        "library scan: {} available, {reads} metadata reads, {:?}",
+        "library scan: {} available, {reads} metadata reads, {}",
         index.books.iter().filter(|b| b.available).count(),
-        started.elapsed()
+        working_time(started, paused.get())
     );
     Some(Scan { index, errors, metadata_reads: reads })
 }

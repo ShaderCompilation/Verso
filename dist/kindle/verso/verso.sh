@@ -12,8 +12,9 @@
 # For scripts/test-launcher.sh only: VERSO_STORAGE_ROOT replaces /mnt/us,
 # VERSO_TMP replaces /tmp, VERSO_FB replaces /dev/fb0, VERSO_LAUNCHER_BIN
 # holds fake Kindle commands and counting file tools, VERSO_LAUNCHER_SHELL
-# replaces /bin/sh, VERSO_START_TIMEOUT the 120 s a new version gets to
-# start, VERSO_ARMHF_LOADER the hard-float loader it checks for and
+# replaces /bin/sh, VERSO_BOOT_ID the kernel's boot id file,
+# VERSO_START_TIMEOUT the 120 s a new version gets to start,
+# VERSO_ARMHF_LOADER the hard-float loader it checks for and
 # VERSO_REFUSAL_WAIT the 8 s an "unsupported" message stays up.
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
@@ -38,6 +39,9 @@ LOCKFILE="${TMP}/verso-launcher.lock"
 OWNERFILE="${TMP}/verso-launcher-$$.owner"
 FB_DUMP="${TMP}/verso-fb.dump"
 SELF="${TMP}/verso-launcher-$$.sh"
+# Which boot the running session started in, and when; see note_last_session.
+RUNNING="${APP_DIR}/running"
+BOOT_ID="${VERSO_BOOT_ID:-/proc/sys/kernel/random/boot_id}"
 
 # Updates (crates/verso-update/src/launcher.rs has the same names).
 UPDATE_DIR="${APP_DIR}/update"
@@ -69,8 +73,13 @@ if [ "$0" != "${SELF}" ]; then
     # If the copy failed, carry on from the original.
 fi
 
+# Log times are UTC, like Verso's own lines.
+now() {
+    date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') launcher: $*" >>"${LOG}"
+    echo "$(now) launcher: $*" >>"${LOG}"
 }
 
 # Writes a full problem report (tools/report.sh).
@@ -283,7 +292,7 @@ restore() {
     if [ "$(cat "${PIDFILE}" 2>/dev/null)" = "$$" ]; then
         rm -f "${PIDFILE}"
     fi
-    rm -f "${VERSO_SYSTEM_ACK}" "${HUNG}"
+    rm -f "${VERSO_SYSTEM_ACK}" "${HUNG}" "${RUNNING}"
     # An update download keeps the Kindle awake and leaves this marker until
     # it turns that off again. If Verso died first, turn it off here.
     if [ -f "${AWAKE_MARKER}" ]; then
@@ -695,12 +704,46 @@ run_verso() {
     fi
 }
 
+# Says if the session before this one had no end, and whether the Kindle has
+# restarted since (a forced restart or an empty battery, not just a launcher
+# that was killed). Leaves the same marker for the next launch.
+note_last_session() {
+    boot=""
+    read -r boot 2>/dev/null <"${BOOT_ID}"
+    if [ -f "${RUNNING}" ]; then
+        last_boot="" last_start=""
+        read -r last_boot last_start 2>/dev/null <"${RUNNING}"
+        since="unknown whether the Kindle restarted since"
+        if [ -n "${boot}" ] && [ -n "${last_boot}" ]; then
+            since="the Kindle has restarted since"
+            [ "${boot}" = "${last_boot}" ] && since="the Kindle hasn't restarted since"
+        fi
+        log "the last session, started ${last_start:-at an unknown time}, has no end; ${since}"
+    fi
+    echo "${boot:-unknown} $(now)" 2>/dev/null >"${RUNNING}"
+}
+
+# The app Amazon's UI had in front. Its id only: nothing after it.
+log_active_app() {
+    app="$(lipc-get-prop com.lab126.appmgrd activeApp 2>/dev/null)"
+    app="${app#app://}"
+    log "active app at pause: ${app%%[!A-Za-z0-9._-]*}"
+}
+
 # What started us, for problem reports: only known names, so nothing else a
-# caller passes ends up in the log. Older KPM packages pass nothing.
+# caller passes ends up in the log. Older KPM packages pass nothing. $2 is how
+# often documents/Verso.sh or KPM's launch.sh waited 0.1 s for the Home screen.
+case "${2:-}" in
+    '' | *[!0-9]*) WAITED="" ;;
+    *) WAITED=" (waited $2 of 50 times for Home)" ;;
+esac
 case "${1:-}" in
-    library | kual | kpm | deploy) log "launched from $1" ;;
+    library | kual | kpm | deploy) log "launched from $1${WAITED}" ;;
     *) log "launched from an unknown source" ;;
 esac
+note_last_session
+# In the background: asking takes a moment, and the pause must not wait for it.
+log_active_app &
 
 # Pause the Kindle UI, the same way KOReader does on this firmware.
 # Each flag is set *before* acting, so an interruption can't skip its undo.

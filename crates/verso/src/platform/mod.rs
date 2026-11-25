@@ -335,6 +335,38 @@ pub trait Platform {
 
     /// Blocks until every refresh sent so far has finished on the panel.
     fn wait_for_complete(&mut self) -> Result<()>;
+
+    /// Whether the framebuffer still holds `canvas`, as last presented, for
+    /// the log. `None` where nothing else can draw.
+    fn check_frame(&mut self, _canvas: &Canvas) -> Option<FrameCheck> {
+        None
+    }
+
+    /// Display refreshes that failed this session.
+    fn failed_refreshes(&self) -> u32 {
+        0
+    }
+}
+
+/// How much of a presented frame something else drew over: a sample of panel
+/// rows, as many as `strips`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))] // the simulator's window is its own
+pub struct FrameCheck {
+    pub strips: u32,
+    pub changed: u32,
+    /// The first and last changed panel rows, from the panel's top.
+    pub rows: (i32, i32),
+}
+
+impl std::fmt::Display for FrameCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if self.changed == 0 {
+            return write!(f, "framebuffer intact");
+        }
+        let (first, last) = self.rows;
+        write!(f, "framebuffer OVERWRITTEN in {} of {} rows, panel rows {first} to {last}", self.changed, self.strips)
+    }
 }
 
 /// A scripted touch, for screenshots without a window.

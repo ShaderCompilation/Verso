@@ -228,6 +228,24 @@ impl App {
         self.refresh_all(RefreshMode::Full);
     }
 
+    /// What the last frame showed on top, for the log.
+    pub fn screen_name(&self) -> &'static str {
+        if self.exit_prompt.is_some() {
+            "ExitPrompt"
+        } else if let Some(prompt) = &self.usb_prompt {
+            prompt.name()
+        } else if let Some(notice) = self.notices.front() {
+            match notice {
+                Notice::Rollback(_) => "RollbackNotice",
+                Notice::Untested(_) => "UntestedNotice",
+            }
+        } else if self.drawer.is_some() {
+            "TopDrawer"
+        } else {
+            self.stack.last().map_or("", |s| s.name())
+        }
+    }
+
     pub fn canvas(&self) -> &Canvas {
         &self.canvas
     }

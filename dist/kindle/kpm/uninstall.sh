@@ -66,7 +66,8 @@ if [ "${MODE}" != "upgrade" ]; then
     if [ ! -e "${ROOT}/documents/Verso.sh" ]; then
         rm -rf "${ROOT}/documents/Verso.sh.sdr"
     fi
-    rm -f "${ROOT}/verso/installed.json" "${ROOT}/verso/verso.log" "${ROOT}/verso/verso.log.old"
+    rm -f "${ROOT}/verso/installed.json" "${ROOT}/verso/verso.log" "${ROOT}/verso/verso.log.old" \
+        "${ROOT}/verso/running"
     rm -rf "${ROOT}/verso/update" "${ROOT}/verso/cache"
     rmdir "${ROOT}/extensions/verso" 2>/dev/null || true
     rmdir "${ROOT}/verso/data" 2>/dev/null || true

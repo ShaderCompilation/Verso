@@ -2690,6 +2690,14 @@ impl Books {
 }
 
 impl Screen for Books {
+    fn name(&self) -> &'static str {
+        match &self.reader {
+            Some(reader) => reader.name(),
+            None if self.search.is_some() => "Search",
+            None if self.is_home() => "Home",
+            None => "Library",
+        }
+    }
     fn fills_canvas(&self) -> bool {
         self.reader.as_ref().is_some_and(Screen::fills_canvas)
     }

@@ -3,6 +3,7 @@
 
 #include "verso_cre.h"
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <string.h>
@@ -990,11 +991,36 @@ static void verso_cre_fatal_error(int errorCode, const char *errorText) {
     std::abort();
 }
 
+// Passes errors on to the app. Starts at its level: CRLog::setLogLevel logs
+// a warning about the change.
+class VersoCreLog : public CRLog {
+    void (*logger)(const char *);
+
+public:
+    explicit VersoCreLog(void (*logger)(const char *)) : logger(logger) { curr_level = LL_ERROR; }
+
+protected:
+    void log(const char *, const char *msg, va_list args) override {
+        char text[1024];
+        vsnprintf(text, sizeof(text), msg, args);
+        logger(text);
+    }
+};
+static void (*app_logger)(const char *) = nullptr;
+
+void verso_cre_set_logger(void (*logger)(const char *)) {
+    app_logger = logger;
+}
+
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes) {
     GUARD(-1, {
         crSetFatalErrorHandler(verso_cre_fatal_error);
-        CRLog::setStderrLogger();
-        CRLog::setLogLevel(CRLog::LL_ERROR);
+        if (app_logger) {
+            CRLog::setLogger(new VersoCreLog(app_logger));
+        } else {
+            CRLog::setStderrLogger();
+            CRLog::setLogLevel(CRLog::LL_ERROR);
+        }
         if (!InitFontManager(lString8()))
             return -1;
         if (hyph_dir)

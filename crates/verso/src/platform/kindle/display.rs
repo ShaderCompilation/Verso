@@ -11,7 +11,7 @@ use fbink_sys as fb;
 use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
 use crate::platform::framebuffer::{Format, Layout, Writer};
-use crate::platform::{Orientation, RefreshMode, Unsupported, Update};
+use crate::platform::{FrameCheck, Orientation, RefreshMode, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
 pub struct DisplaySession {
@@ -74,6 +74,8 @@ pub struct Display {
     pub touch_mirror_y: bool,
     /// Tracks an unawaited flashing refresh so the next write or handoff waits for it.
     flash_fence: FlashFence,
+    /// Refreshes FBInk refused, for the exit line.
+    pub failed_refreshes: u32,
 }
 
 impl Display {
@@ -197,6 +199,7 @@ impl Display {
                 touch_mirror_x: st.touch_mirror_x,
                 touch_mirror_y: st.touch_mirror_y,
                 flash_fence: FlashFence::default(),
+                failed_refreshes: 0,
             })
         }
     }
@@ -245,6 +248,7 @@ impl Display {
             // SAFETY: FFI call with a valid fd and config.
             let rc = unsafe { fb::fbink_refresh(self.fd, r.y as u32, r.x as u32, r.w as u32, r.h as u32, &self.cfg) };
             if rc < 0 {
+                self.failed_refreshes += 1;
                 log::warn!("refresh of {r:?} ({:?}) failed: {rc}", u.mode);
             } else if flash {
                 // SAFETY: reads FBInk's marker for the refresh just sent.
@@ -255,11 +259,19 @@ impl Display {
         Ok(())
     }
 
+    /// Whether the framebuffer still holds `canvas`, as last presented.
+    pub fn check_frame(&mut self, canvas: &Canvas) -> FrameCheck {
+        // SAFETY: as in `present`. Others can write the memory meanwhile, which
+        // is what this looks for; a torn read only changes the answer.
+        let pixels = unsafe { std::slice::from_raw_parts(self.fb, self.fb_len) };
+        self.writer.check(canvas, self.orientation, pixels)
+    }
+
     fn wait_for_marker(&self, marker: u32) {
         // SAFETY: FFI call with a valid fd; marker 0 means "the last refresh we sent".
         let rc = unsafe { fb::fbink_wait_for_complete(self.fd, marker) };
         if rc < 0 {
-            log::debug!("wait for complete (marker {marker}) returned {rc}");
+            log::warn!("waiting for refresh {marker} to complete failed: {rc}");
         }
     }
 

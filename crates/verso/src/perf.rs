@@ -1,6 +1,6 @@
 //! The performance line logged at a clean exit, so a problem report from a slower Kindle carries its numbers:
 //!
-//! `perf: first_frame_ms=812 page_turns=48 turn_median_ms=22.1 turn_p95_ms=35.0 peak_rss_kib=45123`
+//! `perf: first_frame_ms=812 page_turns=48 turn_median_ms=22.1 turn_p95_ms=35.0 peak_rss_kib=45123 failed_refreshes=0 sleeps=2`
 //!
 //! A page turn is timed from the finger lifting to the refresh request
 //! returning, including a page the worker had to render first. Fields
@@ -16,6 +16,7 @@ pub struct SessionPerf {
     first_frame: Option<Duration>,
     /// Microseconds.
     turns: Vec<u32>,
+    sleeps: u32,
 }
 
 impl SessionPerf {
@@ -29,18 +30,23 @@ impl SessionPerf {
         }
     }
 
+    pub fn sleep(&mut self) {
+        self.sleeps += 1;
+    }
+
     /// The one-line summary; `peak_rss_kib` is `VmHWM`.
-    pub fn summary(&self, peak_rss_kib: Option<u64>) -> String {
+    pub fn summary(&self, peak_rss_kib: Option<u64>, failed_refreshes: u32) -> String {
         let mut sorted = self.turns.clone();
         sorted.sort_unstable();
         let ms = |us: Option<f64>| us.map_or_else(|| "-".to_owned(), |us| format!("{:.1}", us / 1000.0));
         format!(
-            "perf: first_frame_ms={} page_turns={} turn_median_ms={} turn_p95_ms={} peak_rss_kib={}",
+            "perf: first_frame_ms={} page_turns={} turn_median_ms={} turn_p95_ms={} peak_rss_kib={} failed_refreshes={failed_refreshes} sleeps={}",
             self.first_frame.map_or_else(|| "-".to_owned(), |d| d.as_millis().to_string()),
             sorted.len(),
             ms(median(&sorted)),
             ms(nearest_rank(&sorted, 0.95).map(f64::from)),
             peak_rss_kib.map_or_else(|| "-".to_owned(), |k| k.to_string()),
+            self.sleeps,
         )
     }
 }
@@ -59,6 +65,15 @@ fn median(sorted: &[u32]) -> Option<f64> {
 fn nearest_rank(sorted: &[u32], p: f64) -> Option<u32> {
     let rank = (p * sorted.len() as f64).ceil() as usize;
     sorted.get(rank.max(1) - 1).copied()
+}
+
+/// The CPU time this thread has used: next to the wall time, it tells slow
+/// work from waiting for storage or a busy processor.
+pub fn thread_cpu() -> Duration {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: fills the timespec we pass; a failure leaves it zero.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
 }
 
 /// The process's peak resident memory (`VmHWM` in /proc/self/status), KiB.
@@ -83,21 +98,22 @@ mod tests {
         for ms in [30, 10, 20, 40, 100, 25, 15, 22, 18, 21] {
             perf.page_turn(Duration::from_millis(ms));
         }
+        perf.sleep();
         assert_eq!(
-            perf.summary(Some(45123)),
-            "perf: first_frame_ms=812 page_turns=10 turn_median_ms=21.5 turn_p95_ms=100.0 peak_rss_kib=45123"
+            perf.summary(Some(45123), 3),
+            "perf: first_frame_ms=812 page_turns=10 turn_median_ms=21.5 turn_p95_ms=100.0 peak_rss_kib=45123 failed_refreshes=3 sleeps=1"
         );
     }
 
     #[test]
     fn missing_measurements_read_as_dashes() {
         assert_eq!(
-            SessionPerf::default().summary(None),
-            "perf: first_frame_ms=- page_turns=0 turn_median_ms=- turn_p95_ms=- peak_rss_kib=-"
+            SessionPerf::default().summary(None, 0),
+            "perf: first_frame_ms=- page_turns=0 turn_median_ms=- turn_p95_ms=- peak_rss_kib=- failed_refreshes=0 sleeps=0"
         );
         let mut one = SessionPerf::default();
         one.page_turn(Duration::from_micros(22_070));
-        assert!(one.summary(None).contains("page_turns=1 turn_median_ms=22.1 turn_p95_ms=22.1"));
+        assert!(one.summary(None, 0).contains("page_turns=1 turn_median_ms=22.1 turn_p95_ms=22.1"));
     }
 
     #[test]

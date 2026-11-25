@@ -107,6 +107,9 @@ rather than stopping it:
   (FUSE) cannot break teardown. Uses an atomic `/tmp` hard-link lock and refuses
   to start if Verso or KOReader (`reader.lua`) is running or `powerd state !=
   active`.
+- **Log:** `verso.log` times are UTC. `verso/running` (boot id, start time)
+  exists during a session; the next launch logs one left without an end, and
+  whether the Kindle restarted.
 - **Pause order** (flags set *before* acting so `trap restore EXIT` always
   undoes them): save `/dev/fb0` to `/tmp/verso-fb.dump`, disable `pillow`
   (`com.lab126.pillow disableEnablePillow disable`), `SIGSTOP` `awesome`,

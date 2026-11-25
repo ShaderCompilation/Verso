@@ -89,6 +89,13 @@ pub enum TopDrawerBookAction {
 }
 
 pub trait Screen {
+    /// The screen's name in the log: the type's, or a fixed word. Never
+    /// anything about a book or folder.
+    fn name(&self) -> &'static str {
+        let path = std::any::type_name::<Self>();
+        path.rsplit("::").next().unwrap_or(path)
+    }
+
     /// True when drawing replaces every pixel, so the app can skip its clear.
     fn fills_canvas(&self) -> bool {
         false

@@ -176,6 +176,11 @@ mod tests {
             "    device: Paperwhite 6 (bellatrix, mt8110, id=0x1234)",
             "    === end session ===",
             "session frontlight: flIntensity=yes, currentAmberLevel=yes",
+            "2026-11-22T08:00:01Z launcher: launched from library (waited 3 of 50 times for Home)",
+            "2026-11-22T08:00:01Z launcher: pausing the Kindle UI",
+            "[2026-11-22T08:00:02.000Z INFO  verso] frame check 2.0 s after the launch frame: framebuffer intact",
+            "[2026-11-22T08:00:03.000Z INFO  verso] screen: Library",
+            "2026-11-22T08:00:04Z launcher: Verso ended: bye (code 0) (after 3s, 100B logged)",
             "deleted /mnt/us/documents/Tolkien/The Hobbit.epub",
             "deleting /mnt/us/Secret Shelf/Война и мир.epub: Permission denied",
             "open book removed: Some(\"/mnt/us/documents/Tolkien/The Hobbit.epub\")",
@@ -213,12 +218,20 @@ mod tests {
         let text = fs::read_to_string(&out_file).unwrap();
 
         // 1. All 5 sections present and in exact order.
+        let sessions = text.find("== Sessions (newest last) ==").expect("sessions");
         let s1 = text.find("== 1. Verso version and settings ==").expect("section 1");
         let s2 = text.find("== 2. Update state ==").expect("section 2");
         let s3 = text.find("== 3. Crash reports ==").expect("section 3");
         let s4 = text.find("== 4. Logs (up to 1000 lines, book names redacted) ==").expect("section 4");
         let s5 = text.find("== 5. Hardware diagnostics ==").expect("section 5");
-        assert!(s1 < s2 && s2 < s3 && s3 < s4 && s4 < s5, "sections out of order");
+        assert!(sessions < s1 && s1 < s2 && s2 < s3 && s3 < s4 && s4 < s5, "sections out of order");
+
+        // The summary has the sessions' key lines and nothing else.
+        let summary: Vec<_> = text[sessions..s1].lines().filter(|l| !l.is_empty()).skip(1).collect();
+        assert_eq!(summary.len(), 3, "{summary:?}");
+        for (line, part) in summary.iter().zip(["launched from library", "frame check", "Verso ended: bye"]) {
+            assert!(line.contains(part), "{line}");
+        }
 
         // 2. Version, commit, settings summary without library folders or hostname.
         assert!(text.contains("Installed version: 0.1.0"));

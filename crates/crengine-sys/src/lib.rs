@@ -71,6 +71,7 @@ unsafe extern "C" {
         buf: *mut c_char,
         len: c_int,
     ) -> c_int;
+    pub fn verso_cre_set_logger(logger: extern "C" fn(*const c_char));
     pub fn verso_cre_init(hyph_dir: *const c_char, cache_dir: *const c_char, cache_max_bytes: c_int) -> c_int;
     pub fn verso_cre_cache_reload() -> c_int;
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;

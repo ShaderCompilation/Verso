@@ -18,6 +18,7 @@ mod app;
 mod clock;
 mod dictionary;
 mod document;
+mod frame_watch;
 mod geom;
 mod gfx;
 // Used by the check on open and the bulk import.
@@ -342,6 +343,8 @@ fn run() -> Result<i32> {
     let mut perf = perf::SessionPerf::default();
     // When the last finger lifted: a page turn is timed from there.
     let mut last_release: Option<Instant> = None;
+    let mut watch = frame_watch::FrameWatch::new(cfg!(feature = "kindle"));
+    let mut shown_screen = "";
 
     loop {
         if let Some(light) = app.light_request()
@@ -359,6 +362,12 @@ fn run() -> Result<i32> {
             let present_us = t.elapsed().as_micros();
             let save_started = Instant::now();
             app.after_present();
+            watch.presented(&updates, t);
+            let screen = app.screen_name();
+            if screen != shown_screen {
+                log::info!("screen: {screen}");
+                shown_screen = screen;
+            }
             log::debug!("after_present: {:?}", save_started.elapsed());
             log::debug!("presented {} update(s) in {:?}: {updates:?}", updates.len(), t.elapsed());
             if app.take_page_turn()
@@ -399,6 +408,15 @@ fn run() -> Result<i32> {
                 }
             }
         }
+        if let Some(line) = watch.take_touch_summary() {
+            log::info!("{line}");
+        }
+        // The canvas is as last presented until the next `app.frame()`.
+        if let Some(what) = watch.take_due(Instant::now())
+            && let Some(check) = platform.check_frame(app.canvas())
+        {
+            log::info!("{what}: {check}");
+        }
         if quit || app.wants_exit() {
             if app.on_quit() {
                 log::info!("exit requested");
@@ -425,7 +443,7 @@ fn run() -> Result<i32> {
         }
 
         platform.set_busy(app.busy());
-        let deadline = [gestures.next_deadline(), app.deadline()].into_iter().flatten().min();
+        let deadline = [gestures.next_deadline(), app.deadline(), watch.deadline()].into_iter().flatten().min();
         let mut timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         // Handle everything that's already waiting before drawing, so a fast
         // drag or burst of taps draws once per batch instead of once per report.
@@ -450,6 +468,12 @@ fn run() -> Result<i32> {
                     if t.phase == platform::TouchPhase::Up {
                         last_release = Some(t.time);
                     }
+                    if let Some(what) = watch.touch(t.phase, t.time) {
+                        match platform.check_frame(app.canvas()) {
+                            Some(check) => log::info!("{what}: {check}"),
+                            None => log::info!("{what}"),
+                        }
+                    }
                     if let Some(g) = gestures.on_touch(&t) {
                         log::debug!("{g:?}");
                         app.on_gesture(g);
@@ -464,6 +488,8 @@ fn run() -> Result<i32> {
                 }
                 Some(Event::Sleep) => {
                     log::info!("sleep");
+                    perf.sleep();
+                    watch.sleep();
                     app.finish_batch();
                     gestures.reset();
                     app.on_sleep();
@@ -481,6 +507,7 @@ fn run() -> Result<i32> {
                     gestures.reset();
                     app.set_battery(platform.battery());
                     app.on_wake();
+                    watch.wake();
                     if let Some(connected) = platform.usb_connected() {
                         app.on_usb(connected);
                     }
@@ -530,7 +557,7 @@ fn run() -> Result<i32> {
         // Closed cleanly before the started delay ran out: it works.
         update::mark_started();
     }
-    log::info!("{}", perf.summary(perf::peak_rss_kib()));
+    log::info!("{}", perf.summary(perf::peak_rss_kib(), platform.failed_refreshes()));
     let code = app.exit_code();
     log::info!("bye{}", if code == 0 { String::new() } else { format!(" (exit code {code} for the launcher)") });
     Ok(code)

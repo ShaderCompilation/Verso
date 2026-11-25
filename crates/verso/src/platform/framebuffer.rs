@@ -7,7 +7,10 @@
 
 use crate::geom::Rect;
 use crate::gfx::{Canvas, ColorMode, RotateScratch};
-use crate::platform::Orientation;
+use crate::platform::{FrameCheck, Orientation};
+
+/// Panel rows `Writer::check` compares: enough to notice a status bar.
+const CHECK_STRIPS: u32 = 48;
 
 /// How a framebuffer pixel is laid out in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +169,32 @@ impl Writer {
         };
         Some(Rect::new(r.x + l.origin.0 as i32, r.y + l.origin.1 as i32, r.w, r.h))
     }
+
+    /// Compares evenly spaced panel rows of `fb` with what `write` puts there
+    /// for `canvas`.
+    pub fn check(&mut self, canvas: &Canvas, orientation: Orientation, fb: &[u8]) -> FrameCheck {
+        let l = self.layout;
+        // Zeroed memory is only mapped where the strips are written.
+        let mut expected = vec![0u8; l.required_len().unwrap_or(0)];
+        let mut check = FrameCheck { strips: 0, changed: 0, rows: (0, 0) };
+        for i in 0..CHECK_STRIPS.min(l.height) {
+            let row = ((2 * i + 1) * l.height / (2 * CHECK_STRIPS.min(l.height))) as i32;
+            let rect = match orientation {
+                Orientation::Portrait => Rect::new(0, row, canvas.width() as i32, 1),
+                // A canvas column is a panel row (see `copy_gray_rotated`).
+                Orientation::Landscape => Rect::new(canvas.width() as i32 - 1 - row, 0, 1, canvas.height() as i32),
+            };
+            let Some(r) = self.write(canvas, rect, orientation, &mut expected) else { continue };
+            let start = r.y as usize * l.stride + r.x as usize * l.format.bytes();
+            let bytes = start..start + r.w as usize * l.format.bytes();
+            check.strips += 1;
+            if fb[bytes.clone()] != expected[bytes] {
+                check.rows = (if check.changed == 0 { row } else { check.rows.0 }, row);
+                check.changed += 1;
+            }
+        }
+        check
+    }
 }
 
 /// How a 32-bit panel wants its pixels: channel order and inversion.
@@ -316,6 +345,16 @@ mod tests {
                                 assert_eq!(gray_at(&fb, &l, x, y), want, "{what} at ({x}, {y})");
                             }
                         }
+                        // A check finds exactly the rows something else drew over.
+                        assert_eq!(writer.check(&c, orientation, &fb).changed, 0, "{what}");
+                        let drawn_over = fb.clone();
+                        for y in 1..3 {
+                            let i = (origin.1 + y) as usize * l.stride + (origin.0 + W - 1) as usize * format.bytes();
+                            fb[i] ^= 0x40;
+                        }
+                        let check = writer.check(&c, orientation, &fb);
+                        assert_eq!((check.strips, check.changed, check.rows), (H, 2, (1, 2)), "{what}");
+                        fb = drawn_over;
                         // Nothing outside the viewport is touched.
                         let bytes = format.bytes();
                         for (i, &v) in fb.iter().enumerate() {

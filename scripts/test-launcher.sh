@@ -270,6 +270,7 @@ fresh() {
     : >"${W}/calls"
     install_files "${R}" 1
     printf 'framebuffer' >"${W}/fb"
+    echo boot-1 >"${W}/boot-id"
     : >"${W}/ld-linux-armhf.so.3"
 }
 
@@ -282,7 +283,7 @@ launch() {
         COUNT_STEPS="${COUNT_STEPS:-}" CRASH_AT="${1:-}" VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
-            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
+            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" VERSO_BOOT_ID="${W}/boot-id" \
             setsid ${SH} "${R}/verso/verso.sh" </dev/null >/dev/null 2>&1 &
         wait $!
     ) 2>/dev/null
@@ -323,6 +324,7 @@ wait_scriptlet() {
 
 # A reboot after a power loss: /tmp is empty again.
 reboot() {
+    echo boot-2 >"${W}/boot-id"
     rm -rf "${W}/tmp"
     mkdir -p "${W}/tmp"
 }
@@ -447,6 +449,9 @@ no_update_state
 ! grep -q 'iptables\|preventScreenSaver' "${W}/calls" || fail "touched the firewall or keep-awake"
 grep -q "Verso ended: bye (code 0)" "${R}/verso/verso.log" || fail "clean exit not logged as bye"
 grep -q "launched from an unknown source" "${R}/verso/verso.log" || fail "launch without a name not logged"
+grep -q "active app at pause: com.lab126.KPPMainApp$" "${R}/verso/verso.log" || fail "the active app isn't logged"
+! grep -q "has no end" "${R}/verso/verso.log" || fail "a first launch said the last session has no end"
+absent "${R}/verso/running"
 [ -z "$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null)" ] || fail "clean exit created a crash report"
 
 if [ -f "${SCRIPTLET}" ]; then
@@ -465,7 +470,7 @@ if [ -f "${SCRIPTLET}" ]; then
     rm -f "${W}/sh-active"
     wait_scriptlet 1 || fail "scriptlet launch did not finish"
     runs_are "0.1.0"
-    grep -q "launched from library" "${R}/verso/verso.log" || fail "library launch not logged"
+    grep -q "launched from library (waited [1-9][0-9]* of 50 times for Home)" "${R}/verso/verso.log" || fail "library launch not logged"
     ui_restored_once
     absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
     [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
@@ -635,6 +640,22 @@ if [ -d "${KPM_DIR}" ]; then
     fi
     rm -rf "${W}/kpm-v1" "${W}/kpm-v2"
 fi
+
+begin "a session without an end is noted at the next launch"
+fresh
+echo powerloss >"${W}/queue-0.1.0"
+launch
+present "${R}/verso/running"
+launch
+grep -q "the last session, started 20.*Z, has no end; the Kindle hasn't restarted since" "${R}/verso/verso.log" ||
+    fail "a killed launcher isn't noted"
+echo powerloss >"${W}/queue-0.1.0"
+launch
+reboot
+launch
+grep -q "has no end; the Kindle has restarted since" "${R}/verso/verso.log" || fail "a restart isn't noted"
+launch
+[ "$(grep -c "has no end" "${R}/verso/verso.log")" = 2 ] || fail "a session that ended was noted too"
 
 begin "crash report on signal exit"
 fresh

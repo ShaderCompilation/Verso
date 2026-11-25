@@ -59,6 +59,10 @@ int verso_cre_search_state(VersoCreDoc *doc, int *searched_pages);
  * (UTF-8, returns full length), 5=page number (returned directly). */
 int verso_cre_search_hit(VersoCreDoc *doc, int index, int field, char *buf, int len);
 
+/* Where crengine's error messages go, instead of stderr. Call before
+ * verso_cre_init. */
+void verso_cre_set_logger(void (*logger)(const char *message));
+
 /* Global setup, once per process. `hyph_dir` holds crengine's *.pattern
  * files (may be NULL: no hyphenation). `cache_dir` enables crengine's
  * on-disk document cache (may be NULL). Returns 0 on success. */

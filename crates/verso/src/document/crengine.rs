@@ -118,6 +118,18 @@ fn register_fonts(dirs: &[std::path::PathBuf], list: Option<&Path>) -> Result<(u
     Ok((fonts, listed))
 }
 
+/// crengine's error messages, into the app's log.
+extern "C" fn log_message(message: *const c_char) {
+    // SAFETY: crengine passes a NUL-terminated string that lives for this call.
+    let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    // The cache's index of embedded blobs, which `ldomBlobCache::loadIndex`
+    // reads as empty when missing: every book without blobs says so. Any
+    // other missing block is a damaged cache file.
+    if message != "CacheFile::read: Block 16:0 not found in file" {
+        log::error!(target: "crengine", "{}", message.trim_end());
+    }
+}
+
 /// crengine's global state (fonts, hyphenation, cache). Create one per process.
 pub struct CreEngine {
     paths: Paths,
@@ -136,6 +148,7 @@ impl CreEngine {
             None => None,
         };
         let cache_ptr = cache.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        unsafe { sys::verso_cre_set_logger(log_message) };
         if unsafe { sys::verso_cre_init(hyph.as_ptr(), cache_ptr, CACHE_MAX_BYTES) } != 0 {
             bail!("crengine failed to start");
         }
@@ -222,22 +235,25 @@ impl CreEngine {
         if let Some((t, page)) = typography {
             doc.set_typography(t, self.dpi, page)?;
         }
-        let t = Instant::now();
+        let (t, cpu) = (Instant::now(), crate::perf::thread_cpu());
         if unsafe { sys::verso_cre_load(raw, cstr(path)?.as_ptr()) } != 0 {
             bail!("could not open {}", path.display());
         }
         doc.stats.load_ms = t.elapsed().as_millis() as u32;
-        let t = Instant::now();
+        let (t, parsed_cpu) = (Instant::now(), crate::perf::thread_cpu());
         unsafe { sys::verso_cre_render(raw) };
         doc.stats.layout_ms = t.elapsed().as_millis() as u32;
+        let layout_cpu = crate::perf::thread_cpu().saturating_sub(parsed_cpu);
         anyhow::ensure!(doc.page_count() > 0, "book has no readable pages");
         let pages = doc.page_count();
         log::info!(
-            "opened {}: parse {} ms, layout {} ms, {} pages",
+            "opened {}: parse {} ms, layout {} ms, {} pages, CPU {} + {} ms",
             path.display(),
             doc.stats.load_ms,
             doc.stats.layout_ms,
-            pages
+            pages,
+            parsed_cpu.saturating_sub(cpu).as_millis(),
+            layout_cpu.as_millis(),
         );
         Ok(doc)
     }
