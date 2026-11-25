@@ -855,32 +855,6 @@ fn long_text_is_sent_nowhere_unless_its_tab_was_chosen() {
 }
 
 #[test]
-fn a_passage_with_few_spaces_is_counted_in_characters() {
-    for (passage, expected) in [
-        ("It was the best of times, it was the worst of times,\nit was the age of wisdom.", "18 words"),
-        (
-            "Das Bundesverfassungsgericht erklärte die Wohnungsbauförderungsgesetze und das \
-             Rindfleischetikettierungsüberwachungsaufgabenübertragungsgesetz für verfassungswidrig, obwohl die \
-             Landesregierungen widersprachen.",
-            "14 words",
-        ),
-        (
-            "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。\n吾輩はここで始めて人間というものを見た。",
-            "53 characters",
-        ),
-        ("吾輩は猫である。名前はまだ無い。\u{3000}どこで生れたかとんと見当がつかぬ。", "33 characters"),
-        ("https://example.org/a/long/address", "34 characters"),
-        (
-            "ครั้งหนึ่งนานมาแล้ว มีกระต่ายตัวหนึ่งอาศัยอยู่ในป่าใหญ่ \
-             ทุกเช้ามันจะออกไปหาอาหาร และกลับมาก่อนพระอาทิตย์ตกดิน",
-            "106 characters",
-        ),
-    ] {
-        assert_eq!(length(passage), expected, "{passage}");
-    }
-}
-
-#[test]
 fn a_folded_wikipedia_grows_for_a_long_error_without_expanding_the_card() {
     let (t, screen) = (Theme::for_dpi(167), Rect::new(0, 0, 600, 800));
     let error = r#"{"error":{"code":"internal_api_error_Wikimedia\\RequestTimeout\\RequestTimeoutException"}}"#;
@@ -1456,6 +1430,39 @@ fn words_in_a_definition_look_up_on_tap_or_long_press_but_not_on_swipes() {
     // × closes straight to the book at any depth.
     let close = lookup.close.rect().center();
     assert!(matches!(tap(&mut lookup, close, &t, screen), Some(LookupEvent::Close)));
+    worker.flush().unwrap();
+    drop(lookup);
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_button_hidden_under_the_finger_lets_go() {
+    let (root, store) = fixture();
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
+    let mut lookup =
+        Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
+    lookup.place(&t);
+    let manage = lookup.manage.rect().center();
+    cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Down(manage), cx));
+    assert!(lookup.manage.is_pressed());
+    // The definition takes its place before the finger lifts.
+    wait(&mut lookup, &t, screen);
+    assert!(cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Tap(manage), cx)).is_none());
+    // A word is down when the dictionaries change, and the button is back.
+    draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+    let word = lookup.body.center();
+    cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Down(word), cx));
+    worker.edit(crate::dictionary::sets::Edit::MoveDictionary {
+        set: crate::dictionary::sets::DEFAULT.into(),
+        dictionary: "13.ifo".into(),
+        position: 13,
+    });
+    cx(&t, screen, |cx| lookup.receive(cx));
+    assert!(lookup.manage_shown() && !lookup.manage.is_pressed());
+    assert!(cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Tap(word), cx)).is_none());
     worker.flush().unwrap();
     drop(lookup);
     drop(worker);

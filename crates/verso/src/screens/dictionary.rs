@@ -220,14 +220,6 @@ fn one_line(query: &str) -> String {
     query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// How long a passage is: in characters where spaces are too rare to count
-/// words by, as in scripts written without them and in addresses.
-fn length(passage: &str) -> String {
-    let words = passage.split_whitespace().count();
-    let characters = passage.chars().filter(|c| !c.is_whitespace()).count();
-    if characters < 15 * words { format!("{words} words") } else { format!("{characters} characters") }
-}
-
 /// What the online tabs' chooser is for.
 enum Choosing {
     /// One of Wikipedia's matches.
@@ -720,6 +712,14 @@ impl Lookup {
         let below = Rect::new(c.x, top + message + retry_gap, t.mm(30.0), t.target);
         self.retry.place(below, t);
         self.another_language.place(Rect { w: t.mm(38.0), ..below }, t);
+        // Hidden, they keep the places where they last showed: they ignore
+        // touches and let go of a press under way, as a reply may hide them.
+        self.search.enabled = self.edit_row();
+        self.retry.enabled = self.retry_shown();
+        self.another_language.enabled = self.another_language_shown();
+        self.manage.enabled = self.manage_shown();
+        let actions = self.actions_shown();
+        self.actions.iter_mut().for_each(|b| b.enabled = actions);
         if let Some((_, chooser)) = &mut self.chooser {
             let area = Rect::new(c.x, top, c.w, frame.bottom() - t.mm(2.4) - top);
             chooser.place(area, t);
@@ -1433,27 +1433,25 @@ impl Lookup {
             self.choose_source();
             return None;
         }
-        if self.target.on_gesture(g) || self.another_language_shown() && self.another_language.on_gesture(g) {
+        if self.target.on_gesture(g) || self.another_language.on_gesture(g) {
             self.choose_target();
             return None;
         }
-        if self.retry_shown() && self.retry.on_gesture(g) {
+        if self.retry.on_gesture(g) {
             self.tabs.retry();
             self.show_new_reply();
             return None;
         }
-        if self.manage_shown() && self.manage.on_gesture(g) {
+        if self.manage.on_gesture(g) {
             return Some(self.manage_event());
         }
-        if self.edit_row() {
-            if self.field.on_gesture(g) {
-                self.start_editing();
-                return None;
-            }
-            if self.search.on_gesture(g) {
-                self.submit(false);
-                return None;
-            }
+        if self.edit_row() && self.field.on_gesture(g) {
+            self.start_editing();
+            return None;
+        }
+        if self.search.on_gesture(g) {
+            self.submit(false);
+            return None;
         }
         if self.on_dictionary() {
             if self.previous.on_gesture(g) {
@@ -1463,21 +1461,18 @@ impl Lookup {
                 self.cycle(1);
             }
         }
-        // Hidden, they keep the places where they last showed.
-        if self.actions_shown() {
-            let [highlight, note, search, extend] = &mut self.actions;
-            if highlight.on_gesture(g) {
-                return Some(LookupEvent::Highlight);
-            }
-            if note.on_gesture(g) {
-                return Some(LookupEvent::Note);
-            }
-            if search.on_gesture(g) {
-                return Some(LookupEvent::Search(self.query.clone()));
-            }
-            if extend.on_gesture(g) {
-                return Some(LookupEvent::Extend);
-            }
+        let [highlight, note, search, extend] = &mut self.actions;
+        if highlight.on_gesture(g) {
+            return Some(LookupEvent::Highlight);
+        }
+        if note.on_gesture(g) {
+            return Some(LookupEvent::Note);
+        }
+        if search.on_gesture(g) {
+            return Some(LookupEvent::Search(self.query.clone()));
+        }
+        if extend.on_gesture(g) {
+            return Some(LookupEvent::Extend);
         }
         if self.on_dictionary() {
             self.word_gesture(g, t);
@@ -1577,7 +1572,8 @@ impl Lookup {
             // the length of a passage too long to edit.
             let crumb = match self.history.last() {
                 Some(v) => Some(format!("← {}", start(&v.query))),
-                None => too_long(&self.query).then(|| length(&self.query)),
+                // Characters, as Translate counts: not every script has spaces.
+                None => too_long(&self.query).then(|| format!("{} characters", self.query.trim().chars().count())),
             };
             let crumb_style = t.small;
             let after = match &crumb {
