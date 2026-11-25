@@ -176,9 +176,17 @@ impl Client {
     }
 }
 
+/// Whether `e` carries the error `variant` holds: rustls reports a failed
+/// handshake through `io::Error`. Why this shape: it names rustls' error type
+/// without a dependency on rustls, whose version must stay ureq's.
+fn wraps<T: std::error::Error + 'static>(e: &std::io::Error, _variant: fn(T) -> ureq::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<T>())
+}
+
 fn classify(error: ureq::Error, limit: u64) -> FetchError {
     use ureq::Error as E;
     match error {
+        E::Io(e) if wraps(&e, E::Rustls) => FetchError::Tls(e.to_string()),
         E::Timeout(_) => FetchError::Timeout,
         E::StatusCode(code) => FetchError::Status(code),
         E::BodyExceedsLimit(_) => FetchError::TooLarge(limit),
@@ -402,6 +410,22 @@ pub(crate) mod tests {
         let (_reserved, port) = refusing_port();
         let result = client(1000).get(&format!("http://127.0.0.1:{port}/latest.json"), 100);
         assert!(matches!(result, Err(FetchError::Unreachable(_))), "{result:?}");
+    }
+
+    #[test]
+    fn a_failed_handshake_is_a_tls_error() {
+        // Answers the handshake with something that isn't TLS.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}/latest.json", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let _ = stream.read(&mut [0; 4096]);
+                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+            }
+        });
+        let result = client(2000).get(&url, 100);
+        assert!(matches!(result, Err(FetchError::Tls(_))), "{result:?}");
     }
 
     fn downloader() -> Client {
