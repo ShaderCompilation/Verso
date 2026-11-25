@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::kindle_profiles::{self, Lights};
+use super::power::Link;
 use super::remote::{self, Gate};
 use super::{
     Battery, DeviceInfo, DeviceModel, Event, FrameCheck, Frontlight, Orientation, PageButtons, Platform, Unsupported,
@@ -160,6 +161,12 @@ fn start_remotes(held: Vec<String>, tx: std::sync::mpsc::Sender<Remote>, waker: 
     }
 }
 
+/// Starts a process, about 29 ms.
+fn powerd_status() -> Option<super::power::Status> {
+    let out = std::process::Command::new("lipc-get-prop").args(["com.lab126.powerd", "battStateInfo"]).output().ok()?;
+    out.status.success().then(|| super::power::Status::parse(&out.stdout))?
+}
+
 impl Kindle {
     pub fn open() -> Result<Self> {
         install_signal_handlers();
@@ -274,12 +281,7 @@ impl Kindle {
         {
             return status;
         }
-        let status = std::process::Command::new("lipc-get-prop")
-            .args(["com.lab126.powerd", "battStateInfo"])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .and_then(|out| super::power::Status::parse(&out.stdout));
+        let status = powerd_status();
         self.status = Some((Instant::now(), status));
         status
     }
@@ -287,6 +289,9 @@ impl Kindle {
     fn system_event(&mut self, event: Event) -> Event {
         if matches!(event, Event::PowerChanged | Event::Usb(_) | Event::Wake) {
             self.status = None;
+        }
+        if event == Event::Wake {
+            self.cable.forget();
         }
         if let Event::Usb(connected) = event {
             self.cable.recheck(Instant::now());
@@ -352,10 +357,18 @@ impl Platform for Kindle {
     fn usb_connected(&mut self) -> Option<bool> {
         // Unlike isCharging, this stays true for a full battery on a cable.
         // usbState is an undocumented enum and does not mean "connected != 0".
-        // The charger supply's `online` matched powerd's `usb` plugged and
-        // unplugged (measured).
-        let usb = match self.power_files.as_ref().and_then(|f| f.usb()) {
-            Some(usb) => usb,
+        let usb = match self.power_files.as_ref().and_then(|f| f.link()) {
+            // Asking powerd would delay the first frame: ask at the first
+            // recheck instead.
+            Some(Link::Unsure) if self.opening.is_some() => {
+                self.cable.recheck(Instant::now());
+                return None;
+            }
+            Some(link) => self.cable.computer(link, || {
+                let usb = powerd_status().and_then(|s| s.usb);
+                log::info!("power: powerd usb={usb:?}");
+                usb
+            }),
             None => self.system_status()?.usb?,
         };
         Some(self.cable.settle(usb, Instant::now()))

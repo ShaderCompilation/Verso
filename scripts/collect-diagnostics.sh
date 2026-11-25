@@ -327,16 +327,29 @@ report() {
         [ -d "$supply" ] || continue
         found=yes
         printf '\n%s\n' "$supply"
-        for attribute in type status capacity online present temp voltage_now; do
+        for attribute in type status capacity online present charging temp voltage_now; do
             field "$attribute" "$supply/$attribute"
         done
+        # Names only: whatever else could tell a wall charger from a computer.
+        printf 'attributes: '
+        ls "$supply" 2>/dev/null | tr '\n' ' ' | clean
     done
     [ "$found" = yes ] || printf '%s\n' '[no power-supply sysfs entries found]'
+
+    section 'USB device controllers'
+    found=no
+    for controller in /sys/class/udc/*; do
+        [ -d "$controller" ] || continue
+        found=yes
+        printf '\n%s\n' "$controller"
+        field state "$controller/state"
+    done
+    [ "$found" = yes ] || printf '%s\n' '[no USB device controllers found]'
 
     section 'Optional platform queries'
     if command -v lipc-get-prop >/dev/null 2>&1; then
         printf '%s\n' 'Kindle LIPC tool detected (inference; not a model identification).'
-        for property in state flIntensity flMaxIntensity currentAmberLevel; do
+        for property in state flIntensity flMaxIntensity currentAmberLevel battStateInfo; do
             bounded_query "powerd $property" lipc-get-prop com.lab126.powerd "$property"
         done
     else

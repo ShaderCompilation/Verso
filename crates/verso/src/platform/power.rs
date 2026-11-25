@@ -40,16 +40,20 @@ impl PowerFiles {
         let charging = read("status").is_some_and(|s| s.trim() == "Charging");
         Some(Battery { percent: percent.clamp(0, 100) as u8, charging })
     }
-    /// A USB data cable is attached, charging or not. A wall charger
-    /// (`USB_DCP`) sets `online = 1` while powerd reports `usb = false`.
-    pub fn usb(&self) -> Option<bool> {
+    /// What the cable is plugged into, charging or not, as far as the files
+    /// tell. `None` without a cable supply.
+    pub fn link(&self) -> Option<Link> {
         let cable = self.cable.as_ref()?;
         let online = std::fs::read_to_string(cable.join("online")).ok()?;
         if online.trim() != "1" {
-            return Some(false);
+            return Some(Link::Unplugged);
         }
         let kind = std::fs::read_to_string(cable.join("type")).ok();
-        Some(kind.as_deref().map(str::trim) != Some("USB_DCP"))
+        Some(match kind.as_deref().map(str::trim) {
+            Some("USB_DCP") => Link::Charger,
+            Some("USB" | "USB_CDP") => Link::Computer,
+            _ => Link::Unsure,
+        })
     }
     /// The raw files, for the log.
     pub fn describe(&self) -> String {
@@ -62,6 +66,16 @@ impl PowerFiles {
         );
         format!("battery {}% {}, {cable}", read(&self.battery, "capacity"), read(&self.battery, "status"))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Unplugged,
+    Charger,
+    Computer,
+    /// `Mains`: a computer on the Paperwhite 6, whose type changes with what's
+    /// plugged in; on the Oasis 3 (`max77796-charger`) maybe anything.
+    Unsure,
 }
 
 /// When to read again after a cable event. The files lag behind powerd:
@@ -80,10 +94,14 @@ pub struct Cable {
     usb: Option<bool>,
     rising: Option<Instant>,
     due: VecDeque<Instant>,
+    /// powerd's answer for this plug-in, until the next read that's due. The
+    /// minute poll reuses it: asking takes about 29 ms on the UI thread.
+    powerd: Option<bool>,
 }
 impl Cable {
     /// Schedules the reads that follow a cable event, replacing earlier ones.
     pub fn recheck(&mut self, now: Instant) {
+        self.powerd = None;
         self.due = RECHECKS.iter().map(|&d| now + d).collect();
     }
     pub fn next_due(&self) -> Option<Instant> {
@@ -93,7 +111,28 @@ impl Cable {
     pub fn take_due(&mut self, now: Instant) -> bool {
         let before = self.due.len();
         self.due.retain(|&at| at > now);
-        self.due.len() < before
+        let due = self.due.len() < before;
+        if due {
+            self.powerd = None;
+        }
+        due
+    }
+    /// The Kindle slept: the cable may have changed unnoticed.
+    pub fn forget(&mut self) {
+        self.powerd = None;
+    }
+    /// Whether `link` leads to a computer. `ask` is powerd's `usb`, false on
+    /// a wall charger (measured, PW6); without an answer, assume a computer.
+    pub fn computer(&mut self, link: Link, ask: impl FnOnce() -> Option<bool>) -> bool {
+        match link {
+            Link::Unplugged => {
+                self.powerd = None;
+                false
+            }
+            Link::Charger => false,
+            Link::Computer => true,
+            Link::Unsure => *self.powerd.get_or_insert_with(|| ask().unwrap_or(true)),
+        }
     }
     /// The settled state after reading `usb`.
     pub fn settle(&mut self, usb: bool, now: Instant) -> bool {
@@ -175,13 +214,13 @@ mod tests {
         let files = PowerFiles::find(&root).unwrap();
         assert_eq!(files, PowerFiles { battery: root.join("bd71827_bat"), cable: Some(root.join("bd71827_ac")) });
         assert_eq!(files.battery(), Some(Battery { percent: 38, charging: false }));
-        assert_eq!(files.usb(), Some(false), "the moisture sensor isn't a cable");
+        assert_eq!(files.link(), Some(Link::Unplugged), "the moisture sensor isn't a cable");
         // Plugged in, as measured: Charging, and the Mains supply online.
         std::fs::write(root.join("bd71827_bat/status"), "Charging\n").unwrap();
         std::fs::write(root.join("bd71827_bat/capacity"), "41\n").unwrap();
         std::fs::write(root.join("bd71827_ac/online"), "1\n").unwrap();
         assert_eq!(files.battery(), Some(Battery { percent: 41, charging: true }));
-        assert_eq!(files.usb(), Some(true));
+        assert_eq!(files.link(), Some(Link::Unsure));
         assert_eq!(files.describe(), "battery 41% Charging, cable online=1 type=Mains");
         // Full on a cable: connected but not charging.
         std::fs::write(root.join("bd71827_bat/status"), "Full\n").unwrap();
@@ -190,11 +229,11 @@ mod tests {
         std::fs::write(root.join("bd71827_ac/type"), "USB_DCP\n").unwrap();
         let files = PowerFiles::find(&root).unwrap();
         assert_eq!(files.cable, Some(root.join("bd71827_ac")));
-        assert_eq!(files.usb(), Some(false), "wall charger is not a USB data connection");
+        assert_eq!(files.link(), Some(Link::Charger), "wall charger is not a USB data connection");
         // No cable supply: the cable state comes from powerd instead.
         std::fs::remove_dir_all(root.join("bd71827_ac")).unwrap();
         let files = PowerFiles::find(&root).unwrap();
-        assert_eq!(files.usb(), None);
+        assert_eq!(files.link(), None);
         // No battery at all: powerd it is.
         std::fs::remove_dir_all(root.join("bd71827_bat")).unwrap();
         assert_eq!(PowerFiles::find(&root), None);
@@ -226,6 +265,28 @@ mod tests {
         assert!(!cable.settle(true, at(30_000)));
         // Already on a computer at startup: no wait.
         assert!(Cable::default().settle(true, t0));
+    }
+    #[test]
+    fn powerd_tells_a_charger_from_a_computer_when_the_type_does_not() {
+        let t0 = Instant::now();
+        let mut cable = Cable::default();
+        let silent = || panic!("the type is enough, or powerd has answered");
+        // A type that says enough never asks.
+        assert!(!cable.computer(Link::Charger, silent));
+        assert!(cable.computer(Link::Computer, silent));
+        // A wall charger, asked about once until a read is due.
+        assert!(!cable.computer(Link::Unsure, || Some(false)));
+        assert!(!cable.computer(Link::Unsure, silent));
+        cable.recheck(t0);
+        assert!(cable.computer(Link::Unsure, || Some(true)), "powerd was late");
+        assert!(cable.take_due(t0 + Duration::from_millis(600)));
+        assert!(!cable.computer(Link::Unsure, || Some(false)));
+        // The next plug-in, and the first look after a sleep, ask again.
+        assert!(!cable.computer(Link::Unplugged, silent));
+        assert!(cable.computer(Link::Unsure, || Some(true)));
+        cable.forget();
+        // No answer: the prompt shows rather than missing a computer.
+        assert!(cable.computer(Link::Unsure, || None));
     }
     #[test]
     fn a_full_usb_battery_is_connected_even_when_it_is_not_charging() {
