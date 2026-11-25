@@ -12,6 +12,8 @@ crengine-sys = { path = "../crengine-sys" }
 # Base forms from user-installed Hunspell dictionaries.
 hunspell-sys = { path = "../hunspell-sys" }
 cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
+# The script type in cosmic-text's font fallback trait, which it doesn't re-export.
+unicode-script = { version = "0.5.9", default-features = false }
 env_logger = { version = "0.11.11", default-features = false, features = ["auto-color", "humantime"] }
 fbink-sys = { path = "../fbink-sys", optional = true }
 verso-mdns = { path = "../verso-mdns" }

@@ -41,6 +41,7 @@ time (see `crates/crengine-sys/build.rs`).
 | --- | --- | --- |
 | Inter (the interface) | `assets/fonts/Inter-*`, `Inter-LICENSE.txt` | SIL Open Font License 1.1 |
 | Literata (books) | `assets/fonts/Literata-*`, `Literata-LICENSE.txt` | SIL Open Font License 1.1 |
+| Noto Sans (a subset, for phonetic letters and marks) | `assets/fonts/NotoSans-IPA.ttf`, `NotoSans-LICENSE.txt` | SIL Open Font License 1.1 |
 
 ## Icons
 

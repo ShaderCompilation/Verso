@@ -2,7 +2,8 @@
 //!
 //! The UI fonts are compiled into the binary, so the app can always draw text,
 //! even if its folder on the device is incomplete: Inter for controls and
-//! labels, Literata for titles. Laid-out text is cached, so redrawing a whole
+//! labels, Literata for titles, and a subset of Noto Sans for the phonetic
+//! letters and marks both lack. Laid-out text is cached, so redrawing a whole
 //! screen every frame stays cheap.
 
 use std::collections::HashMap;
@@ -10,9 +11,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Ellipsize, EllipsizeHeightLimit, Family as CtFamily, FontSystem, LineIter, Metrics, Shaping,
-    SwashCache, SwashContent, Wrap, fontdb,
+    Align, Attrs, Buffer, Ellipsize, EllipsizeHeightLimit, Fallback, Family as CtFamily, FontSystem, LineIter, Metrics,
+    Shaping, SwashCache, SwashContent, Wrap, fontdb,
 };
+use unicode_script::Script;
 
 use super::Canvas;
 use crate::geom::Rect;
@@ -25,6 +27,27 @@ const LITERATA_REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/Literat
 const LITERATA_SEMIBOLD: &[u8] = include_bytes!("../../../../assets/fonts/Literata-SemiBold.ttf");
 const LITERATA_ITALIC: &[u8] = include_bytes!("../../../../assets/fonts/Literata-Italic.ttf");
 const LITERATA_SEMIBOLD_ITALIC: &[u8] = include_bytes!("../../../../assets/fonts/Literata-SemiBoldItalic.ttf");
+/// Noto Sans cut down with `hb-subset --instance=wght=400 --no-hinting` and
+/// `--layout-features=mark,mkmk,ccmp` to U+0250-036F, U+1D00-1DBF and the plain
+/// letters: a mark is only placed on a letter of its own font.
+const NOTO_IPA: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-IPA.ttf");
+
+/// Inter before the rest, so Noto only draws what Inter can't.
+struct InterFirst;
+
+impl Fallback for InterFirst {
+    fn common_fallback(&self) -> &[&'static str] {
+        &["Inter"]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn script_fallback(&self, _: Script, _: &str) -> &[&'static str] {
+        &[]
+    }
+}
 
 /// Laid-out texts kept at most. The cache is simply cleared when it's full;
 /// a screen only shows a few dozen texts.
@@ -154,13 +177,14 @@ impl TextRenderer {
             LITERATA_SEMIBOLD,
             LITERATA_ITALIC,
             LITERATA_SEMIBOLD_ITALIC,
+            NOTO_IPA,
         ] {
             db.load_font_source(fontdb::Source::Binary(Arc::new(data)));
         }
         db.set_sans_serif_family(Family::Sans.name());
         db.set_serif_family(Family::Serif.name());
         Self {
-            fonts: FontSystem::new_with_locale_and_db("en-US".into(), db),
+            fonts: FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, InterFirst),
             book_families: Vec::new(),
             glyphs: SwashCache::new(),
             layouts: HashMap::new(),
@@ -483,6 +507,34 @@ mod tests {
             let (italic_w, italic) = shape(fontdb::Style::Italic);
             assert!((upright_w - italic_w).abs() > 1.0, "italic {weight:?} should have its own advances");
             assert!(upright.iter().zip(&italic).all(|(a, b)| a.0 != b.0), "italic {weight:?} should use its own face");
+        }
+    }
+
+    #[test]
+    fn phonetic_marks_fall_back_to_noto_and_letters_to_inter() {
+        let mut t = TextRenderer::new();
+        for family in ["Literata", "Inter"] {
+            for (weight, style) in [
+                (fontdb::Weight::NORMAL, fontdb::Style::Normal),
+                (fontdb::Weight::SEMIBOLD, fontdb::Style::Normal),
+                (fontdb::Weight::NORMAL, fontdb::Style::Italic),
+            ] {
+                let text = "mɐˈs̪kvä ɕt̪ɽ";
+                let mut buffer = Buffer::new(&mut t.fonts, Metrics::new(40.0, 50.0));
+                let attrs = Attrs::new().family(CtFamily::Name(family)).weight(weight).style(style);
+                buffer.set_text(text, &attrs, Shaping::Advanced, None);
+                buffer.shape_until_scroll(&mut t.fonts, false);
+                for g in buffer.layout_runs().next().unwrap().glyphs {
+                    let face = &t.fonts.db().face(g.font_id).unwrap().families[0].0;
+                    let expected = match &text[g.start..g.end] {
+                        "s̪" | "t̪" | "ɕ" | "ɽ" => "Noto Sans",
+                        "ɐ" => "Inter",
+                        _ => family,
+                    };
+                    assert_ne!(g.glyph_id, 0, "{family} {weight:?} {style:?}");
+                    assert_eq!(face, expected, "{:?} {family} {weight:?} {style:?}", &text[g.start..g.end]);
+                }
+            }
         }
     }
 
