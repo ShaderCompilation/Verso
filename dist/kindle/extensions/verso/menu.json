@@ -8,7 +8,7 @@
 			"name": "Start Verso",
 			"priority": 1,
 			"action": "/bin/sh",
-			"params": "/mnt/us/verso/verso.sh",
+			"params": "/mnt/us/verso/verso.sh kual",
 			"status": false,
 			"internal": "status Starting Verso"
 		},

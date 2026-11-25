@@ -128,7 +128,7 @@ echo "==> running (Ctrl-C to stop)"
 ssh "$HOST" sh -s <<EOF || true
 LOG=$APP/verso.log
 N=\$(cat \$LOG 2>/dev/null | wc -l)
-RUST_LOG='${RUST_LOG:-info}' setsid sh $APP/verso.sh </dev/null >/dev/null 2>&1 &
+RUST_LOG='${RUST_LOG:-info}' setsid sh $APP/verso.sh deploy </dev/null >/dev/null 2>&1 &
 sleep 1
 # The launcher may have started a fresh log.
 [ "\$(cat \$LOG 2>/dev/null | wc -l)" -lt "\$N" ] && N=0

@@ -446,6 +446,7 @@ ui_restored_once
 no_update_state
 ! grep -q 'iptables\|preventScreenSaver' "${W}/calls" || fail "touched the firewall or keep-awake"
 grep -q "Verso ended: bye (code 0)" "${R}/verso/verso.log" || fail "clean exit not logged as bye"
+grep -q "launched from an unknown source" "${R}/verso/verso.log" || fail "launch without a name not logged"
 [ -z "$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null)" ] || fail "clean exit created a crash report"
 
 if [ -f "${SCRIPTLET}" ]; then
@@ -464,6 +465,7 @@ if [ -f "${SCRIPTLET}" ]; then
     rm -f "${W}/sh-active"
     wait_scriptlet 1 || fail "scriptlet launch did not finish"
     runs_are "0.1.0"
+    grep -q "launched from library" "${R}/verso/verso.log" || fail "library launch not logged"
     ui_restored_once
     absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
     [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
@@ -605,6 +607,7 @@ if [ -d "${KPM_DIR}" ]; then
     ) || fail "launch.sh exited non-zero"
     wait_scriptlet 1 || fail "launch.sh did not finish running verso.sh"
     runs_are "0.1.0"
+    grep -q "launched from kpm" "${R}/verso/verso.log" || fail "KPM launch not logged"
     ui_restored_once
     # Launch while SH_Integration is active must wait until it unloads.
     : >"${W}/calls"

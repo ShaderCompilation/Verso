@@ -5,8 +5,9 @@
 # version if a new one fails to start, with renames from the plan Verso staged, and starts Verso
 # again when it asks (Restart to apply).
 #
-# Started from KUAL (extensions/verso/menu.json) or by scripts/deploy.sh.
-# Installed at /mnt/us/verso/verso.sh.
+# Started from the Kindle library (documents/Verso.sh), KUAL
+# (extensions/verso/menu.json), KPM (its launch.sh) or scripts/deploy.sh; each
+# passes its name as $1, for the log. Installed at /mnt/us/verso/verso.sh.
 #
 # For scripts/test-launcher.sh only: VERSO_STORAGE_ROOT replaces /mnt/us,
 # VERSO_TMP replaces /tmp, VERSO_FB replaces /dev/fb0, VERSO_LAUNCHER_BIN
@@ -693,6 +694,13 @@ run_verso() {
         sleep "${REFUSAL_WAIT}"
     fi
 }
+
+# What started us, for problem reports: only known names, so nothing else a
+# caller passes ends up in the log. Older KPM packages pass nothing.
+case "${1:-}" in
+    library | kual | kpm | deploy) log "launched from $1" ;;
+    *) log "launched from an unknown source" ;;
+esac
 
 # Pause the Kindle UI, the same way KOReader does on this firmware.
 # Each flag is set *before* acting, so an interruption can't skip its undo.

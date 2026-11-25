@@ -39,6 +39,6 @@ setsid ${SH} -c '
     if [ "${waited}" = 1 ]; then
         usleep 200000 2>/dev/null || sleep 0.2 2>/dev/null || sleep 1
     fi
-    exec ${VERSO_LAUNCHER_SHELL:-/bin/sh} "$1"
+    exec ${VERSO_LAUNCHER_SHELL:-/bin/sh} "$1" kpm
 ' verso-launch "${LAUNCHER}" </dev/null >/dev/null 2>&1 &
 exit 0
