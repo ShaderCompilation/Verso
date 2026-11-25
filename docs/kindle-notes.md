@@ -15,7 +15,7 @@ behaviour on other models is **(to verify)**.
   without emitting VFPv4 or hardware integer division that i.MX6SLL models
   (PW4, Basic 3) lack. `.cargo/arm-glibc-relplt.ld` keeps `.rel.plt` immediately
   after `.rel.dyn` so LLD does not place `.ARM.exidx` between them, avoiding an
-  instant `SIGSEGV` in glibc ≤ 2.23 `ld.so` under Zig's default `-z now` (glibc
+  instant `SIGSEGV` in glibc ≤ 2.22 `ld.so` under Zig's default `-z now` (glibc
   bug #14341).
 - **Hard-float firmware only (5.16.3+):** requires `/lib/ld-linux-armhf.so.3`.
   `verso.sh` checks for it before pausing the Kindle UI; if absent, it prints

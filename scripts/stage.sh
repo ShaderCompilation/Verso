@@ -28,14 +28,18 @@ copy() {
 # Verify Kindle ELF ABI compatibility before staging:
 # - interpreter is /lib/ld-linux-armhf.so.3
 # - max required GLIBC version <= 2.20 (i.MX armhf Kindles like Oasis 3)
-# - DT_REL + DT_RELSZ == DT_JMPREL (contiguous .rel.dyn/.rel.plt for glibc <= 2.23, bug #14341)
+# - DT_REL + DT_RELSZ == DT_JMPREL (contiguous .rel.dyn/.rel.plt for glibc <= 2.22, bug #14341)
 # - PT_ARM_EXIDX is present
 check_kindle_elf() {
     python3 -I - "$@" <<'PY'
-import re, subprocess, sys
+import os, re, subprocess, sys
+
+# readelf localizes its output ("(bytes)"), so parse it in the C locale.
+env = {**os.environ, "LC_ALL": "C"}
+env.pop("LANGUAGE", None)
 
 for path in sys.argv[1:]:
-    out = subprocess.check_output(["readelf", "-lW", "-dW", "-VW", path], text=True)
+    out = subprocess.check_output(["readelf", "-lW", "-dW", "-VW", path], text=True, env=env)
     if "/lib/ld-linux-armhf.so.3" not in out:
         sys.exit(f"stage.sh: {path}: expected /lib/ld-linux-armhf.so.3 interpreter")
     if "ARM_EXIDX" not in out:
@@ -51,14 +55,15 @@ for path in sys.argv[1:]:
     rel = re.search(r"\(REL\)\s+0x([0-9a-f]+)", out)
     relsz = re.search(r"\(RELSZ\)\s+(\d+)\s+\(bytes\)", out)
     jmprel = re.search(r"\(JMPREL\)\s+0x([0-9a-f]+)", out)
-    if rel and relsz and jmprel:
-        rel_end = int(rel.group(1), 16) + int(relsz.group(1), 10)
-        jmp_start = int(jmprel.group(1), 16)
-        if rel_end != jmp_start:
-            sys.exit(
-                f"stage.sh: {path}: DT_REL+DT_RELSZ (0x{rel_end:x}) != DT_JMPREL (0x{jmp_start:x}); "
-                "non-contiguous relocations crash glibc <= 2.23 (see .cargo/arm-glibc-relplt.ld)"
-            )
+    if not (rel and relsz and jmprel):
+        sys.exit(f"stage.sh: {path}: could not find DT_REL, DT_RELSZ and DT_JMPREL (dynamic binaries always have all three)")
+    rel_end = int(rel.group(1), 16) + int(relsz.group(1), 10)
+    jmp_start = int(jmprel.group(1), 16)
+    if rel_end != jmp_start:
+        sys.exit(
+            f"stage.sh: {path}: DT_REL+DT_RELSZ (0x{rel_end:x}) != DT_JMPREL (0x{jmp_start:x}); "
+            "non-contiguous relocations crash glibc <= 2.22 (see .cargo/arm-glibc-relplt.ld)"
+        )
 PY
 }
 
