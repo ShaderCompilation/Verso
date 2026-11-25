@@ -60,6 +60,7 @@ pub struct Kindle {
     status: Option<(Instant, Option<super::power::Status>)>,
     /// Battery and cable from sysfs; powerd (`lipc`) when missing.
     power_files: Option<super::power::PowerFiles>,
+    cable: super::power::Cable,
 }
 
 struct Inputs {
@@ -257,6 +258,7 @@ impl Kindle {
             native_sleep: false,
             status: None,
             power_files,
+            cable: Default::default(),
         })
     }
 
@@ -284,7 +286,16 @@ impl Kindle {
         if matches!(event, Event::PowerChanged | Event::Usb(_) | Event::Wake) {
             self.status = None;
         }
+        if let Event::Usb(connected) = event {
+            self.cable.recheck(Instant::now());
+            self.log_power(if connected { "charging event" } else { "notCharging event" });
+        }
         event
+    }
+
+    fn log_power(&self, when: &str) {
+        let files = self.power_files.as_ref().map_or_else(|| "no sysfs".to_owned(), |f| f.describe());
+        log::info!("power: {when}: {files}");
     }
 
     /// Page buttons follow the touchscreen's grab, and remotes drop what was
@@ -341,10 +352,11 @@ impl Platform for Kindle {
         // usbState is an undocumented enum and does not mean "connected != 0".
         // The charger supply's `online` matched powerd's `usb` plugged and
         // unplugged (measured).
-        if let Some(usb) = self.power_files.as_ref().and_then(|f| f.usb()) {
-            return Some(usb);
-        }
-        self.system_status()?.usb
+        let usb = match self.power_files.as_ref().and_then(|f| f.usb()) {
+            Some(usb) => usb,
+            None => self.system_status()?.usb?,
+        };
+        Some(self.cable.settle(usb, Instant::now()))
     }
 
     fn finish_startup(&mut self) -> Result<()> {
@@ -503,12 +515,17 @@ impl Platform for Kindle {
                 // Unlike real power events, the poll keeps the powerd snapshot.
                 return Ok(Some(Event::PowerChanged));
             }
+            if !self.sleeping && self.cable.take_due(Instant::now()) {
+                self.status = None;
+                self.log_power("read again");
+                return Ok(Some(Event::PowerChanged));
+            }
             // Poll at least once, even when the deadline has passed (a zero
             // timeout means "anything waiting?").
             let poll_deadline = if self.sleeping {
                 deadline
             } else {
-                Some(deadline.map_or(self.battery_due, |d| d.min(self.battery_due)))
+                [deadline, Some(self.battery_due), self.cable.next_due()].into_iter().flatten().min()
             };
             let wait_ms = match poll_deadline {
                 None => -1,

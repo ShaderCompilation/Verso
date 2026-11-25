@@ -1,7 +1,9 @@
 //! Battery and cable state, from sysfs or powerd. lipc-wait-event emits one
 //! event name followed by optional arguments.
 use super::{Battery, Event};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The kernel's battery and charger files (`/sys/class/power_supply`).
 /// Reading them takes well under a millisecond; `lipc-get-prop` starts a
@@ -48,6 +50,67 @@ impl PowerFiles {
         }
         let kind = std::fs::read_to_string(cable.join("type")).ok();
         Some(kind.as_deref().map(str::trim) != Some("USB_DCP"))
+    }
+    /// The raw files, for the log.
+    pub fn describe(&self) -> String {
+        let read = |dir: &Path, name| {
+            std::fs::read_to_string(dir.join(name)).map_or_else(|_| "?".to_owned(), |s| s.trim().to_owned())
+        };
+        let cable = self.cable.as_ref().map_or_else(
+            || "no cable supply".to_owned(),
+            |c| format!("cable online={} type={}", read(c, "online"), read(c, "type")),
+        );
+        format!("battery {}% {}, {cable}", read(&self.battery, "capacity"), read(&self.battery, "status"))
+    }
+}
+
+/// When to read again after a cable event. The files lag behind powerd:
+/// `charging` arrives about 0.2 s before the battery's status leaves
+/// `Discharging` (measured, PW6), so a single read keeps the old icon until
+/// the next minute poll. The later reads are for slower models.
+const RECHECKS: [Duration; 3] = [Duration::from_millis(500), Duration::from_millis(1500), Duration::from_secs(3)];
+
+/// The computer connection as reported to the app, and the reads still to do.
+/// Unplugging is believed at once; plugging in only when a read
+/// `RECHECKS[0]` later agrees: while a cable comes out, a wall charger too
+/// reads `Mains` and online for about 0.1 s (measured, PW6), which would
+/// open the computer prompt.
+#[derive(Default)]
+pub struct Cable {
+    usb: Option<bool>,
+    rising: Option<Instant>,
+    due: VecDeque<Instant>,
+}
+impl Cable {
+    /// Schedules the reads that follow a cable event, replacing earlier ones.
+    pub fn recheck(&mut self, now: Instant) {
+        self.due = RECHECKS.iter().map(|&d| now + d).collect();
+    }
+    pub fn next_due(&self) -> Option<Instant> {
+        self.due.front().copied()
+    }
+    /// Whether a read is due; several overdue ones count as one.
+    pub fn take_due(&mut self, now: Instant) -> bool {
+        let before = self.due.len();
+        self.due.retain(|&at| at > now);
+        self.due.len() < before
+    }
+    /// The settled state after reading `usb`.
+    pub fn settle(&mut self, usb: bool, now: Instant) -> bool {
+        if usb && self.usb == Some(false) {
+            match self.rising {
+                None => {
+                    self.rising = Some(now);
+                    self.recheck(now);
+                    return false;
+                }
+                Some(since) if now.saturating_duration_since(since) < RECHECKS[0] => return false,
+                Some(_) => {}
+            }
+        }
+        self.usb = Some(usb);
+        self.rising = None;
+        usb
     }
 }
 
@@ -119,6 +182,7 @@ mod tests {
         std::fs::write(root.join("bd71827_ac/online"), "1\n").unwrap();
         assert_eq!(files.battery(), Some(Battery { percent: 41, charging: true }));
         assert_eq!(files.usb(), Some(true));
+        assert_eq!(files.describe(), "battery 41% Charging, cable online=1 type=Mains");
         // Full on a cable: connected but not charging.
         std::fs::write(root.join("bd71827_bat/status"), "Full\n").unwrap();
         assert_eq!(files.battery(), Some(Battery { percent: 41, charging: false }));
@@ -136,6 +200,32 @@ mod tests {
         assert_eq!(PowerFiles::find(&root), None);
         assert_eq!(PowerFiles::find(&root.join("missing")), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn a_cable_is_read_again_and_a_computer_must_last() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut cable = Cable::default();
+        assert!(!cable.settle(false, t0));
+        assert_eq!(cable.next_due(), None, "no reads without a cable event");
+        // A computer: reported at the first recheck.
+        cable.recheck(at(1000));
+        assert!(!cable.settle(true, at(1010)));
+        assert!(!cable.take_due(at(1400)));
+        assert!(cable.take_due(at(1510)));
+        assert!(cable.settle(true, at(1510)));
+        assert!(cable.take_due(at(9000)), "overdue reads count as one");
+        assert!(!cable.take_due(at(9000)));
+        assert_eq!(cable.next_due(), None);
+        // Unplugged: at once.
+        assert!(!cable.settle(false, at(9100)));
+        // A charger coming out reads as a computer for a moment; a poll that
+        // sees it must not report it, nor count towards a later plug-in.
+        assert!(!cable.settle(true, at(20_000)));
+        assert!(!cable.settle(false, at(20_100)));
+        assert!(!cable.settle(true, at(30_000)));
+        // Already on a computer at startup: no wait.
+        assert!(Cable::default().settle(true, t0));
     }
     #[test]
     fn a_full_usb_battery_is_connected_even_when_it_is_not_charging() {

@@ -176,10 +176,10 @@ rather than stopping it:
   ~29 ms per `lipc-get-prop`): first `Battery` supply (`bd71827_bat`) for
   capacity/charging, first `Mains`/`USB`/`USB_DCP`/`USB_CDP` supply
   (`bd71827_ac`) for cable presence. Ignores `Wireless` and `USB_WET`
-  (`max20342_moisture`, always online). `USB_DCP` (wall charger) counts as
-  charging but returns `usb = false` so it never triggers the computer-transfer
-  prompt. Falls back to `battStateInfo` (5-minute cache) and `battLevel` /
-  `isCharging` when sysfs is missing (`usbState` is not a boolean).
+  (`max20342_moisture`). `USB_DCP` (wall charger) never triggers the computer
+  prompt. Battery `status` turns `Charging` ~0.2 s *after* powerd's `charging`,
+  and unplugging reads `Mains` online for ~0.1 s **(measured)**, so reads repeat
+  after each cable event. Without sysfs: `battStateInfo`, `battLevel`, `isCharging`.
 
 ---
 
