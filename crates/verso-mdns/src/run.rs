@@ -2,9 +2,10 @@
 //! [`Responder`].
 //!
 //! Event-driven: it sleeps in `poll` on the socket and on a pidfd for the
-//! process it serves (the SSH server), waking for packets, for probe and
-//! announce timers, and every 10 s to check the address. When the watched
-//! process exits, or on SIGTERM, it withdraws its records and exits.
+//! process it serves (falling back to `/proc` polling on Linux < 5.3), waking
+//! for packets, for probe and announce timers, and every 10 s to check the
+//! address. When the watched process exits, or on SIGTERM, it withdraws its
+//! records and exits.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -21,6 +22,9 @@ use crate::{NAME_FILE, PID_FILE, PROCESS_NAME};
 /// How often to look for a changed address (after a Wi-Fi reconnect). A
 /// netlink listener would notice at once, but this is one cheap check.
 const ADDRESS_CHECK: Duration = Duration::from_secs(10);
+/// How often to poll `/proc/<pid>/stat` when `pidfd_open` is unavailable
+/// (Linux < 5.3). Short enough to fit well inside Verso's 1 s stop wait.
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Return to poll after a bounded batch so signals and the watched pidfd
 /// cannot be starved by a continuously readable multicast socket.
 const PACKET_BATCH_LIMIT: usize = 64;
@@ -89,7 +93,7 @@ pub fn run(options: Options) -> i32 {
 
 fn serve(
     socket: &UdpSocket,
-    watch: Option<&OwnedFd>,
+    watch: Option<&Watcher>,
     interface: Option<&str>,
     responder: &mut Responder,
 ) -> &'static str {
@@ -133,12 +137,15 @@ fn serve(
             }
         }
 
-        let deadline = responder.deadline().map_or(next_check, |d| d.min(next_check));
+        let mut deadline = responder.deadline().map_or(next_check, |d| d.min(next_check));
+        if let Some(interval) = watch.and_then(Watcher::poll_interval) {
+            deadline = deadline.min(Instant::now() + interval);
+        }
         let wait = deadline.saturating_duration_since(Instant::now());
         let timeout = wait.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
         let mut fds = vec![libc::pollfd { fd: socket.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-        if let Some(fd) = watch {
-            fds.push(libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        if let Some(fd) = watch.and_then(Watcher::pidfd) {
+            fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
         }
         // SAFETY: `fds` is a valid array of pollfd for the length given.
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
@@ -150,7 +157,7 @@ fn serve(
             say!("poll: {e}");
             return "error";
         }
-        if fds.get(1).is_some_and(|fd| fd.revents != 0) {
+        if fds.get(1).is_some_and(|fd| fd.revents != 0) || watch.is_some_and(|w| !w.is_alive()) {
             return "the watched process exited";
         }
         if fds[0].revents != 0 {
@@ -201,23 +208,106 @@ impl Drop for Lock {
     }
 }
 
-/// A pidfd that becomes readable when `pid` exits.
-fn watch(pid: i32, name: Option<&str>) -> io::Result<OwnedFd> {
+/// Tracks the watched process either via a pidfd (Linux >= 5.3) or by polling
+/// `/proc/<pid>/stat` with its start time to guard against PID reuse.
+enum Watcher {
+    PidFd(OwnedFd),
+    Poll { pid: i32, start_ticks: u64 },
+}
+
+impl Watcher {
+    fn poll(pid: i32, name: Option<&str>) -> io::Result<Self> {
+        let (state, start_ticks) = read_proc_stat(pid)?;
+        if !is_live_state(state) {
+            return Err(io::Error::other(format!("process {pid} has exited")));
+        }
+        if let Some(name) = name {
+            check_comm(pid, name)?;
+            // Confirm the PID wasn't reused between reading `stat` and `comm`.
+            let (state2, ticks2) = read_proc_stat(pid)?;
+            if ticks2 != start_ticks || !is_live_state(state2) {
+                return Err(io::Error::other(format!("process {pid} has exited")));
+            }
+        }
+        Ok(Self::Poll { pid, start_ticks })
+    }
+
+    fn pidfd(&self) -> Option<RawFd> {
+        match self {
+            Self::PidFd(fd) => Some(fd.as_raw_fd()),
+            Self::Poll { .. } => None,
+        }
+    }
+
+    fn poll_interval(&self) -> Option<Duration> {
+        match self {
+            Self::PidFd(_) => None,
+            Self::Poll { .. } => Some(WATCH_POLL_INTERVAL),
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        match *self {
+            Self::PidFd(_) => true,
+            Self::Poll { pid, start_ticks } => {
+                read_proc_stat(pid).is_ok_and(|(state, ticks)| ticks == start_ticks && is_live_state(state))
+            }
+        }
+    }
+}
+
+fn is_live_state(state: char) -> bool {
+    !matches!(state, 'Z' | 'X')
+}
+
+fn check_comm(pid: i32, name: &str) -> io::Result<()> {
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm"))?;
+    if comm.trim() != name {
+        return Err(io::Error::other(format!("process {pid} is {:?}, not {name:?}", comm.trim())));
+    }
+    Ok(())
+}
+
+/// Parses `(state, starttime)` (fields 3 and 22) from `/proc/<pid>/stat`.
+/// Field 2 `(comm)` can contain spaces and parentheses, so parsing starts
+/// after the last `')'`.
+fn parse_proc_stat(stat: &str) -> Option<(char, u64)> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_ascii_whitespace();
+    let mut state_chars = fields.next()?.chars();
+    let state = state_chars.next()?;
+    if state_chars.next().is_some() {
+        return None;
+    }
+    // Token 0 was field 3 (`state`); token 19 (18 skipped after token 0) is field 22 (`starttime`).
+    let start_ticks = fields.nth(18)?.parse::<u64>().ok()?;
+    Some((state, start_ticks))
+}
+
+fn read_proc_stat(pid: i32) -> io::Result<(char, u64)> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    parse_proc_stat(&stat).ok_or_else(|| io::Error::other(format!("can't parse /proc/{pid}/stat")))
+}
+
+/// Watches `pid`, preferring `pidfd_open` and falling back to `/proc` polling
+/// on older kernels (Linux < 5.3) where `pidfd_open` returns `ENOSYS`.
+fn watch(pid: i32, name: Option<&str>) -> io::Result<Watcher> {
     // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
     if fd < 0 {
-        return Err(io::Error::last_os_error());
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOSYS) {
+            return Watcher::poll(pid, name);
+        }
+        return Err(err);
     }
     // SAFETY: the kernel just gave us this descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // The PID could have been reused before the pidfd pinned it.
     if let Some(name) = name {
-        let comm = fs::read_to_string(format!("/proc/{pid}/comm"))?;
-        if comm.trim() != name {
-            return Err(io::Error::other(format!("process {pid} is {:?}, not {name:?}", comm.trim())));
-        }
+        check_comm(pid, name)?;
     }
-    Ok(fd)
+    Ok(Watcher::PidFd(fd))
 }
 
 extern "C" fn on_signal(_: libc::c_int) {
@@ -352,5 +442,66 @@ fn firewall(interface: &str, open: bool) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_proc_stat_handles_spaces_and_parens() {
+        // Fields after `(comm)`: 3=state(S), 4..=21 (18 fields), 22=starttime(987654321), 23=vsize
+        let tricky = "42 (foo (bar) baz) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654321 999\n";
+        assert_eq!(parse_proc_stat(tricky), Some(('S', 987_654_321)));
+
+        let zombie = "42 (sshd) Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 12345 0\n";
+        let (state, ticks) = parse_proc_stat(zombie).expect("parse zombie stat");
+        assert_eq!((state, ticks), ('Z', 12_345));
+        assert!(!is_live_state(state));
+
+        for bad in [
+            "42 no-parens S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123",
+            "42 (short) S 1 2 3",
+            "42 (bad-state) SS 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123",
+            "42 (bad-ticks) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 nope",
+        ] {
+            assert_eq!(parse_proc_stat(bad), None, "{bad:?}");
+        }
+
+        let self_stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
+        let (state, start_ticks) = parse_proc_stat(&self_stat).expect("parse /proc/self/stat");
+        assert!(is_live_state(state), "unexpected state {state:?}");
+        assert!(start_ticks > 0);
+    }
+
+    #[test]
+    fn poll_watcher_tracks_child_lifecycle() {
+        let self_pid = std::process::id() as i32;
+        let self_comm = fs::read_to_string("/proc/self/comm").expect("read /proc/self/comm");
+        assert!(Watcher::poll(self_pid, Some(self_comm.trim())).is_ok());
+        assert!(Watcher::poll(self_pid, Some("definitely-not-verso-test")).is_err());
+
+        // A stale start_ticks on a live PID represents PID reuse and must read as exited.
+        let (_, real_ticks) = read_proc_stat(self_pid).expect("read self stat");
+        let reused = Watcher::Poll { pid: self_pid, start_ticks: real_ticks.wrapping_add(1) };
+        assert!(!reused.is_alive());
+
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child.id() as i32;
+        let watcher = Watcher::poll(child_pid, None).expect("watch child");
+        assert_eq!(watcher.pidfd(), None);
+        assert_eq!(watcher.poll_interval(), Some(WATCH_POLL_INTERVAL));
+        assert!(watcher.is_alive());
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!watcher.is_alive());
     }
 }

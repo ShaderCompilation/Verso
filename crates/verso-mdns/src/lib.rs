@@ -76,7 +76,8 @@ pub fn interface_addresses() -> Vec<(String, InterfaceAddr)> {
             let e = &*entry;
             entry = e.ifa_next;
             let up = libc::IFF_UP as libc::c_uint | libc::IFF_RUNNING as libc::c_uint;
-            if e.ifa_addr.is_null()
+            if e.ifa_name.is_null()
+                || e.ifa_addr.is_null()
                 || e.ifa_netmask.is_null()
                 || i32::from((*e.ifa_addr).sa_family) != libc::AF_INET
                 || e.ifa_flags & up != up
@@ -84,7 +85,7 @@ pub fn interface_addresses() -> Vec<(String, InterfaceAddr)> {
                 continue;
             }
             let ip = |sa: *const libc::sockaddr| {
-                let sin = &*sa.cast::<libc::sockaddr_in>();
+                let sin = std::ptr::read_unaligned(sa.cast::<libc::sockaddr_in>());
                 Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
             };
             let index = libc::if_nametoindex(e.ifa_name);
