@@ -661,9 +661,10 @@ impl App {
         }
     }
 
-    /// A page-turn button. Prompts, notices and the Top Drawer ignore it;
-    /// the screen below them decides what it means.
-    pub fn on_key(&mut self, key: KeyAction) {
+    /// A page-turn button (`button`: the device's own, not a remote's).
+    /// Prompts, notices and the Top Drawer ignore it; the screen below them
+    /// decides what it means.
+    pub fn on_key(&mut self, key: KeyAction, button: bool) {
         if self.asleep
             || self.exit_prompt.is_some()
             || self.usb_prompt.is_some()
@@ -673,6 +674,8 @@ impl App {
         {
             return;
         }
+        let swap = button && self.services.as_ref().is_some_and(|s| s.store.settings().swap_page_buttons);
+        let key = if swap { key.reversed() } else { key };
         self.with_screen(|screen, cx| screen.on_key(key, cx));
     }
 
@@ -1720,6 +1723,32 @@ mod tests {
         app.set_initial_frontlight(Some(Frontlight { brightness: 1, warmth: Some(0) }));
         assert_eq!(app.frontlight, Some(hw));
         assert_eq!(backgrounds.get(), 1);
+    }
+
+    #[test]
+    fn swapping_turns_the_devices_own_buttons_but_not_remotes() -> anyhow::Result<()> {
+        use KeyAction::{PageNext, PagePrev};
+        struct Keys(Rc<std::cell::RefCell<Vec<KeyAction>>>);
+        impl Screen for Keys {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn on_key(&mut self, key: KeyAction, _: &mut EventCx) -> Action {
+                self.0.borrow_mut().push(key);
+                Action::None
+            }
+        }
+        let mut d = drawer_app(false, false);
+        let keys = Rc::new(std::cell::RefCell::new(Vec::new()));
+        d.app.push_screen(Box::new(Keys(keys.clone())));
+        for swap in [false, true] {
+            d.store.save_settings(&crate::store::Settings { swap_page_buttons: swap, ..d.store.settings() })?;
+            d.app.on_key(PageNext, true);
+            d.app.on_key(PageNext, false);
+        }
+        assert_eq!(*keys.borrow(), [PageNext, PageNext, PagePrev, PageNext]);
+        Ok(())
     }
 
     /// A screen that counts what reaches it and can ask for the drawer.

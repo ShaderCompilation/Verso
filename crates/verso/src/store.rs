@@ -49,6 +49,9 @@ pub struct Settings {
     /// A tap in the top-right corner of a page toggles its bookmark.
     /// Settings → Reading.
     pub bookmark_corner: bool,
+    /// The device's page-turn buttons the other way round; remotes have their
+    /// own mapping. Settings → Reading, on devices with buttons.
+    pub swap_page_buttons: bool,
     pub orientation: Orientation,
     /// Developer options in Settings (tap the version five times).
     pub developer: bool,
@@ -89,6 +92,7 @@ impl Default for Settings {
             page_flash: DEFAULT_PAGE_FLASH,
             tap_zones: TapZones::Standard,
             bookmark_corner: true,
+            swap_page_buttons: false,
             orientation: Orientation::Portrait,
             developer: false,
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
@@ -220,6 +224,8 @@ pub struct Store {
     live_data_edited: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Display color mode for cover cache keys, thumbnails and sleep covers.
     color: crate::gfx::ColorMode,
+    /// The device has page-turn buttons, so Settings offers to swap them.
+    page_buttons: bool,
 }
 impl Store {
     pub fn new() -> Self {
@@ -263,11 +269,19 @@ impl Store {
             updates: Default::default(),
             live_data_edited: Default::default(),
             color: crate::gfx::ColorMode::Gray8,
+            page_buttons: false,
         }
     }
     pub fn with_color(mut self, color: crate::gfx::ColorMode) -> Self {
         self.color = color;
         self
+    }
+    pub fn with_page_buttons(mut self, page_buttons: bool) -> Self {
+        self.page_buttons = page_buttons;
+        self
+    }
+    pub fn has_page_buttons(&self) -> bool {
+        self.page_buttons
     }
     pub fn color_mode(&self) -> crate::gfx::ColorMode {
         self.color
@@ -602,6 +616,7 @@ impl Store {
             updates: Default::default(),
             live_data_edited: Default::default(),
             color: crate::gfx::ColorMode::Gray8,
+            page_buttons: false,
         }
     }
     fn book_path(&self, id: &str) -> PathBuf {

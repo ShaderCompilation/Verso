@@ -171,6 +171,8 @@ pub struct SystemSettings {
     corner: Toggle,
     /// "Check KOReader progress".
     koreader: Toggle,
+    /// "Swap page buttons", on devices with buttons; always below the preview.
+    swap: Toggle,
     // Display: one column, or (landscape) orientation and folder previews
     // side by side and the refresh choices across both below them.
     orientation: Segmented,
@@ -331,6 +333,7 @@ impl SystemSettings {
             zones_preview: Rect::default(),
             corner: Toggle::new(settings.bookmark_corner),
             koreader: Toggle::new(settings.koreader_progress),
+            swap: Toggle::new(settings.swap_page_buttons),
             orientation,
             flash,
             previews,
@@ -428,9 +431,12 @@ impl SystemSettings {
         self.zones.place(col.control(t));
         self.zones.draw(cx);
         // A small page with the zones drawn on it, shaped like the screen,
-        // leaving room in portrait for the two switch rows below it.
+        // leaving room for the switch rows below it: the page buttons' and,
+        // in portrait, the two others.
         let top = col.y + t.mm(3.0);
-        let switch_rows = if landscape { 0 } else { 2 * t.mm(14.0) };
+        let buttons = self.store.has_page_buttons();
+        let rows = i32::from(buttons) + if landscape { 0 } else { 2 };
+        let switch_rows = rows * t.mm(14.2);
         let h = (self.content.bottom() - top - switch_rows).clamp(t.mm(20.0), t.mm(36.0));
         let w = (h * self.screen.w / self.screen.h.max(1)).min(col.w);
         let h = h.min(w * self.screen.h / self.screen.w.max(1));
@@ -461,6 +467,14 @@ impl SystemSettings {
             self.zones_preview.bottom() + t.mm(SECTION_GAP_MM)
         };
         let (x, w) = (self.right.x, self.right.w);
+        if buttons {
+            let swap = ("Swap page buttons", "Each button turns the other way.");
+            let below = self.zones_preview.bottom() + t.mm(SECTION_GAP_MM);
+            let end = switch_row(cx, &mut self.swap, swap, self.left.x, below, self.left.w);
+            if !landscape {
+                y = end;
+            }
+        }
         let corner = ("Tap the top-right corner to bookmark", "Tap it again to remove the bookmark.");
         y = switch_row(cx, &mut self.corner, corner, x, y, w);
         let koreader = ("Check KOReader progress", "When you open a book, offer KOReader’s newer position.");
@@ -477,6 +491,12 @@ impl SystemSettings {
             && !self.save(cx, "KOReader progress", |s| s.koreader_progress = on)
         {
             self.koreader.on = !on;
+        }
+        if self.store.has_page_buttons()
+            && let Some(on) = self.swap.on_gesture(g)
+            && !self.save(cx, "the page buttons", |s| s.swap_page_buttons = on)
+        {
+            self.swap.on = !on;
         }
         if let Some(i) = self.zones.on_gesture(g)
             && !self.save(cx, "tap zones", |s| s.tap_zones = TapZones::ALL[i])
@@ -1677,6 +1697,20 @@ mod tests {
             assert!(corner.bottom() < koreader.y, "{w}x{h}: one row after the other");
             assert!(koreader.bottom() <= s.content.bottom(), "{w}x{h}: {koreader:?}");
             assert!(corner.y > s.zones.rect().bottom() && corner.x > s.zones_preview.right(), "{w}x{h}");
+            // With page buttons, a third switch still fits.
+            let buttons = store.clone().with_page_buttons(true);
+            let mut b = SystemSettings::new(&t, screen, buttons, Waker::new(|| {}));
+            let canvas = draw(&mut b, &t, w, h);
+            let margin = &canvas.gray_data()[(b.content.bottom() * w) as usize..];
+            assert!(margin.iter().all(|&g| g == PAPER), "{w}x{h}: the switches reach the bottom margin");
+            let (swap, corner) = (b.swap.rect(), b.corner.rect());
+            assert!(swap.bottom() < corner.y || swap.right() < corner.x, "{w}x{h}: {swap:?} {corner:?}");
+            assert!(swap.y > b.zones_preview.bottom(), "{w}x{h}: {swap:?}");
+            let at = b.swap.rect();
+            assert!(!store.settings().swap_page_buttons);
+            tap(&mut b, &t, screen, at);
+            assert!(store.settings().swap_page_buttons, "{w}x{h}: saved");
+            tap(&mut b, &t, screen, at);
             s.tab = Tab::Library;
             draw(&mut s, &t, w, h);
             let (d, k) = (s.dictionaries, s.koreader_area);

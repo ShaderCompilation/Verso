@@ -262,7 +262,7 @@ fn run() -> Result<i32> {
         platform.set_orientation(orientation)?;
     }
     let info = platform.info().clone();
-    let store = store.with_color(info.color);
+    let store = store.with_color(info.color).with_page_buttons(platform.model().page_buttons);
     let mut session = format!(
         "=== Verso session ===\nversion: {} ({})\norientation: {:?}\nscreen: {} {}x{} @ {} dpi",
         env!("CARGO_PKG_VERSION"),
@@ -465,11 +465,11 @@ fn run() -> Result<i32> {
                         platform.unhandled_text_input(&input, repeat);
                     }
                 }
-                Some(Event::Key(key)) => {
-                    log::debug!("{key:?}");
+                Some(Event::Key { action, button }) => {
+                    log::debug!("{action:?}, button={button}");
                     // A button press is timed like a lifted finger.
                     last_release = Some(Instant::now());
-                    app.on_key(key);
+                    app.on_key(action, button);
                 }
                 Some(Event::Touch(t)) => {
                     log::trace!("{t:?}");

@@ -108,6 +108,7 @@ impl SimDevice {
             name: format!("the simulated {}", self.name),
             untested: self.untested,
             key: format!("sim {}", self.name),
+            page_buttons: self.page_buttons,
             ..DeviceModel::default()
         }
     }

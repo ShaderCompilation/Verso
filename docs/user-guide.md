@@ -136,7 +136,8 @@ Verso reads **EPUB** (`.epub`, EPUB 2 and EPUB 3).
   bottom edge for the **Reader Menu**, or down from the top edge for the **Top
   Drawer**.
 - **Page-turn buttons:** on an Oasis, the top button goes to the next page and the
-  bottom one back; in landscape, right is next and left is back.
+  bottom one back; in landscape, right is next and left is back. **Settings →
+  Reading → Swap page buttons** turns them round (remotes aren't affected).
 - **Remotes:** Verso doesn't pair remotes, but reads the ones the Kindle has.
   Amazon's **Kindle Click** needs no setup. With **HID Passthrough**, a paired
   remote's page, arrow, volume, Enter and Space keys turn pages. To choose what each

@@ -125,6 +125,8 @@ pub struct DeviceModel {
     /// The model's key in `Settings::untested_seen`.
     pub key: String,
     pub light_range: LightRange,
+    /// It has page-turn buttons: Settings offers to swap them.
+    pub page_buttons: bool,
 }
 
 /// The device has a screen or input Verso can't drive yet. The Kindle
@@ -178,8 +180,12 @@ pub enum Event {
     /// Asynchronous startup frontlight reading from hardware.
     Frontlight(Option<Frontlight>),
     /// A page-turn button or remote was pressed (or PgUp/PgDn in the
-    /// simulator), already turned to the way the device is held.
-    Key(KeyAction),
+    /// simulator), already turned to the way the device is held. `button`:
+    /// one of the device's own, which `Settings::swap_page_buttons` applies to.
+    Key {
+        action: KeyAction,
+        button: bool,
+    },
     /// Leave the app (window closed, or a signal on the device).
     Quit,
 }
@@ -228,8 +234,7 @@ impl KeyAction {
         })
     }
 
-    #[cfg(any(feature = "kindle", test))]
-    fn reversed(self) -> Self {
+    pub fn reversed(self) -> Self {
         match self {
             Self::PageNext => Self::PagePrev,
             Self::PagePrev => Self::PageNext,

@@ -140,15 +140,19 @@ pub fn lookup(id: u16) -> Option<&'static Profile> {
 /// named after FBInk's guess when it has one.
 pub fn model(profile: Option<&Profile>, id: u16, fbink_name: &str) -> DeviceModel {
     match profile {
-        Some(p) => {
-            DeviceModel { name: p.model.to_owned(), untested: !p.tested, key: p.model.to_owned(), light_range: p.range }
-        }
+        Some(p) => DeviceModel {
+            name: p.model.to_owned(),
+            untested: !p.tested,
+            key: p.model.to_owned(),
+            light_range: p.range,
+            page_buttons: p.page_buttons.is_some(),
+        },
         None => {
             let known =
                 !fbink_name.is_empty() && !fbink_name.starts_with("Unknown") && !fbink_name.starts_with("Unidentified");
             let name =
                 if known { format!("this Kindle ({fbink_name})") } else { format!("this Kindle (id {id:#06x})") };
-            DeviceModel { name, untested: true, key: format!("id {id:#06x}"), light_range: LightRange::default() }
+            DeviceModel { name, untested: true, key: format!("id {id:#06x}"), ..DeviceModel::default() }
         }
     }
 }

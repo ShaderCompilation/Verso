@@ -516,7 +516,7 @@ impl ApplicationHandler for Sim {
                 };
                 if let Some(key) = page {
                     if !event.repeat {
-                        self.events.push_back(Event::Key(key));
+                        self.events.push_back(Event::Key { action: key, button: true });
                     }
                     return;
                 }

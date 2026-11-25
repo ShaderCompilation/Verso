@@ -85,7 +85,7 @@ impl Inputs {
                 Remote::Page(action) => {
                     log::debug!("remote port: {action:?}");
                     if self.gate.accept((input::PORT_ID, 0), Instant::now()) {
-                        queue.push_back(Event::Key(action));
+                        queue.push_back(Event::Key { action, button: false });
                         self.remote_used();
                     }
                 }
@@ -501,7 +501,7 @@ impl Platform for Kindle {
         (self.info.width, self.info.height) = orientation.screen_size(self.display.width, self.display.height);
         // Touches and button presses already queued were mapped for the old
         // orientation.
-        self.queue.retain(|e| !matches!(e, Event::Touch(_) | Event::Key(_)));
+        self.queue.retain(|e| !matches!(e, Event::Touch(_) | Event::Key { .. }));
         Ok(())
     }
 

@@ -657,7 +657,7 @@ impl KeySource {
             KeyAction::PageNext => self.counts.forward += 1,
             KeyAction::PagePrev => self.counts.back += 1,
         }
-        out.push_back(Event::Key(action));
+        out.push_back(Event::Key { action, button: self.kind == Kind::Buttons });
     }
 
     /// The number of events now in `buf`; 0 when there are none waiting.
