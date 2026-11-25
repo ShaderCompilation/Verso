@@ -1,7 +1,18 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
+    {
+        let script = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("../../.cargo/arm-glibc-relplt.ld")
+            .canonicalize()
+            .expect(".cargo/arm-glibc-relplt.ld missing");
+        println!("cargo:rerun-if-changed={}", script.display());
+        println!("cargo:rustc-link-arg-bins=-Wl,-T,{}", script.display());
+    }
+
     let git_dir = Path::new("../../.git");
     let head = git_dir.join("HEAD");
     if head.exists() {
