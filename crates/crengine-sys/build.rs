@@ -524,7 +524,7 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     (
         "crengine/src/lvfntman.cpp",
         "    void GetAvailableFontWeights(LVArray<int>& weights, lString8 typeface) {\n        FONT_MAN_GUARD\n        weights.clear();",
-        "    // Verso: see LVFontManager::DescribeFontFile(). A line holds face_index,\n    // italic, CSS family, emojis, math and small caps, then has/min/max for\n    // the wght, opsz, ital, slnt and wdth axes, then the family name.\n    virtual lString8 DescribeFontFile( lString8 name )\n    {\n        FONT_MAN_GUARD\n        LVArray<const LVFontFace*> faces;\n        for (int i = 0; i < _registry.familyCount(); i++) {\n            const LVFontFamily* f = _registry.familyAt(i);\n            for (int j = 0; j < f->faceCount(); j++) {\n                const LVFontFace& face = f->faceAt(j);\n                if (face.documentId == -1 && face.file_path == name)\n                    faces.add(&face);\n            }\n        }\n        // In file order, as RegisterFont() registered them.\n        for (int i = 1; i < faces.length(); i++)\n            for (int j = i; j > 0 && faces[j-1]->face_index > faces[j]->face_index; j--) {\n                const LVFontFace* t = faces[j-1];\n                faces[j-1] = faces[j];\n                faces[j] = t;\n            }\n        lString8 out;\n        for (int i = 0; i < faces.length(); i++) {\n            const LVFontFace& f = *faces[i];\n            if (f.typeface.empty() || f.typeface.pos(cs8(\"\\t\")) >= 0 || f.typeface.pos(cs8(\"\\n\")) >= 0)\n                return lString8::empty_str;\n            char buf[128];\n            snprintf(buf, sizeof(buf), \"%d\\t%d\\t%d\\t%d\\t%d\\t%d\", f.face_index, f.is_italic ? 1 : 0,\n                     (int)f.css_family, f.has_emojis ? 1 : 0, f.has_ot_math ? 1 : 0, f.has_small_caps ? 1 : 0);\n            out << buf;\n            const bool has[5] = { f._has_wght, f._has_opsz, f._has_ital, f._has_slnt, f._has_wdth };\n            const float lo[5] = { f._wght_min, f._opsz_min, f._ital_min, f._slnt_min, f._wdth_min };\n            const float hi[5] = { f._wght_max, f._opsz_max, f._ital_max, f._slnt_max, f._wdth_max };\n            for (int k = 0; k < 5; k++) {\n                snprintf(buf, sizeof(buf), \"\\t%d\\t%.9g\\t%.9g\", has[k] ? 1 : 0, (double)lo[k], (double)hi[k]);\n                out << buf;\n            }\n            out << \"\\t\" << f.typeface << \"\\n\";\n        }\n        return out;\n    }\n\n    // Verso: see LVFontManager::RegisterFontFaces(). Like RegisterFont(), it\n    // stops at the first face that is already registered.\n    virtual int RegisterFontFaces( lString8 name, lString8 description )\n    {\n        FONT_MAN_GUARD\n        static const lUInt32 tags[5] = { LVFONT_TAG_WGHT, LVFONT_TAG_OPSZ, LVFONT_TAG_ITAL, LVFONT_TAG_SLNT, LVFONT_TAG_WDTH };\n        LVPtrVector<LVFontFace, true> faces;\n        const char* p = description.c_str();\n        while (*p) {\n            LVFontFace def;\n            def.file_path = name;\n            char* end;\n            long v[6];\n            for (int k = 0; k < 6; k++) {\n                v[k] = strtol(p, &end, 10);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n            }\n            def.face_index = (int)v[0];\n            def.is_italic = v[1] != 0;\n            def.css_family = (css_font_family_t)v[2];\n            def.has_emojis = v[3] != 0;\n            def.has_ot_math = v[4] != 0;\n            def.has_small_caps = v[5] != 0;\n            for (int k = 0; k < 5; k++) {\n                long has = strtol(p, &end, 10);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n                float lo = strtof(p, &end);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n                float hi = strtof(p, &end);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n                if (has)\n                    def.setAxisInfo(tags[k], lo, hi);\n            }\n            const char* nl = strchr(p, '\\n');\n            if (!nl || nl == p) return -1;\n            def.typeface = lString8(p, (int)(nl - p));\n            p = nl + 1;\n            faces.add(new LVFontFace(def));\n        }\n        int count = 0;\n        for (int i = 0; i < faces.length(); i++) {\n            if (!tryRegisterFace(*faces[i]))\n                break;\n            count++;\n        }\n        return count;\n    }\n\n    void GetAvailableFontWeights(LVArray<int>& weights, lString8 typeface) {\n        FONT_MAN_GUARD\n        weights.clear();",
+        "    // Verso: see LVFontManager::DescribeFontFile(). A line holds face_index,\n    // italic, CSS family, emojis, math and small caps, then has/min/max for\n    // the wght, opsz, ital, slnt and wdth axes, then the family name.\n    virtual lString8 DescribeFontFile( lString8 name )\n    {\n        FONT_MAN_GUARD\n        LVArray<const LVFontFace*> faces;\n        for (int i = 0; i < _registry.familyCount(); i++) {\n            const LVFontFamily* f = _registry.familyAt(i);\n            for (int j = 0; j < f->faceCount(); j++) {\n                const LVFontFace& face = f->faceAt(j);\n                if (face.documentId == -1 && face.file_path == name)\n                    faces.add(&face);\n            }\n        }\n        // In file order, as RegisterFont() registered them.\n        for (int i = 1; i < faces.length(); i++)\n            for (int j = i; j > 0 && faces[j-1]->face_index > faces[j]->face_index; j--) {\n                const LVFontFace* t = faces[j-1];\n                faces[j-1] = faces[j];\n                faces[j] = t;\n            }\n        lString8 out;\n        for (int i = 0; i < faces.length(); i++) {\n            const LVFontFace& f = *faces[i];\n            if (f.typeface.empty() || f.typeface.pos(cs8(\"\\t\")) >= 0 || f.typeface.pos(cs8(\"\\n\")) >= 0)\n                return lString8::empty_str;\n            char buf[128];\n            snprintf(buf, sizeof(buf), \"%d\\t%d\\t%d\\t%d\\t%d\\t%d\", f.face_index, f.is_italic ? 1 : 0,\n                     (int)f.css_family, f.has_emojis ? 1 : 0, f.has_ot_math ? 1 : 0, f.has_small_caps ? 1 : 0);\n            out << buf;\n            const bool has[5] = { f._has_wght, f._has_opsz, f._has_ital, f._has_slnt, f._has_wdth };\n            const float lo[5] = { f._wght_min, f._opsz_min, f._ital_min, f._slnt_min, f._wdth_min };\n            const float hi[5] = { f._wght_max, f._opsz_max, f._ital_max, f._slnt_max, f._wdth_max };\n            for (int k = 0; k < 5; k++) {\n                snprintf(buf, sizeof(buf), \"\\t%d\\t%.9g\\t%.9g\", has[k] ? 1 : 0, (double)lo[k], (double)hi[k]);\n                out << buf;\n            }\n            out << \"\\t\" << f.typeface << \"\\n\";\n        }\n        return out;\n    }\n\n    // Verso: see LVFontManager::RegisterFontFaces(). Like RegisterFont(), it\n    // stops at the first face that is already registered.\n    virtual int RegisterFontFaces( lString8 name, lString8 description )\n    {\n        FONT_MAN_GUARD\n        static const lUInt32 tags[5] = { LVFONT_TAG_WGHT, LVFONT_TAG_OPSZ, LVFONT_TAG_ITAL, LVFONT_TAG_SLNT, LVFONT_TAG_WDTH };\n        LVPtrVector<LVFontFace, true> faces;\n        const char* p = description.c_str();\n        while (*p) {\n            LVFontFace def;\n            def.file_path = name;\n            char* end;\n            long v[6];\n            for (int k = 0; k < 6; k++) {\n                v[k] = strtol(p, &end, 10);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n            }\n            if (v[2] < css_ff_inherit || v[2] > css_ff_fangsong) return -1;\n            def.face_index = (int)v[0];\n            def.is_italic = v[1] != 0;\n            def.css_family = (css_font_family_t)v[2];\n            def.has_emojis = v[3] != 0;\n            def.has_ot_math = v[4] != 0;\n            def.has_small_caps = v[5] != 0;\n            for (int k = 0; k < 5; k++) {\n                long has = strtol(p, &end, 10);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n                float lo = strtof(p, &end);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n                float hi = strtof(p, &end);\n                if (end == p || *end != '\\t') return -1;\n                p = end + 1;\n                if (has)\n                    def.setAxisInfo(tags[k], lo, hi);\n            }\n            const char* nl = strchr(p, '\\n');\n            if (!nl || nl == p) return -1;\n            def.typeface = lString8(p, (int)(nl - p));\n            p = nl + 1;\n            faces.add(new LVFontFace(def));\n        }\n        int count = 0;\n        for (int i = 0; i < faces.length(); i++) {\n            if (!tryRegisterFace(*faces[i]))\n                break;\n            count++;\n        }\n        return count;\n    }\n\n    void GetAvailableFontWeights(LVArray<int>& weights, lString8 typeface) {\n        FONT_MAN_GUARD\n        weights.clear();",
     ),
     // The glyph cache item has an `alignas(16)` member, but is allocated with
     // malloc, which only guarantees 8-byte alignment on 32-bit ARM. Clang then
@@ -552,8 +552,13 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     // out on both sides.
     (
         "crengine/src/lvtinydom.cpp",
+        "#include <stdlib.h>\n#include <string.h>",
+        "#include <stdlib.h>\n#include <string.h>\n#include <limits.h>",
+    ),
+    (
+        "crengine/src/lvtinydom.cpp",
         "                _oldStreamCRC = (lUInt32)oldStream->getcrc32();",
-        "                _oldStreamCRC = 0;\n                lUInt8 * old = _oldStreamSize > 4 ? (lUInt8 *)malloc( _oldStreamSize ) : NULL;\n                lvsize_t got = 0;\n                if ( old && oldStream->Read( old, _oldStreamSize, &got ) == LVERR_OK && got == _oldStreamSize )\n                    _oldStreamCRC = lStr_crc32( 0, old, (int)_oldStreamSize - 4 );\n                free( old );",
+        "                _oldStreamCRC = 0;\n                lUInt8 * old = _oldStreamSize > 4 && _oldStreamSize <= (lUInt32)INT_MAX ? (lUInt8 *)malloc( _oldStreamSize ) : NULL;\n                lvsize_t got = 0;\n                if ( old && oldStream->Read( old, _oldStreamSize, &got ) == LVERR_OK && got == _oldStreamSize )\n                    _oldStreamCRC = lStr_crc32( 0, old, (int)_oldStreamSize - 4 );\n                free( old );",
     ),
     (
         "crengine/src/lvtinydom.cpp",
@@ -569,11 +574,97 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "    if ( mimeType != U\"application/epub+zip\" )\n        return false;",
         "    if ( mimeType.empty() )\n        return !m_arc->OpenStream(U\"META-INF/container.xml\", LVOM_READ).isNull();\n    if ( mimeType != U\"application/epub+zip\" )\n        return false;",
     ),
+    // Headers needed by our lvimg.cpp fixes (SIZE_MAX, std::vector).
+    (
+        "crengine/src/lvimg.cpp",
+        "#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>",
+        "#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>\n#include <stdint.h>\n#include <vector>",
+    ),
+    // Fix setjmp/longjmp UB and error-path leaks in JPEG decoding: arm setjmp
+    // before jpeg_create_decompress, qualify locals mutated across setjmp as
+    // volatile, and copy out a non-volatile scanline pointer for libjpeg.
+    (
+        "crengine/src/lvimg.cpp",
+        "        /* Now we can initialize the JPEG decompression object. */\n        jpeg_create_decompress(&cinfo);\n\n        lUInt8 * buffer = NULL;\n\n        if (setjmp(jerr.setjmp_buffer)) {\n        \tCRLog::error(\"JPEG setjmp error handling\");\n\t    /* If we get here, the JPEG code has signaled an error.\n\t     * We need to clean up the JPEG object, close the input file, and return.\n\t     */\n            delete[] buffer;\n        \tCRLog::debug(\"JPEG decoder cleanup\");\n            cr_jpeg_src_free (&cinfo);\n            jpeg_destroy_decompress(&cinfo);\n            return false;\n\t     }",
+        r#"        lUInt8 * volatile buffer = NULL;
+        volatile bool cinfo_created = false;
+
+        if (setjmp(jerr.setjmp_buffer)) {
+            CRLog::error("JPEG setjmp error handling");
+            /* If we get here, the JPEG code has signaled an error.
+             * We need to clean up the JPEG object, close the input file, and return.
+             */
+            delete[] buffer;
+            CRLog::debug("JPEG decoder cleanup");
+            if (cinfo_created) {
+                cr_jpeg_src_free (&cinfo);
+                jpeg_destroy_decompress(&cinfo);
+            }
+            return false;
+        }
+
+        /* Now we can initialize the JPEG decompression object. */
+        jpeg_create_decompress(&cinfo);
+        cinfo_created = true;"#,
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "                buffer = new lUInt8 [ cinfo.output_width << 2U ];",
+        "                buffer = new lUInt8 [ (size_t)cinfo.output_width << 2U ];",
+    ),
+    (
+        "crengine/src/lvimg.cpp",
+        "                    (void) jpeg_read_scanlines(&cinfo, &buffer, 1);\n\n                    // CRe wants inverted alpha, but libjpeg-turbo doesn't guarantee that the alpha byte will be zero...\n                    const unsigned char* const end = buffer + (cinfo.output_width << 2U);\n                    // Start at the first alpha byte, then loop over each subsequent alpha byte, pixel-by-pixel\n                    for (unsigned char* p = buffer + 3U; p <= end; p += 4U) {\n                        *p = 0x00;\n                    }\n                    callback->OnLineDecoded( this, y, reinterpret_cast<lUInt32 *>(buffer) );\n\n                }\n                callback->OnEndDecode(this, false);",
+        r#"                    lUInt8 * scanline = buffer;
+                    (void) jpeg_read_scanlines(&cinfo, &scanline, 1);
+
+                    // CRe wants inverted alpha, but libjpeg-turbo doesn't guarantee that the alpha byte will be zero...
+                    const unsigned char* const end = scanline + ((size_t)cinfo.output_width << 2U);
+                    // Start at the first alpha byte, then loop over each subsequent alpha byte, pixel-by-pixel
+                    for (unsigned char* p = scanline + 3U; p < end; p += 4U) {
+                        *p = 0x00;
+                    }
+                    callback->OnLineDecoded( this, y, reinterpret_cast<lUInt32 *>(scanline) );
+
+                }
+                delete[] buffer;
+                buffer = NULL;
+                callback->OnEndDecode(this, false);"#,
+    ),
     // Large images inside an SVG used to cost two full-size copies: libpng
     // decoded the whole image into one buffer, and smooth scaling (always on
     // inside an SVG) kept another to scale from. The 2481x3509 PNG cover of
     // *Go with Domain* took 70 MB that way. A PNG without
-    // interlacing is now decoded one line at a time.
+    // interlacing is now decoded one line at a time. Also fix setjmp/longjmp
+    // UB (volatile info_ptr and decode buffer), 32-bit size_t overflows, and
+    // OOM/error-path leaks in LVPngImageSource::Decode.
+    (
+        "crengine/src/lvimg.cpp",
+        "    png_structp png_ptr = NULL;\n    png_infop info_ptr = NULL;\n    _stream->SetPos( 0 );\n    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING,\n        (png_voidp)this, lvpng_error_func, lvpng_warning_func);\n    if ( !png_ptr )\n        return false;\n\n    if (setjmp(png_jmpbuf(png_ptr))) {\n        _width = 0;\n        _height = 0;\n        if (png_ptr)\n        {\n            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);\n        }\n        if (callback)\n            callback->OnEndDecode(this, true); // error!\n        return false;\n    }",
+        r#"    png_structp png_ptr = NULL;
+    png_infop volatile info_ptr = NULL;
+    unsigned char * volatile verso_buf = NULL;
+    _stream->SetPos( 0 );
+    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING,
+        (png_voidp)this, lvpng_error_func, lvpng_warning_func);
+    if ( !png_ptr )
+        return false;
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        _width = 0;
+        _height = 0;
+        free(verso_buf);
+        verso_buf = NULL;
+        if (png_ptr)
+        {
+            png_infop ip = info_ptr;
+            png_destroy_read_struct(&png_ptr, ip ? &ip : NULL, NULL);
+        }
+        if (callback)
+            callback->OnEndDecode(this, true); // error!
+        return false;
+    }"#,
+    ),
     (
         "crengine/src/lvimg.cpp",
         "        png_set_interlace_handling(png_ptr);",
@@ -581,32 +672,67 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     ),
     (
         "crengine/src/lvimg.cpp",
-        "        size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);\n        size_t image_size = height * rowbytes;",
+        "        size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);\n        size_t image_size = height * rowbytes;\n        unsigned char * storage = NULL;\n        unsigned char * __restrict image = NULL;\n        png_bytep * __restrict row_pointers = NULL;\n\n        // NOTE: Stash *both* the array of row pointers *and* the image data in a single allocation.\n        //       This implies some alignment trickery to ensure both pointers are aligned as malloc would.\n        //       c.f., the comments for LVFontGlyphCacheItem in lvfntman.h\n        // To that effect, compute the size of the array of row pointers, and align it on a 16-byte boundary.\n        size_t image_offset = ALIGN((height * sizeof(*row_pointers)), 16);\n        // And we can now alloc the whole thing...\n        storage = (unsigned char *) malloc(image_offset + image_size);",
         r#"        if ( verso_png_passes == 1 ) {
             // Verso: one line at a time (see build.rs).
-            png_bytep row = (png_bytep) malloc(png_get_rowbytes(png_ptr, info_ptr));
-            if ( !row )
+            verso_buf = (unsigned char *) malloc(png_get_rowbytes(png_ptr, info_ptr));
+            if ( !verso_buf )
                 lvpng_error_func(png_ptr, "cannot allocate png row");
+            png_bytep row = verso_buf;
             for (size_t y = 0; y < height; y++) {
                 png_read_row(png_ptr, row, NULL);
                 callback->OnLineDecoded( this, y, reinterpret_cast<lUInt32 *>(row) );
             }
             png_read_end(png_ptr, info_ptr);
+            free(verso_buf);
+            verso_buf = NULL;
             callback->OnEndDecode(this, false);
-            free(row);
         } else {
         size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
-        size_t image_size = height * rowbytes;"#,
+        if ( height > 0 && rowbytes > SIZE_MAX / (size_t)height )
+            lvpng_error_func(png_ptr, "png image too large");
+        size_t image_size = (size_t)height * rowbytes;
+        unsigned char * storage = NULL;
+        unsigned char * __restrict image = NULL;
+        png_bytep * __restrict row_pointers = NULL;
+
+        // NOTE: Stash *both* the array of row pointers *and* the image data in a single allocation.
+        //       This implies some alignment trickery to ensure both pointers are aligned as malloc would.
+        //       c.f., the comments for LVFontGlyphCacheItem in lvfntman.h
+        // To that effect, compute the size of the array of row pointers, and align it on a 16-byte boundary.
+        if ( (size_t)height > (SIZE_MAX - 15) / sizeof(*row_pointers) )
+            lvpng_error_func(png_ptr, "png image too large");
+        size_t image_offset = ALIGN(((size_t)height * sizeof(*row_pointers)), 16);
+        if ( image_size > SIZE_MAX - image_offset )
+            lvpng_error_func(png_ptr, "png image too large");
+        // And we can now alloc the whole thing...
+        storage = (unsigned char *) malloc(image_offset + image_size);
+        if ( !storage )
+            lvpng_error_func(png_ptr, "cannot allocate png image");
+        verso_buf = storage;"#,
     ),
     (
         "crengine/src/lvimg.cpp",
-        "        callback->OnEndDecode(this, false);\n        free(storage);\n    }",
-        "        callback->OnEndDecode(this, false);\n        free(storage);\n        }\n    }",
+        "        callback->OnEndDecode(this, false);\n        free(storage);\n    }\n    png_destroy_read_struct(&png_ptr, &info_ptr, NULL);",
+        "        free(verso_buf);\n        verso_buf = NULL;\n        callback->OnEndDecode(this, false);\n        }\n    }\n    png_infop ip = info_ptr;\n    png_destroy_read_struct(&png_ptr, ip ? &ip : NULL, NULL);",
     ),
     // Smooth scaling now keeps the image shrunk by the largest whole factor
     // that leaves it at least as large as the target, averaging each block of
     // pixels as the lines come in, and scales from that. The copy is then less
     // than 4 times the target's area, however large the image is.
+    // Also guard LVColorDrawBuf::Draw against non-positive dimensions (like
+    // LVGrayDrawBuf::Draw), guard overflow/bounds in smoothscale, and bail
+    // out of OnEndDecode when decoding reported errors.
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>\n#include \"../include/lvdrawbuf.h\"",
+        "#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>\n#include <stdint.h>\n#include \"../include/lvdrawbuf.h\"",
+    ),
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "void LVColorDrawBuf::Draw( LVImageSourceRef img, int x, int y, int width, int height, bool dither )\n{\n    //fprintf( stderr, \"LVColorDrawBuf::Draw( img(%d, %d), %d, %d, %d, %d\\n\", img->GetWidth(), img->GetHeight(), x, y, width, height );\n    LVImageScaledDrawCallback drawcb( this, img, x, y, width, height, dither, _invertImages, _smoothImages );",
+        "void LVColorDrawBuf::Draw( LVImageSourceRef img, int x, int y, int width, int height, bool dither )\n{\n    //fprintf( stderr, \"LVColorDrawBuf::Draw( img(%d, %d), %d, %d, %d, %d\\n\", img->GetWidth(), img->GetHeight(), x, y, width, height );\n    if ( width<=0 || height<=0 )\n        return;\n    LVImageScaledDrawCallback drawcb( this, img, x, y, width, height, dither, _invertImages, _smoothImages );",
+    ),
     (
         "crengine/src/lvdrawbuf.cpp",
         "    lUInt8 * __restrict decoded;\n    bool isNinePatch;",
@@ -616,23 +742,30 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     // have come in order so far (an interlaced GIF sends them out of order).
     int shrink, red_dx, red_dy, next_y;
     bool lines_in_order;
-    lUInt32 * __restrict acc;
+    lUInt64 * __restrict acc;
     // Verso: writes the average of the source lines summed in acc (rows of
     // them) as line ry of the shrunk copy, and clears acc.
     // Divides by multiplying with a 32.32 fixed-point reciprocal: the Kindle
     // build has no hardware divide, and a division per channel made the
     // 2481x3509 cover draw 150 ms slower.
     void flushShrunkLine( int ry, int rows ) {
-        lUInt8 * __restrict out = decoded + ry * (red_dx * 4);
-        const int last_cols = src_dx - (red_dx - 1) * shrink;
-        const lUInt64 inv = ((1ULL << 32) + rows * shrink / 2) / (lUInt64)(rows * shrink);
-        const lUInt64 inv_last = ((1ULL << 32) + rows * last_cols / 2) / (lUInt64)(rows * last_cols);
+        if (!decoded || !acc || ry < 0 || ry >= red_dy || rows <= 0)
+            return;
+        lUInt8 * __restrict out = decoded + (size_t)ry * ((size_t)red_dx * 4);
+        const int last_cols = src_dx - (int)((lUInt64)(red_dx - 1) * (lUInt64)shrink);
+        const lUInt64 denom = (lUInt64)rows * (lUInt64)shrink;
+        const lUInt64 denom_last = last_cols > 0 ? (lUInt64)rows * (lUInt64)last_cols : denom;
+        if (denom == 0 || denom_last == 0)
+            return;
+        const lUInt64 inv = ((1ULL << 32) + denom / 2) / denom;
+        const lUInt64 inv_last = ((1ULL << 32) + denom_last / 2) / denom_last;
         for (int x = 0; x < red_dx; x++) {
             const lUInt64 r = x == red_dx - 1 ? inv_last : inv;
+            const size_t base = (size_t)x * 4;
             for (int c = 0; c < 4; c++)
-                out[x * 4 + c] = (lUInt8)((acc[x * 4 + c] * r + (1ULL << 31)) >> 32);
+                out[base + c] = (lUInt8)((acc[base + c] * r + (1ULL << 31)) >> 32);
         }
-        memset(acc, 0, red_dx * 4 * sizeof(lUInt32));
+        memset(acc, 0, (size_t)red_dx * 4 * sizeof(lUInt64));
     }
     bool isNinePatch;"#,
     ),
@@ -641,21 +774,33 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "        if (smoothscale) {\n            // Byte-sized buffer, we're 32bpp, so, 4 bytes per pixel.\n            decoded = new lUInt8[src_dy * (src_dx * 4)];\n        }",
         r#"        // Verso: shrunk by a whole factor while decoding (see build.rs).
         shrink = 1;
+        red_dx = 0;
+        red_dy = 0;
         next_y = 0;
         lines_in_order = true;
         acc = NULL;
         if (smoothscale) {
-            if (!isNinePatch) {
-                shrink = src_dx / dst_dx < src_dy / dst_dy ? src_dx / dst_dx : src_dy / dst_dy;
-                if (shrink < 2)
-                    shrink = 1;
+            if (dst_dx <= 0 || dst_dy <= 0 || src_dx <= 0 || src_dy <= 0) {
+                smoothscale = false;
+            } else {
+                if (!isNinePatch) {
+                    shrink = src_dx / dst_dx < src_dy / dst_dy ? src_dx / dst_dx : src_dy / dst_dy;
+                    if (shrink < 2)
+                        shrink = 1;
+                }
+                red_dx = (int)(((lUInt64)src_dx + (lUInt64)shrink - 1) / (lUInt64)shrink);
+                red_dy = (int)(((lUInt64)src_dy + (lUInt64)shrink - 1) / (lUInt64)shrink);
+                // Byte-sized buffer, we're 32bpp, so, 4 bytes per pixel.
+                const bool acc_ok = shrink <= 1 || (size_t)red_dx <= SIZE_MAX / (4 * sizeof(lUInt64));
+                if (acc_ok && (size_t)red_dx <= SIZE_MAX / 4
+                    && (size_t)red_dy <= SIZE_MAX / ((size_t)red_dx * 4)) {
+                    decoded = new lUInt8[(size_t)red_dy * ((size_t)red_dx * 4)];
+                    if (shrink > 1)
+                        acc = new lUInt64[(size_t)red_dx * 4]();
+                } else {
+                    smoothscale = false;
+                }
             }
-            red_dx = (src_dx + shrink - 1) / shrink;
-            red_dy = (src_dy + shrink - 1) / shrink;
-            // Byte-sized buffer, we're 32bpp, so, 4 bytes per pixel.
-            decoded = new lUInt8[red_dy * (red_dx * 4)];
-            if (shrink > 1)
-                acc = new lUInt32[red_dx * 4]();
         }"#,
     ),
     (
@@ -666,8 +811,10 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     (
         "crengine/src/lvdrawbuf.cpp",
         "            memcpy(decoded + (y * (src_dx * 4)), data, (src_dx * 4));\n            return true;",
-        r#"            if (shrink == 1) {
-                memcpy(decoded + (y * (src_dx * 4)), data, (src_dx * 4));
+        r#"            if (y < 0 || y >= src_dy || !decoded)
+                return true;
+            if (shrink == 1) {
+                memcpy(decoded + ((size_t)y * ((size_t)src_dx * 4)), data, (size_t)src_dx * 4);
                 return true;
             }
             if (lines_in_order && y != next_y) {
@@ -680,9 +827,9 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
             if (!lines_in_order && y % shrink)
                 return true;
             const lUInt8 * __restrict p = (const lUInt8 *)data;
-            lUInt32 * __restrict a = acc;
+            lUInt64 * __restrict a = acc;
             for (int x = 0; x < src_dx; a += 4) {
-                const int end = x + shrink < src_dx ? x + shrink : src_dx;
+                const int end = shrink < src_dx - x ? x + shrink : src_dx;
                 for (; x < end; x++, p += 4) {
                     a[0] += p[0];
                     a[1] += p[1];
@@ -698,6 +845,11 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
                     flushShrunkLine(y / shrink, y % shrink + 1);
             }
             return true;"#,
+    ),
+    (
+        "crengine/src/lvdrawbuf.cpp",
+        "    virtual void OnEndDecode( LVImageSource * obj, bool )\n    {\n        // If we're not smooth scaling, we're done!\n        if (!smoothscale) {\n            return;\n        }",
+        "    virtual void OnEndDecode( LVImageSource * obj, bool errors )\n    {\n        // If we're not smooth scaling, or decoding failed, we're done!\n        if (!smoothscale || errors || !decoded) {\n            return;\n        }",
     ),
     (
         "crengine/src/lvdrawbuf.cpp",
@@ -723,6 +875,8 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "    int render_w = have_target_size ? target_w : _width;\n    int render_h = have_target_size ? target_h : _height;",
         r#"    int render_w = have_target_size ? target_w : _width;
     int render_h = have_target_size ? target_h : _height;
+    if ( render_w <= 0 || render_h <= 0 )
+        return false;
     // Verso: no larger than the screen without a target size (see build.rs).
     const bool capped = !have_target_size && verso_max_image_pixels > 0
                         && (lInt64)render_w * render_h > verso_max_image_pixels;
@@ -735,13 +889,25 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
     ),
     (
         "crengine/src/lvimg.cpp",
-        "    lUInt32 * __restrict src = (lUInt32 *)bitmap.data();\n    lUInt32 * __restrict row = new lUInt32 [ render_w ];\n    for (int y=0; y<render_h; y++) {\n        size_t px_count = render_w;\n        lUInt32 * __restrict dst = row;\n        while (px_count--) {",
-        r#"    // Verso: a capped SVG is converted at the size it was drawn at, and each
+        "    render_w = bitmap.width();\n    render_h = bitmap.height();\n\n    callback->OnStartDecode(this);\n    lUInt32 * __restrict src = (lUInt32 *)bitmap.data();\n    lUInt32 * __restrict row = new lUInt32 [ render_w ];\n    for (int y=0; y<render_h; y++) {\n        size_t px_count = render_w;\n        lUInt32 * __restrict dst = row;\n        while (px_count--) {",
+        r#"    render_w = bitmap.width();
+    render_h = bitmap.height();
+    if ( render_w <= 0 || render_h <= 0 )
+        return false;
+    // Verso: a capped SVG is converted at the size it was drawn at, and each
     // line is repeated across the declared size, which the callback expects.
     const int out_w = capped ? _width : render_w;
     const int out_h = capped ? _height : render_h;
-    lUInt32 * conv = new lUInt32 [ render_w ];
-    lUInt32 * row = capped ? new lUInt32 [ out_w ] : conv;
+    if ( out_w <= 0 || out_h <= 0 )
+        return false;
+
+    callback->OnStartDecode(this);
+    std::vector<lUInt32> conv_buf( (size_t)render_w );
+    std::vector<lUInt32> row_buf;
+    if ( capped )
+        row_buf.resize( (size_t)out_w );
+    lUInt32 * conv = conv_buf.data();
+    lUInt32 * row = capped ? row_buf.data() : conv;
     int last_sy = -1;
     for (int y=0; y<out_h; y++) {
         const int sy = capped ? (int)((lInt64)y * render_h / out_h) : y;
@@ -759,7 +925,8 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         }
         }
         if ( capped ) {
-            int sx = 0, ex = 0;
+            int sx = 0;
+            lInt64 ex = 0;
             for (int x=0; x<out_w; x++) {
                 row[x] = conv[sx];
                 ex += render_w;
@@ -770,10 +937,36 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
             }
         }
         callback->OnLineDecoded( this, y, row );
-    }
-    delete[] conv;
-    if ( capped )
-        delete[] row;"#,
+    }"#,
+    ),
+    // Stream fixes in lvstream.cpp:
+    // - Pass missing format argument to both "File is too big to open %s" logs.
+    // - Use stat64 when HAVE_STAT64 && _LINUX in LVOpenDirectory and check the
+    //   return value so failed stat / 64-bit inodes never read uninitialized st.
+    // - Return LVERR_FAIL instead of calling exit(-1) in LVCachedStream::Read.
+    (
+        "crengine/src/lvstream.cpp",
+        "CRLog::error( \"File is too big to open %s\");",
+        "CRLog::error( \"File is too big to open %s\", fn8.c_str() );",
+    ),
+    (
+        "crengine/src/lvstream.cpp",
+        "                struct stat st;\n                stat( fpath.c_str(), &st );\n                if ( S_ISDIR(st.st_mode) ) {",
+        r#"#if defined(HAVE_STAT64) && defined(_LINUX)
+                struct stat64 st;
+                if ( stat64( fpath.c_str(), &st ) != 0 )
+                    continue;
+#else
+                struct stat st;
+                if ( stat( fpath.c_str(), &st ) != 0 )
+                    continue;
+#endif
+                if ( S_ISDIR(st.st_mode) ) {"#,
+    ),
+    (
+        "crengine/src/lvstream.cpp",
+        "                    if ( !res )\n                    {\n                        fprintf( stderr, \"cannot fill fragment %d .. %d\\n\", fillStart, fillEnd );\n                        exit(-1);\n                    }",
+        "                    if ( !res )\n                    {\n                        fprintf( stderr, \"cannot fill fragment %d .. %d\\n\", fillStart, fillEnd );\n                        delete[] flags;\n                        return LVERR_FAIL;\n                    }",
     ),
 ];
 

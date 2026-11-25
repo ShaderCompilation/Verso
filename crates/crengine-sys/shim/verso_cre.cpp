@@ -3,6 +3,8 @@
 
 #include "verso_cre.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <string.h>
 #include <vector>
 #include <unordered_map>
@@ -11,6 +13,7 @@
 
 #include "lvdocview.h"
 #include "lvdrawbuf.h"
+#include "lvmemman.h"
 #include "hyphman.h"
 #include "textlang.h"
 #include "fb2def.h"
@@ -979,8 +982,17 @@ int verso_cre_bookmark_check(VersoCreDoc *doc, const char *start, const char *en
 static lString32 cache_dir_saved;
 static lvsize_t cache_max_saved = 0;
 
+// Abort instead of crengine's default exit(code), so fatal errors produce a
+// SIGABRT crash report/backtrace instead of racing C++ static destructors
+// against the UI thread.
+static void verso_cre_fatal_error(int errorCode, const char *errorText) {
+    fprintf(stderr, "FATAL ERROR #%d: %s\n", errorCode, errorText ? errorText : "");
+    std::abort();
+}
+
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes) {
     GUARD(-1, {
+        crSetFatalErrorHandler(verso_cre_fatal_error);
         CRLog::setStderrLogger();
         CRLog::setLogLevel(CRLog::LL_ERROR);
         if (!InitFontManager(lString8()))
