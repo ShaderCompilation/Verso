@@ -764,42 +764,94 @@ fn a_late_translation_never_replaces_newer_words_or_languages() {
 }
 
 #[test]
-fn a_long_passage_opens_on_translate_and_cannot_be_edited_or_looked_up() {
-    let root = std::env::temp_dir().join(format!("verso-lookup-long-{}", std::process::id()));
-    let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
+fn long_text_reaches_the_dictionaries_and_is_never_cut() {
+    let (root, store) = fixture();
+    // Paclitaxel, with a space: over the length a long press takes for a word.
+    let chemical = "(2α,4α,5β,7β,10β,13α)-4,10-Bis(acetyloxy)-13-{[(2R,3S)-3-(benzoylamino)-2-hydroxy-3-phenylpropanoyl]oxy}\
+                    -1,7-dihydroxy-9-oxo-5,20-epoxytax-11-en-2-yl benzoate";
+    let longest = format!("{chemical} {}", "x".repeat(QUERY_LIMIT - chemical.chars().count() - 1));
+    let long = format!("{longest}x");
+    let path = store.dictionary_dir().join("02");
+    let mut idx = Vec::new();
+    for word in [chemical, &long] {
+        idx.extend_from_slice(word.as_bytes());
+        idx.push(0);
+        idx.extend_from_slice(&0u32.to_be_bytes());
+        idx.extend_from_slice(&7u32.to_be_bytes());
+    }
+    fs::write(path.with_extension("idx"), &idx).unwrap();
+    fs::write(path.with_extension("dict"), "Meaning").unwrap();
+    let ifo = format!(
+        "StarDict's dict ifo file\nversion=2.4.2\nbookname=Chemistry\nwordcount=2\nidxfilesize={}\nsametypesequence=m\n",
+        idx.len()
+    );
+    fs::write(path.with_extension("ifo"), ifo).unwrap();
+    let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    // 120 characters, trimmed, is still a word.
-    let longest = format!(" {} ", "ж".repeat(QUERY_LIMIT));
-    let lookup =
-        Lookup::new(&longest, worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
-    assert!(lookup.asked && lookup.tabs.current() == Tab::Dictionary);
-    let long = "words ".repeat(QUERY_LIMIT / 6 + 1);
-    let mut lookup =
-        Lookup::new(&long, worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
-    assert!(!lookup.asked && lookup.tabs.current() == Tab::Translate);
-    for tab in [Tab::Dictionary, Tab::Wikipedia] {
+    let card = |query: &str| {
+        let mut lookup =
+            Lookup::new(query, worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
+        wait(&mut lookup, &t, screen);
+        lookup
+    };
+    let go = |lookup: &mut Lookup, tab| {
+        lookup.place(&t);
         let p = lookup.tab_point(tab);
-        tap(&mut lookup, p, &t, screen);
-        assert_eq!(lookup.tabs.current(), Tab::Translate, "{tab:?} ignores taps");
+        tap(lookup, p, &t, screen);
+        lookup.tabs.current()
+    };
+    let found = |lookup: &Lookup| matches!(lookup.state, State::Definition { .. });
+    // From the book, and from a definition; only Wikipedia has a limit.
+    for (word, wikipedia) in [(chemical, Tab::Wikipedia), (long.as_str(), Tab::Dictionary)] {
+        let mut chained = card("boxes");
+        chained.look_up_word(word.into());
+        wait(&mut chained, &t, screen);
+        for mut lookup in [card(word), chained] {
+            assert!(found(&lookup) && lookup.on_dictionary(), "{word}");
+            assert_eq!(go(&mut lookup, Tab::Wikipedia), wikipedia, "{word}");
+            assert_eq!(go(&mut lookup, Tab::Translate), Tab::Translate);
+            assert_eq!(go(&mut lookup, Tab::Wikipedia) == Tab::Wikipedia, wikipedia == Tab::Wikipedia, "{word}");
+            assert_eq!(go(&mut lookup, Tab::Dictionary), Tab::Dictionary);
+            assert!(found(&lookup));
+        }
     }
+    // A miss offers the field only for text that fits it whole.
+    let mut lookup = card(&longest);
+    assert!(!found(&lookup) && lookup.edit_row());
+    assert_eq!(lookup.field.value(), longest);
+    cx(&t, screen, |cx| {
+        lookup.start_editing();
+        lookup.on_text_input(&TextInput::Insert("x".into()), cx);
+    });
+    assert_eq!(lookup.field.value(), longest, "typing stops at the limit");
+    let mut lookup = card(&format!("{long}x"));
+    assert!(!found(&lookup) && !lookup.edit_row());
     let heading = lookup.heading.center();
     tap(&mut lookup, heading, &t, screen);
     assert!(!lookup.keyboard.visible);
+    capture(&mut lookup, &t, screen, "long-miss");
+    go(&mut lookup, Tab::Translate);
     capture(&mut lookup, &t, screen, "long-passage");
-    // Typing stops at the limit.
-    let mut lookup =
-        Lookup::new("fox", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
-    cx(&t, screen, |cx| {
-        lookup.start_editing();
-        lookup.on_text_input(&TextInput::Insert("ж".repeat(QUERY_LIMIT)), cx);
-    });
-    assert_eq!(lookup.field.value().chars().count(), QUERY_LIMIT);
-    assert!(!too_long(lookup.field.value()));
-    worker.cancel();
+    worker.flush().unwrap();
     drop(lookup);
     drop(worker);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn long_text_is_sent_nowhere_unless_its_tab_was_chosen() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let long = "字".repeat(QUERY_LIMIT + 1);
+    for (tab, sent) in [(Tab::Dictionary, 0), (Tab::Wikipedia, 0), (Tab::Translate, 1)] {
+        let server = online();
+        let link = Arc::new(AtomicU64::new(2));
+        let languages = Languages::for_test(None, Some("de"));
+        let mut lookup = online_card(tab, &long, &server, &link, Duration::from_secs(5), languages, &t, screen);
+        answered(&mut lookup, &t, screen);
+        assert_eq!((lookup.tabs.current(), server.requests.lock().unwrap().len()), (tab, sent));
+    }
 }
 
 #[test]
@@ -991,11 +1043,11 @@ fn a_late_first_result_cannot_replace_a_new_picker_choice_or_show_diagnostics_be
     cx(&t, screen, |cx| lookup.receive(cx));
     assert_eq!(lookup.selected.as_deref(), Some("01.ifo"));
     assert!(lookup.pending);
-    let blocks = content(&lookup.state, false, &["Broken dictionary".into()], &t);
+    let blocks = content(&lookup.state, false, false, &["Broken dictionary".into()], &t);
     assert!(blocks.iter().all(
         |b| !matches!(b, StyledBlock::Paragraph(p) if p.text.contains("Broken") || p.text.contains("incomplete"))
     ));
-    let blocks = content(&State::NoResult, false, &["Broken dictionary".into()], &t);
+    let blocks = content(&State::NoResult, false, false, &["Broken dictionary".into()], &t);
     assert!(blocks.iter().any(|b| matches!(b, StyledBlock::Paragraph(p) if p.text.contains("Search incomplete"))));
     worker.flush().unwrap();
     drop(lookup);
@@ -1572,10 +1624,10 @@ fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
             assert_eq!(bar.on_gesture(&Gesture::Down(outside)), None);
             assert_eq!(bar.on_gesture(&Gesture::Tap(outside)), Some(SelectionAction::Dismiss));
         }
-        // One character more: too long to look up, so Dict and Wiki ignore taps.
+        // One character more: too long for Wikipedia, so Wiki ignores taps.
         let mut bar = SelectionActions::new(&t, screen, upper, &format!("{longest}x"));
         for (action, works) in [
-            (SelectionAction::Dictionary, false),
+            (SelectionAction::Dictionary, true),
             (SelectionAction::Wikipedia, false),
             (SelectionAction::Translate, true),
         ] {

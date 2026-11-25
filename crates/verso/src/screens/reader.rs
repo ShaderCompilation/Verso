@@ -19,9 +19,7 @@ use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
 use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
 use crate::screens::books::ConfirmDelete;
 use crate::screens::contents::{Contents, ContentsEvent};
-use crate::screens::dictionary::{
-    Languages, Lookup, LookupEvent, SelectionAction, SelectionActions, Tab, Tabs, too_long,
-};
+use crate::screens::dictionary::{Languages, Lookup, LookupEvent, SelectionAction, SelectionActions, Tab, Tabs};
 use crate::screens::footnote::{Footnote, FootnoteEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
@@ -170,6 +168,9 @@ struct BarState {
 }
 /// Highlight requests share the selection reply; this bit keeps their IDs apart.
 const HIGHLIGHT_ID: u64 = 1 << 63;
+/// A longer selection isn't taken for one word: without spaces it is more
+/// likely a passage, and gets the bar.
+const LONGEST_WORD: usize = 120;
 /// How long after a book's first page the dictionaries' indexes open in the
 /// background: past the first page's neighbours and the chapter offsets.
 const DICTIONARY_PREPARE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -613,9 +614,7 @@ impl Reader {
             if self.selection.extending {
                 return;
             }
-            // Without spaces a passage is one word too, but the card would
-            // open on Translate and send it unasked.
-            if text.split_whitespace().count() == 1 && !too_long(&text) {
+            if text.split_whitespace().count() == 1 && text.trim().chars().count() <= LONGEST_WORD {
                 self.lookup(&text, Tab::Dictionary, cx);
             } else {
                 self.open_passage_actions(cx);
@@ -3731,7 +3730,7 @@ mod tests {
             start_visible: true,
             end_visible: true,
         };
-        let long = Selection { text: "字".repeat(crate::online::QUERY_LIMIT + 1), ..word.clone() };
+        let long = Selection { text: "字".repeat(LONGEST_WORD + 1), ..word.clone() };
         let settings = Settings { translate_language: Some("de".into()), ..r.store.settings() };
         r.store.save_settings(&settings).unwrap();
         for (i, (selected, close)) in [(&word, false), (&word, true), (&long, true)].into_iter().enumerate() {

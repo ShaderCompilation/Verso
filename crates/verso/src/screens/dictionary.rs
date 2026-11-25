@@ -9,7 +9,7 @@ mod translate;
 mod wikipedia;
 
 pub use passage_bar::{SelectionAction, SelectionActions};
-pub use tabs::{Languages, Tab, Tabs, too_long};
+pub use tabs::{Languages, Tab, Tabs};
 
 use crate::{
     dictionary::{
@@ -35,13 +35,15 @@ use crate::{
 };
 use pickers::{Chooser, Chosen, DropDown};
 use std::rc::Rc;
-use tabs::Replies;
+use tabs::{Replies, too_long};
 use wikipedia::Wikipedia;
 
 const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
                        then open Dictionaries and tap Rescan.";
 const DISABLED: &str = "All dictionaries are disabled. Open Dictionaries to enable one.";
 const NO_RESULT: &str = "No definition found. Edit the word above, or switch dictionary sets.";
+/// Without the field, for text too long to edit.
+const NO_RESULT_LONG: &str = "No definition found. Try another dictionary set.";
 const FIRST_DRAW_WAIT: std::time::Duration = std::time::Duration::from_millis(12);
 /// Nesting levels that indent; deeper blocks stay at the last level.
 const MAX_DEPTH: u8 = 4;
@@ -109,7 +111,7 @@ pub(crate) fn styled_blocks<'a>(blocks: &'a [Block], t: &'a Theme) -> impl Itera
 }
 
 /// All visible content shares one pagination, including provenance and errors.
-fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<StyledBlock> {
+fn content(state: &State, pending: bool, long: bool, warnings: &[String], t: &Theme) -> Vec<StyledBlock> {
     if pending {
         return vec![plain("Looking up…".into(), t.body, true)];
     }
@@ -133,7 +135,7 @@ fn content(state: &State, pending: bool, warnings: &[String], t: &Theme) -> Vec<
         }
         State::Missing => blocks.push(plain(MISSING.into(), t.body, true)),
         State::Disabled => blocks.push(plain(DISABLED.into(), t.body, true)),
-        State::NoResult => blocks.push(plain(NO_RESULT.into(), t.body, true)),
+        State::NoResult => blocks.push(plain(if long { NO_RESULT_LONG } else { NO_RESULT }.into(), t.body, true)),
         State::Error(_) => blocks.push(plain(
             "Couldn’t read this entry. Open Manage dictionaries for details, or choose another result.".into(),
             t.body,
@@ -363,8 +365,8 @@ impl Lookup {
     /// opens on the half of the screen away from it (the bottom half when
     /// unknown, which is how the at-bottom setting keeps it there), so the
     /// word, its sentence and the selection handles stay visible; in
-    /// landscape it stands at the side away from the word. A query too long
-    /// to look up opens on Translate.
+    /// landscape it stands at the side away from the word. It opens on, and
+    /// asks for, the tab `tabs` names and no other.
     pub fn new(
         query: &str,
         worker: Rc<Worker>,
@@ -372,14 +374,11 @@ impl Lookup {
         screen: Rect,
         word: Option<Rect>,
         selection: crate::dictionary::sets::Selection,
-        mut tabs: Tabs,
+        tabs: Tabs,
     ) -> Self {
         let mut field = TextField::new("Word");
         field.limit = Some(QUERY_LIMIT);
         field.edit(&TextInput::Insert(one_line(query)));
-        if too_long(query) {
-            tabs.show(Tab::Translate);
-        }
         let asked = tabs.current() == Tab::Dictionary;
         let request = if asked { worker.lookup_in(query.into(), false, selection.clone()) } else { 0 };
         let mut keyboard = Keyboard::default();
@@ -565,14 +564,15 @@ impl Lookup {
         !self.pending && matches!(self.state, State::Definition { .. })
     }
     /// The query field and Look up: while typing, and on a miss so editing
-    /// the query is one tap away. Pickers take their place.
+    /// the query is one tap away, unless the field would cut it. Pickers take
+    /// their place.
     fn edit_row(&self) -> bool {
         let missed = match self.tabs.current() {
             Tab::Dictionary => !self.pending && self.state == State::NoResult,
             Tab::Wikipedia => self.tabs.wikipedia().found_nothing(),
             Tab::Translate => false,
         };
-        self.keyboard.visible || (!self.picking() && missed)
+        self.keyboard.visible || (!self.picking() && missed && !too_long(&self.query))
     }
     /// An online tab's error that may go away.
     fn retry_shown(&self) -> bool {
@@ -1568,14 +1568,15 @@ impl Lookup {
             cx.line(title, t.heading, r, HAlign::Left);
         } else {
             // As much as may show.
-            let words = one_line(&self.query.chars().take(2 * QUERY_LIMIT).collect::<String>());
+            let start = |query: &str| one_line(&query.chars().take(QUERY_LIMIT).collect::<String>());
+            let words = start(&self.query);
             let label = if words.is_empty() { "Look up a word" } else { words.as_str() };
             let style = t.dictionary_headword;
             let gap = t.mm(1.5);
             // Beside the query: ✎ at the book's word, "← previous" deeper, or
             // the length of a passage too long to edit.
             let crumb = match self.history.last() {
-                Some(v) => Some(format!("← {}", one_line(&v.query))),
+                Some(v) => Some(format!("← {}", start(&v.query))),
                 None => too_long(&self.query).then(|| length(&self.query)),
             };
             let crumb_style = t.small;
@@ -1673,7 +1674,7 @@ impl Lookup {
         let (mut result, mut bytes);
         loop {
             let blocks = if self.on_dictionary() {
-                content(&self.state, self.pending, &self.warnings, t)
+                content(&self.state, self.pending, too_long(&self.query), &self.warnings, t)
             } else {
                 self.tabs.content(t)
             };
@@ -1991,7 +1992,7 @@ mod tests {
                 base_forms: Some(BaseForms { query: "leaves".into(), count: 2 }),
             };
             lookup.warnings = vec!["/gone is not available.".into()];
-            let input = content(&lookup.state, false, &lookup.warnings, &t);
+            let input = content(&lookup.state, false, false, &lookup.warnings, &t);
             let StyledBlock::Paragraph(p) = &input[3] else { panic!("definition paragraph") };
             assert_eq!(p.indent, (4 * t.dictionary_indent) as f32);
             assert_eq!(p.muted, INK2);
@@ -2114,7 +2115,9 @@ mod tests {
         assert!(matches!(&lookup.state, State::Definition { entries, .. } if entries[0].blocks[0].text == "meaning"));
         let exact = lookup.state.clone();
         let first_paragraph = |state: &State| {
-            let StyledBlock::Paragraph(p) = content(state, false, &[], &t).remove(0) else { panic!("first paragraph") };
+            let StyledBlock::Paragraph(p) = content(state, false, false, &[], &t).remove(0) else {
+                panic!("first paragraph")
+            };
             p.text
         };
         assert_eq!(first_paragraph(&exact), "Hello");

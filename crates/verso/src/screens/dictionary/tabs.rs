@@ -31,7 +31,8 @@ impl Tab {
     }
 }
 
-/// Whether a query is too long for anything but Translate.
+/// Whether a query is too long for Wikipedia, and to be edited. Not for the
+/// dictionaries: names of chemicals can be this long.
 pub fn too_long(query: &str) -> bool {
     query.trim().chars().count() > QUERY_LIMIT
 }
@@ -140,8 +141,7 @@ impl Tabs {
     /// Places the row (empty while it's hidden) for a query.
     pub fn place(&mut self, rect: Rect, query: &str) {
         self.bar.place(rect);
-        let disabled = [Tab::Dictionary.index(), Tab::Wikipedia.index()];
-        self.bar.disabled = if too_long(query) { disabled.to_vec() } else { Vec::new() };
+        self.bar.disabled = if too_long(query) { vec![Tab::Wikipedia.index()] } else { Vec::new() };
     }
 
     /// The other tab, once it's tapped.

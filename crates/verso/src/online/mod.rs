@@ -14,9 +14,9 @@ pub use worker::{Answer, Reply, Request, Service, Worker};
 
 use crate::net::FetchError;
 
-/// Longer Wikipedia queries find nothing; the lookup card doesn't send them.
-/// The search itself allows 300 characters.
-pub const QUERY_LIMIT: usize = 120;
+/// The most characters Wikipedia's search takes; the lookup card doesn't send
+/// more.
+pub const QUERY_LIMIT: usize = 300;
 
 /// The largest reply read, decompressed. The longest articles are under half
 /// of this as plain text.

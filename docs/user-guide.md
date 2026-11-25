@@ -296,7 +296,7 @@ Wikipedia or Google only when you open their tab; if that fails, tap **Retry**.
   target language the first time and detects the source (both can be changed).
   Google may refuse some shared or VPN connections as busy.
 
-Passages over 120 characters can only be translated.
+Dictionaries take a passage of any length, Wikipedia up to 300 characters.
 
 ---
 

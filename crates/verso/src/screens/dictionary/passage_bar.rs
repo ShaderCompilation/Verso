@@ -41,8 +41,7 @@ const CELLS: usize = SELECTION_ACTIONS.len();
 pub struct SelectionActions {
     rect: Rect,
     cells: [Rect; CELLS],
-    /// The passage is too long to look up: Dict and Wiki are gray and ignore
-    /// taps.
+    /// The passage is too long for Wikipedia: Wiki is gray and ignores taps.
     long: bool,
     pressed: Option<usize>,
     press: Press,
@@ -83,7 +82,7 @@ impl SelectionActions {
         self.rect
     }
     fn enabled(&self, i: usize) -> bool {
-        !self.long || !matches!(SELECTION_ACTIONS[i].2, SelectionAction::Dictionary | SelectionAction::Wikipedia)
+        !self.long || SELECTION_ACTIONS[i].2 != SelectionAction::Wikipedia
     }
     /// The area the bar covers, including its shadow.
     pub fn bounds(&self, t: &Theme) -> Rect {
