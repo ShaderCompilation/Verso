@@ -3,7 +3,9 @@ use crate::{
     dictionary::{Preference, sets::Preferences},
     gfx::Icon,
     gfx::{Canvas, IconRenderer},
-    platform::Waker,
+    net::tests::{Reply as Http, Server},
+    online::{Service, wikipedia::Edition},
+    platform::{Waker, wifi::Link},
     store::Store,
     ui::gesture::Direction,
 };
@@ -109,6 +111,177 @@ fn reply(lookup: &Lookup) -> crate::dictionary::worker::Reply {
     }
 }
 
+/// Wikipedia always lists its hits; Translate always answers.
+fn online() -> Server {
+    Server::answering(|request| {
+        let reply = if request.path.starts_with("/translate") {
+            r#"[[["Übersetzung","x"]],null,"en"]"#.to_string()
+        } else {
+            let hit = |title| format!(r#"{{"ns":0,"title":"{title}","snippet":""}}"#);
+            format!(
+                r#"{{"batchcomplete":true,"query":{{"searchinfo":{{"totalhits":2}},"search":[{},{}]}}}}"#,
+                hit("First match"),
+                hit("Second match")
+            )
+        };
+        Http::Ok(reply.into_bytes())
+    })
+}
+/// Waits for the tab shown to have its reply.
+fn answered(lookup: &mut Lookup, t: &Theme, screen: Rect) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lookup.tabs.waiting() {
+        cx(t, screen, |cx| lookup.receive(cx));
+        assert!(Instant::now() < deadline, "no online reply");
+        std::thread::yield_now();
+    }
+}
+/// The text of the online tab shown.
+fn online_text(lookup: &Lookup, t: &Theme) -> String {
+    let blocks = lookup.tabs.content(t);
+    let texts =
+        blocks.iter().filter_map(|b| if let StyledBlock::Paragraph(p) = b { Some(p.text.as_str()) } else { None });
+    texts.collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn tabs_ask_when_first_shown_and_once_per_word() {
+    let (root, store) = fixture();
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
+    let server = online();
+    let service = Service::for_test(&server.base, Duration::from_secs(5), Box::new(|| Ok(Link::Connected)));
+    let tabs = |tab, translate: Option<&str>| {
+        let languages = Languages { wikipedia: Edition::ENGLISH, translate: translate.map(Into::into) };
+        Tabs::new(tab, &service, Waker::new(|| {}), languages)
+    };
+    let hits = || server.requests.lock().unwrap().len();
+    let go = |lookup: &mut Lookup, tab| {
+        let p = lookup.tab_point(tab);
+        tap(lookup, p, &t, screen);
+        assert_eq!(lookup.tabs.current(), tab);
+        answered(lookup, &t, screen);
+    };
+    let mut lookup =
+        Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), tabs(Tab::Dictionary, Some("de")));
+    wait(&mut lookup, &t, screen);
+    let mut text = TextRenderer::new();
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    let swipe = Gesture::Swipe { dir: Direction::Left, from: screen.center(), to: screen.center() };
+    cx(&t, screen, |cx| lookup.on_gesture(&swipe, cx));
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!((lookup.pager.page, hits()), (1, 0), "Dictionary stays offline");
+    let (compact, request) = (lookup.rect(&t), lookup.request);
+    // Wikipedia asks, and grows the card; Dictionary comes back as it was.
+    go(&mut lookup, Tab::Wikipedia);
+    assert_eq!(hits(), 1);
+    assert_eq!(online_text(&lookup, &t), "First match\nSecond match");
+    assert_eq!(lookup.rect(&t).h, 1696 * 4 / 5);
+    capture(&mut lookup, &t, screen, "wikipedia");
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    // Its words can't be looked up.
+    let body = lookup.body;
+    tap(&mut lookup, crate::geom::Point::new(body.x + t.mm(3.0), body.y + t.mm(2.0)), &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!(lookup.depth(), 0);
+    go(&mut lookup, Tab::Dictionary);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!((lookup.rect(&t), lookup.request, lookup.pager.page), (compact, request, 1));
+    go(&mut lookup, Tab::Translate);
+    assert_eq!((lookup.rect(&t), hits()), (compact, 2));
+    assert!(online_text(&lookup, &t).starts_with("Übersetzung"));
+    capture(&mut lookup, &t, screen, "translate");
+    // Seen before: no request.
+    go(&mut lookup, Tab::Wikipedia);
+    go(&mut lookup, Tab::Translate);
+    go(&mut lookup, Tab::Wikipedia);
+    assert_eq!(hits(), 2);
+    // An edited query is a step, asked only on the tab shown; tabs hide while typing.
+    cx(&t, screen, |cx| {
+        lookup.start_editing();
+        lookup.place(&t);
+        assert_eq!(lookup.tabs.rect(), Rect::default());
+        lookup.on_text_input(&TextInput::Clear, cx);
+        lookup.on_text_input(&TextInput::Insert("fox".into()), cx);
+        lookup.on_text_input(&TextInput::Submit, cx);
+    });
+    answered(&mut lookup, &t, screen);
+    assert_eq!((lookup.depth(), hits(), lookup.tabs.current()), (1, 3, Tab::Wikipedia));
+    assert!(!lookup.asked && lookup.request == request, "the dictionaries weren't asked");
+    assert_eq!(server.requests.lock().unwrap()[2].param("srsearch").as_deref(), Some("fox"));
+    lookup.place(&t);
+    go(&mut lookup, Tab::Dictionary);
+    wait(&mut lookup, &t, screen);
+    assert_eq!(lookup.state, State::NoResult);
+    // ← returns to the tab the word was on, without asking again.
+    lookup.place(&t);
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    assert_eq!((lookup.tabs.current(), lookup.query.as_str()), (Tab::Wikipedia, "boxes"));
+    assert!(!lookup.tabs.waiting() && !online_text(&lookup, &t).is_empty());
+    go(&mut lookup, Tab::Dictionary);
+    wait(&mut lookup, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!(lookup.pager.page, 1);
+    assert_eq!(hits(), 3);
+    // Opened on Wikipedia, the dictionaries wait. Without a language chosen,
+    // Translate asks for one and sends nothing.
+    let mut lookup =
+        Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), tabs(Tab::Wikipedia, None));
+    assert!(!lookup.asked);
+    answered(&mut lookup, &t, screen);
+    go(&mut lookup, Tab::Translate);
+    assert_eq!(online_text(&lookup, &t), "Translate into which language?");
+    assert_eq!(hits(), 4);
+    go(&mut lookup, Tab::Dictionary);
+    wait(&mut lookup, &t, screen);
+    assert_eq!(lookup.matches.len(), 13);
+    worker.flush().unwrap();
+    drop(lookup);
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_long_passage_opens_on_translate_and_cannot_be_edited_or_looked_up() {
+    let root = std::env::temp_dir().join(format!("verso-lookup-long-{}", std::process::id()));
+    let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    // 120 characters, trimmed, is still a word.
+    let longest = format!(" {} ", "ж".repeat(QUERY_LIMIT));
+    let lookup =
+        Lookup::new(&longest, worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
+    assert!(lookup.asked && lookup.tabs.current() == Tab::Dictionary);
+    let long = "words ".repeat(QUERY_LIMIT / 6 + 1);
+    let mut lookup =
+        Lookup::new(&long, worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
+    assert!(!lookup.asked && lookup.tabs.current() == Tab::Translate);
+    for tab in [Tab::Dictionary, Tab::Wikipedia] {
+        let p = lookup.tab_point(tab);
+        tap(&mut lookup, p, &t, screen);
+        assert_eq!(lookup.tabs.current(), Tab::Translate, "{tab:?} ignores taps");
+    }
+    let heading = lookup.heading.center();
+    tap(&mut lookup, heading, &t, screen);
+    assert!(!lookup.keyboard.visible);
+    capture(&mut lookup, &t, screen, "long-passage");
+    // Typing stops at the limit.
+    let mut lookup =
+        Lookup::new("fox", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
+    cx(&t, screen, |cx| {
+        lookup.start_editing();
+        lookup.on_text_input(&TextInput::Insert("ж".repeat(QUERY_LIMIT)), cx);
+    });
+    assert_eq!(lookup.field.value().chars().count(), QUERY_LIMIT);
+    assert!(!too_long(lookup.field.value()));
+    worker.cancel();
+    drop(lookup);
+    drop(worker);
+    let _ = fs::remove_dir_all(root);
+}
+
 fn capture(lookup: &mut Lookup, t: &Theme, screen: Rect, name: &str) {
     let Some(folder) = std::env::var_os("VERSO_DICTIONARY_CAPTURES") else { return };
     let folder = std::path::PathBuf::from(folder);
@@ -135,7 +308,8 @@ fn picker_pages_only_matches_switches_sets_and_preserves_pages_on_final_counts()
         let t = Theme::for_dpi(dpi);
         let screen = Rect::new(0, 0, w, h);
         let worker = Rc::new(Worker::new(store.clone(), Waker::new(|| {})));
-        let mut lookup = Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default());
+        let mut lookup =
+            Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
         wait(&mut lookup, &t, screen);
         assert_eq!(lookup.matches.len(), 13);
         capture(&mut lookup, &t, screen, "lookup");
@@ -246,7 +420,8 @@ fn a_late_first_result_cannot_replace_a_new_picker_choice_or_show_diagnostics_be
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
-    let mut lookup = Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default());
+    let mut lookup =
+        Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
     wait(&mut lookup, &t, screen);
     let old = reply(&lookup);
     // Model the two publications with an intervening user choice.
@@ -275,17 +450,26 @@ fn the_compact_card_stands_away_from_the_word_and_expands_on_demand() {
     for (w, h, dpi) in [(1272, 1696, 300), (1072, 1448, 300), (600, 800, 167)] {
         let t = Theme::for_dpi(dpi);
         let screen = Rect::new(0, 0, w, h);
-        let compact = (h * 46 / 100).max(t.mm(64.0)).min(h * 52 / 100);
+        let compact = (h * 54 / 100).max(t.mm(72.0)).min(h * 60 / 100);
         let upper = Rect::new(w / 3, h / 4, t.mm(15.0), t.mm(4.0));
         let lower = Rect::new(w / 3, h * 3 / 4, t.mm(15.0), t.mm(4.0));
         for (word, top) in [(None, false), (Some(upper), false), (Some(lower), true)] {
-            let mut lookup = Lookup::new("word", worker.clone(), &t, screen, word, Default::default());
+            let mut lookup = Lookup::new(
+                "word",
+                worker.clone(),
+                &t,
+                screen,
+                word,
+                Default::default(),
+                Tabs::offline(Tab::Dictionary),
+            );
             let card = lookup.rect(&t);
             let expected = if top { Rect::new(0, 0, w, compact) } else { Rect::new(0, h - compact, w, compact) };
             assert_eq!(card, expected, "{w}×{h} {word:?}");
             assert!(word.is_none_or(|word| card.intersect(&word).is_none()), "the word stays visible");
-            // Two header rows, the definition and the action strip all fit.
+            // Three header rows, the definition and the action strip all fit.
             assert!(lookup.body_full.h >= 3 * t.dictionary_body.line_height() as i32, "{w}×{h}");
+            assert!(lookup.heading.bottom() < lookup.tabs.rect().y && lookup.tabs.rect().bottom() < lookup.switcher.y);
             assert!(lookup.heading.y >= card.y && lookup.actions[3].rect().bottom() <= card.bottom());
             assert!(
                 lookup.switcher.bottom() < lookup.body_full.y && lookup.body_full.bottom() < lookup.actions[0].rect().y
@@ -297,7 +481,8 @@ fn the_compact_card_stands_away_from_the_word_and_expands_on_demand() {
                 tap(&mut lookup, p, &t, screen)
             };
             assert!(lookup.expanded);
-            assert_eq!(lookup.rect(&t), Rect::new(0, h - h * 4 / 5, w, h * 4 / 5));
+            let tall = Rect::new(0, if top { 0 } else { h - h * 4 / 5 }, w, h * 4 / 5);
+            assert_eq!(lookup.rect(&t), tall, "grows from its own edge");
             lookup.place(&t);
             assert_eq!(lookup.expand.icon, Icon::Collapse);
             {
@@ -305,6 +490,27 @@ fn the_compact_card_stands_away_from_the_word_and_expands_on_demand() {
                 tap(&mut lookup, p, &t, screen)
             };
             assert_eq!(lookup.rect(&t), expected, "collapsing restores the original edge");
+            // Wikipedia opens tall at the same edge; pickers and typing stay there.
+            let wikipedia = lookup.tab_point(Tab::Wikipedia);
+            tap(&mut lookup, wikipedia, &t, screen);
+            assert_eq!(lookup.rect(&t), tall);
+            let collapse = lookup.expand.rect().center();
+            assert!(tap(&mut lookup, collapse, &t, screen).is_none(), "its size isn't saved");
+            assert_eq!(lookup.rect(&t), expected);
+            let dictionary = lookup.tab_point(Tab::Dictionary);
+            tap(&mut lookup, dictionary, &t, screen);
+            assert_eq!(lookup.rect(&t), expected, "Dictionary keeps its own size");
+            lookup.open_picker(&t);
+            assert_eq!(lookup.rect(&t), tall);
+            lookup.picker = None;
+            lookup.start_editing();
+            let keyboard = lookup.keyboard.rect().y;
+            let typing = if top { Rect::new(0, 0, w, keyboard) } else { tall };
+            assert_eq!(lookup.rect(&t), typing);
+            lookup.place(&t);
+            assert!(lookup.body_full.bottom() <= keyboard && lookup.search.rect().bottom() < keyboard, "{w}×{h}");
+            lookup.stop_typing();
+            lookup.place(&t);
             capture(&mut lookup, &t, screen, if top { "compact-top" } else { "compact-bottom" });
         }
     }
@@ -314,7 +520,15 @@ fn the_compact_card_stands_away_from_the_word_and_expands_on_demand() {
     let width = (1696 * 52 / 100).max(t.mm(72.0));
     for (x, right) in [(200, true), (1300, false)] {
         let word = Rect::new(x, 600, 150, 50);
-        let lookup = Lookup::new("word", worker.clone(), &t, screen, Some(word), Default::default());
+        let lookup = Lookup::new(
+            "word",
+            worker.clone(),
+            &t,
+            screen,
+            Some(word),
+            Default::default(),
+            Tabs::offline(Tab::Dictionary),
+        );
         let card = lookup.rect(&t);
         assert_eq!(card, Rect::new(if right { 1696 - width } else { 0 }, 0, width, 1272));
         assert!(card.intersect(&word).is_none());
@@ -335,11 +549,19 @@ fn picker_and_typing_expand_temporarily_and_actions_are_direct() {
     let screen = Rect::new(0, 0, 1272, 1696);
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
     let word = Rect::new(400, 1300, 200, 50);
-    let mut lookup = Lookup::new("boxes", worker.clone(), &t, screen, Some(word), Default::default());
+    let mut lookup = Lookup::new(
+        "boxes",
+        worker.clone(),
+        &t,
+        screen,
+        Some(word),
+        Default::default(),
+        Tabs::offline(Tab::Dictionary),
+    );
     wait(&mut lookup, &t, screen);
     let compact = lookup.rect(&t);
     assert_eq!(compact.y, 0, "a word in the lower half puts the card at the top");
-    let expanded = Rect::new(0, 1696 - 1696 * 4 / 5, 1272, 1696 * 4 / 5);
+    let expanded = Rect::new(0, 0, 1272, 1696 * 4 / 5);
     // The switcher opens the picker in the expanded layout; Back restores.
     {
         let p = lookup.switcher.center();
@@ -359,7 +581,7 @@ fn picker_and_typing_expand_temporarily_and_actions_are_direct() {
         tap(&mut lookup, p, &t, screen)
     };
     assert!(lookup.keyboard.visible && lookup.field.focused);
-    assert_eq!(lookup.rect(&t), expanded);
+    assert_eq!(lookup.rect(&t), Rect::new(0, 0, 1272, lookup.keyboard.rect().y));
     capture(&mut lookup, &t, screen, "editing");
     assert!(lookup.body_full.bottom() <= lookup.keyboard.rect().y, "the definition stays above the keyboard");
     assert!(lookup.search.rect().bottom() < lookup.keyboard.rect().y);
@@ -404,7 +626,15 @@ fn picker_and_typing_expand_temporarily_and_actions_are_direct() {
     assert!(lookup.actions_divider.is_none());
     // A miss for the book's own word keeps the actions.
     worker.flush().unwrap();
-    let mut lookup = Lookup::new("nothing", worker.clone(), &t, screen, Some(word), Default::default());
+    let mut lookup = Lookup::new(
+        "nothing",
+        worker.clone(),
+        &t,
+        screen,
+        Some(word),
+        Default::default(),
+        Tabs::offline(Tab::Dictionary),
+    );
     wait(&mut lookup, &t, screen);
     assert_eq!(lookup.state, State::NoResult);
     lookup.place(&t);
@@ -449,7 +679,8 @@ fn the_pager_shows_only_for_definitions_longer_than_a_page() {
     let screen = Rect::new(0, 0, 1272, 1696);
     let t = Theme::for_dpi(300);
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
-    let mut lookup = Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default());
+    let mut lookup =
+        Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
     wait(&mut lookup, &t, screen);
     let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
     let mut canvas = Canvas::new(screen.w as u32, screen.h as u32);
@@ -477,7 +708,7 @@ fn the_pager_shows_only_for_definitions_longer_than_a_page() {
     lookup.expanded = true;
     draw(&mut lookup);
     assert_eq!(lookup.pages.as_ref().unwrap().size(), (lookup.body.w, lookup.body.h));
-    assert!(lookup.body.h > compact + t.mm(40.0));
+    assert!(lookup.body.h > compact + t.mm(30.0));
     capture(&mut lookup, &t, screen, "expanded");
     worker.flush().unwrap();
     drop(lookup);
@@ -540,7 +771,8 @@ fn words_in_a_definition_look_up_on_tap_or_long_press_but_not_on_swipes() {
     let screen = Rect::new(0, 0, 1272, 1696);
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
     let mut text = TextRenderer::new();
-    let mut lookup = Lookup::new("box", worker.clone(), &t, screen, None, Default::default());
+    let mut lookup =
+        Lookup::new("box", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
     wait(&mut lookup, &t, screen);
     draw_hints(&mut lookup, &t, screen, &mut text);
     let crate_at = find_word(&mut lookup, "crate", &mut text);
@@ -609,7 +841,8 @@ fn back_restores_the_dictionary_and_page_at_once_or_asks_again_after_a_rescan() 
     let screen = Rect::new(0, 0, 1272, 1696);
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
     let mut text = TextRenderer::new();
-    let mut lookup = Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default());
+    let mut lookup =
+        Lookup::new("boxes", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
     wait(&mut lookup, &t, screen);
     lookup.cycle(1);
     wait(&mut lookup, &t, screen);
@@ -638,7 +871,7 @@ fn back_restores_the_dictionary_and_page_at_once_or_asks_again_after_a_rescan() 
     wait(&mut lookup, &t, screen);
     lookup.place(&t);
     assert!(lookup.body_full.h > depth0_body + t.mm(8.0), "the hidden action strip gives the entry its room");
-    assert_eq!(lookup.rect(&t).h, (1696 * 46 / 100).max(t.mm(64.0)), "the card stays compact");
+    assert_eq!(lookup.rect(&t).h, (1696 * 54 / 100).max(t.mm(72.0)), "the card stays compact");
     // Back with the reply kept: shown at once, same dictionary and page.
     let request = lookup.request;
     let back = lookup.back.rect().center();
@@ -692,7 +925,15 @@ fn history_keeps_24_steps_and_the_newest_6_replies() {
     let root = std::env::temp_dir().join(format!("verso-history-{}", std::process::id()));
     let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
     let t = Theme::for_dpi(300);
-    let mut lookup = Lookup::new("w0", worker.clone(), &t, Rect::new(0, 0, 1272, 1696), None, Default::default());
+    let mut lookup = Lookup::new(
+        "w0",
+        worker.clone(),
+        &t,
+        Rect::new(0, 0, 1272, 1696),
+        None,
+        Default::default(),
+        Tabs::offline(Tab::Dictionary),
+    );
     for i in 1..=30 {
         // Pretend each word's reply arrived.
         lookup.pending = false;
@@ -719,11 +960,12 @@ fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
         let line = |y| Rect::new(w / 4, y, w / 2, t.mm(4.0));
         let upper = line(h / 4);
         let lower = line(h - t.mm(20.0));
+        let longest = "x".repeat(QUERY_LIMIT);
         let whole = Rect::new(t.mm(4.0), t.mm(8.0), w - t.mm(8.0), h - t.mm(12.0));
         for (selection, placement) in [(upper, "below"), (lower, "above"), (whole, "docked")] {
-            let mut bar = SelectionActions::new(&t, screen, selection);
+            let mut bar = SelectionActions::new(&t, screen, selection, &longest);
             let r = bar.rect();
-            assert!(r.w <= t.mm(105.0) && r.w <= w - 2 * t.margin, "{w}×{h}");
+            assert!(r.w <= t.mm(115.0) && r.w <= w - 2 * t.margin, "{w}×{h}");
             assert!(r.x >= t.margin && r.right() <= w - t.margin && r.y >= t.margin && r.bottom() <= h - t.margin);
             match placement {
                 "below" => assert_eq!(r.y, selection.bottom() + clearance),
@@ -739,6 +981,8 @@ fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
                 SelectionAction::Note,
                 SelectionAction::Search,
                 SelectionAction::Dictionary,
+                SelectionAction::Wikipedia,
+                SelectionAction::Translate,
                 SelectionAction::Extend,
             ];
             for action in actions {
@@ -752,8 +996,32 @@ fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
             assert_eq!(bar.on_gesture(&Gesture::Down(outside)), None);
             assert_eq!(bar.on_gesture(&Gesture::Tap(outside)), Some(SelectionAction::Dismiss));
         }
+        // One character more: too long to look up, so Dict and Wiki ignore taps.
+        let mut bar = SelectionActions::new(&t, screen, upper, &format!("{longest}x"));
+        for (action, works) in [
+            (SelectionAction::Dictionary, false),
+            (SelectionAction::Wikipedia, false),
+            (SelectionAction::Translate, true),
+        ] {
+            let p = bar.cell(action).center();
+            bar.on_gesture(&Gesture::Down(p));
+            assert_eq!(bar.on_gesture(&Gesture::Tap(p)), works.then_some(action));
+        }
+        {
+            let mut canvas = Canvas::new(w as u32, h as u32);
+            canvas.fill(crate::ui::theme::PAPER);
+            let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
+            bar.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]));
+            save_capture(&canvas, w, h, "passage-bar-long");
+            let style = t.caption.weight(Weight::SemiBold);
+            for (label, action) in
+                [("Highlight", SelectionAction::Highlight), ("Translate", SelectionAction::Translate)]
+            {
+                assert!(text.width(label, style) <= (bar.cell(action).w - t.mm(1.0)) as f32, "{w}×{h}: {label} is cut");
+            }
+        }
         // Drawn: the primary cell is ink, with its label in paper.
-        let mut bar = SelectionActions::new(&t, screen, upper);
+        let mut bar = SelectionActions::new(&t, screen, upper, &longest);
         let mut canvas = Canvas::new(w as u32, h as u32);
         canvas.fill(crate::ui::theme::PAPER);
         let (mut text, mut icons, mut hints) = (TextRenderer::new(), IconRenderer::default(), vec![]);
@@ -766,9 +1034,7 @@ fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
         );
         let shadow = crate::geom::Point::new(bar.rect().center().x, bar.rect().bottom() + t.mm(0.5));
         assert_eq!(gray(&canvas, shadow), crate::ui::theme::SHADOW);
-        if (w, h) == (1272, 1696) {
-            save_capture(&canvas, w, h, "passage-bar");
-        }
+        save_capture(&canvas, w, h, "passage-bar");
         let note = bar.cell(SelectionAction::Note).center();
         bar.on_gesture(&Gesture::Down(note));
         let mut pressed = vec![];

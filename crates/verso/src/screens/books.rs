@@ -4712,7 +4712,7 @@ mod tests {
             assert!(books.reader.is_some());
             // Reader-owned overlays can push management through the outer
             // library screen, while retaining this reader and its query.
-            books.reader.as_mut().unwrap().lookup("Hello", cx);
+            books.reader.as_mut().unwrap().lookup("Hello", crate::screens::dictionary::Tab::Dictionary, cx);
             let manage = Point::new(screen.w / 2, screen.h - t.mm(20.0));
             books.on_gesture(Gesture::Down(manage), cx);
             assert!(matches!(books.on_gesture(Gesture::Tap(manage), cx), Action::Push(_)));

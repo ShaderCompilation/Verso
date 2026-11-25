@@ -18,6 +18,7 @@ import sys
 import sim
 
 OUT = sim.out_dir('devices')
+WIKIPEDIA = 'http://127.0.0.1:9/{lang}'
 
 
 def scenes(s):
@@ -34,6 +35,12 @@ def scenes(s):
     margin = s.mm(5)
     column = (s.w - 2 * margin) / 4
     hello_x = (max(s.mm(7), (s.w - s.mm(107)) / 2) if s.w > s.h else s.mm(7)) + s.mm(8)
+    # The lookup card: a side panel on the right in landscape, else the lower 80%.
+    panel = max(s.w * 52 // 100, s.mm(72)) if s.w > s.h else s.w
+    card_y = 0 if s.w > s.h else s.h - s.h * 4 // 5
+    tab = lambda i: s.tap(s.w - panel + margin + (i + 0.5) * (panel - 2 * margin) / 3, card_y + s.mm(15.2))
+    drag = lambda y: ['--hold-drag', f'{round(hello_x)},{s.mm(9.3)},{round(hello_x) + s.mm(30)},{y}']
+    lookup = [*book, *s.long_press(hello_x, s.mm(9.3))]
     menu_button = lambda i: s.tap(margin + (i + 0.5) * column, s.h - margin - s.mm(10) / 2)
     return {
         'home': ('all', {}, []),
@@ -50,7 +57,12 @@ def scenes(s):
         'drawer': ('one', {}, [*page2, *s.swipe(cx, 2, cx, s.h * 0.55)]),
         # "Hello" starts the first line; landscape pages centre a line of
         # about 107 mm.
-        'dictionary': ('one', {'footer': False}, [*book, *s.long_press(hello_x, s.mm(9.3))]),
+        'dictionary': ('one', {'footer': False}, lookup),
+        # Nothing answers at WIKIPEDIA, so this shows its error.
+        'wikipedia': ('one', {'footer': False}, [*lookup, *tab(1)]),
+        'translate': ('one', {'footer': False}, [*lookup, *tab(2)]),
+        'passage': ('one', {'footer': False}, [*book, *drag(s.mm(9.3))]),
+        'passage-long': ('one', {'footer': False}, [*book, *drag(s.mm(45))]),
         'settings': ('all', {}, [], 'settings'),
     }
 
@@ -78,7 +90,8 @@ def main():
                              {'orientation': orientation, **settings},
                              {'dictionary-folders.json': {'version': 1, 'folders': []}})
             shutil.copytree(dictionaries / 'dictionaries', data / 'dictionaries')
-            sim.run(out, steps, data, books[folder], device=device, screen=screen[0] if screen else None)
+            sim.run(out, steps, data, books[folder], device=device, screen=screen[0] if screen else None,
+                    env={'VERSO_WIKIPEDIA_URL': WIKIPEDIA})
             made.setdefault(name, []).append(out)
     if shutil.which('montage'):
         for name, files in made.items():

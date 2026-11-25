@@ -20,15 +20,23 @@ pub struct Parts {
     /// Text areas, each with the height its text needs.
     pub bodies: Vec<(Rect, i32)>,
     pub keyboard: Option<Rect>,
+    /// Buttons may be lower than a touch target, down to this: rows of a
+    /// dense card, whose gaps make up for it.
+    pub dense: Option<i32>,
 }
 
 impl Parts {
     pub fn new(name: &'static str, panel: Rect, buttons: impl IntoIterator<Item = Rect>) -> Self {
-        Self { name, panel, buttons: buttons.into_iter().collect(), bodies: Vec::new(), keyboard: None }
+        Self { name, panel, buttons: buttons.into_iter().collect(), bodies: Vec::new(), keyboard: None, dense: None }
     }
 
     pub fn body(mut self, rect: Rect, needed: i32) -> Self {
         self.bodies.push((rect, needed));
+        self
+    }
+
+    pub fn dense(mut self, height: i32) -> Self {
+        self.dense = Some(height);
         self
     }
 
@@ -56,8 +64,9 @@ pub fn check(t: &Theme, screen: Rect, p: &Parts) -> Vec<String> {
         if !p.panel.contains_rect(b) || !margins.contains_rect(b) {
             fail(format!("button {b:?} leaves the panel {:?} or the margins", p.panel));
         }
-        if b.h < t.target {
-            fail(format!("button {b:?} is lower than a touch target ({})", t.target));
+        let lowest = p.dense.unwrap_or(t.target);
+        if b.h < lowest {
+            fail(format!("button {b:?} is lower than a touch target ({lowest})"));
         }
         if b.bottom() > keyboard_y {
             fail(format!("button {b:?} runs under the keyboard at {keyboard_y}"));

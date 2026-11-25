@@ -76,6 +76,9 @@ pub struct Settings {
     /// The compact lookup card stays at the bottom (the right in landscape)
     /// rather than moving away from the word. Dictionaries → Lookup card.
     pub dictionary_at_bottom: bool,
+    /// The language Translate translates into, in every book; unset until
+    /// the reader chooses one, and nothing is translated before.
+    pub translate_language: Option<String>,
     /// First-time setup was finished or skipped; until then it shows over
     /// Home on every launch (`screens/setup.rs`).
     pub setup_done: bool,
@@ -103,6 +106,7 @@ impl Default for Settings {
             koreader_progress: true,
             dictionary_expanded: true,
             dictionary_at_bottom: true,
+            translate_language: None,
             setup_done: false,
         }
     }
@@ -179,6 +183,9 @@ pub struct BookState {
     pub hidden_from_continue: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dictionary_set: Option<String>,
+    /// The Wikipedia chosen for this book, instead of its language's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wikipedia_language: Option<String>,
     /// Characters per second read in this book, for the time-left items.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_speed: Option<crate::reader::speed::ReadingSpeed>,
@@ -218,6 +225,8 @@ pub struct Store {
     bulk_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The update check, shared by startup and Settings; made on first use.
     updates: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::update::Updates>>>,
+    /// Online lookups, made on first use; it holds no `Store`.
+    online: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::online::Service>>>,
     /// Set when the web app's Files tab wrote into Verso's live data
     /// (developer mode): Verso still holds the old values and would save
     /// over the edits, so they wait for Restart to apply.
@@ -267,6 +276,7 @@ impl Store {
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),
             updates: Default::default(),
+            online: Default::default(),
             live_data_edited: Default::default(),
             color: crate::gfx::ColorMode::Gray8,
             page_buttons: false,
@@ -555,6 +565,14 @@ impl Store {
             })
             .clone()
     }
+    pub fn online(&self) -> &std::sync::Arc<crate::online::Service> {
+        self.online.get_or_init(crate::online::Service::new)
+    }
+    /// Looks things up through `service` instead of the internet.
+    #[cfg(test)]
+    pub fn with_online(self, service: std::sync::Arc<crate::online::Service>) -> Self {
+        Self { online: std::sync::Arc::new(std::sync::OnceLock::from(service)), ..self }
+    }
     /// Notes that the web app wrote into Verso's live data (`*.json`,
     /// `books`, `annotations`): see `live_data_edited`.
     pub fn note_live_data_edit(&self) {
@@ -614,6 +632,7 @@ impl Store {
             dictionary_folder_revision: Default::default(),
             library_worker: Default::default(),
             updates: Default::default(),
+            online: Default::default(),
             live_data_edited: Default::default(),
             color: crate::gfx::ColorMode::Gray8,
             page_buttons: false,

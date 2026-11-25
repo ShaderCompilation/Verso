@@ -23,6 +23,7 @@ fn every_sheet_fits_every_screen() {
         samples.extend(super::text_sheet::fit_samples(&t, screen));
         samples.extend(super::reader_menu::fit_samples(&t, screen));
         samples.extend(super::reader::fit_samples(&t, screen));
+        samples.extend(super::dictionary::fit_samples(&t, screen));
         for parts in &samples {
             errors.extend(check(&t, screen, parts));
         }

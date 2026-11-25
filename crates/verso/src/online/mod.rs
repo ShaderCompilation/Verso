@@ -10,7 +10,7 @@ pub mod translate;
 pub mod wikipedia;
 mod worker;
 
-pub use worker::{Answer, Reply, Request, Service, Worker};
+pub use worker::{Answer, Request, Service, Worker};
 
 use crate::net::FetchError;
 
@@ -97,6 +97,7 @@ impl Error {
     }
 
     /// Whether the same request may work later.
+    #[allow(dead_code)] // Retry
     pub fn retryable(&self) -> bool {
         match self {
             Error::WifiOff | Error::Connecting | Error::Refused(_) | Error::Unreadable => true,

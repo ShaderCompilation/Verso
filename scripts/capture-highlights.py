@@ -15,7 +15,7 @@ def main():
     books = sim.books(OUT / 'books', 'selection.epub')
     opening = ['--tap', '636,1560', '--tap', '165,500']  # Home → Library → book
     passage = [*opening, '--hold-drag', '200,110,500,190']
-    extend = [*passage, '--tap', '1094,340']  # the passage bar's Extend
+    extend = [*passage, '--tap', '1125,340']  # the passage bar's Extend
     moved = [*extend, '--tap', '490,1600', '--tap', '500,200']
     save = [*moved, '--tap', '800,1600']
     scenes = {'passage': passage, 'extension': extend, 'cross-page': moved,
@@ -93,7 +93,7 @@ def notes(passage, resume):
             sim.state(state, books)
         sim.run(OUT / (name + '.png'), steps, state, books, quiet=False)
 
-    add_note = [*passage, '--tap', '406,340']  # the passage bar's Note
+    add_note = [*passage, '--tap', '308,340']  # the passage bar's Note
     first = 'A first thought on this passage.'
     run('note-sheet', passage, OUT / 'scratch-state', fresh=True)
     run('note-editor', [*add_note, '--text', first], OUT / 'scratch-state', fresh=True)

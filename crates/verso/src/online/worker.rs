@@ -24,6 +24,7 @@ pub enum Request {
     /// The best article for a query, or the hits to choose from.
     Wikipedia { edition: Edition, query: String },
     /// The article with a hit's title.
+    #[allow(dead_code)] // Other matches
     Article { edition: Edition, title: String },
     /// `source`: None to detect it.
     Translate { text: String, source: Option<String>, target: String },
@@ -279,12 +280,12 @@ impl Drop for Worker {
 #[cfg(test)]
 impl Service {
     /// A service that talks to `base` (`/{lang}/api` and `/translate`).
-    pub(super) fn for_test(base: &str, total: Duration, link: Box<ReadLink>) -> Arc<Self> {
+    pub(crate) fn for_test(base: &str, total: Duration, link: Box<ReadLink>) -> Arc<Self> {
         let endpoints = Endpoints { wikipedia: format!("{base}/{{lang}}/api"), translate: format!("{base}/translate") };
         Self::with(endpoints, Duration::from_millis(500), total, link)
     }
 
-    pub(super) fn threads(&self) -> usize {
+    pub(crate) fn threads(&self) -> usize {
         lock(&self.queue).threads
     }
 }

@@ -1,4 +1,12 @@
-//! Lookup is an overlay over the unchanged cached book page.
+//! Lookup is an overlay over the unchanged cached book page: a card with
+//! three tabs. This file holds the card and its Dictionary tab; `tabs.rs`
+//! holds the online ones, `passage_bar.rs` the bar beside a passage.
+mod passage_bar;
+mod tabs;
+
+pub use passage_bar::{SelectionAction, SelectionActions};
+pub use tabs::{Languages, Tab, Tabs};
+
 use crate::{
     dictionary::{
         Block, BlockKind, Dictionary, Source, Style,
@@ -10,16 +18,18 @@ use crate::{
         HAlign, Icon, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, StyledWordHit,
         TextRenderer, TextStyle, Weight,
     },
+    online::QUERY_LIMIT,
     platform::{RefreshMode, TextInput},
     screens::EventCx,
     ui::{
         gesture::Gesture,
-        theme::{INK, INK2, LINE, PAPER, SHADOW, Theme},
+        theme::{INK, INK2, LINE, PAPER, Theme},
         widget::{DrawCx, Press, PressEvent},
         widgets::{Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
     },
 };
 use std::rc::Rc;
+use tabs::{Replies, too_long};
 
 const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
                        then open Dictionaries and tap Rescan.";
@@ -154,13 +164,16 @@ struct Snapshot {
     sets: Vec<Set>,
 }
 
-/// An earlier lookup in a chain: Back returns to its word, dictionary and
-/// page.
+/// An earlier lookup in a chain: Back returns to its word, tab, dictionary
+/// and page.
 struct Visit {
     query: String,
+    tab: Tab,
+    /// The page each tab showed.
+    pages: [usize; 3],
     selected: Option<String>,
-    page: usize,
     snapshot: Option<Box<Snapshot>>,
+    online: Replies,
 }
 
 /// A touch on the definition, which looks up the word under it on release.
@@ -196,6 +209,8 @@ pub struct Lookup {
     word: Option<Rect>,
     /// Portrait only: the compact card was expanded to 80% height.
     expanded: bool,
+    /// Wikipedia, which opens at 80%, was collapsed. Until the tab changes.
+    folded: bool,
     /// The card already grew once by itself for content that needed it.
     grew: bool,
     sheet: Sheet,
@@ -210,15 +225,21 @@ pub struct Lookup {
     query: String,
     pending: bool,
     complete: bool,
+    /// The dictionaries were asked for `query`: only once their tab shows.
+    asked: bool,
     preparing: Option<String>,
     matches: Vec<Match>,
     sets: Vec<Set>,
     revision: u64,
+    tabs: Tabs,
+    /// The page each tab showed when it was last left.
+    tab_pages: [usize; 3],
     picker: Option<Picker>,
     /// Earlier lookups of a chain, newest last. Depth 0 (empty) is the
     /// word from the book.
     history: Vec<Visit>,
-    /// The page to show once the definition is laid out, after Back.
+    /// The page to show once the content is laid out, after Back or another
+    /// tab.
     restore_page: Option<usize>,
     /// The worker's session (which `open` reads) is this lookup's query.
     /// Not after Back restored a cached reply: switching dictionaries then
@@ -278,7 +299,8 @@ impl Lookup {
     /// opens on the half of the screen away from it (the bottom half when
     /// unknown, which is how the at-bottom setting keeps it there), so the
     /// word, its sentence and the selection handles stay visible; in
-    /// landscape it stands at the side away from the word.
+    /// landscape it stands at the side away from the word. A query too long
+    /// to look up opens on Translate.
     pub fn new(
         query: &str,
         worker: Rc<Worker>,
@@ -286,10 +308,16 @@ impl Lookup {
         screen: Rect,
         word: Option<Rect>,
         selection: crate::dictionary::sets::Selection,
+        mut tabs: Tabs,
     ) -> Self {
         let mut field = TextField::new("Word");
         field.edit(&TextInput::Insert(query.into()));
-        let request = worker.lookup_in(query.into(), false, selection.clone());
+        field.limit = Some(QUERY_LIMIT);
+        if too_long(query) {
+            tabs.show(Tab::Translate);
+        }
+        let asked = tabs.current() == Tab::Dictionary;
+        let request = if asked { worker.lookup_in(query.into(), false, selection.clone()) } else { 0 };
         let mut keyboard = Keyboard::default();
         keyboard.set_submit("Look up");
         keyboard.place(screen, t);
@@ -299,6 +327,7 @@ impl Lookup {
             screen,
             word,
             expanded: false,
+            folded: false,
             grew: false,
             sheet: Sheet::panel(Rect::default(), screen),
             worker,
@@ -309,10 +338,13 @@ impl Lookup {
             query: query.into(),
             pending: true,
             complete: false,
+            asked,
             preparing: None,
             matches: vec![],
             sets: vec![],
             revision,
+            tabs,
+            tab_pages: [0; 3],
             picker: None,
             history: Vec::new(),
             restore_page: None,
@@ -351,6 +383,7 @@ impl Lookup {
             body_paged: Rect::default(),
             body: Rect::default(),
         };
+        lookup.tabs.ask(&lookup.query);
         lookup.place(t);
         lookup
     }
@@ -375,6 +408,15 @@ impl Lookup {
     pub(crate) fn depth(&self) -> usize {
         self.history.len()
     }
+    #[cfg(test)]
+    pub(crate) fn tab(&self) -> Tab {
+        self.tabs.current()
+    }
+    /// The middle of a tab.
+    #[cfg(test)]
+    pub(crate) fn tab_point(&self, tab: Tab) -> Point {
+        self.tabs.rect().columns(3, 0)[tab.index()].center()
+    }
     /// The middle of ⤢ (⤡ while expanded).
     #[cfg(test)]
     pub(crate) fn expand_point(&self) -> crate::geom::Point {
@@ -388,9 +430,18 @@ impl Lookup {
     fn landscape(&self) -> bool {
         self.screen.w > self.screen.h
     }
-    /// Portrait: compact (~46%) at the bottom or top, away from the word, or
-    /// 80% at the bottom when expanded and while the picker or the keyboard
-    /// needs the room. Landscape: a full-height side panel.
+    fn on_dictionary(&self) -> bool {
+        self.tabs.current() == Tab::Dictionary
+    }
+    /// Portrait: at 80% height, as ⤢ left the card, or because the tab, the
+    /// picker or the keyboard needs the room.
+    fn tall(&self) -> bool {
+        let tab = if self.tabs.current() == Tab::Wikipedia { !self.folded } else { self.expanded };
+        tab || self.picker.is_some() || self.keyboard.visible
+    }
+    /// Portrait: compact (~54%) or 80%, at the edge away from the word in
+    /// every state, so the tabs stay under the finger. Landscape: a
+    /// full-height side panel.
     fn frame(&self, t: &Theme) -> Rect {
         let s = self.screen;
         if self.landscape() {
@@ -398,15 +449,16 @@ impl Lookup {
             let width = (s.w * 52 / 100).max(t.mm(72.0)).min(s.w);
             return if right { s.split_right(width).0 } else { s.split_left(width).0 };
         }
-        if self.expanded || self.picker.is_some() || self.keyboard.visible {
-            return s.split_bottom(s.h * 4 / 5).0;
-        }
-        let height = (s.h * 46 / 100).max(t.mm(64.0)).min(s.h * 52 / 100);
-        if self.word.is_none_or(|w| w.center().y < s.center().y) {
-            s.split_bottom(height).0
+        let top = self.word.is_some_and(|w| w.center().y >= s.center().y);
+        let height = if !self.tall() {
+            (s.h * 54 / 100).max(t.mm(72.0)).min(s.h * 60 / 100)
+        } else if top && self.keyboard.visible {
+            // At the top, the card ends where the keyboard starts.
+            self.keyboard.rect().y - s.y
         } else {
-            s.split_top(height).0
-        }
+            s.h * 4 / 5
+        };
+        if top { s.split_top(height).0 } else { s.split_bottom(height).0 }
     }
     fn definition_shown(&self) -> bool {
         !self.pending && matches!(self.state, State::Definition { .. })
@@ -414,7 +466,11 @@ impl Lookup {
     /// The query field and Look up: while typing, and on a miss so editing
     /// the query is one tap away.
     fn edit_row(&self) -> bool {
-        self.keyboard.visible || !self.pending && self.state == State::NoResult
+        self.keyboard.visible || self.on_dictionary() && !self.pending && self.state == State::NoResult
+    }
+    /// Manage dictionaries, below anything but a definition.
+    fn manage_shown(&self) -> bool {
+        self.on_dictionary() && !self.definition_shown()
     }
     /// The book-selection actions, only for the book's own word.
     fn actions_shown(&self) -> bool {
@@ -437,7 +493,7 @@ impl Lookup {
         let (side, cy) = (t.target, header.center().y);
         self.close.place(Rect::new(c.right() - side + t.mm(2.0), cy - side / 2, side, side));
         let expandable = !landscape && self.picker.is_none() && !typing;
-        self.expand.icon = if self.expanded { Icon::Collapse } else { Icon::Expand };
+        self.expand.icon = if self.tall() { Icon::Collapse } else { Icon::Expand };
         self.expand.place(if expandable {
             Rect::new(self.close.rect().x - side, cy - side / 2, side, side)
         } else {
@@ -456,9 +512,18 @@ impl Lookup {
         }
         self.heading = Rect::new(start, header.y, (end - gap - start).max(0), header.h);
         let mut y = header.bottom();
+        // Dictionary · Wikipedia · Translate, over pickers too.
+        if typing {
+            self.tabs.place(Rect::default(), &self.query);
+        } else {
+            let row = Rect::new(c.x, y + t.mm(1.0), c.w, t.mm(7.8));
+            self.tabs.place(row, &self.query);
+            y = row.bottom();
+        }
+        let header_bottom = y;
         // Switcher: ‹ · name · i / N ▾ · ›
-        if !typing && self.picker.is_none() {
-            let row = Rect::new(c.x, y + t.mm(0.4), c.w, t.mm(7.8));
+        if !typing && self.picker.is_none() && self.on_dictionary() {
+            let row = Rect::new(c.x, y + t.mm(1.2), c.w, t.mm(7.8));
             let arrow = t.mm(if landscape { 7.1 } else { 8.1 });
             self.previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
             self.next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
@@ -496,10 +561,10 @@ impl Lookup {
             bottom = line - t.mm(1.4);
         }
         self.manage.place(Rect::new(c.x, bottom - t.target, c.w, t.target), t);
-        let (lowest, pager_bottom) = if self.definition_shown() {
-            (bottom, bottom)
-        } else {
+        let (lowest, pager_bottom) = if self.manage_shown() {
             (self.manage.rect().y - t.mm(2.0), self.manage.rect().y - t.mm(1.0))
+        } else {
+            (bottom, bottom)
         };
         let pager = Rect::new(c.x, pager_bottom - t.mm(7.0), c.w, t.mm(7.0));
         self.pager.place(pager, t);
@@ -507,14 +572,14 @@ impl Lookup {
         self.body_paged = Rect::new(c.x, top, c.w, (pager.y - t.mm(1.0) - top).max(1));
         self.body = if self.paged { self.body_paged } else { self.body_full };
         if let Some(p) = &mut self.picker {
-            let area = Rect::new(c.x, header.bottom() + gap, c.w, frame.bottom() - t.mm(2.4) - header.bottom() - gap);
+            let area = Rect::new(c.x, header_bottom + gap, c.w, frame.bottom() - t.mm(2.4) - header_bottom - gap);
             let gap = t.mm(2.0);
             let footer = Rect::new(area.x, area.bottom() - t.target, area.w, t.target);
             let back_w = t.mm(17.0);
             p.back.place(Rect::new(area.x, footer.y, back_w, footer.h), t);
             p.manage.place(Rect::new(area.x + back_w + gap, footer.y, area.w - back_w - gap, footer.h), t);
             p.pager.place(Rect::new(area.x, footer.y - t.target - gap, area.w, t.target), t);
-            p.status = Rect::new(area.x, p.pager.rect().y - t.mm(8.0), area.w, t.mm(8.0));
+            p.status = Rect::new(area.x, p.pager.rect().y - t.mm(6.5), area.w, t.mm(6.5));
             p.set.place(Rect::new(area.x, area.y, area.w, t.target), t);
             let list_y = area.y + t.target + gap;
             p.list.place(Rect::new(area.x, list_y, area.w, p.status.y - list_y), t.row2, 0);
@@ -530,7 +595,8 @@ impl Lookup {
         }
     }
     pub fn busy(&self) -> bool {
-        !self.complete || self.pending || (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
+        let waiting = if self.on_dictionary() { !self.complete || self.pending } else { self.tabs.waiting() };
+        waiting || (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
     }
     pub fn paginating(&self) -> bool {
         self.pages.as_ref().is_some_and(|p| !p.is_complete())
@@ -543,7 +609,7 @@ impl Lookup {
         let step = text.paginate_styled_step(pages);
         self.layout_timing.1 += started.elapsed();
         if let Err(e) = step {
-            self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
+            self.layout_error = Some(format!("Couldn't lay out this text: {e}"));
             self.pages = None;
             self.pager.set(0, 1);
             self.pager.incomplete = false;
@@ -566,11 +632,63 @@ impl Lookup {
     /// which Back returns from.
     fn submit(&mut self, rescan: bool) {
         let query = self.field.value().to_owned();
-        if !same_query(&query, &self.query) {
+        let changed = !same_query(&query, &self.query);
+        if changed {
             self.push_history();
         }
         self.query = query;
-        self.repeat(rescan);
+        if self.on_dictionary() {
+            self.repeat(rescan);
+            return;
+        }
+        if changed {
+            self.forget_dictionary();
+            self.reset_layout();
+        }
+        self.stop_typing();
+        self.tabs.ask(&self.query);
+    }
+    fn stop_typing(&mut self) {
+        self.field.focused = false;
+        self.keyboard.visible = false;
+    }
+    /// The content changed: it's laid out again, from its first page.
+    fn reset_layout(&mut self) {
+        self.pages = None;
+        self.layout_error = None;
+        self.pager.set(0, 1);
+        self.pager.incomplete = true;
+    }
+    /// The dictionaries haven't been asked for this word; they are once
+    /// their tab shows.
+    fn forget_dictionary(&mut self) {
+        if self.asked && (self.pending || !self.complete) {
+            self.worker.cancel();
+        }
+        self.asked = false;
+        self.pending = true;
+        self.complete = false;
+        self.matches.clear();
+        self.selected = None;
+        self.preparing = None;
+    }
+    fn show_tab(&mut self, tab: Tab) {
+        let left = self.tabs.current();
+        if tab == left {
+            return;
+        }
+        // A tab left before it was laid out again still has its page to show.
+        self.tab_pages[left.index()] = self.restore_page.unwrap_or(self.pager.page);
+        self.tabs.show(tab);
+        self.picker = None;
+        self.word_press = None;
+        self.folded = false;
+        self.reset_layout();
+        self.restore_page = Some(self.tab_pages[tab.index()]);
+        if tab == Tab::Dictionary && !self.asked {
+            self.repeat(false);
+        }
+        self.tabs.ask(&self.query);
     }
     /// Looks up a word tapped in the definition, unless it is the word shown.
     fn look_up_word(&mut self, query: String) {
@@ -586,7 +704,7 @@ impl Lookup {
     /// Remembers the current lookup before the chain moves on, with its
     /// reply when finished. Only the newest `CACHED` visits keep theirs.
     fn push_history(&mut self) {
-        let snapshot = (self.complete && !self.pending).then(|| {
+        let snapshot = (self.asked && self.complete && !self.pending).then(|| {
             Box::new(Snapshot {
                 revision: self.revision,
                 matches: self.matches.clone(),
@@ -599,22 +717,30 @@ impl Lookup {
                 sets: self.sets.clone(),
             })
         });
+        let tab = self.tabs.current();
+        let mut pages = std::mem::take(&mut self.tab_pages);
+        pages[tab.index()] = self.restore_page.take().unwrap_or(self.pager.page);
         self.history.push(Visit {
             query: self.query.clone(),
+            tab,
+            pages,
             selected: self.selected.clone(),
-            page: self.pager.page,
             snapshot,
+            online: self.tabs.take_replies(),
         });
+        self.folded = false;
         if self.history.len() > HISTORY {
             self.history.remove(0);
         }
         let mut cached = self.history.iter().filter(|v| v.snapshot.is_some()).count();
+        let mut online = self.history.iter().filter(|v| !v.online.is_empty()).count();
         for visit in &mut self.history {
-            if cached <= CACHED {
-                break;
-            }
-            if visit.snapshot.take().is_some() {
+            if cached > CACHED && visit.snapshot.take().is_some() {
                 cached -= 1;
+            }
+            if online > CACHED && !visit.online.is_empty() {
+                visit.online = Replies::default();
+                online -= 1;
             }
         }
     }
@@ -623,16 +749,19 @@ impl Lookup {
     /// for the same dictionary and page.
     fn go_back(&mut self) {
         let Some(visit) = self.history.pop() else { return };
-        if self.pending || !self.complete {
-            // A reply still coming is for the word being left.
-            self.worker.cancel();
-        }
+        // A reply still coming is for the word being left.
+        self.forget_dictionary();
+        self.tabs.restore(visit.tab, visit.online);
+        self.folded = false;
         self.word_press = None;
         self.picker = None;
         self.field.edit(&TextInput::Clear);
         self.field.edit(&TextInput::Insert(visit.query.clone()));
         self.query = visit.query;
-        self.restore_page = Some(visit.page);
+        self.tab_pages = visit.pages;
+        self.restore_page = Some(visit.pages[visit.tab.index()]);
+        self.reset_layout();
+        self.stop_typing();
         match visit.snapshot.filter(|s| s.revision == self.worker.revision()) {
             Some(s) => {
                 let s = *s;
@@ -646,18 +775,14 @@ impl Lookup {
                 self.warnings = s.warnings;
                 self.sets = s.sets;
                 self.selected = visit.selected;
+                self.asked = true;
                 self.pending = false;
                 self.complete = true;
-                self.preparing = None;
                 self.first_frame = false;
                 self.session_live = false;
-                self.pages = None;
-                self.layout_error = None;
-                self.pager.set(0, 1);
-                self.pager.incomplete = true;
-                self.field.focused = false;
-                self.keyboard.visible = false;
             }
+            // Asked again only if it shows.
+            None if visit.tab != Tab::Dictionary => {}
             None => {
                 self.repeat(false);
                 if let Some(dictionary) = visit.selected {
@@ -667,11 +792,13 @@ impl Lookup {
                 }
             }
         }
+        self.tabs.ask(&self.query);
     }
     /// Runs the last submitted query again, leaving any unsubmitted field edit.
     fn repeat(&mut self, rescan: bool) {
         self.request = self.worker.lookup_in(self.query.clone(), rescan, self.selection.clone());
         self.session_live = true;
+        self.asked = true;
         self.pending = true;
         self.complete = false;
         self.first_frame = true;
@@ -679,21 +806,22 @@ impl Lookup {
         self.selected = None;
         self.preparing = None;
         self.revision = self.worker.revision();
-        self.pages = None;
-        self.layout_error = None;
-        self.pager.set(0, 1);
-        self.pager.incomplete = true;
-        self.field.focused = false;
-        self.keyboard.visible = false;
+        if self.on_dictionary() {
+            self.reset_layout();
+            self.stop_typing();
+        }
     }
     /// Consumes the worker's reply for the current request. `drawing` lets the
     /// first frame of a request wait briefly for it.
     fn take_reply(&mut self, t: &Theme, drawing: bool) -> bool {
+        if !self.asked {
+            return false;
+        }
         if self.revision != self.worker.revision() || self.returning && !self.complete {
             self.repeat(false);
         }
         self.returning = false;
-        let first_frame = drawing && std::mem::take(&mut self.first_frame);
+        let first_frame = drawing && self.on_dictionary() && std::mem::take(&mut self.first_frame);
         let reply = if first_frame && self.pending && self.selected.is_none() && self.pages.is_none() {
             self.worker.receive_wait(FIRST_DRAW_WAIT)
         } else {
@@ -727,11 +855,8 @@ impl Lookup {
                 self.pending = !self.complete && !matches!(&state, State::Definition { .. });
                 self.selected = reply.selected;
                 self.state = state;
-                if changed {
-                    self.pages = None;
-                    self.layout_error = None;
-                    self.pager.set(0, 1);
-                    self.pager.incomplete = true;
+                if changed && self.on_dictionary() {
+                    self.reset_layout();
                 }
             }
             if let Some(error) = reply.save_error {
@@ -745,6 +870,10 @@ impl Lookup {
     }
     pub fn receive(&mut self, cx: &mut EventCx) {
         if self.take_reply(cx.theme, false) {
+            cx.redraw();
+        }
+        if self.tabs.receive() {
+            self.reset_layout();
             cx.redraw();
         }
         if let Some(error) = self.pending_save_error.take() {
@@ -769,10 +898,7 @@ impl Lookup {
         self.selected = Some(dictionary);
         self.restore_page = None;
         self.pending = true;
-        self.pages = None;
-        self.layout_error = None;
-        self.pager.set(0, 1);
-        self.pager.incomplete = true;
+        self.reset_layout();
     }
     fn cycle(&mut self, delta: isize) {
         let current = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref()).unwrap_or(0);
@@ -861,10 +987,7 @@ impl Lookup {
         }
         match input {
             TextInput::Submit => self.submit(false),
-            TextInput::Dismiss => {
-                self.field.focused = false;
-                self.keyboard.visible = false;
-            }
+            TextInput::Dismiss => self.stop_typing(),
             _ => {
                 self.field.edit(input);
             }
@@ -929,8 +1052,17 @@ impl Lookup {
             return None;
         }
         if self.expand.on_gesture(g) {
+            if self.tabs.current() == Tab::Wikipedia {
+                // Only for now: its size isn't the card's.
+                self.folded = !self.folded;
+                return None;
+            }
             self.expanded = !self.expanded;
             return Some(LookupEvent::Resized(self.expanded));
+        }
+        if let Some(tab) = self.tabs.on_gesture(g) {
+            self.show_tab(tab);
+            return None;
         }
         if let Some(p) = &mut self.picker {
             if p.manage.on_gesture(g) {
@@ -973,15 +1105,15 @@ impl Lookup {
         let tapped = |press: &mut Press, area: Rect| {
             matches!(press.on_gesture(g, area), Some(PressEvent::Tap | PressEvent::LongPressEnd))
         };
-        if tapped(&mut self.heading_press, self.heading) {
+        if !too_long(&self.query) && tapped(&mut self.heading_press, self.heading) {
             self.start_editing();
             return None;
         }
-        if tapped(&mut self.switcher_press, self.switcher) {
+        if self.on_dictionary() && tapped(&mut self.switcher_press, self.switcher) {
             self.open_picker(t);
             return None;
         }
-        if !self.definition_shown() && self.manage.on_gesture(g) {
+        if self.manage_shown() && self.manage.on_gesture(g) {
             return Some(self.manage_event());
         }
         if self.edit_row() {
@@ -994,11 +1126,13 @@ impl Lookup {
                 return None;
             }
         }
-        if self.previous.on_gesture(g) {
-            self.cycle(-1);
-        }
-        if self.next.on_gesture(g) {
-            self.cycle(1);
+        if self.on_dictionary() {
+            if self.previous.on_gesture(g) {
+                self.cycle(-1);
+            }
+            if self.next.on_gesture(g) {
+                self.cycle(1);
+            }
         }
         let [highlight, note, search, extend] = &mut self.actions;
         if highlight.on_gesture(g) {
@@ -1013,7 +1147,9 @@ impl Lookup {
         if extend.on_gesture(g) {
             return Some(LookupEvent::Extend);
         }
-        self.word_gesture(g, t);
+        if self.on_dictionary() {
+            self.word_gesture(g, t);
+        }
         if self.paged {
             self.pager.on_gesture(g);
         }
@@ -1083,13 +1219,22 @@ impl Lookup {
         let t = cx.theme;
         let r = self.heading;
         if self.keyboard.visible {
-            cx.line("Look up word", t.heading, r, HAlign::Left);
+            let title = match self.tabs.current() {
+                Tab::Dictionary => "Look up word",
+                Tab::Wikipedia => "Search Wikipedia",
+                Tab::Translate => "Translate text",
+            };
+            cx.line(title, t.heading, r, HAlign::Left);
         } else {
             let label = if self.query.trim().is_empty() { "Look up a word" } else { self.query.as_str() };
             let style = t.dictionary_headword;
             let gap = t.mm(1.5);
-            // Beside the query: ✎ at the book's word, "← previous" deeper.
-            let crumb = self.history.last().map(|v| format!("← {}", v.query));
+            // Beside the query: ✎ at the book's word, "← previous" deeper, or
+            // the length of a passage too long to edit.
+            let crumb = match self.history.last() {
+                Some(v) => Some(format!("← {}", v.query)),
+                None => too_long(&self.query).then(|| format!("{} words", self.query.split_whitespace().count())),
+            };
             let crumb_style = t.small;
             let after = match &crumb {
                 Some(crumb) => (cx.text.width(crumb, crumb_style).ceil() as i32 + 2).min(r.w / 3),
@@ -1172,10 +1317,15 @@ impl Lookup {
         }
         let started = std::time::Instant::now();
         // After Back, lay out as far as the page that was showing.
-        let target = if self.pending { 0 } else { self.restore_page.take().unwrap_or(0) };
+        let waiting = if self.on_dictionary() { self.pending } else { self.tabs.waiting() };
+        let target = if waiting { 0 } else { self.restore_page.take().unwrap_or(0) };
         let (mut result, mut bytes);
         loop {
-            let blocks = content(&self.state, self.pending, &self.warnings, t);
+            let blocks = if self.on_dictionary() {
+                content(&self.state, self.pending, &self.warnings, t)
+            } else {
+                self.tabs.content(t)
+            };
             bytes =
                 blocks.iter().map(|b| if let StyledBlock::Paragraph(p) = b { p.text.len() } else { 0 }).sum::<usize>();
             let (full, paged_h) = (self.body_full, self.body_paged.h);
@@ -1193,9 +1343,10 @@ impl Lookup {
             });
             // Long status text in a compact card with Manage and the query
             // field: grow once to the expanded card rather than squeezing it.
-            if matches!(&result, Ok((_, true))) && !roomy && !self.landscape() && !self.expanded && !self.grew {
+            if matches!(&result, Ok((_, true))) && !roomy && !self.landscape() && !self.tall() && !self.grew {
                 self.grew = true;
                 self.expanded = true;
+                self.folded = false;
                 self.place(t);
                 continue;
             }
@@ -1214,7 +1365,7 @@ impl Lookup {
                 self.pages = Some(pages);
             }
             Err(e) => {
-                self.layout_error = Some(format!("Couldn't lay out this definition: {e}"));
+                self.layout_error = Some(format!("Couldn't lay out this text: {e}"));
                 self.paged = false;
                 self.pager.set(0, 1);
                 self.pager.incomplete = false;
@@ -1245,6 +1396,9 @@ impl Lookup {
         let status = self.status();
         log::debug!("dictionary status draw: {status}, set {}", self.active_set);
         self.draw_header(cx);
+        if !self.keyboard.visible {
+            self.tabs.draw(cx);
+        }
         let rule = |cx: &mut DrawCx, y: i32, r: Rect| cx.fill(Rect::new(r.x, y, r.w, t.hairline), LINE);
         if let Some(p) = &mut self.picker {
             p.set.draw(cx);
@@ -1255,7 +1409,7 @@ impl Lookup {
             cx.line(&status, t.small.gray(INK2), p.status, HAlign::Left);
             return;
         }
-        if !self.keyboard.visible {
+        if !self.keyboard.visible && self.on_dictionary() {
             self.draw_switcher(cx, &status);
         }
         if self.edit_row() {
@@ -1269,7 +1423,7 @@ impl Lookup {
                 b.draw(cx);
             }
         }
-        if !self.definition_shown() {
+        if self.manage_shown() {
             self.manage.draw(cx);
         }
         self.paginate(cx);
@@ -1299,148 +1453,52 @@ impl Lookup {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelectionAction {
-    Dismiss,
-    Dictionary,
-    Search,
-    Highlight,
-    Note,
-    Extend,
-}
-
-/// The bar's cells, left to right; the first is the primary action.
-const SELECTION_ACTIONS: [(Icon, &str, SelectionAction); 5] = [
-    (Icon::Highlighter, "Highlight", SelectionAction::Highlight),
-    (Icon::Pencil, "Note", SelectionAction::Note),
-    (Icon::Search, "Search", SelectionAction::Search),
-    (Icon::BookOpen, "Dict", SelectionAction::Dictionary),
-    (Icon::Extend, "Extend", SelectionAction::Extend),
-];
-
-/// The actions for a selected passage: a floating card of five cells beside
-/// the selection, in the pop-up menu's style, leaving the page open.
-pub struct SelectionActions {
-    rect: Rect,
-    cells: [Rect; 5],
-    pressed: Option<usize>,
-    press: Press,
-    /// A touch started outside the card.
-    outside: bool,
-}
-impl SelectionActions {
-    /// Below `selection` (the passage's bounding box) if there's room,
-    /// otherwise above it, leaving room for the handles; a passage that
-    /// fills the page gets the bar at the bottom margin.
-    pub fn new(t: &Theme, screen: Rect, selection: Rect) -> Self {
-        let m = t.margin;
-        let w = (screen.w - 2 * m).min(t.mm(105.0));
-        let h = t.mm(11.5);
-        let clearance = t.mm(4.5);
-        let x = (selection.center().x - w / 2).clamp(screen.x + m, screen.right() - m - w);
-        let (below, above) = (selection.bottom() + clearance, selection.y - clearance - h);
-        let y = if below + h <= screen.bottom() - m {
-            below
-        } else if above >= screen.y + m {
-            above
-        } else {
-            screen.bottom() - m - h
-        };
-        let rect = Rect::new(x, y, w, h);
-        let inner = rect.inset(t.border);
-        let cell_w = inner.w / 5;
-        let cells = std::array::from_fn(|i| {
-            let x = inner.x + i as i32 * cell_w;
-            // The last cell takes the rounding remainder.
-            let w = if i == 4 { inner.right() - x } else { cell_w };
-            Rect::new(x, inner.y, w, inner.h)
-        });
-        Self { rect, cells, pressed: None, press: Press::default(), outside: false }
-    }
-    #[cfg(test)]
-    pub(crate) fn rect(&self) -> Rect {
-        self.rect
-    }
-    /// The area the bar covers, including its shadow.
-    pub fn bounds(&self, t: &Theme) -> Rect {
-        self.rect.union(&self.rect.moved(t.mm(1.0), t.mm(1.0)))
-    }
-    /// Where each action is, for tests.
-    #[cfg(test)]
-    pub(crate) fn cell(&self, action: SelectionAction) -> Rect {
-        let i = SELECTION_ACTIONS.iter().position(|(_, _, a)| *a == action).expect("an action of the bar");
-        self.cells[i]
-    }
-    fn radius(t: &Theme) -> f32 {
-        t.mm(2.2) as f32
-    }
-    pub fn visual_state(&self) -> Option<usize> {
-        self.pressed.filter(|_| self.press.is_down())
-    }
-    pub fn on_gesture(&mut self, g: &Gesture) -> Option<SelectionAction> {
-        if let Gesture::Down(p) = *g {
-            self.outside = !self.rect.contains(p);
-            self.pressed = self.cells.iter().position(|r| r.contains(p));
-        }
-        if self.outside {
-            // Any touch that starts outside dismisses the selection when it ends.
-            return g.ends_touch().then_some(SelectionAction::Dismiss);
-        }
-        let i = self.pressed?;
-        let event = match self.press.on_gesture(g, self.cells[i]) {
-            Some(PressEvent::Tap | PressEvent::LongPressEnd) => Some(SELECTION_ACTIONS[i].2),
-            _ => None,
-        };
-        if !self.press.is_down() {
-            self.pressed = None;
-        }
-        event
-    }
-    /// Fills a cell, rounding only the corners that lie in the card's.
-    fn fill_cell(cx: &mut DrawCx, i: usize, r: Rect, gray: u8) {
-        let t = cx.theme;
-        if i != 0 && i != 4 {
-            cx.fill(r, gray);
-            return;
-        }
-        let radius = Self::radius(t) - t.border as f32;
-        cx.canvas.fill_rounded_rect(r, radius, gray);
-        let c = (radius.ceil() as i32).min(r.w / 2).min(r.h / 2);
-        let x = if i == 0 { r.right() - c } else { r.x };
-        cx.fill(Rect::new(x, r.y, c, c), gray);
-        cx.fill(Rect::new(x, r.bottom() - c, c, c), gray);
-    }
-    pub fn draw(&self, cx: &mut DrawCx) {
-        let t = cx.theme;
-        let (r, radius) = (self.rect, Self::radius(t));
-        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), radius, SHADOW);
-        cx.canvas.fill_rounded_rect(r, radius, PAPER);
-        let label_style = t.caption.weight(Weight::SemiBold);
-        let (icon, gap) = (t.icon_small, t.mm(0.9));
-        let label_h = label_style.line_height().ceil() as i32;
-        for (i, ((glyph, label, _), cell)) in SELECTION_ACTIONS.iter().zip(self.cells).enumerate() {
-            let primary = i == 0;
-            let pressed = self.pressed == Some(i) && self.press.is_down();
-            // Pressed cells invert, like buttons.
-            let fg = if primary != pressed {
-                Self::fill_cell(cx, i, cell, INK);
-                PAPER
+/// The card on each tab, at both edges, with the pager where it has one.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts> {
+    use crate::{platform::Waker, store::Store, ui::fit::Parts};
+    let root = std::env::temp_dir().join(format!("verso-lookup-fit-{}", std::process::id()));
+    let worker = Rc::new(Worker::new(Store::at(root), Waker::new(|| {})));
+    let word = |y| Rect::new(screen.w / 4, y, t.mm(15.0), t.mm(4.0));
+    let line = t.dictionary_body.line_height().ceil() as i32;
+    let mut samples = Vec::new();
+    for word in [word(screen.h / 8), word(screen.h * 7 / 8)] {
+        for (tab, typing) in [
+            (Tab::Dictionary, false),
+            (Tab::Wikipedia, false),
+            (Tab::Translate, false),
+            (Tab::Dictionary, true),
+            (Tab::Wikipedia, true),
+        ] {
+            let tabs = Tabs::offline(tab);
+            let mut l = Lookup::new("word", worker.clone(), t, screen, Some(word), Default::default(), tabs);
+            worker.cancel();
+            // A definition of several pages.
+            l.pending = false;
+            l.state = State::Definition { entries: Vec::new(), base_forms: None };
+            l.keyboard.visible = typing;
+            l.paged = true;
+            l.place(t);
+            let mut buttons = vec![];
+            if typing {
+                buttons.push(l.search.rect());
             } else {
-                INK
-            };
-            if pressed {
-                cx.hint(cell, RefreshMode::Fast);
+                buttons.extend([l.tabs.rect(), l.pager.rect()]);
+                buttons.extend(l.actions.iter().map(Button::rect));
+                if tab == Tab::Dictionary {
+                    buttons.extend([l.previous.rect(), l.switcher, l.next.rect()]);
+                }
             }
-            if i > 1 {
-                cx.fill(Rect::new(cell.x - t.hairline / 2, cell.y, t.hairline, cell.h), LINE);
+            let body = if typing { l.body_full } else { l.body };
+            let mut parts = Parts::new("Lookup", l.sheet.rect(), buttons).body(l.heading, l.heading.h);
+            parts = parts.body(body, 3 * line).dense(t.mm(7.0));
+            if typing {
+                parts = parts.keyboard(l.keyboard.rect());
             }
-            let top = cell.y + (cell.h - icon - gap - label_h) / 2;
-            cx.icon(*glyph, Rect::new(cell.x, top, cell.w, icon), icon, fg);
-            let text = Rect::new(cell.x + t.mm(0.5), top + icon + gap, cell.w - t.mm(1.0), label_h);
-            cx.line(label, label_style.gray(fg), text, HAlign::Center);
+            samples.push(parts);
         }
-        cx.canvas.stroke_rounded_rect(r, radius, t.border as f32, INK);
     }
+    samples
 }
 
 #[cfg(test)]
@@ -1467,7 +1525,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("verso-styled-lookup-{}", std::process::id()));
         let worker = Rc::new(Worker::new(Store::at(root.clone()), Waker::new(|| {})));
         for screen in [Rect::new(0, 0, 1272, 1696), Rect::new(0, 0, 1696, 1272)] {
-            let mut lookup = Lookup::new("leaves", worker.clone(), &t, screen, None, Default::default());
+            let mut lookup = Lookup::new(
+                "leaves",
+                worker.clone(),
+                &t,
+                screen,
+                None,
+                Default::default(),
+                Tabs::offline(Tab::Dictionary),
+            );
             worker.cancel(); // This test supplies its own styled state.
             lookup.pending = false;
             lookup.complete = true;
@@ -1594,7 +1660,8 @@ mod tests {
         ));
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
-        let mut lookup = Lookup::new("Hello", worker.clone(), &t, screen, None, Default::default());
+        let mut lookup =
+            Lookup::new("Hello", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
         let mut cx = EventCx {
             theme: &t,
             screen,

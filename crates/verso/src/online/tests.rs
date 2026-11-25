@@ -1,6 +1,7 @@
 //! Lookups end to end against a local HTTP server.
 use super::wikipedia::tests::hit;
 use super::wikipedia::{Article, Block, Edition, Found};
+use super::worker::Reply;
 use super::*;
 use crate::net::tests::{Reply as Http, Request as HttpRequest, Server};
 use crate::platform::Waker;

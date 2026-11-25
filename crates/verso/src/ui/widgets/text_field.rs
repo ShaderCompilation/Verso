@@ -15,6 +15,8 @@ pub struct TextField {
     rect: Rect,
     press: Press,
     pub focused: bool,
+    /// The most characters typing can reach.
+    pub limit: Option<usize>,
     /// Shown while empty and unfocused.
     pub placeholder: &'static str,
 }
@@ -34,6 +36,11 @@ impl TextField {
     }
     /// Returns true only when the text changed (cursor movement is still drawn).
     pub fn edit(&mut self, input: &TextInput) -> bool {
+        if let (TextInput::Insert(text), Some(limit)) = (input, self.limit) {
+            let room = limit.saturating_sub(self.value.chars().count());
+            let text = text.chars().filter(|c| !c.is_control()).take(room).collect();
+            return edit(&mut self.value, &mut self.cursor, &TextInput::Insert(text));
+        }
         edit(&mut self.value, &mut self.cursor, input)
     }
     pub fn draw(&self, cx: &mut DrawCx) {

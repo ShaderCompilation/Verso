@@ -19,7 +19,7 @@ use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
 use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
 use crate::screens::books::ConfirmDelete;
 use crate::screens::contents::{Contents, ContentsEvent};
-use crate::screens::dictionary::{Lookup, LookupEvent, SelectionAction, SelectionActions};
+use crate::screens::dictionary::{Languages, Lookup, LookupEvent, SelectionAction, SelectionActions, Tab, Tabs};
 use crate::screens::footnote::{Footnote, FootnoteEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
@@ -570,14 +570,23 @@ impl Reader {
     fn selected_rect(&self) -> Option<Rect> {
         self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)))
     }
-    pub(super) fn lookup(&mut self, query: &str, cx: &mut EventCx) {
+    /// What the lookup card's online tabs look things up in.
+    fn online_languages(&self, settings: &Settings) -> Languages {
+        use crate::online::wikipedia::Edition;
+        let chosen = self.store.book(&self.id).wikipedia_language;
+        let wikipedia = chosen.as_deref().and_then(Edition::for_language);
+        let wikipedia = wikipedia.or_else(|| Edition::for_language(&self.book_language()));
+        Languages { wikipedia: wikipedia.unwrap_or(Edition::ENGLISH), translate: settings.translate_language.clone() }
+    }
+    pub(super) fn lookup(&mut self, query: &str, tab: Tab, cx: &mut EventCx) {
         self.dictionary_prepare_at = None;
         let service = self.dictionary_service().clone();
         let settings = self.store.settings();
         // Without the word, the card takes its place at the bottom.
         let word = if settings.dictionary_at_bottom { None } else { self.selected_rect() };
         let selection = self.dictionary_selection();
-        let mut lookup = Lookup::new(query, service, cx.theme, self.screen, word, selection);
+        let tabs = Tabs::new(tab, self.store.online(), self.worker.waker(), self.online_languages(&settings));
+        let mut lookup = Lookup::new(query, service, cx.theme, self.screen, word, selection, tabs);
         if settings.dictionary_expanded {
             lookup = lookup.expanded(cx.theme);
         }
@@ -590,7 +599,7 @@ impl Reader {
                 return;
             }
             if text.split_whitespace().count() == 1 {
-                self.lookup(&text, cx);
+                self.lookup(&text, Tab::Dictionary, cx);
             } else {
                 self.open_passage_actions(cx);
             }
@@ -600,7 +609,9 @@ impl Reader {
     /// rectangles are unknown.
     fn open_passage_actions(&mut self, cx: &mut EventCx) {
         let passage = self.selected_rect().unwrap_or_else(|| Rect::centered(self.screen.center(), 0, 0));
-        self.overlay = Overlay::SelectionActions(Box::new(SelectionActions::new(cx.theme, self.screen, passage)));
+        let text = self.selection.selected.as_ref().map_or("", |s| s.text.as_str());
+        let bar = SelectionActions::new(cx.theme, self.screen, passage, text);
+        self.overlay = Overlay::SelectionActions(Box::new(bar));
         cx.redraw();
     }
     fn display(&mut self, page: Arc<Page>, cx: &mut EventCx) {
@@ -1732,9 +1743,17 @@ impl Reader {
                         self.extension = Some(annotations::ExtendBar::new(cx.theme, self.screen));
                         self.overlay = Overlay::None;
                     }
-                    Some(SelectionAction::Dictionary) => {
+                    Some(
+                        action
+                        @ (SelectionAction::Dictionary | SelectionAction::Wikipedia | SelectionAction::Translate),
+                    ) => {
+                        let tab = match action {
+                            SelectionAction::Wikipedia => Tab::Wikipedia,
+                            SelectionAction::Translate => Tab::Translate,
+                            _ => Tab::Dictionary,
+                        };
                         if let Some(query) = self.selection.selected.as_ref().map(|s| s.text.clone()) {
-                            self.lookup(&query, cx);
+                            self.lookup(&query, tab, cx);
                         }
                     }
                     Some(SelectionAction::Search) => {
@@ -3560,7 +3579,7 @@ mod tests {
                 start_visible: true,
                 end_visible: true,
             });
-            test_cx(&theme, |cx| r.lookup("word", cx));
+            test_cx(&theme, |cx| r.lookup("word", Tab::Dictionary, cx));
             let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
             lookup.rect(&theme)
         };
@@ -3640,6 +3659,111 @@ mod tests {
     }
 
     #[test]
+    fn a_long_press_stays_offline_and_sleeping_or_closing_drops_online_lookups() {
+        use crate::{
+            document::{Selection, TextRange},
+            geom::{Point, Rect},
+            online::Service,
+            platform::wifi::Link,
+        };
+        use std::sync::{Arc, Condvar, Mutex};
+        let theme = Theme::for_dpi(150);
+        let server = crate::net::tests::Server::start(vec![]);
+        // Reading the link, which each request starts with, waits for the gate.
+        let gate = Arc::new((Mutex::new((false, 0)), Condvar::new()));
+        let read = gate.clone();
+        let link = move || {
+            let mut state = read.0.lock().unwrap();
+            state.1 += 1;
+            while !state.0 {
+                state = read.1.wait(state).unwrap();
+            }
+            Ok(Link::Connected)
+        };
+        let service = Service::for_test(&server.base, Duration::from_secs(5), Box::new(link));
+        let wait_until = |done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !done() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let (mut r, commands) = test_reader("lookup-cancel");
+        r.store = r.store.clone().with_online(service.clone());
+        r.pages = 10;
+        r.target = 2;
+        r.laying_out = false;
+        r.shown = Some(test_page(1, 2));
+        let word = Selection {
+            range: TextRange { start: Position("a".into()), end: Position("b".into()) },
+            text: "word".into(),
+            rects: vec![Rect::new(100, 100, 120, 30)],
+            start_page: 2,
+            start_visible: true,
+            end_visible: true,
+        };
+        for (i, close) in [false, true].into_iter().enumerate() {
+            // A long press opens the card on Dictionary, asking nothing online.
+            let p = word.rects[0].center();
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(p), cx);
+                r.on_gesture(Gesture::LongPress(p), cx);
+                r.on_gesture(Gesture::End(p), cx);
+            });
+            let request = commands
+                .try_iter()
+                .find_map(|c| if let Command::Select { request, .. } = c { Some(request) } else { None })
+                .expect("a selection request");
+            test_cx(&theme, |cx| r.receive(Reply::Selection { request, result: Ok(Some(word.clone())) }, cx));
+            let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
+            assert_eq!(lookup.tab(), Tab::Dictionary);
+            assert_eq!((gate.0.lock().unwrap().1, service.threads()), (i, 0), "no online request");
+            // Wikipedia's request is under way when the card goes.
+            let wikipedia = lookup.tab_point(Tab::Wikipedia);
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(wikipedia), cx);
+                r.on_gesture(Gesture::Tap(wikipedia), cx);
+            });
+            wait_until(&|| gate.0.lock().unwrap().1 == i + 1);
+            if close {
+                let outside = Point::new(500, 20);
+                test_cx(&theme, |cx| {
+                    r.on_gesture(Gesture::Down(outside), cx);
+                    r.on_gesture(Gesture::Tap(outside), cx);
+                });
+            } else {
+                r.on_sleep();
+            }
+            assert!(matches!(r.overlay, Overlay::None));
+            gate.0.lock().unwrap().0 = true;
+            gate.1.notify_all();
+            wait_until(&|| service.threads() == 0);
+            gate.0.lock().unwrap().0 = false;
+            assert!(server.requests.lock().unwrap().is_empty(), "it never reached the network");
+        }
+    }
+
+    #[test]
+    fn online_lookups_use_the_saved_languages() {
+        let (mut r, _commands) = test_reader("online-languages");
+        let languages = |r: &Reader| {
+            let languages = r.online_languages(&r.store.settings());
+            (languages.wikipedia.code(), languages.translate)
+        };
+        r.language_tag = "x-klingon".into();
+        assert_eq!(languages(&r), ("en", None), "no such Wikipedia; nothing chosen");
+        r.language_tag = "nb-NO".into();
+        assert_eq!(languages(&r), ("no", None));
+        // Saved: the Wikipedia with the book, the target with the settings.
+        let state = BookState { wikipedia_language: Some("fr".into()), ..r.store.book("book") };
+        r.store.save_book("book", &state).unwrap();
+        let settings = Settings { translate_language: Some("de".into()), ..r.store.settings() };
+        r.store.save_settings(&settings).unwrap();
+        r.store = Store::at(std::env::temp_dir().join(format!("verso-online-languages-{}", std::process::id())));
+        assert_eq!(languages(&r), ("fr", Some("de".into())));
+    }
+
+    #[test]
     fn the_passage_bar_floats_beside_the_passage_and_yields_its_handles() {
         use crate::{
             document::{Selection, TextRange},
@@ -3698,7 +3822,15 @@ mod tests {
             _ => unreachable!(),
         };
         tap(&mut r, dict);
-        assert!(matches!(r.overlay, Overlay::Lookup(_)));
+        assert!(matches!(&r.overlay, Overlay::Lookup(lookup) if lookup.tab() == Tab::Dictionary));
+        // Translate opens the card on its tab.
+        open(&mut r);
+        let translate = match &r.overlay {
+            Overlay::SelectionActions(bar) => bar.cell(SelectionAction::Translate).center(),
+            _ => unreachable!(),
+        };
+        tap(&mut r, translate);
+        assert!(matches!(&r.overlay, Overlay::Lookup(lookup) if lookup.tab() == Tab::Translate));
         // A tap elsewhere dismisses the bar and the selection.
         open(&mut r);
         tap(&mut r, Point::new(300, 700));
@@ -3811,11 +3943,11 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
-        r.lookup("Hello", &mut cx);
+        r.lookup("Hello", Tab::Dictionary, &mut cx);
         assert_eq!(catalog(&r), ["native"]);
         // The management button pushes a screen without dismissing the lookup
         // or changing the book/selected passage. Returning refreshes the query.
-        r.lookup("Hello", &mut cx);
+        r.lookup("Hello", Tab::Dictionary, &mut cx);
         let before = r.anchor.clone();
         let before_target = r.target;
         let button = crate::geom::Point::new(screen.w / 2, screen.h - theme.mm(20.0));
@@ -3830,7 +3962,7 @@ mod tests {
         // Settings (stacked above the retained reader) adds a folder.
         store.save_dictionary_folders(&[root.join("koreader")])?;
         assert_eq!(catalog(&r), ["external", "native"], "the shared service notices folder saves itself");
-        r.lookup("Hello", &mut cx);
+        r.lookup("Hello", Tab::Dictionary, &mut cx);
         assert_eq!(catalog(&r), ["external", "native"], "the next lookup uses the new folders");
         // Settings edits the same service while this reader is retained.
         use crate::dictionary::{
@@ -3861,7 +3993,7 @@ mod tests {
         r.metadata.language = "ru".into();
         r.language_tag = "en-US".into();
         let lookup = |r: &mut Reader, cx: &mut EventCx| {
-            r.lookup("Hello", cx);
+            r.lookup("Hello", Tab::Dictionary, cx);
             let worker = r.dictionary.as_ref().unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {

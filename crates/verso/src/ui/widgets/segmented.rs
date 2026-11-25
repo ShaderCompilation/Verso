@@ -3,7 +3,7 @@
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, PAPER};
+use crate::ui::theme::{INK, INK3, PAPER};
 use crate::ui::widget::DrawCx;
 
 pub enum Segment {
@@ -18,6 +18,8 @@ pub struct Segmented {
     pub selected: usize,
     /// Optional dot indicator on an unselected segment (e.g. an available update).
     pub dot: Option<usize>,
+    /// Segments drawn gray that ignore taps.
+    pub disabled: Vec<usize>,
     rect: Rect,
     /// The segment the current touch started on.
     down_on: Option<usize>,
@@ -25,7 +27,7 @@ pub struct Segmented {
 
 impl Segmented {
     pub fn new(items: Vec<Segment>, selected: usize) -> Self {
-        Self { items, selected, dot: None, rect: Rect::default(), down_on: None }
+        Self { items, selected, dot: None, disabled: Vec::new(), rect: Rect::default(), down_on: None }
     }
 
     pub fn texts(labels: &[&str], selected: usize) -> Self {
@@ -45,7 +47,7 @@ impl Segmented {
     }
 
     fn segment_at(&self, p: crate::geom::Point) -> Option<usize> {
-        self.segments().iter().position(|r| r.contains(p))
+        self.segments().iter().position(|r| r.contains(p)).filter(|i| !self.disabled.contains(i))
     }
 
     /// Returns the newly selected index when a different segment is tapped.
@@ -101,7 +103,7 @@ impl Segmented {
                 if i > 0 && i != self.selected + 1 {
                     cx.fill(Rect::new(seg.x - t.hairline / 2, seg.y + t.mm(2.0), t.hairline, seg.h - t.mm(4.0)), INK);
                 }
-                INK
+                if self.disabled.contains(&i) { INK3 } else { INK }
             };
             match item {
                 Segment::Text(s) => cx.line(s, style.gray(fg), seg.inset_xy(pad, 0), HAlign::Center),
