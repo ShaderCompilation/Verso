@@ -1,11 +1,13 @@
 //! Kindle backend: FBInk for the screen, evdev for touch.
 //!
-//! `poll` waits on the touchscreen fd, optional Oasis/Voyage button fd and an
-//! `eventfd` `Waker` shared with background workers, the `lipc-wait-event`
+//! `poll` waits on the touchscreen fd, the page-key fds (Oasis/Voyage buttons,
+//! remotes) and an `eventfd` `Waker` shared with background workers, the remote
+//! threads (`verso-remotes`, `verso-remote-port`), the `lipc-wait-event`
 //! `powerd` listener (`PowerEvents`, thread `verso-power`) and the one-shot
 //! startup frontlight thread (`verso-frontlight`). Opening the touchscreen
 //! takes ~80 ms in the kernel, so `verso-input-init` does it while the first
-//! frame draws; `finish_startup` (or the first call needing input) joins it. Battery and cable state read `/sys/class/power_supply`
+//! frame draws; `finish_startup` (or the first call needing input) joins it.
+//! Battery and cable state read `/sys/class/power_supply`
 //! directly (<1 ms) with a cached `battStateInfo` `lipc` fallback. Native
 //! Amazon sleep handoff signals `verso.sh` via acknowledged `SIGUSR1`/`SIGUSR2`
 //! so the launcher remains the sole owner of Amazon UI process state.
@@ -21,12 +23,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::kindle_profiles::{self, Lights};
+use super::remote::{self, Gate};
 use super::{
     Battery, DeviceInfo, DeviceModel, Event, FrameCheck, Frontlight, Orientation, Platform, Unsupported, Update, Waker,
 };
 use crate::gfx::Canvas;
 use display::Display;
-use input::{Buttons, Mapping, TouchInput};
+use input::{KeySource, Mapping, Remote, TouchInput};
 
 /// Set by SIGINT/SIGTERM/SIGHUP, so we can shut down cleanly.
 static QUIT: AtomicBool = AtomicBool::new(false);
@@ -61,8 +64,98 @@ pub struct Kindle {
 
 struct Inputs {
     touch: TouchInput,
-    /// Page-turn buttons; `None` (and never polled) on touch-only Kindles.
-    buttons: Option<Buttons>,
+    /// The Kindle's page-turn buttons, if it has any, and the remotes
+    /// connected now.
+    keys: Vec<KeySource>,
+    remotes: std::sync::mpsc::Receiver<Remote>,
+    gate: Gate,
+    /// When a remote last postponed the idle sleep.
+    postponed: Option<Instant>,
+}
+
+impl Inputs {
+    /// Takes in what the remote threads sent.
+    fn take_remotes(&mut self, queue: &mut VecDeque<Event>) {
+        while let Ok(remote) = self.remotes.try_recv() {
+            match remote {
+                Remote::Found(source) => self.keys.push(source),
+                Remote::Page(action) => {
+                    log::debug!("remote port: {action:?}");
+                    if self.gate.accept((input::PORT_ID, 0), Instant::now()) {
+                        queue.push_back(Event::Key(action));
+                        self.remote_used();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads the key devices whose poll flags are set. Losing one isn't worth
+    /// ending the session over: the touchscreen still turns pages.
+    fn read_keys(&mut self, pfds: &[libc::pollfd], orientation: Orientation, queue: &mut VecDeque<Event>) {
+        let mut remote_used = false;
+        for i in (0..pfds.len()).rev().filter(|&i| pfds[i].revents != 0) {
+            let source = &mut self.keys[i];
+            let before = queue.len();
+            let read = if pfds[i].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                Err(anyhow!("poll flags {:#x}", pfds[i].revents))
+            } else {
+                source.read(orientation, &mut self.gate, queue)
+            };
+            remote_used |= source.is_remote() && queue.len() > before;
+            if let Err(e) = read {
+                log::info!("{}: gone: {e:#}", source.label());
+                self.keys.remove(i);
+            }
+        }
+        if remote_used {
+            self.remote_used();
+        }
+    }
+
+    /// A remote in use keeps the Kindle awake like a touch does; powerd
+    /// doesn't see every remote.
+    fn remote_used(&mut self) {
+        const EVERY: Duration = Duration::from_secs(60);
+        if self.postponed.is_some_and(|at| at.elapsed() < EVERY) {
+            return;
+        }
+        self.postponed = Some(Instant::now());
+        // Starting lipc-set-prop takes ~29 ms.
+        let postpone = std::thread::Builder::new().name("verso-postpone".into()).spawn(|| {
+            if let Err(e) = super::awake::postpone_sleep() {
+                log::debug!("{e:#}");
+            }
+        });
+        if let Err(e) = postpone {
+            log::warn!("couldn't start the sleep postponing thread: {e}");
+        }
+    }
+}
+
+/// Follows remotes on two threads, until the process ends.
+fn start_remotes(held: Vec<String>, tx: std::sync::mpsc::Sender<Remote>, waker: Waker) {
+    let (port_tx, port_waker) = (tx.clone(), waker.clone());
+    let watch = std::thread::Builder::new().name("verso-remotes".into()).spawn(move || {
+        let held: Vec<&str> = held.iter().map(String::as_str).collect();
+        input::watch(&held, |source| {
+            let _ = tx.send(Remote::Found(source));
+            waker.wake();
+        });
+    });
+    let port = std::thread::Builder::new().name("verso-remote-port".into()).spawn(move || match remote::listen() {
+        Ok(listener) => {
+            log::info!("remote port: {}", remote::PORT);
+            remote::serve(&listener, |action| {
+                let _ = port_tx.send(Remote::Page(action));
+                port_waker.wake();
+            });
+        }
+        Err(e) => log::warn!("remote port {}: {e}", remote::PORT),
+    });
+    for e in [watch.err(), port.err()].into_iter().flatten() {
+        log::warn!("couldn't start a remote thread: {e}");
+    }
 }
 
 impl Kindle {
@@ -91,11 +184,23 @@ impl Kindle {
             // `finish_startup` applies the settings' orientation.
             orientation: Orientation::Portrait,
         };
+        use std::os::fd::FromRawFd;
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        let waker = fd_waker(wake_fd.clone());
         let opening = std::thread::Builder::new().name("verso-input-init".into()).spawn(move || {
             let started = Instant::now();
             let (touch, buttons) = input::open(mapping, probe_buttons)?;
             log::debug!("startup stage: kindle input open input_us={}", started.elapsed().as_micros());
-            Ok(Inputs { touch, buttons })
+            let held = std::iter::once(touch.path()).chain(buttons.as_ref().map(KeySource::path));
+            let held = held.map(str::to_owned).collect();
+            let (tx, remotes) = std::sync::mpsc::channel();
+            start_remotes(held, tx, waker);
+            let keys = buttons.into_iter().collect();
+            Ok(Inputs { touch, keys, remotes, gate: Gate::default(), postponed: None })
         })?;
         let model = kindle_profiles::model(profile, id, &display.name);
         let lights = Lights::for_profile(profile);
@@ -122,12 +227,6 @@ impl Kindle {
             dpi: display.dpi,
             color,
         };
-        use std::os::fd::FromRawFd;
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let wake_fd = std::sync::Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
         let t_pw = Instant::now();
         let (tx, power_rx) = std::sync::mpsc::channel();
         let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()))?;
@@ -188,13 +287,14 @@ impl Kindle {
         event
     }
 
-    /// Page buttons follow the touchscreen's grab; a failure only costs the
-    /// buttons' exclusivity, so it's logged rather than fatal.
+    /// Page buttons follow the touchscreen's grab, and remotes drop what was
+    /// pressed meanwhile. A failure is logged rather than fatal: it only costs
+    /// the buttons' exclusivity, or the remote is gone and the next poll says so.
     fn grab_buttons(&mut self, grab: bool) {
-        if let Some(buttons) = &mut self.inputs_mut().buttons
-            && let Err(e) = buttons.grab(grab)
-        {
-            log::warn!("{e:#}");
+        for source in &mut self.inputs_mut().keys {
+            if let Err(e) = source.grab(grab) {
+                log::warn!("{e:#}");
+            }
         }
     }
 
@@ -263,7 +363,8 @@ impl Platform for Kindle {
         self.power.wait_started()?;
         inputs.touch.set_orientation(self.display.orientation);
         log::info!("session touch: {}", inputs.touch.summary());
-        log::info!("session page buttons: {}", inputs.buttons.as_ref().map_or("none".into(), Buttons::summary));
+        // Only the Kindle's own so far; remotes log themselves.
+        log::info!("session page buttons: {}", inputs.keys.first().map_or("none".into(), KeySource::summary));
         log::debug!("startup stage: kindle input ready waited_us={}", started.elapsed().as_micros());
         self.inputs = Some(inputs);
         Ok(())
@@ -392,6 +493,8 @@ impl Platform for Kindle {
             if let Ok(e) = self.power_rx.try_recv() {
                 return Ok(Some(self.system_event(e)));
             }
+            let inputs = self.inputs.as_mut().expect("finish_startup opened the inputs");
+            inputs.take_remotes(&mut self.queue);
             if let Some(e) = self.queue.pop_front() {
                 return Ok(Some(e));
             }
@@ -416,15 +519,13 @@ impl Platform for Kindle {
             };
             use std::os::fd::AsRawFd;
             let inputs = self.inputs.as_mut().expect("finish_startup opened the inputs");
-            let mut pfds = [
-                libc::pollfd { fd: inputs.touch.fd(), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: self.wake_fd.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: inputs.buttons.as_ref().map_or(-1, Buttons::fd), events: libc::POLLIN, revents: 0 },
-            ];
-            // Touch-only Kindles poll just the first two.
-            let count = if inputs.buttons.is_some() { 3 } else { 2 };
-            // SAFETY: `count` initialized pollfds backed by live file descriptors.
-            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), count, wait_ms) };
+            let mut pfds: Vec<_> = [inputs.touch.fd(), self.wake_fd.as_raw_fd()]
+                .into_iter()
+                .chain(inputs.keys.iter().map(KeySource::fd))
+                .map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
+                .collect();
+            // SAFETY: initialized pollfds backed by live file descriptors.
+            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, wait_ms) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -455,22 +556,7 @@ impl Platform for Kindle {
                     bail!("the touchscreen stopped working (poll flags {:#x})", pfd.revents);
                 }
                 inputs.touch.read(&mut self.queue)?;
-                if pfds[2].revents != 0
-                    && let Some(buttons) = &mut inputs.buttons
-                {
-                    // Losing the buttons isn't worth ending the session over:
-                    // the touchscreen still turns pages.
-                    let failed = pfds[2].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0;
-                    let read = if failed {
-                        Err(anyhow::anyhow!("poll flags {:#x}", pfds[2].revents))
-                    } else {
-                        buttons.read(self.display.orientation, &mut self.queue)
-                    };
-                    if let Err(e) = read {
-                        log::warn!("page buttons stopped working, touch only from now: {e:#}");
-                        inputs.buttons = None;
-                    }
-                }
+                inputs.read_keys(&pfds[2..], self.display.orientation, &mut self.queue);
             }
             if self.queue.is_empty() && deadline.is_some_and(|d| Instant::now() >= d) {
                 return Ok(None);

@@ -136,6 +136,13 @@ Verso reads **EPUB** (`.epub`, EPUB 2 and EPUB 3).
   Drawer**.
 - **Page-turn buttons:** hardware page buttons on supported models turn pages
   (and reverse automatically in landscape).
+- **Remotes:** Verso doesn't pair remotes, but reads the ones the Kindle has.
+  Amazon's **Kindle Click** needs no setup. With **HID Passthrough**, a paired
+  remote's page, arrow, volume, Enter and Space keys turn pages. To choose what each
+  button does, bind it in **Button Mapper** to the **Auto** tab's *Next page* /
+  *Previous page* (1.6.0 or later): the same binding then works in the Kindle
+  reader, KOReader and Verso. The **Kindle** tab's *Next page* doesn't reach Verso,
+  and its *(tap)* actions follow your tap zones, so prefer **Auto**.
 - **Bookmark corner:** tapping the top-right corner toggles a page bookmark
   (configurable in **Settings → Reading**).
 - **Back pill:** after jumping via Contents, Notes, chapter arrows, the progress

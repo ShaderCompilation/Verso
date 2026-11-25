@@ -35,6 +35,9 @@ mod power;
 #[cfg(any(feature = "kindle", test))]
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod process;
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+mod remote;
 #[cfg(feature = "desktop")]
 mod sim_device;
 pub mod ssh;
@@ -174,7 +177,7 @@ pub enum Event {
     Usb(bool),
     /// Asynchronous startup frontlight reading from hardware.
     Frontlight(Option<Frontlight>),
-    /// A hardware page-turn button was pressed (Oasis, or PgUp/PgDn in the
+    /// A page-turn button or remote was pressed (or PgUp/PgDn in the
     /// simulator), already turned to the way the device is held.
     Key(KeyAction),
     /// Leave the app (window closed, or a signal on the device).
@@ -189,7 +192,8 @@ pub enum KeyAction {
 }
 
 impl KeyAction {
-    /// The page-turn meaning of an evdev key code, held in `orientation`.
+    /// The page-turn meaning of a Kindle button's evdev key code, held in
+    /// `orientation` (remotes: `remote::page_key`).
     /// Kindle codes as FBInk's input scan reads them: `KEY_PAGEUP` and
     /// `KEY_F23` go back, `KEY_PAGEDOWN` and `KEY_YEN` forward. The
     /// Oasis's buttons sit on the panel's right edge in portrait, the

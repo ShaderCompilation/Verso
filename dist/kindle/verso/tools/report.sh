@@ -455,7 +455,7 @@ combined_log_tail() {
 # The lines that tell sessions apart and how each went, from both logs.
 session_lines() {
     for f in "${LOG_OLD}" "${LOG}"; do
-        [ -r "${f}" ] && grep -E ' launcher: (launched from|the last session|active app|starting Verso|Verso ended)|\] (perf:|first frame on screen|frame check|first touch)' "${f}" 2>/dev/null
+        [ -r "${f}" ] && grep -E ' launcher: (launched from|the last session|active app|starting Verso|Verso ended)|\] (perf:|first frame on screen|frame check|first touch|(remote|page buttons) [^:]*: ([0-9]+ forward|first |left to ))' "${f}" 2>/dev/null
     done | tail -n 60
 }
 

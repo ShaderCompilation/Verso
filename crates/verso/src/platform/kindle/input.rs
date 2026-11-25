@@ -4,29 +4,32 @@
 //! lives in a numbered slot and has a tracking id (-1 when lifted), and a
 //! SYN_REPORT marks the end of each batch of changes.
 //!
-//! Page-turn buttons (Oasis) are a separate key device, read alongside.
+//! Page-turn buttons (Oasis) and remotes are separate key devices
+//! (`KeySource`), read alongside. Remotes come and go: `watch` follows
+//! `/dev/input` with inotify. Their rules are in `platform/remote.rs`.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
-use std::time::Instant;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::geom::Point;
+use crate::platform::remote::{self, Gate, Kind};
 use crate::platform::{Event, KeyAction, Orientation, Touch, TouchPhase, Unsupported};
 
 // Event types and codes from <linux/input-event-codes.h>.
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_ABS: u16 = 0x03;
+const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_POWER: u16 = 116;
-/// The page keys FBInk's input scan looks for on a Kindle: PAGEUP, PAGEDOWN,
-/// YEN and F23 (see `KeyAction::from_evdev`).
-const PAGE_KEYS: [u16; 4] = [104, 109, 124, 193];
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
 const ABS_MT_SLOT: u16 = 0x2f;
@@ -65,8 +68,12 @@ const fn ioc(dir: u32, nr: u32, size: u32) -> u32 {
 }
 const IOC_WRITE: u32 = 1;
 const IOC_READ: u32 = 2;
+const EVIOCGID: u32 = ioc(IOC_READ, 0x02, size_of::<[u16; 4]>() as u32);
 const fn eviocgname(len: u32) -> u32 {
     ioc(IOC_READ, 0x06, len)
+}
+const fn eviocguniq(len: u32) -> u32 {
+    ioc(IOC_READ, 0x08, len)
 }
 const fn eviocgbit_abs(len: u32) -> u32 {
     ioc(IOC_READ, 0x20 + EV_ABS as u32, len)
@@ -129,7 +136,7 @@ pub struct TouchInput {
 }
 
 impl TouchInput {
-    fn from_file(file: File, path: &std::path::Path, map: Mapping) -> Result<Self> {
+    fn from_file(file: File, path: &Path, map: Mapping) -> Result<Self> {
         let fd = file.as_raw_fd();
         let name = device_name(fd);
         let x = abs_info(fd, ABS_MT_POSITION_X)?;
@@ -171,6 +178,10 @@ impl TouchInput {
             self.map.mirror_x,
             self.map.mirror_y,
         )
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     pub fn set_orientation(&mut self, orientation: Orientation) {
@@ -338,22 +349,45 @@ fn scale_axis(v: i32, (lo, hi): (i32, i32), size: u32) -> i32 {
     ((i128::from(clamped) * i128::from(size - 1)) / i128::from(span)) as i32
 }
 
-/// The page-turn buttons: an evdev key device with page keys.
-pub struct Buttons {
+/// Page keys: the Kindle's own buttons or a remote (`platform/remote.rs`).
+pub struct KeySource {
+    id: u32,
+    kind: Kind,
     file: File,
     path: String,
     device_name: String,
-    /// Grabbed only when the device has no power key, which powerd must
-    /// keep seeing (if a Kindle ever puts both on one device).
+    /// Only the Kindle's buttons are grabbed, and only when the device has no
+    /// power key, which powerd must keep seeing (if a Kindle ever puts both on
+    /// one device). Remotes are shared: the mapper may read the same device.
     can_grab: bool,
     grabbed: bool,
+    has_volume_down: bool,
+    counts: Counts,
     buf: Vec<InputEvent>,
 }
 
-/// Scans `/dev/input/event*` once to find the touchscreen and, when requested,
-/// the page-turn buttons. Touch-only Kindles pass `probe_buttons = false` and
-/// stop scanning as soon as the touchscreen is found.
-pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<Buttons>)> {
+/// Presses since the source was opened.
+#[derive(Default)]
+struct Counts {
+    forward: u32,
+    back: u32,
+    /// Dropped by the `Gate`.
+    echoes: u32,
+    other: u32,
+}
+
+/// What the remote threads send the event loop.
+pub enum Remote {
+    Found(KeySource),
+    /// Asked for on the local port.
+    Page(KeyAction),
+}
+
+/// The `Gate`'s id for the local port; devices count up from 1.
+pub const PORT_ID: u32 = 0;
+static NEXT_ID: AtomicU32 = AtomicU32::new(PORT_ID + 1);
+
+fn event_paths() -> Result<Vec<PathBuf>> {
     let mut paths: Vec<_> = std::fs::read_dir("/dev/input")
         .context("can't list /dev/input")?
         .filter_map(|e| e.ok())
@@ -361,17 +395,26 @@ pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<But
         .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
         .collect();
     paths.sort();
+    Ok(paths)
+}
+
+fn open_device(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(path)
+}
+
+/// Scans `/dev/input/event*` once to find the touchscreen and, when requested,
+/// the Kindle's page-turn buttons. Touch-only Kindles pass `probe_buttons =
+/// false` and stop scanning as soon as the touchscreen is found; remotes are
+/// left to `watch`, off the startup path.
+pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<KeySource>)> {
     let mut touch: Option<TouchInput> = None;
-    let mut buttons: Option<Buttons> = None;
+    let mut buttons: Option<KeySource> = None;
     let mut map = Some(map);
-    for path in paths {
+    for path in event_paths()? {
         if touch.is_some() && (!probe_buttons || buttons.is_some()) {
             break;
         }
-        let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path)
-        else {
-            continue;
-        };
+        let Ok(file) = open_device(&path) else { continue };
         let fd = file.as_raw_fd();
         if has_mt_position(fd) {
             if touch.is_none() {
@@ -380,32 +423,141 @@ pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<But
             continue;
         }
         if probe_buttons && buttons.is_none() {
-            buttons = Buttons::from_file(file, &path);
+            buttons = KeySource::from_file(file, &path, true).filter(|s| s.kind == Kind::Buttons);
+            if let Some(buttons) = &mut buttons
+                && let Err(e) = buttons.grab(true)
+            {
+                log::warn!("{e:#}");
+            }
         }
     }
     let touch = touch.ok_or_else(|| Unsupported("no touchscreen found in /dev/input".into()))?;
     Ok((touch, buttons))
 }
 
-impl Buttons {
-    fn from_file(file: File, path: &std::path::Path) -> Option<Self> {
+/// Sends every remote there is and every one that appears later, until the
+/// process ends. `held`: the devices `open` took. Opening a device can be
+/// slow, so this has its own thread (`verso-remotes`).
+pub fn watch(held: &[&str], mut found: impl FnMut(KeySource)) {
+    // Which device each path was when we looked at it. A remote that comes
+    // back may get its old path.
+    let mut seen: HashMap<PathBuf, (u64, u64)> = HashMap::new();
+    for path in held.iter().map(PathBuf::from) {
+        if let Some(id) = identity(&path) {
+            seen.insert(path, id);
+        }
+    }
+    // Before the first scan, so nothing appears unnoticed in between.
+    let notify = watch_directory(c"/dev/input");
+    scan(&mut seen, &mut found);
+    let mut notify = match notify {
+        Ok(notify) => notify,
+        Err(e) => {
+            log::warn!("remotes connected from now on won't be noticed: {e}");
+            return;
+        }
+    };
+    let mut events = [0u8; 4096];
+    loop {
+        match notify.read(&mut events) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => {
+                log::warn!("remotes connected from now on won't be noticed: {e}");
+                return;
+            }
+        }
+        // A new device isn't ready at once: udev sets its permissions, and
+        // Bluetooth devices get their address (which `mapper_binds` needs) late.
+        for delay in [500, 2000] {
+            std::thread::sleep(Duration::from_millis(delay));
+            scan(&mut seen, &mut found);
+        }
+    }
+}
+
+fn scan(seen: &mut HashMap<PathBuf, (u64, u64)>, found: &mut impl FnMut(KeySource)) {
+    let paths = match event_paths() {
+        Ok(paths) => paths,
+        Err(e) => return log::warn!("{e:#}"),
+    };
+    seen.retain(|path, _| paths.contains(path));
+    for path in paths {
+        let Some(id) = identity(&path) else { continue };
+        if seen.get(&path) == Some(&id) {
+            continue;
+        }
+        let file = match open_device(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                log::info!("input device {}: can't open: {e}", path.display());
+                continue;
+            }
+        };
+        seen.insert(path.clone(), id);
+        log::info!("input device {}: {}", path.display(), device_name(file.as_raw_fd()));
+        if has_mt_position(file.as_raw_fd()) {
+            continue;
+        }
+        if let Some(source) = KeySource::from_file(file, &path, false) {
+            if source.kind == Kind::Remote && source.bound_in_mapper() {
+                log::info!("{}: left to {}, which has bindings for it", source.label(), remote::MAPPER);
+                continue;
+            }
+            log::info!("{}: connected ({:?})", source.label(), source.kind);
+            found(source);
+        }
+    }
+}
+
+/// Tells a device from a later one at the same path: its file in `/dev`, and
+/// its folder in sysfs, which is new even if the `/dev` file was left behind.
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    let node = std::fs::metadata(path).ok()?.ino();
+    let sysfs = std::fs::metadata(Path::new("/sys/class/input").join(path.file_name()?)).map_or(0, |m| m.ino());
+    Some((node, sysfs))
+}
+
+fn watch_directory(dir: &CStr) -> std::io::Result<File> {
+    // SAFETY: plain syscalls; the new descriptor is owned by the File at once.
+    unsafe {
+        let fd = libc::inotify_init1(libc::IN_CLOEXEC);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let file = File::from_raw_fd(fd);
+        if libc::inotify_add_watch(fd, dir.as_ptr(), libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_ATTRIB) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(file)
+    }
+}
+
+impl KeySource {
+    fn from_file(file: File, path: &Path, probe_buttons: bool) -> Option<Self> {
         let fd = file.as_raw_fd();
         let keys = key_bits(fd)?;
-        if !PAGE_KEYS.iter().any(|&k| keys.has(k)) {
-            return None;
-        }
-        let mut buttons = Self {
+        let device_name = device_name(fd);
+        let kind = remote::classify(&device_name, bus(fd), |code| keys.has(code), probe_buttons)?;
+        Some(Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            kind,
             file,
             path: path.display().to_string(),
-            device_name: device_name(fd),
-            can_grab: !keys.has(KEY_POWER),
+            device_name,
+            can_grab: kind == Kind::Buttons && !keys.has(KEY_POWER),
             grabbed: false,
+            has_volume_down: keys.has(KEY_VOLUMEDOWN),
+            counts: Counts::default(),
             buf: vec![InputEvent::default(); 16],
-        };
-        if let Err(e) = buttons.grab(true) {
-            log::warn!("{e:#}");
-        }
-        Some(buttons)
+        })
+    }
+
+    fn bound_in_mapper(&self) -> bool {
+        Path::new(remote::MAPPER_BINARY).exists()
+            && std::fs::read(remote::MAPPER_CONFIG).is_ok_and(|config| {
+                remote::mapper_binds(&String::from_utf8_lossy(&config), &self.device_name, &device_uniq(self.fd()))
+            })
     }
 
     pub fn summary(&self) -> String {
@@ -423,13 +575,28 @@ impl Buttons {
         )
     }
 
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// For the log (`report.sh` picks lines by it).
+    pub fn label(&self) -> String {
+        let what = if self.is_remote() { "remote" } else { "page buttons" };
+        format!("{what} {}", self.device_name)
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.kind != Kind::Buttons
+    }
+
     pub fn fd(&self) -> RawFd {
         self.file.as_raw_fd()
     }
 
-    /// Takes or releases the buttons; presses made meanwhile are dropped.
+    /// Takes or releases the buttons (remotes are never taken); presses made
+    /// meanwhile are dropped.
     pub fn grab(&mut self, grab: bool) -> Result<()> {
-        self.read(Orientation::Portrait, &mut VecDeque::new())?;
+        while self.read_batch()? > 0 {}
         let grab = grab && self.can_grab;
         if self.grabbed == grab {
             return Ok(());
@@ -444,39 +611,77 @@ impl Buttons {
 
     /// Reads everything available (without blocking) and queues a key
     /// event for each page-key press. Releases and auto-repeat are ignored.
-    pub fn read(&mut self, orientation: Orientation, out: &mut VecDeque<Event>) -> Result<()> {
+    pub fn read(&mut self, orientation: Orientation, gate: &mut Gate, out: &mut VecDeque<Event>) -> Result<()> {
         loop {
-            let event_size = size_of::<InputEvent>();
-            // SAFETY: InputEvent is plain old data; any bytes are a valid value.
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut u8, self.buf.len() * event_size)
-            };
-            let n = match self.file.read(bytes) {
-                Ok(n) => n,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e).with_context(|| format!("reading {}", self.path)),
-            };
+            let n = self.read_batch()?;
             if n == 0 {
-                bail!("{} closed", self.path);
+                return Ok(());
             }
-            for ev in &self.buf[..n / event_size] {
-                if ev.kind == EV_KEY
-                    && ev.value == 1
-                    && let Some(action) = KeyAction::from_evdev(ev.code, orientation)
-                {
-                    out.push_back(Event::Key(action));
+            for i in 0..n {
+                let ev = self.buf[i];
+                if ev.kind == EV_KEY && ev.value == 1 {
+                    self.press(ev.code, orientation, gate, out);
                 }
             }
         }
     }
+
+    fn press(&mut self, code: u16, orientation: Orientation, gate: &mut Gate, out: &mut VecDeque<Event>) {
+        // The Gate takes the Kindle's buttons as one: quick presses of two of
+        // them are real.
+        let (name, key, button) = match self.kind {
+            Kind::Buttons => ("page button", KeyAction::from_evdev(code, orientation), 0),
+            Kind::Virtual | Kind::Remote => match remote::page_key(code, self.has_volume_down) {
+                Some((name, action)) => (name, Some(action), code),
+                None => ("", None, 0),
+            },
+        };
+        let Some(action) = key else {
+            self.counts.other += 1;
+            return;
+        };
+        if !gate.accept((self.id, button), Instant::now()) {
+            self.counts.echoes += 1;
+            return;
+        }
+        if self.counts.forward + self.counts.back == 0 {
+            log::info!("{}: first {name}, {orientation:?}, {action:?}", self.label());
+        }
+        match action {
+            KeyAction::PageNext => self.counts.forward += 1,
+            KeyAction::PagePrev => self.counts.back += 1,
+        }
+        out.push_back(Event::Key(action));
+    }
+
+    /// The number of events now in `buf`; 0 when there are none waiting.
+    fn read_batch(&mut self) -> Result<usize> {
+        let event_size = size_of::<InputEvent>();
+        loop {
+            // SAFETY: InputEvent is plain old data; any bytes are a valid value.
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut u8, self.buf.len() * event_size)
+            };
+            return match self.file.read(bytes) {
+                Ok(0) => bail!("{} closed", self.path),
+                Ok(n) => Ok(n / event_size),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => Err(e).with_context(|| format!("reading {}", self.path)),
+            };
+        }
+    }
 }
 
-impl Drop for Buttons {
+impl Drop for KeySource {
     fn drop(&mut self) {
         if self.grabbed {
             // SAFETY: EVIOCGRAB takes an int argument by value.
             unsafe { libc::ioctl(self.file.as_raw_fd(), EVIOCGRAB as _, 0 as libc::c_int) };
+        }
+        let Counts { forward, back, echoes, other } = self.counts;
+        if forward + back + echoes + other > 0 {
+            log::info!("{}: {forward} forward, {back} back, {echoes} echoes dropped, {other} other keys", self.label());
         }
     }
 }
@@ -517,13 +722,30 @@ fn has_mt_position(fd: RawFd) -> bool {
 }
 
 fn device_name(fd: RawFd) -> String {
-    let mut name = [0u8; 128];
+    device_string(fd, eviocgname).unwrap_or_else(|| "unknown".into())
+}
+
+/// A Bluetooth device's address; never logged.
+fn device_uniq(fd: RawFd) -> String {
+    device_string(fd, eviocguniq).unwrap_or_default()
+}
+
+fn device_string(fd: RawFd, request: fn(u32) -> u32) -> Option<String> {
+    let mut text = [0u8; 128];
     // SAFETY: the buffer is as long as the size encoded in the request.
-    let rc = unsafe { libc::ioctl(fd, eviocgname(name.len() as u32 - 1) as _, name.as_mut_ptr()) };
+    let rc = unsafe { libc::ioctl(fd, request(text.len() as u32 - 1) as _, text.as_mut_ptr()) };
     if rc < 0 {
-        return "unknown".into();
+        return None;
     }
-    CStr::from_bytes_until_nul(&name).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    CStr::from_bytes_until_nul(&text).ok().map(|s| s.to_string_lossy().into_owned())
+}
+
+/// The bus a device is on (`BUS_USB`, `BUS_BLUETOOTH`, …).
+fn bus(fd: RawFd) -> u16 {
+    let mut id = [0u16; 4]; // struct input_id: bustype, vendor, product, version
+    // SAFETY: the buffer is as long as the size encoded in the request.
+    let rc = unsafe { libc::ioctl(fd, EVIOCGID as _, id.as_mut_ptr()) };
+    if rc < 0 { 0 } else { id[0] }
 }
 
 fn abs_info(fd: RawFd, axis: u16) -> Result<AbsInfo> {
