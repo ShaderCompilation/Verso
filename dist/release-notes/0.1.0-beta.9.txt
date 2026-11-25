@@ -1,0 +1,7 @@
+Ninth closed beta of Verso.
+
+- Fix Basic 3 taps and phonetic marks.
+- Local times for highlights and exports.
+- Highlight exports add page numbers.
+- Book counts include subfolders.
+- Update checks spot a wrong clock.
