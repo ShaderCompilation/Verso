@@ -165,13 +165,12 @@ fn net(wifi: Option<bool>, running: bool) -> NetState {
 
 const LIGHT: Frontlight = Frontlight { brightness: 12, warmth: Some(6) };
 
-fn drawer(developer: bool, net: NetState) -> (Theme, TopDrawer) {
+fn drawer(net: NetState) -> (Theme, TopDrawer) {
     let t = Theme::for_dpi(300);
     let d = TopDrawer::new(
         &t,
         Rect::new(0, 0, 1272, 1696),
         Orientation::Portrait,
-        developer,
         Some(LIGHT),
         LightRange::default(),
         net,
@@ -197,27 +196,24 @@ fn tile_at(d: &TopDrawer, tile: Tile) -> Point {
 }
 
 #[test]
-fn ssh_tile_shows_in_developer_mode_or_while_the_server_runs() {
-    let (t, mut d) = drawer(false, net(Some(true), false));
-    assert_eq!(d.tile_kinds(), [Tile::Wifi, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]);
-    assert_eq!(d.tile_view(Tile::Transfer).2, "Wi-Fi transfer");
-    assert_eq!(d.tile_view(Tile::Transfer).3, "Books & files");
-    let (_, dev) = drawer(true, net(Some(true), false));
-    assert_eq!(dev.tile_kinds().len(), 6);
-    assert_eq!(dev.tile_kinds()[1], Tile::Ssh);
-    assert_eq!(dev.tile_view(Tile::Transfer).2, "Transfer");
-    // A server started elsewhere shows the tile, which then stays after it stops.
+fn ssh_tile_is_always_shown_and_stays_when_the_server_stops() {
+    let (t, mut d) = drawer(net(Some(true), false));
+    assert_eq!(
+        d.tile_kinds(),
+        [Tile::Wifi, Tile::Ssh, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
+    );
+    assert_eq!(d.tile_view(Tile::Transfer).2, "Transfer");
     let height = d.rect().h;
     d.set_net(&t, net(Some(true), true), Instant::now());
     assert_eq!(d.tile_kinds().len(), 6);
     assert_eq!(d.rect().h, height);
     d.set_net(&t, net(Some(true), false), Instant::now());
-    assert_eq!(d.tile_kinds().len(), 6, "turning SSH off doesn't make its tile vanish");
+    assert_eq!(d.tile_kinds().len(), 6);
 }
 
 #[test]
 fn tile_states_follow_wifi_ssh_and_orientation() {
-    let (_, mut d) = drawer(true, net(None, false));
+    let (_, mut d) = drawer(net(None, false));
     d.net.probing = true;
     assert_eq!(d.tile_view(Tile::Wifi).0, TileState::Off);
     assert_eq!(d.tile_view(Tile::Wifi).3, "Checking…");
@@ -246,7 +242,7 @@ fn tile_states_follow_wifi_ssh_and_orientation() {
 
 #[test]
 fn status_strip_names_the_ssh_address_while_it_runs() {
-    let (_, mut d) = drawer(true, net(Some(true), false));
+    let (_, mut d) = drawer(net(Some(true), false));
     assert_eq!(d.net_note(), None);
     d.net = net(Some(true), true);
     assert_eq!(d.net_note().as_deref(), Some("verso-2.local · 10.0.0.2"));
@@ -260,7 +256,7 @@ fn status_strip_names_the_ssh_address_while_it_runs() {
 
 #[test]
 fn tiles_ask_for_their_actions_and_pending_tiles_ignore_taps() {
-    let (_, mut d) = drawer(true, net(Some(false), false));
+    let (_, mut d) = drawer(net(Some(false), false));
     assert_eq!(tap_tile(&mut d, Tile::Wifi), Some(DrawerEvent::Wifi(true)));
     assert_eq!(tap_tile(&mut d, Tile::Ssh), Some(DrawerEvent::Ssh(true)));
     assert_eq!(tap_tile(&mut d, Tile::Orientation), Some(DrawerEvent::Orientation(Orientation::Landscape)));
@@ -291,7 +287,7 @@ fn tiles_ask_for_their_actions_and_pending_tiles_ignore_taps() {
 
 #[test]
 fn swipe_up_and_taps_below_close_but_taps_on_the_panel_do_not() {
-    let (_, mut d) = drawer(false, net(Some(true), false));
+    let (_, mut d) = drawer(net(Some(true), false));
     let panel = d.rect();
     assert_eq!(tap(&mut d, Point::new(600, panel.bottom() + 200)), Some(DrawerEvent::Close));
     let (status, handle) = (d.layout().status.center().y, d.layout().handle.y);
@@ -310,7 +306,7 @@ fn swipe_up_and_taps_below_close_but_taps_on_the_panel_do_not() {
 
 #[test]
 fn light_sliders_drag_and_report_the_frontlight() {
-    let (t, mut d) = drawer(false, net(Some(true), false));
+    let (t, mut d) = drawer(net(Some(true), false));
     let light = row_parts(&t, d.layout().sliders[0], false).slider;
     let warmth = row_parts(&t, d.layout().sliders[1], false).slider;
     let right = Point::new(light.right() - 2, light.center().y);
@@ -346,7 +342,6 @@ fn light_sliders_follow_the_model_range() {
         &t,
         screen,
         Orientation::Portrait,
-        false,
         Some(LIGHT),
         range,
         net(Some(true), false),
@@ -380,7 +375,6 @@ fn late_frontlight_reading_adds_the_sliders_once() {
         &t,
         screen,
         Orientation::Portrait,
-        false,
         None,
         LightRange::default(),
         net(Some(true), false),
@@ -398,7 +392,7 @@ fn late_frontlight_reading_adds_the_sliders_once() {
 
 #[test]
 fn drawing_shows_on_pending_and_pressed_tiles() {
-    let (t, mut d) = drawer(true, net(Some(true), true));
+    let (t, mut d) = drawer(net(Some(true), true));
     d.net.ssh_pending = Some(false);
     let mut canvas = Canvas::new(1272, 1696);
     canvas.fill(0x77);
@@ -431,7 +425,7 @@ fn incomplete_ssh_status_is_reread_for_a_while() {
     let mut state = net(Some(true), true);
     state.ssh.address = None;
     state.ssh.hostname = None;
-    let (t, mut d) = drawer(true, state);
+    let (t, mut d) = drawer(state);
     let now = Instant::now();
     d.ssh_read_at = now;
     d.ssh_recheck_until = now + SSH_RECHECK_FOR;
@@ -651,7 +645,6 @@ fn in_book_drawer_header_geometry_and_actions_in_portrait_landscape_and_small() 
             &t,
             screen,
             orientation,
-            false,
             Some(LIGHT),
             LightRange::default(),
             net(Some(true), false),
@@ -687,6 +680,6 @@ fn in_book_drawer_header_geometry_and_actions_in_portrait_landscape_and_small() 
         d.draw(&mut cx);
     }
     // Home/Library drawer has no back/search buttons.
-    let (_, home) = drawer(false, net(Some(true), false));
+    let (_, home) = drawer(net(Some(true), false));
     assert!(home.back_rect().is_none() && home.search_rect().is_none());
 }

@@ -151,7 +151,7 @@ or `☀` / battery in the Reader Menu) to open the **Top Drawer**:
   warm LEDs).
 - Quick tiles for **Wi-Fi**, **Orientation** (Portrait / Landscape), **Refresh**
   (full-screen flash to clear ghosting), **Wi-Fi transfer**, **Settings**, and
-  **SSH** (shown only when developer mode is unlocked or SSH is running).
+  **SSH**.
 
 ### Reader Menu, Contents, Search and Footnotes
 
@@ -350,11 +350,11 @@ Check automatically**), or on demand via **Check for updates**.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
   a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.
 - **Advanced:** text shaping, **Run setup again** (first-launch setup) and **Create problem
-  report**, plus **Developer** options (hidden until you tap
-  the version line in **Device** five times). Developer mode exposes the
-  built-in **SSH server** (Dropbear + `sftp-server`, port 2222, key-only login
-  via `/mnt/us/verso/ssh/authorized_keys`, advertised as `verso.local`) and
-  allows live-data edits in Wi-Fi transfer's Files tab.
+  report**, plus the built-in **SSH server** switch (Dropbear + `sftp-server`,
+  port 2222, key-only login via `/mnt/us/verso/ssh/authorized_keys`, advertised
+  as `verso.local`). Tapping the version line in **Device** five times turns
+  developer mode on or off, which allows live-data edits in Wi-Fi transfer's
+  Files tab.
 
 ### Problem reports
 

@@ -3,8 +3,8 @@
 //!
 //! The app owns the drawer (`App`), drawn above the screen stack and below
 //! its prompts and toasts. It shows the clock, battery, Light and Warmth, and
-//! a grid of tiles: Wi-Fi, SSH (developer mode, or while it runs),
-//! Orientation, Refresh, Wi-Fi transfer and Settings. Wi-Fi and SSH switch on
+//! a grid of tiles: Wi-Fi, SSH, Orientation, Refresh, Wi-Fi transfer and
+//! Settings. Wi-Fi and SSH switch on
 //! [`DrawerWorker`]'s thread, so opening the drawer or tapping a tile never
 //! waits on `lipc` or the mDNS responder.
 
@@ -495,14 +495,10 @@ pub fn remember_hostname(store: &Store, ssh: &ssh::Status) {
 pub struct TopDrawer {
     screen: Rect,
     orientation: Orientation,
-    developer: bool,
     /// Open book context when pulled down inside a book; None on Home/Library.
     book: Option<TopDrawerBook>,
     back: Option<IconButton>,
     search: Option<IconButton>,
-    /// SSH ran at some point while the drawer was open (or when it opened):
-    /// the tile stays, so turning the server off doesn't make it vanish.
-    ssh_shown: bool,
     layout: DrawerLayout,
     light: Option<Slider>,
     warmth: Option<Slider>,
@@ -524,7 +520,6 @@ impl TopDrawer {
         t: &Theme,
         screen: Rect,
         orientation: Orientation,
-        developer: bool,
         light: Option<Frontlight>,
         range: LightRange,
         net: NetState,
@@ -535,11 +530,9 @@ impl TopDrawer {
             range,
             screen,
             orientation,
-            developer,
             book,
             back: None,
             search: None,
-            ssh_shown: net.ssh.running,
             layout: DrawerLayout::new(t, screen, 0, 5, false, false),
             light: None,
             warmth: None,
@@ -598,17 +591,9 @@ impl TopDrawer {
         self.search.as_ref().map(IconButton::rect)
     }
 
-    fn show_ssh(&self) -> bool {
-        self.developer || self.ssh_shown || self.net.ssh.running || self.net.ssh_pending.is_some()
-    }
-
-    /// Toggles first, then actions; SSH only in developer mode or while it runs.
+    /// Toggles first, then actions.
     pub fn tile_kinds(&self) -> Vec<Tile> {
-        if self.show_ssh() {
-            vec![Tile::Wifi, Tile::Ssh, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
-        } else {
-            vec![Tile::Wifi, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
-        }
+        vec![Tile::Wifi, Tile::Ssh, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
     }
 
     /// One step per powerd step, like the Kindle's own sliders.
@@ -672,7 +657,6 @@ impl TopDrawer {
         let finished = net.finished != self.net.finished;
         let before = self.tile_kinds();
         let had_note = self.layout.ssh_note.is_some();
-        self.ssh_shown |= net.ssh.running;
         self.net = net;
         let wants_note = self.book.is_some() && self.net_note().is_some();
         if self.tile_kinds() != before || wants_note != had_note {

@@ -194,8 +194,8 @@ pub struct SystemSettings {
     add_folder: Button,
     // Device: sleep screen and Wi-Fi, then (or on the right) updates.
     sleep: Segmented,
-    /// The version in the Updates section. Tap it five times to show or
-    /// hide the developer options (on the Advanced tab).
+    /// The version in the Updates section. Tap it five times to turn
+    /// developer mode on or off (more access in Wi-Fi transfer's Files).
     version: Rect,
     version_press: Press,
     version_taps: (u8, Instant),
@@ -209,10 +209,6 @@ pub struct SystemSettings {
     ssh_toggle: Toggle,
     /// Start (true) or stop the SSH server once "Starting…" is on screen.
     ssh_pending: Option<bool>,
-    /// The server was running when Settings opened. The developer section
-    /// then stays for this visit, so turning the server off doesn't make the
-    /// switch vanish.
-    ssh_was_running: bool,
     /// When the SSH status was last read, and until when to keep re-reading
     /// it while it's incomplete (see SSH_RECHECK).
     ssh_read_at: Instant,
@@ -234,8 +230,8 @@ pub struct SystemSettings {
     go_back_button: Button,
     offer: Option<OfferSheet>,
     go_back_sheet: Option<GoBackSheet>,
-    // Advanced: text shaping, then (or on the right) help and the
-    // developer section.
+    // Advanced: text shaping, then (or on the right) help and the SSH
+    // switch.
     setup_button: Button,
     report_button: Button,
     report_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
@@ -359,7 +355,6 @@ impl SystemSettings {
             wifi_toggle,
             wifi_pending: None,
             transfer: Button::new("Wi-Fi transfer", ButtonKind::Secondary),
-            ssh_was_running: ssh.running,
             ssh,
             ssh_toggle,
             ssh_pending: None,
@@ -720,12 +715,6 @@ impl SystemSettings {
         }
     }
 
-    /// The developer section also shows while the server runs, so it can
-    /// always be turned off.
-    fn show_developer(&self) -> bool {
-        self.developer || self.ssh.running || self.ssh_was_running
-    }
-
     fn read_ssh(&mut self) {
         self.ssh = ssh::status();
         self.ssh_read_at = Instant::now();
@@ -783,7 +772,7 @@ impl SystemSettings {
         let developer = !self.store.settings().developer;
         if self.save(cx, "settings", |s| s.developer = developer) {
             self.developer = developer;
-            let text = if self.developer { "Developer options shown in Advanced" } else { "Developer options hidden" };
+            let text = if self.developer { "Developer mode on" } else { "Developer mode off" };
             cx.toast(text, None);
         }
     }
@@ -1044,7 +1033,7 @@ impl SystemSettings {
         });
         col.note(cx, notes[self.shaping.selected], &notes);
         col.note(cx, "Applies from the next book you open. Each book is laid out again once.", &[]);
-        // Help and the developer section below, or on the right in landscape.
+        // Help and the SSH section below, or on the right in landscape.
         let mut col = if self.left == self.right {
             col.gap(t);
             col
@@ -1052,12 +1041,10 @@ impl SystemSettings {
             Column::new(self.right, self.body)
         };
         self.draw_help(cx, &mut col);
-        if self.show_developer() {
-            col.gap(t);
-            col.label(cx, "Developer");
-            let note = self.ssh_note();
-            switch_row(cx, &mut self.ssh_toggle, ("SSH server", &note), col.x, col.y, col.w);
-        }
+        col.gap(t);
+        col.label(cx, "Developer");
+        let note = self.ssh_note();
+        switch_row(cx, &mut self.ssh_toggle, ("SSH server", &note), col.x, col.y, col.w);
     }
 
     /// Run setup again and the problem report, side by side where both
@@ -1082,8 +1069,7 @@ impl SystemSettings {
     }
 
     fn advanced_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
-        if self.show_developer()
-            && self.wifi_pending.is_none()
+        if self.wifi_pending.is_none()
             && self.ssh_pending.is_none()
             && let Some(on) = self.ssh_toggle.on_gesture(g)
         {
@@ -1359,7 +1345,7 @@ impl Screen for SystemSettings {
         if self.ssh_read_on_wake {
             return Some(self.ssh_read_at);
         }
-        let visible = self.tab == Tab::Advanced && self.show_developer();
+        let visible = self.tab == Tab::Advanced;
         (visible && self.ssh_rechecking()).then(|| (self.ssh_read_at + SSH_RECHECK).min(self.ssh_recheck_until))
     }
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
@@ -1652,8 +1638,7 @@ mod tests {
             let t = Theme::for_dpi(dpi);
             let screen = Rect::new(0, 0, w, h);
             let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
-            // Every tab, developer section shown, ends above the bottom margin.
-            s.developer = true;
+            // Every tab ends above the bottom margin.
             for tab in TABS {
                 s.tab = tab;
                 let canvas = draw(&mut s, &t, w, h);

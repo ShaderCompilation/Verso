@@ -1,4 +1,4 @@
-//! Developer-only SSH server switch (Settings → Developer).
+//! SSH server switch (Settings → Advanced, and the top drawer).
 //!
 //! Verso ships its own server: upstream Dropbear, plus OpenSSH's sftp-server
 //! for scp and sftp. scripts/build-ssh.sh builds them and scripts/deploy.sh

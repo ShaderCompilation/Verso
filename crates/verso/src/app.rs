@@ -518,7 +518,6 @@ impl App {
         // SSH is read here (no subprocess); Wi-Fi in the background.
         net.read_ssh();
         net.probe();
-        let developer = services.store.settings().developer;
         let book = self.stack.last().and_then(|s| s.top_drawer_book());
         if let Some(screen) = self.stack.last_mut() {
             screen.top_drawer_opened();
@@ -528,7 +527,6 @@ impl App {
             &self.theme,
             self.canvas.bounds(),
             self.orientation,
-            developer,
             self.frontlight,
             self.light_range,
             net.state(),
