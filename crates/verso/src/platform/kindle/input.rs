@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::geom::Point;
 use crate::platform::remote::{self, Gate, Kind};
-use crate::platform::{Event, KeyAction, Orientation, Touch, TouchPhase, Unsupported};
+use crate::platform::{Event, KeyAction, Orientation, PageButtons, Touch, TouchPhase, Unsupported};
 
 // Event types and codes from <linux/input-event-codes.h>.
 const EV_SYN: u16 = 0x00;
@@ -353,6 +353,8 @@ fn scale_axis(v: i32, (lo, hi): (i32, i32), size: u32) -> i32 {
 pub struct KeySource {
     id: u32,
     kind: Kind,
+    /// For the Kindle's own buttons; `None` for remotes found by `watch`.
+    layout: Option<PageButtons>,
     file: File,
     path: String,
     device_name: String,
@@ -403,15 +405,15 @@ fn open_device(path: &Path) -> std::io::Result<File> {
 }
 
 /// Scans `/dev/input/event*` once to find the touchscreen and, when requested,
-/// the Kindle's page-turn buttons. Touch-only Kindles pass `probe_buttons =
-/// false` and stop scanning as soon as the touchscreen is found; remotes are
+/// the Kindle's page-turn buttons. Touch-only Kindles pass no `layout`
+/// and stop scanning as soon as the touchscreen is found; remotes are
 /// left to `watch`, off the startup path.
-pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<KeySource>)> {
+pub fn open(map: Mapping, layout: Option<PageButtons>) -> Result<(TouchInput, Option<KeySource>)> {
     let mut touch: Option<TouchInput> = None;
     let mut buttons: Option<KeySource> = None;
     let mut map = Some(map);
     for path in event_paths()? {
-        if touch.is_some() && (!probe_buttons || buttons.is_some()) {
+        if touch.is_some() && (layout.is_none() || buttons.is_some()) {
             break;
         }
         let Ok(file) = open_device(&path) else { continue };
@@ -422,8 +424,8 @@ pub fn open(map: Mapping, probe_buttons: bool) -> Result<(TouchInput, Option<Key
             }
             continue;
         }
-        if probe_buttons && buttons.is_none() {
-            buttons = KeySource::from_file(file, &path, true).filter(|s| s.kind == Kind::Buttons);
+        if layout.is_some() && buttons.is_none() {
+            buttons = KeySource::from_file(file, &path, layout).filter(|s| s.kind == Kind::Buttons);
             if let Some(buttons) = &mut buttons
                 && let Err(e) = buttons.grab(true)
             {
@@ -499,7 +501,7 @@ fn scan(seen: &mut HashMap<PathBuf, (u64, u64)>, found: &mut impl FnMut(KeySourc
         if has_mt_position(file.as_raw_fd()) {
             continue;
         }
-        if let Some(source) = KeySource::from_file(file, &path, false) {
+        if let Some(source) = KeySource::from_file(file, &path, None) {
             if source.kind == Kind::Remote && source.bound_in_mapper() {
                 log::info!("{}: left to {}, which has bindings for it", source.label(), remote::MAPPER);
                 continue;
@@ -534,14 +536,15 @@ fn watch_directory(dir: &CStr) -> std::io::Result<File> {
 }
 
 impl KeySource {
-    fn from_file(file: File, path: &Path, probe_buttons: bool) -> Option<Self> {
+    fn from_file(file: File, path: &Path, layout: Option<PageButtons>) -> Option<Self> {
         let fd = file.as_raw_fd();
         let keys = key_bits(fd)?;
         let device_name = device_name(fd);
-        let kind = remote::classify(&device_name, bus(fd), |code| keys.has(code), probe_buttons)?;
+        let kind = remote::classify(&device_name, bus(fd), |code| keys.has(code), layout.is_some())?;
         Some(Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             kind,
+            layout,
             file,
             path: path.display().to_string(),
             device_name,
@@ -630,7 +633,10 @@ impl KeySource {
         // The Gate takes the Kindle's buttons as one: quick presses of two of
         // them are real.
         let (name, key, button) = match self.kind {
-            Kind::Buttons => ("page button", KeyAction::from_evdev(code, orientation), 0),
+            Kind::Buttons => {
+                let key = self.layout.and_then(|layout| KeyAction::from_evdev(code, layout, orientation));
+                ("page button", key, 0)
+            }
             Kind::Virtual | Kind::Remote => match remote::page_key(code, self.has_volume_down) {
                 Some((name, action)) => (name, Some(action), code),
                 None => ("", None, 0),

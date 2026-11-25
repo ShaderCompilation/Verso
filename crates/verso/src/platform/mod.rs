@@ -191,30 +191,40 @@ pub enum KeyAction {
     PagePrev,
 }
 
+/// How a model's page-turn buttons use the Kindle's page keys.
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageButtons {
+    /// As FBInk's input scan names them: `KEY_PAGEUP` and `KEY_F23` go back,
+    /// `KEY_PAGEDOWN` and `KEY_YEN` forward. "Back" is the upper one, which a
+    /// quarter turn clockwise (`Landscape`) moves to the right, where forward
+    /// belongs, so the two swap.
+    Named,
+    /// The Oasis: the top button sends `KEY_PAGEUP` but goes forward, as in
+    /// Amazon's reader and KOReader. `Landscape` moves it to the right of the
+    /// bottom edge, still the forward side, so nothing swaps.
+    Oasis,
+}
+
 impl KeyAction {
     /// The page-turn meaning of a Kindle button's evdev key code, held in
     /// `orientation` (remotes: `remote::page_key`).
-    /// Kindle codes as FBInk's input scan reads them: `KEY_PAGEUP` and
-    /// `KEY_F23` go back, `KEY_PAGEDOWN` and `KEY_YEN` forward. The
-    /// Oasis's buttons sit on the panel's right edge in portrait, the
-    /// "back" one above; a quarter turn clockwise (`Landscape`) puts that
-    /// one on the right of the bottom edge, where forward belongs, so the
-    /// two swap (to verify on an Oasis 3).
     #[cfg(any(feature = "kindle", test))]
     #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
-    pub fn from_evdev(code: u16, orientation: Orientation) -> Option<Self> {
+    pub fn from_evdev(code: u16, buttons: PageButtons, orientation: Orientation) -> Option<Self> {
         const KEY_PAGEUP: u16 = 104;
         const KEY_PAGEDOWN: u16 = 109;
         const KEY_YEN: u16 = 124;
         const KEY_F23: u16 = 193;
-        let portrait = match code {
+        let named = match code {
             KEY_PAGEUP | KEY_F23 => Self::PagePrev,
             KEY_PAGEDOWN | KEY_YEN => Self::PageNext,
             _ => return None,
         };
-        Some(match orientation {
-            Orientation::Portrait => portrait,
-            Orientation::Landscape => portrait.reversed(),
+        Some(match (buttons, orientation) {
+            (PageButtons::Named, Orientation::Portrait) => named,
+            (PageButtons::Named, Orientation::Landscape) | (PageButtons::Oasis, _) => named.reversed(),
         })
     }
 
@@ -425,14 +435,20 @@ mod tests {
     #[test]
     fn page_keys_follow_the_way_the_kindle_is_held() {
         use KeyAction::*;
-        for (code, portrait) in [(104, PagePrev), (193, PagePrev), (109, PageNext), (124, PageNext)] {
-            assert_eq!(KeyAction::from_evdev(code, Orientation::Portrait), Some(portrait), "code {code}");
-            let landscape = if portrait == PageNext { PagePrev } else { PageNext };
-            assert_eq!(KeyAction::from_evdev(code, Orientation::Landscape), Some(landscape), "code {code}");
+        use Orientation::*;
+        for (code, named, other) in
+            [(104, PagePrev, PageNext), (193, PagePrev, PageNext), (109, PageNext, PagePrev), (124, PageNext, PagePrev)]
+        {
+            for (buttons, portrait, landscape) in
+                [(PageButtons::Named, named, other), (PageButtons::Oasis, other, other)]
+            {
+                let key = |orientation| KeyAction::from_evdev(code, buttons, orientation);
+                assert_eq!((key(Portrait), key(Landscape)), (Some(portrait), Some(landscape)), "{buttons:?} {code}");
+            }
         }
         // Power, Home and anything else aren't page keys.
         for code in [116, 102, 1, 0] {
-            assert_eq!(KeyAction::from_evdev(code, Orientation::Portrait), None);
+            assert_eq!(KeyAction::from_evdev(code, PageButtons::Named, Portrait), None);
         }
         assert_eq!((PageNext.step(), PagePrev.step()), (1, -1));
     }

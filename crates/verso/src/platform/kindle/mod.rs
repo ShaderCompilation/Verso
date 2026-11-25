@@ -25,7 +25,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::kindle_profiles::{self, Lights};
 use super::remote::{self, Gate};
 use super::{
-    Battery, DeviceInfo, DeviceModel, Event, FrameCheck, Frontlight, Orientation, Platform, Unsupported, Update, Waker,
+    Battery, DeviceInfo, DeviceModel, Event, FrameCheck, Frontlight, Orientation, PageButtons, Platform, Unsupported,
+    Update, Waker,
 };
 use crate::gfx::Canvas;
 use display::Display;
@@ -175,7 +176,8 @@ impl Kindle {
             id,
         );
         let profile = kindle_profiles::lookup(id);
-        let probe_buttons = profile.is_none_or(|p| p.page_buttons);
+        // A model missing from the table may have buttons.
+        let buttons = profile.map_or(Some(PageButtons::Named), |p| p.page_buttons);
         let mapping = Mapping {
             width: display.width,
             height: display.height,
@@ -194,7 +196,7 @@ impl Kindle {
         let waker = fd_waker(wake_fd.clone());
         let opening = std::thread::Builder::new().name("verso-input-init".into()).spawn(move || {
             let started = Instant::now();
-            let (touch, buttons) = input::open(mapping, probe_buttons)?;
+            let (touch, buttons) = input::open(mapping, buttons)?;
             log::debug!("startup stage: kindle input open input_us={}", started.elapsed().as_micros());
             let held = std::iter::once(touch.path()).chain(buttons.as_ref().map(KeySource::path));
             let held = held.map(str::to_owned).collect();
@@ -211,7 +213,7 @@ impl Kindle {
                 p.model,
                 if p.tested { "tested" } else { "untested" },
                 lights.describe(),
-                if p.page_buttons { "yes" } else { "no" },
+                if p.page_buttons.is_some() { "yes" } else { "no" },
                 p.epdc,
             ),
             None => format!("model: not in the profile table, {} (untested), light: {}", model.name, lights.describe()),

@@ -90,10 +90,12 @@ behaviour on other models is **(to verify)**.
   `EVIOCGMTSLOTS` and `EVIOCGABS(ABS_MT_SLOT)` so the first tap after wake does
   not land at zero on an unchanged axis.
 - **Page-turn buttons:** probed only on profiles with `page_buttons` (or
-  unknown models). Maps `KEY_PAGEUP` (104) / `KEY_F23` (193) → previous and
-  `KEY_PAGEDOWN` (109) / `KEY_YEN` (124) → next, swapped in landscape **(to
-  verify on Oasis 3)**. Any device that also exposes `KEY_POWER` (116) is
-  **never grabbed**, so `powerd` keeps the power button.
+  unknown models). `KEY_PAGEUP` (104) / `KEY_F23` (193) → previous and
+  `KEY_PAGEDOWN` (109) / `KEY_YEN` (124) → next, swapped in landscape. Oasis
+  models are the other way round in both orientations: the top button sends 104
+  and goes forward (fw 5.18.2.1.1; landscape **(to verify)**). Any device that
+  also exposes `KEY_POWER` (116) is **never grabbed**, so `powerd` keeps the
+  power button.
 - **Remotes** (rules in `platform/remote.rs`): the Kindle Click's virtual
   `kindle-input-pt` is absent on PW6 fw 5.18.5.0.1 **(measured)**, present on
   Basic 5 fw 5.20.1. Remotes are never grabbed; on PW6 Xorg doesn't open

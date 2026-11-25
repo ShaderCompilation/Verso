@@ -12,7 +12,7 @@
 //!
 //! Only models with a report are `tested`.
 
-use super::{DeviceModel, Frontlight, LightRange};
+use super::{DeviceModel, Frontlight, LightRange, PageButtons};
 
 /// Which lights the model has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,14 +38,18 @@ pub struct Profile {
     pub tested: bool,
     pub light: Light,
     pub range: LightRange,
-    pub page_buttons: bool,
+    pub page_buttons: Option<PageButtons>,
     pub epdc: Epdc,
 }
 
 const STEPS: LightRange = LightRange { brightness: 24, warmth: 24 };
 
-const fn profile(ids: &'static [u16], model: &'static str, light: Light, page_buttons: bool, epdc: Epdc) -> Profile {
-    Profile { ids, model, tested: false, light, range: STEPS, page_buttons, epdc }
+const fn profile(ids: &'static [u16], model: &'static str, light: Light, epdc: Epdc) -> Profile {
+    Profile { ids, model, tested: false, light, range: STEPS, page_buttons: None, epdc }
+}
+
+const fn with_buttons(profile: Profile, buttons: PageButtons) -> Profile {
+    Profile { page_buttons: Some(buttons), ..profile }
 }
 
 use Epdc::{Imx, Mtk};
@@ -59,7 +63,6 @@ pub const PROFILES: &[Profile] = &[
             &[0xC89, 0xC86, 0xC7F, 0xC7E, 0xE2A, 0xE25, 0xE23, 0xE28, 0xE45, 0xE5A],
             "Kindle Paperwhite 6 (2024)",
             WhiteWarm,
-            false,
             Mtk,
         )
     },
@@ -67,28 +70,20 @@ pub const PROFILES: &[Profile] = &[
         &[0x690, 0x700, 0x6FF, 0x7AD, 0x829, 0x82A, 0x971, 0x972, 0x9B3],
         "Kindle Paperwhite 5 (2021)",
         WhiteWarm,
-        false,
         Mtk,
     ),
     profile(
         &[0xE29, 0xE24, 0xE2B, 0xE26, 0xE22, 0xC9F, 0xE27, 0xE5B, 0xE46, 0x10A6, 0x10A5, 0x11D7],
         "Kindle Colorsoft (2024)",
         WhiteWarm,
-        false,
         Mtk,
     ),
-    profile(&[0x84D, 0x8BB, 0x86A, 0x958, 0x957, 0x7F1, 0x84C], "Kindle Basic 4 (2022)", White, false, Mtk),
-    profile(&[0xE85, 0xE86, 0xE84, 0xE83, 0x2909, 0xE82, 0xE75], "Kindle Basic 5 (2024)", White, false, Mtk),
-    profile(&[0x8F2, 0x974, 0x8C3, 0x847, 0x975, 0x874, 0x875, 0x8E0], "Kindle Scribe (2022)", WhiteWarm, false, Mtk),
-    profile(
-        &[0xFA0, 0xFA1, 0xFE5, 0xF9D, 0xFE4, 0xFE3, 0x102E, 0x102D],
-        "Kindle Scribe 2 (2024)",
-        WhiteWarm,
-        false,
-        Mtk,
-    ),
-    profile(&[0x12F0, 0x12EE, 0x12F4, 0x11E8, 0x11EA, 0x10A4], "Kindle Scribe 3 (2025)", WhiteWarm, false, Mtk),
-    profile(&[0x13BF, 0x12EF, 0x12F1, 0x11E9, 0x11EB, 0x10D7], "Kindle Scribe Colorsoft (2025)", WhiteWarm, false, Mtk),
+    profile(&[0x84D, 0x8BB, 0x86A, 0x958, 0x957, 0x7F1, 0x84C], "Kindle Basic 4 (2022)", White, Mtk),
+    profile(&[0xE85, 0xE86, 0xE84, 0xE83, 0x2909, 0xE82, 0xE75], "Kindle Basic 5 (2024)", White, Mtk),
+    profile(&[0x8F2, 0x974, 0x8C3, 0x847, 0x975, 0x874, 0x875, 0x8E0], "Kindle Scribe (2022)", WhiteWarm, Mtk),
+    profile(&[0xFA0, 0xFA1, 0xFE5, 0xF9D, 0xFE4, 0xFE3, 0x102E, 0x102D], "Kindle Scribe 2 (2024)", WhiteWarm, Mtk),
+    profile(&[0x12F0, 0x12EE, 0x12F4, 0x11E8, 0x11EA, 0x10A4], "Kindle Scribe 3 (2025)", WhiteWarm, Mtk),
+    profile(&[0x13BF, 0x12EF, 0x12F1, 0x11E9, 0x11EB, 0x10D7], "Kindle Scribe Colorsoft (2025)", WhiteWarm, Mtk),
     // i.MX, up to 2019.
     profile(
         &[
@@ -97,36 +92,44 @@ pub const PROFILES: &[Profile] = &[
         ],
         "Kindle Paperwhite 4 (2018)",
         White,
-        false,
         Imx,
     ),
-    profile(&[0x414, 0x3CF, 0x3D0, 0x3D1, 0x3D2, 0x3AB], "Kindle Basic 3 (2019)", White, false, Imx),
-    profile(&[0x434, 0x3D8, 0x3D7, 0x3D6, 0x3D5, 0x3D4], "Kindle Oasis 3 (2019)", WhiteWarm, true, Imx),
-    profile(
-        &[0x295, 0x296, 0x297, 0x298, 0x2E1, 0x2E2, 0x2E6, 0x2E7, 0x2E8, 0x341, 0x342, 0x343, 0x344, 0x347, 0x34A],
-        "Kindle Oasis 2 (2017)",
-        White,
-        true,
-        Imx,
+    profile(&[0x414, 0x3CF, 0x3D0, 0x3D1, 0x3D2, 0x3AB], "Kindle Basic 3 (2019)", White, Imx),
+    with_buttons(
+        profile(&[0x434, 0x3D8, 0x3D7, 0x3D6, 0x3D5, 0x3D4], "Kindle Oasis 3 (2019)", WhiteWarm, Imx),
+        PageButtons::Oasis,
     ),
-    profile(&[0x20C, 0x20D, 0x219, 0x21A, 0x21B, 0x21C], "Kindle Oasis (2016)", White, true, Imx),
+    with_buttons(
+        profile(
+            &[0x295, 0x296, 0x297, 0x298, 0x2E1, 0x2E2, 0x2E6, 0x2E7, 0x2E8, 0x341, 0x342, 0x343, 0x344, 0x347, 0x34A],
+            "Kindle Oasis 2 (2017)",
+            White,
+            Imx,
+        ),
+        PageButtons::Oasis,
+    ),
+    with_buttons(
+        profile(&[0x20C, 0x20D, 0x219, 0x21A, 0x21B, 0x21C], "Kindle Oasis (2016)", White, Imx),
+        PageButtons::Oasis,
+    ),
     profile(
         &[0x201, 0x202, 0x204, 0x205, 0x206, 0x207, 0x26B, 0x26C, 0x26D, 0x26E, 0x26F, 0x270, 0x293, 0x294],
         "Kindle Paperwhite 3 (2015)",
         White,
-        false,
         Imx,
     ),
-    profile(&[0x1BC, 0x269, 0x26A], "Kindle Basic 2 (2016)", Light::None, false, Imx),
-    profile(&[0x13, 0x54, 0x2A, 0x4F, 0x52, 0x53], "Kindle Voyage (2014)", White, true, Imx),
+    profile(&[0x1BC, 0x269, 0x26A], "Kindle Basic 2 (2016)", Light::None, Imx),
+    with_buttons(
+        profile(&[0x13, 0x54, 0x2A, 0x4F, 0x52, 0x53], "Kindle Voyage (2014)", White, Imx),
+        PageButtons::Named,
+    ),
     profile(
         &[0xD4, 0x5A, 0xD5, 0xD6, 0xD7, 0xD8, 0xF2, 0x17, 0x60, 0xF4, 0xF9, 0x62, 0x61, 0x5F],
         "Kindle Paperwhite 2 (2013)",
         White,
-        false,
         Imx,
     ),
-    profile(&[0xC6, 0xDD], "Kindle Basic (2014)", Light::None, false, Imx),
+    profile(&[0xC6, 0xDD], "Kindle Basic (2014)", Light::None, Imx),
 ];
 
 pub fn lookup(id: u16) -> Option<&'static Profile> {
@@ -210,7 +213,9 @@ mod tests {
         assert_eq!(lookup(0xE5A).map(|p| p.model), Some("Kindle Paperwhite 6 (2024)"));
         assert_eq!(lookup(0x10A6).map(|p| p.model), Some("Kindle Colorsoft (2024)"));
         assert_eq!(lookup(0x414).map(|p| p.model), Some("Kindle Basic 3 (2019)"));
-        assert!(lookup(0x434).is_some_and(|p| p.page_buttons && p.light == Light::WhiteWarm && p.epdc == Epdc::Imx));
+        assert!(lookup(0x434).is_some_and(|p| p.page_buttons == Some(PageButtons::Oasis)
+            && p.light == Light::WhiteWarm
+            && p.epdc == Epdc::Imx));
         assert_eq!(lookup(0xFFFF).map(|p| p.model), None);
         let mut ids: Vec<u16> = PROFILES.iter().flat_map(|p| p.ids.iter().copied()).collect();
         let n = ids.len();
