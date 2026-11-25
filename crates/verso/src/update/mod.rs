@@ -4,7 +4,6 @@
 //! download: another worker fetches the changed components' archives,
 //! verifies and stages them for the launcher (`download.rs`).
 pub mod download;
-pub mod fetch;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,10 +15,10 @@ use verso_update::launcher::{self, Previous, Reason, Rollback};
 use verso_update::stage::AWAKE_MARKER;
 use verso_update::{INSTALLED_PATH, Installed, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, Manifest, Version};
 
+use crate::net::{Client, FetchError};
 use crate::platform::wifi::{self, Link};
 use crate::platform::{Battery, Waker, awake};
 use download::{DownloadError, Step};
-use fetch::{Client, FetchError};
 
 /// The newest release's manifest: a stable GitHub link that redirects to
 /// the latest release's file. `VERSO_UPDATE_URL` replaces it.

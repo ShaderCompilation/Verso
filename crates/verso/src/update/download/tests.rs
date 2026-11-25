@@ -2,7 +2,7 @@
 //! `verso-release`'s packing code. The manifests here aren't signed:
 //! `run` takes a manifest that was already verified.
 use super::*;
-use crate::update::fetch::tests::{Reply, Server};
+use crate::net::tests::{Reply, Server};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;

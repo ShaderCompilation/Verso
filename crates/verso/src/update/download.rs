@@ -11,7 +11,7 @@ use verso_update::stage::{self, DOWNLOAD_DIR, STAGED_DIR, StageError, Staged};
 use verso_update::{Component, Installed, Manifest, Version};
 
 use super::CheckError;
-use super::fetch::{Client, FetchError, SaveError};
+use crate::net::{Client, FetchError, SaveError};
 
 /// Updating needs this much battery, or a charger.
 pub const MIN_BATTERY: u8 = 20;
@@ -68,7 +68,7 @@ pub enum DownloadError {
 impl DownloadError {
     /// The update screen's heading for this failure.
     pub fn title(&self) -> &'static str {
-        use super::fetch::FetchError as F;
+        use FetchError as F;
         match self {
             DownloadError::Check(CheckError::WifiOff) => "Wi-Fi is off",
             DownloadError::Check(CheckError::NotConnected) => "Wi-Fi isn’t connected",

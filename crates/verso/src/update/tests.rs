@@ -1,8 +1,8 @@
 //! The update check and download end to end against a local HTTP server
 //! serving the signed fixtures in `crates/verso-update/testdata` (release
 //! 0.3.0: a required `app` and an optional `fonts` that needs app 0.3.0).
-use super::fetch::tests::{Reply, Server};
 use super::*;
+use crate::net::tests::{Reply, Server};
 use std::sync::atomic::{AtomicU8, AtomicU64};
 use verso_update::InstalledComponent;
 use verso_update::stage::{STAGED_DIR, STAGED_FILE, Staged};

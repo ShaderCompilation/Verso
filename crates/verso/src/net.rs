@@ -1,12 +1,15 @@
-//! HTTPS downloads with `ureq` and `rustls`, trusting the certificate list
-//! built into Verso (`webpki-roots`) rather than the firmware's.
+//! HTTPS with `ureq` and `rustls`, trusting the certificate list built into
+//! Verso (`webpki-roots`) rather than the firmware's. Updates and online
+//! lookup share it. Calls block, so they belong on worker threads, and can't
+//! be aborted: timeouts bound them.
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-/// Every request names the app and its version, and nothing else.
+/// What requests say unless a client is told otherwise: the app and its
+/// version, and nothing else.
 pub fn user_agent() -> String {
     format!("Verso/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -14,8 +17,8 @@ pub fn user_agent() -> String {
 /// GitHub sends release downloads through one or two redirects.
 const MAX_REDIRECTS: u32 = 5;
 
-/// A configured HTTP client: one per check or download, so its timeouts
-/// cover the whole job.
+/// A configured HTTP client: one per check, download or lookup. Responses may
+/// arrive compressed (gzip), except saved files.
 pub struct Client {
     agent: ureq::Agent,
 }
@@ -69,23 +72,34 @@ impl Client {
     /// whole request, body included. With `https_only`, plain `http://`
     /// addresses and redirects to them are refused.
     pub fn new(connect: Duration, total: Duration, https_only: bool) -> Self {
-        Self::build(connect, Some(total), None, https_only)
+        Self::build(connect, Some(total), None, https_only, &user_agent())
+    }
+
+    /// Like `new`, for a server that wants to know more than [`user_agent`].
+    pub fn named(user_agent: &str, connect: Duration, total: Duration, https_only: bool) -> Self {
+        Self::build(connect, Some(total), None, https_only, user_agent)
     }
 
     /// A client for archives: no limit on a whole transfer, which depends on
     /// the network, but every read must arrive within `idle`.
     pub fn for_downloads(connect: Duration, idle: Duration, https_only: bool) -> Self {
-        Self::build(connect, None, Some(idle), https_only)
+        Self::build(connect, None, Some(idle), https_only, &user_agent())
     }
 
-    fn build(connect: Duration, total: Option<Duration>, idle: Option<Duration>, https_only: bool) -> Self {
+    fn build(
+        connect: Duration,
+        total: Option<Duration>,
+        idle: Option<Duration>,
+        https_only: bool,
+        user_agent: &str,
+    ) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_connect(Some(connect))
             .timeout_global(total)
             .timeout_per_read(idle)
             .max_redirects(MAX_REDIRECTS)
             .https_only(https_only)
-            .user_agent(user_agent())
+            .user_agent(user_agent)
             .build()
             .into();
         Self { agent }
@@ -111,7 +125,8 @@ impl Client {
         if have == size && size > 0 {
             return Ok(());
         }
-        let mut request = self.agent.get(url);
+        // Sizes and ranges are the file's own, never a compressed copy's.
+        let mut request = self.agent.get(url).header("Accept-Encoding", "identity");
         if have > 0 {
             request = request.header("Range", format!("bytes={have}-"));
         }
@@ -169,11 +184,26 @@ impl Client {
     }
 
     /// Downloads `url` into memory, following redirects, refusing bodies
-    /// longer than `limit` bytes.
+    /// longer than `limit` bytes (once decompressed).
     pub fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, FetchError> {
-        let mut response = self.agent.get(url).call().map_err(|e| classify(e, limit))?;
-        response.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| classify(e, limit))
+        self.get_query(url, &[], limit)
     }
+
+    /// `get` with query parameters, which it percent-encodes.
+    pub fn get_query(&self, url: &str, query: &[(&str, &str)], limit: u64) -> Result<Vec<u8>, FetchError> {
+        read(self.agent.get(url).query_pairs(query.iter().copied()).call(), limit)
+    }
+
+    /// Posts `form` (URL-encoded) and downloads the answer like `get`. For
+    /// text too long for an address.
+    pub fn post_form(&self, url: &str, form: &[(&str, &str)], limit: u64) -> Result<Vec<u8>, FetchError> {
+        read(self.agent.post(url).send_form(form.iter().copied()), limit)
+    }
+}
+
+fn read(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>, limit: u64) -> Result<Vec<u8>, FetchError> {
+    let mut response = response.map_err(|e| classify(e, limit))?;
+    response.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| classify(e, limit))
 }
 
 /// Whether `e` carries the error `variant` holds: rustls reports a failed
@@ -222,6 +252,8 @@ pub(crate) mod tests {
     #[derive(Clone)]
     pub(crate) enum Reply {
         Ok(Vec<u8>),
+        /// Like `Ok`, compressed.
+        Gzip(Vec<u8>),
         Status(u16),
         Redirect(String),
         /// Sends headers promising `len` bytes, then stalls.
@@ -235,11 +267,34 @@ pub(crate) mod tests {
         Cut(Vec<u8>, usize),
     }
 
-    /// A tiny HTTP/1.1 server on 127.0.0.1 for tests. It records each
-    /// request's path and User-Agent.
+    /// A request as the test server got it.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Request {
+        pub method: String,
+        /// With the query, as sent.
+        pub path: String,
+        pub user_agent: String,
+        pub accept_encoding: String,
+        pub content_type: String,
+        pub body: String,
+    }
+
+    impl Request {
+        /// A decoded parameter of the query or the posted form.
+        pub(crate) fn param(&self, name: &str) -> Option<String> {
+            let query = self.path.split_once('?').map_or("", |(_, q)| q);
+            let mut pairs = query.split('&').chain(self.body.split('&')).filter_map(|p| p.split_once('='));
+            pairs.find(|(n, _)| *n == name).map(|(_, value)| crate::transfer::http::decode_component(value).unwrap())
+        }
+    }
+
+    type Handler = dyn Fn(&Request) -> Reply + Send + Sync;
+
+    /// A tiny HTTP/1.1 server on 127.0.0.1 for tests. It records every
+    /// request.
     pub(crate) struct Server {
         pub base: String,
-        pub requests: Arc<Mutex<Vec<(String, String)>>>,
+        pub requests: Arc<Mutex<Vec<Request>>>,
         /// Each request's path and Range header, if it had one.
         pub ranges: Arc<RangeLog>,
     }
@@ -248,18 +303,26 @@ pub(crate) mod tests {
 
     impl Server {
         pub(crate) fn start(routes: Vec<(&str, Reply)>) -> Self {
+            let routes: Vec<(String, Reply)> = routes.into_iter().map(|(p, r)| (p.to_string(), r)).collect();
+            Self::answering(move |request| {
+                routes.iter().find(|(p, _)| *p == request.path).map_or(Reply::Status(404), |(_, r)| r.clone())
+            })
+        }
+
+        /// A server that works out each reply from the request.
+        pub(crate) fn answering(handler: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
+            let handler: Arc<Handler> = Arc::new(handler);
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
-            let routes: Vec<(String, Reply)> = routes.into_iter().map(|(p, r)| (p.to_string(), r)).collect();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let ranges = Arc::new(Mutex::new(Vec::new()));
             let (log, range_log) = (requests.clone(), ranges.clone());
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };
-                    let routes = routes.clone();
+                    let handler = handler.clone();
                     let (log, range_log) = (log.clone(), range_log.clone());
-                    std::thread::spawn(move || serve(stream, &routes, &log, &range_log));
+                    std::thread::spawn(move || serve(stream, &*handler, &log, &range_log));
                 }
             });
             Self { base, requests, ranges }
@@ -270,43 +333,65 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn paths(&self) -> Vec<String> {
-            self.requests.lock().unwrap().iter().map(|(p, _)| p.clone()).collect()
+            self.requests.lock().unwrap().iter().map(|r| r.path.clone()).collect()
+        }
+
+        pub(crate) fn request(&self, index: usize) -> Request {
+            self.requests.lock().unwrap()[index].clone()
         }
     }
 
-    fn serve(mut stream: TcpStream, routes: &[(String, Reply)], log: &Mutex<Vec<(String, String)>>, ranges: &RangeLog) {
+    fn serve(mut stream: TcpStream, handler: &Handler, log: &Mutex<Vec<Request>>, ranges: &RangeLog) {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() {
             return;
         }
-        let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
-        let mut agent = String::new();
+        let mut words = line.split_whitespace().map(str::to_string);
+        let mut request = Request { method: words.next().unwrap_or_default(), ..Request::default() };
+        request.path = words.next().unwrap_or_default();
         let mut range = None;
+        let mut length = 0;
         loop {
             let mut header = String::new();
             if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
                 break;
             }
             if let Some((name, value)) = header.split_once(':') {
-                if name.eq_ignore_ascii_case("user-agent") {
-                    agent = value.trim().to_string();
-                } else if name.eq_ignore_ascii_case("range") {
-                    range = Some(value.trim().to_string());
+                let value = value.trim().to_string();
+                match name.to_ascii_lowercase().as_str() {
+                    "user-agent" => request.user_agent = value,
+                    "accept-encoding" => request.accept_encoding = value,
+                    "content-type" => request.content_type = value,
+                    "content-length" => length = value.parse().unwrap(),
+                    "range" => range = Some(value),
+                    _ => {}
                 }
             }
         }
-        log.lock().unwrap().push((path.clone(), agent));
-        ranges.lock().unwrap().push((path.clone(), range.clone()));
+        let mut body = vec![0; length];
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        request.body = String::from_utf8(body).unwrap();
+        ranges.lock().unwrap().push((request.path.clone(), range.clone()));
+        log.lock().unwrap().push(request.clone());
         // The offset a `bytes=N-` range asks for.
         let from = range.as_deref().and_then(|r| r.strip_prefix("bytes=")?.strip_suffix('-')?.parse::<usize>().ok());
-        let reply = routes.iter().find(|(p, _)| *p == path).map_or(Reply::Status(404), |(_, r)| r.clone());
+        let reply = handler(&request);
         let head = |status: &str, extra: &str, len: usize| {
             format!("HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n{extra}\r\n")
         };
         let _ = match reply {
             Reply::Ok(body) => {
                 stream.write_all(head("200 OK", "", body.len()).as_bytes()).and_then(|()| stream.write_all(&body))
+            }
+            Reply::Gzip(body) => {
+                let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(&body).unwrap();
+                let body = encoder.finish().unwrap();
+                let header = head("200 OK", "Content-Encoding: gzip\r\n", body.len());
+                stream.write_all(header.as_bytes()).and_then(|()| stream.write_all(&body))
             }
             Reply::Status(code) => stream.write_all(head(&format!("{code} Error"), "", 0).as_bytes()),
             Reply::Redirect(to) => stream.write_all(head("302 Found", &format!("Location: {to}\r\n"), 0).as_bytes()),
@@ -354,8 +439,32 @@ pub(crate) mod tests {
         ]);
         assert_eq!(client(2000).get(&server.url("/latest.json"), 100).unwrap(), b"{}");
         assert_eq!(server.paths(), ["/latest.json", "/download/latest.json"]);
-        let agents: Vec<String> = server.requests.lock().unwrap().iter().map(|(_, a)| a.clone()).collect();
+        let agents: Vec<String> = server.requests.lock().unwrap().iter().map(|r| r.user_agent.clone()).collect();
         assert!(agents.iter().all(|a| *a == format!("Verso/{}", env!("CARGO_PKG_VERSION"))), "{agents:?}");
+    }
+
+    #[test]
+    fn sends_queries_and_forms_under_a_chosen_name() {
+        let server = Server::answering(|_| Reply::Ok(b"ok".to_vec()));
+        let client = Client::named("Verso/1 (contact)", Duration::from_secs(1), Duration::from_secs(2), false);
+        let text = "naïve & “Köln” 100%+1=2";
+        client.get_query(&server.url("/api?a=1"), &[("q", text)], 100).unwrap();
+        client.post_form(&server.url("/form"), &[("x", "1"), ("q", text)], 100).unwrap();
+        let (get, post) = (server.request(0), server.request(1));
+        assert_eq!((get.method.as_str(), get.param("a"), get.param("q")), ("GET", Some("1".into()), Some(text.into())));
+        assert_eq!((post.method.as_str(), post.path.as_str()), ("POST", "/form"), "nothing in the address");
+        assert_eq!(post.content_type, "application/x-www-form-urlencoded");
+        assert_eq!((post.param("x"), post.param("q")), (Some("1".into()), Some(text.into())));
+        assert_eq!([get.user_agent, post.user_agent], ["Verso/1 (contact)", "Verso/1 (contact)"]);
+    }
+
+    #[test]
+    fn decompresses_within_the_limit() {
+        let server = Server::start(vec![("/a", Reply::Gzip(vec![b'x'; 10_000]))]);
+        assert_eq!(client(2000).get(&server.url("/a"), 10_000).unwrap(), vec![b'x'; 10_000]);
+        assert!(server.request(0).accept_encoding.contains("gzip"));
+        // The limit counts what comes out, however small the transfer.
+        assert_eq!(client(2000).get(&server.url("/a"), 9_999), Err(FetchError::TooLarge(9_999)));
     }
 
     #[test]
@@ -469,6 +578,7 @@ pub(crate) mod tests {
                 ("/download/a.tar.gz".to_string(), Some("bytes=70000-".to_string())),
             ]
         );
+        assert_eq!(server.request(0).accept_encoding, "identity", "ranges count the file's own bytes");
         // Already complete: no request at all.
         downloader().save(&server.url("/a.tar.gz"), &path, size, &mut |_| true).unwrap();
         assert_eq!(server.paths().len(), 3);

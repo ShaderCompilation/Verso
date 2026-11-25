@@ -26,6 +26,10 @@ mod gfx;
 mod koreader;
 mod library;
 mod logging;
+mod net;
+// Until the lookup card has its tabs.
+#[allow(dead_code, unused_imports)]
+mod online;
 mod page_layout;
 mod perf;
 mod platform;

@@ -16,7 +16,7 @@ mod books;
 mod device;
 mod dictionaries;
 mod files;
-mod http;
+pub(crate) mod http;
 mod server;
 
 use std::net::Ipv4Addr;

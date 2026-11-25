@@ -40,7 +40,7 @@ unicode-segmentation = "1.13.3"
 whatlang = "0.18.0"
 unicode-normalization = "0.1"
 caseless = "0.2.2"
-ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5.2", default-features = false, features = ["rustls", "gzip"] }
 verso-update = { path = "../verso-update", default-features = false }
 
 [features]
