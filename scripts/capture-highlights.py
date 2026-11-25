@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Capture Phases 4 and 5 with original fixtures and isolated state; build the simulator first."""
+from datetime import datetime, timezone
 import json
 import re
 import shutil
@@ -119,7 +120,10 @@ def notes(passage, resume):
     for expected in ['# Selection fixture', 'Fixture Author', '## ', '> ' + quote.split()[0],
                      '**Note:** An edited note', 'ünïcödé']:
         assert expected in md, (expected, md)
-    assert re.search(r'\n\*p\. \d+ of \d+ · ' + re.escape(record['created']) + r'\*\n', md), md
+    created = record['created']
+    if created.endswith(' UTC'):
+        created = datetime.strptime(created, '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
+    assert re.search(r'\n\*p\. \d+ of \d+ · ' + re.escape(created) + r'\*\n', md), md
     print(exports[0])
     # Deleting the note keeps the highlight.
     run('note-deleted', [*listing, '--tap', '400,548', '--tap', '900,1337'], state)

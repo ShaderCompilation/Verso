@@ -398,7 +398,7 @@ impl Books {
             pages: vec![],
             total: 0,
         };
-        let md = export::markdown(&exp, &annotations::created_now());
+        let md = export::markdown(&exp, &annotations::exported_now());
         let name = export::file_name(&exp.title, ann_id);
         Response::download(md.into_bytes(), &name)
     }
@@ -410,7 +410,7 @@ impl Books {
         let mut books: Vec<&Book> = index.books.iter().filter(|b| b.available).collect();
         books.sort_by(|a, b| library::compare_books(a, b));
 
-        let exported = annotations::created_now();
+        let exported = annotations::exported_now();
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         let mut used_names = HashSet::new();

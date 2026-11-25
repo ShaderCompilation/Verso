@@ -103,6 +103,19 @@ pub fn created_now() -> String {
         time.tm_sec
     )
 }
+/// Converts a stored UTC timestamp (`YYYY-MM-DD HH:MM:SS UTC`) to local
+/// wall-clock time (`YYYY-MM-DD HH:MM:SS`). Anything else (KOReader's
+/// zone-less timestamps, empty strings, unparsable values) is kept as is.
+pub fn created_local(created: &str) -> String {
+    crate::clock::parse_utc(created)
+        .and_then(crate::clock::LocalDateTime::at)
+        .map(crate::clock::LocalDateTime::timestamp)
+        .unwrap_or_else(|| created.to_owned())
+}
+/// Current local time for export headers, falling back to UTC on failure.
+pub fn exported_now() -> String {
+    crate::clock::LocalDateTime::now().map(crate::clock::LocalDateTime::timestamp).unwrap_or_else(created_now)
+}
 
 /// The most characters a note may hold.
 pub const NOTE_LIMIT: usize = 4000;
@@ -411,5 +424,24 @@ mod tests {
         assert!(same_quotation("Hello\n  wo\u{ad}rld!", "Hello world!"));
         assert!(!same_quotation("Hello world", "Hello world!"));
         assert!(!same_quotation("", " \u{ad} "));
+    }
+    #[test]
+    fn created_local_converts_utc_and_leaves_everything_else() {
+        let local = |unix| crate::clock::LocalDateTime::at(unix).unwrap().timestamp();
+        for (input, expected) in [
+            ("2000-02-29 23:59:59 UTC", local(951_868_799)),
+            ("2026-11-14 23:08:05 UTC", local(1_794_697_685)),
+            ("2026-11-20 08:00:00", "2026-11-20 08:00:00".into()),
+            ("2026-11-15", "2026-11-15".into()),
+            ("", String::new()),
+            ("not a date UTC", "not a date UTC".into()),
+            ("2026-02-29 12:00:00 UTC", "2026-02-29 12:00:00 UTC".into()),
+            ("2026-02-31 12:00:00 UTC", "2026-02-31 12:00:00 UTC".into()),
+            ("2026-04-31 12:00:00 UTC", "2026-04-31 12:00:00 UTC".into()),
+            ("2026-11-15 24:00:00 UTC", "2026-11-15 24:00:00 UTC".into()),
+            ("+026-11-15 12:00:00 UTC", "+026-11-15 12:00:00 UTC".into()),
+        ] {
+            assert_eq!(created_local(input), expected, "{input}");
+        }
     }
 }

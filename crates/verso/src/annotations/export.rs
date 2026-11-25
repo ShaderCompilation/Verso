@@ -70,7 +70,7 @@ pub fn markdown(export: &Export, exported: &str) -> String {
         }
         // A bookmark's page is on its own line above.
         let page = page.filter(|_| a.kind == Kind::Highlight);
-        let created = Some(a.created.clone()).filter(|c| !c.is_empty());
+        let created = Some(super::created_local(&a.created)).filter(|c| !c.is_empty());
         let footer: Vec<String> = [page, created].into_iter().flatten().collect();
         if !footer.is_empty() {
             out.push_str(&format!("\n*{}*\n", footer.join(" · ")));
@@ -108,7 +108,7 @@ pub fn file_name(title: &str, book: &str) -> String {
 pub fn write(store: &Store, book: &str, export: &Export) -> Result<PathBuf> {
     ensure!(!export.records.is_empty(), "this book has no highlights or bookmarks to export");
     let path = store.export_dir().join(file_name(&export.title, book));
-    atomic_bytes(&path, markdown(export, &super::created_now()).as_bytes())
+    atomic_bytes(&path, markdown(export, &super::exported_now()).as_bytes())
         .with_context(|| format!("couldn't write {}", path.display()))?;
     Ok(path)
 }
@@ -145,8 +145,9 @@ mod tests {
     #[test]
     fn markdown_has_title_author_chapters_quotes_notes_and_pages() {
         let mut e = export();
+        e.records[0].created = "2026-11-14 23:08:00 UTC".into();
         e.records[1].created.clear();
-        let md = markdown(&e, "2026-11-15 12:00:00 UTC");
+        let md = markdown(&e, "2026-11-15 12:00:00");
         assert!(md.starts_with("# Война и мир\n\nЛев Толстой\n\n*3 highlights · 1 note · exported"));
         assert_eq!(md.matches("## Глава 1").count(), 1, "consecutive entries share a chapter heading");
         assert!(md.contains("> Первая строка\n>\n> second paragraph\n"));
@@ -154,9 +155,11 @@ mod tests {
         assert!(md.contains("## Untitled chapter"));
         assert_eq!(md.matches("**Note:**").count(), 1, "blank notes are left out");
         assert!(!md.contains("bookmark"), "not counted when there are none");
-        assert!(md.contains("\n*p. 3 of 412 · 2026-11-15*\n"), "{md}");
+        let first_date = super::super::created_local("2026-11-14 23:08:00 UTC");
+        assert!(md.contains(&format!("\n*p. 3 of 412 · {first_date}*\n")), "{md}");
+        assert!(!md.contains("23:08:00 UTC"), "UTC timestamps convert to local time");
         assert!(md.contains("\n*p. 5 of 412*\n"), "a page without a date");
-        assert!(md.ends_with("\n*2026-11-15*\n"), "an unresolved highlight has no page");
+        assert!(md.ends_with("\n*2026-11-15*\n"), "an unresolved highlight has no page and keeps zone-less dates");
     }
     #[test]
     fn bookmarks_are_listed_in_reading_order_with_page_opening_words_and_note() {

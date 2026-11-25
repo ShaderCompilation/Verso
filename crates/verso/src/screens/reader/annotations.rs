@@ -962,7 +962,7 @@ impl View {
                         let text = format!(
                             "{}\n{}\n\n{}{}{}",
                             place.join(" · "),
-                            a.created,
+                            crate::annotations::created_local(&a.created),
                             match a.kind {
                                 Kind::Highlight => a.quotation.clone(),
                                 Kind::Bookmark => format!("Bookmark · {}", bookmark_label(&a.quotation)),

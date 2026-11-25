@@ -46,8 +46,13 @@ pub struct LocalDateTime {
     pub month: u8,
     pub day: u8,
     pub time: LocalTime,
+    pub second: u8,
 }
 impl LocalDateTime {
+    pub fn now() -> Option<Self> {
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Self::at(unix)
+    }
     /// `unix` seconds in the local time zone.
     pub fn at(unix: u64) -> Option<Self> {
         let t = libc::time_t::try_from(unix).ok()?;
@@ -62,18 +67,19 @@ impl LocalDateTime {
                 month: (tm.tm_mon + 1).clamp(1, 12) as u8,
                 day: tm.tm_mday.clamp(1, 31) as u8,
                 time: LocalTime { hour: tm.tm_hour.clamp(0, 23) as u8, minute: tm.tm_min.clamp(0, 59) as u8 },
+                second: tm.tm_sec.clamp(0, 59) as u8,
             })
         }
     }
-    /// Days since 1970-01-01 for the calendar date (Howard Hinnant's
-    /// days_from_civil), so "yesterday" works across months and years.
+    /// `2026-11-15 03:08:00`, matching KOReader's local timestamp format.
+    pub fn timestamp(self) -> String {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.time.hour, self.time.minute, self.second
+        )
+    }
     fn days(self) -> i64 {
-        let (m, d) = (i64::from(self.month), i64::from(self.day));
-        let y = i64::from(self.year) - i64::from(m <= 2);
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-        era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+        days_from_civil(self.year, self.month, self.day)
     }
     /// When `self` was, seen from `now`: `today at 14:02`, `yesterday at
     /// 9:05`, `on 3 Nov` or `on 3 Nov 2025`.
@@ -128,13 +134,73 @@ impl LocalDateTime {
     }
 }
 
+/// Days since 1970-01-01 for a civil calendar date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
+    let (m, d) = (i64::from(month), i64::from(day));
+    let y = i64::from(year) - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 0,
+    }
+}
+
+fn digits(s: &str) -> Option<u32> {
+    s.bytes().all(|b| b.is_ascii_digit()).then(|| s.parse().ok()).flatten()
+}
+
+/// Parses `YYYY-MM-DD HH:MM:SS UTC` to Unix seconds. Returns `None` for any
+/// other shape or an impossible calendar date.
+pub fn parse_utc(text: &str) -> Option<u64> {
+    let s = text.strip_suffix(" UTC")?;
+    let b = s.as_bytes();
+    if b.len() != 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b' ' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let year = digits(&s[0..4])? as i32;
+    let month = digits(&s[5..7])? as u8;
+    let day = digits(&s[8..10])? as u8;
+    let hour = digits(&s[11..13])? as u8;
+    let minute = digits(&s[14..16])? as u8;
+    let second = digits(&s[17..19])? as u8;
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+        || hour >= 24
+        || minute >= 60
+        || second >= 60
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    u64::try_from(days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second)).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn says_when_relative_to_now() {
-        let at = |year, month, day, hour, minute| LocalDateTime { year, month, day, time: LocalTime { hour, minute } };
+        let at = |year, month, day, hour, minute| LocalDateTime {
+            year,
+            month,
+            day,
+            time: LocalTime { hour, minute },
+            second: 0,
+        };
         let now = at(2026, 3, 1, 10, 0);
         assert_eq!(at(2026, 3, 1, 9, 5).since(now), "today at 09:05");
         assert_eq!(at(2026, 2, 28, 23, 59).since(now), "yesterday at 23:59");
