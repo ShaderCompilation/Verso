@@ -600,18 +600,32 @@ $("book-folder").addEventListener("change", () => {
   chosenFolder = $("book-folder").value;
 });
 
+// A copy of `fold` in library/search.rs; change both together. Lower, upper,
+// lower stands in for case folding (ß and ẞ become ss), all but final sigma.
+const PLAIN_LETTERS = {
+  "đ": "d", "ð": "d", "ø": "o", "ł": "l", "ħ": "h", "ŧ": "t", "ı": "i",
+  "æ": "ae", "œ": "oe", "þ": "th", "ς": "σ"
+};
+
+function fold(text) {
+  return text
+    .normalize("NFD")
+    .replace(/[\u{300}-\u{36f}\u{1ab0}-\u{1aff}\u{1dc0}-\u{1dff}\u{20d0}-\u{20ff}]/gu, "")
+    .toLowerCase().toUpperCase().toLowerCase()
+    .replace(/[đðøłħŧıæœþς]/g, (c) => PLAIN_LETTERS[c])
+    .normalize("NFC");
+}
+
+function matchesQuery(book, foldedQuery) {
+  return [book.title, book.author, book.filename, book.group]
+    .some((field) => fold(field || "").includes(foldedQuery));
+}
+
 function renderBooks() {
   const list = $("books-list");
   list.replaceChildren();
-  const q = $("book-search").value.trim().toLowerCase();
-  const filtered = q
-    ? libraryData.books.filter((b) =>
-        (b.title || "").toLowerCase().includes(q) ||
-        (b.author || "").toLowerCase().includes(q) ||
-        (b.filename || "").toLowerCase().includes(q) ||
-        (b.group || "").toLowerCase().includes(q)
-      )
-    : libraryData.books;
+  const q = fold($("book-search").value.trim());
+  const filtered = q ? libraryData.books.filter((b) => matchesQuery(b, q)) : libraryData.books;
 
   if (filtered.length === 0) {
     const p = document.createElement("p");
@@ -722,15 +736,8 @@ function renderHighlights() {
   const list = $("hl-list");
   list.replaceChildren();
   const all = libraryData.books.filter((b) => b.has_highlights);
-  const q = $("book-search").value.trim().toLowerCase();
-  const filtered = q
-    ? all.filter((b) =>
-        (b.title || "").toLowerCase().includes(q) ||
-        (b.author || "").toLowerCase().includes(q) ||
-        (b.filename || "").toLowerCase().includes(q) ||
-        (b.group || "").toLowerCase().includes(q)
-      )
-    : all;
+  const q = fold($("book-search").value.trim());
+  const filtered = q ? all.filter((b) => matchesQuery(b, q)) : all;
 
   $("hl-head").hidden = all.length === 0;
   $("hl-summary").textContent = all.length === 1 ? "1 book with highlights" : all.length + " books with highlights";

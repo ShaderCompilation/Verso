@@ -93,7 +93,8 @@ hides its books without deleting any files or reading progress.
 ### Search and touch keyboard
 
 Tap **Search** (`🔍`) on Home or inside any folder to filter by title, author or
-filename across **All books** or **This folder** (including subfolders).
+filename across **All books** or **This folder** (including subfolders). Accents
+don't matter: `di tim` finds *Đi tìm* and `елка` finds *Ёлка*.
 
 The touch keyboard provides **English**, **Русский** and **Dansk** layouts
 (cycle with the globe key), Shift (double-tap for Caps Lock), `123`/`ABC`
@@ -295,7 +296,7 @@ shown IP address). The server stops on **Done**, sleep, USB exit or after 10
 minutes idle.
 
 - **Books:** drag-and-drop EPUBs into any folder (with **+ New folder**; the
-  library folder with the most books is preselected), search, download or delete books. Switch to **Highlights** to download
+  library folder with the most books is preselected), search (accents don't matter), download or delete books. Switch to **Highlights** to download
   per-book Markdown or **Download all (.zip)**.
 - **Dictionaries:** upload StarDict archives or loose files and remove
   installed dictionaries (rescans automatically on **Done**).

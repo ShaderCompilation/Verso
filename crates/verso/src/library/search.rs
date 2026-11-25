@@ -27,8 +27,35 @@ pub struct SearchCache {
     entries: HashMap<PathBuf, Entry>,
 }
 
+/// What search compares: lower case, without Latin, Greek and Cyrillic accents.
+/// `transfer/page.html` has a copy of this; change both together.
 pub fn fold(text: &str) -> String {
-    text.nfd().default_case_fold().nfc().collect()
+    let mut plain = String::with_capacity(text.len());
+    // Accents go before case folding, which turns U+0345 (Greek iota subscript)
+    // into a letter.
+    for c in text.nfd().filter(|c| !is_accent(*c)).default_case_fold() {
+        // Letters Unicode doesn't decompose.
+        match c {
+            'đ' | 'ð' => plain.push('d'),
+            'ø' => plain.push('o'),
+            'ł' => plain.push('l'),
+            'ħ' => plain.push('h'),
+            'ŧ' => plain.push('t'),
+            'ı' => plain.push('i'),
+            'æ' => plain.push_str("ae"),
+            'œ' => plain.push_str("oe"),
+            'þ' => plain.push_str("th"),
+            _ => plain.push(c),
+        }
+    }
+    // Recomposed so that 가 isn't found inside 각.
+    plain.nfc().collect()
+}
+
+/// Not every combining mark: dropping those would lose Hindi vowels and turn が
+/// into か.
+fn is_accent(c: char) -> bool {
+    matches!(c, '\u{300}'..='\u{36f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}')
 }
 
 impl SearchCache {
@@ -119,16 +146,44 @@ mod tests {
     fn unicode_fields_and_literal_substrings() {
         let mut b = book(0);
         b.path = "/books/Греция-final.EPUB".into();
-        b.metadata.title = "ЛЕГЕНДЫ Café Straße Σίσυφος ёлка".into();
+        b.metadata.title =
+            "ЛЕГЕНДЫ Café Straße Σίσυφος ᾠδή ёлка Đi tìm lẽ sống İstanbul Kırmızı Smørrebrød Łódź が 각 किताब".into();
         b.metadata.authors = "Николай Кун".into();
         let index = LibraryIndex { books: vec![b.clone()], ..Default::default() };
         let mut cache = SearchCache::default();
         cache.sync(&index);
-        for q in ["легенды", "КУН", "греция-FINAL.epub", "cafe\u{301}", "STRASSE", "ΣΊΣΥΦΟΣ", "ЁЛКА", "  "]
-        {
+        for q in ["легенды", "КУН", "греция-FINAL.epub", "STRASSE", "  "] {
             assert!(cache.matches(&b, &fold(q.trim()), &Scope::All), "{q}");
         }
-        for q in ["легенды кун", "елка", "cafe", "[.*]"] {
+        // Accents don't matter, typed, missing or decomposed.
+        for q in [
+            "cafe",
+            "café",
+            "cafe\u{301}",
+            "елка",
+            "ЁЛКА",
+            "ΣΊΣΥΦΟΣ",
+            "σισυφος",
+            "ωδη",
+            "di tim le song",
+            "Đi tìm",
+            "ĐI TI\u{300}M",
+            "istanbul kirmizi",
+            "İSTANBUL",
+            "Kırmızı",
+            "smorrebrod",
+            "SMØRREBRØD",
+            "lodz",
+            "Łódź",
+            "が",
+            "か\u{3099}",
+            "각",
+            "किताब",
+        ] {
+            assert!(cache.matches(&b, &fold(q), &Scope::All), "{q}");
+        }
+        // In other scripts marks are letters: か, 가 and Hindi without its vowel.
+        for q in ["легенды кун", "か", "가", "कताब", "[.*]"] {
             assert!(!cache.matches(&b, &fold(q), &Scope::All), "{q}");
         }
     }
