@@ -1,0 +1,4 @@
+Eighth closed beta of Verso.
+
+- Fix updates failing on newer Kindles, such as the Basic 5 2024.
+- New icon for Wi-Fi file transfer.
