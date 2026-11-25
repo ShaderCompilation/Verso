@@ -407,14 +407,14 @@ mod tests {
         let index = LibraryIndex { books: vec![b0.clone(), b1], ..Default::default() };
         store.rebuild_home_summary(&index)?;
         let summary = store.home_summary().unwrap();
-        assert_eq!((summary.library_root_count, summary.library_folders, summary.library_books), (1, 1, 1));
+        assert_eq!((summary.library_root_count, summary.library_folders, summary.library_books), (1, 1, 2));
         store.select_home_book(&b0);
         store.save_book(
             &b0.id,
             &BookState { position: Position("p".into()), progress: 2000, last_opened: 12, ..Default::default() },
         )?;
         let after = store.home_summary().unwrap();
-        assert_eq!((after.library_root_count, after.library_folders, after.library_books), (1, 1, 1));
+        assert_eq!((after.library_root_count, after.library_folders, after.library_books), (1, 1, 2));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

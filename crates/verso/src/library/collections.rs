@@ -167,15 +167,24 @@ impl Collections {
         }
     }
 
+    /// Total books in `folder` and all its subfolders, or across all active
+    /// roots when `folder` is `None`.
+    pub fn book_count(&self, folder: Option<&Path>) -> usize {
+        match folder {
+            Some(path) => self.folders.get(path).map_or(0, |f| f.count),
+            None => self.roots.iter().filter_map(|r| self.folders.get(r)).map(|f| f.count).sum(),
+        }
+    }
+
     /// Top-level Library counts for Home's Library card:
-    /// `(root_count, folders, books)`.
+    /// `(root_count, folders, books)`, where `books` includes all subfolders.
     pub fn top_level_counts(&self, configured_roots: &[PathBuf]) -> (usize, usize, usize) {
         if let Some(root) = self.single_root(configured_roots) {
-            let (folders, books) = self.folders.get(root).map_or((0, 0), |f| (f.children.len(), f.books.len()));
+            let (folders, books) = self.folders.get(root).map_or((0, 0), |f| (f.children.len(), f.count));
             (1, folders, books)
         } else {
             let n = self.roots.len();
-            (n, n, 0)
+            (n, n, self.book_count(None))
         }
     }
 }
@@ -295,7 +304,9 @@ mod tests {
         let roots = vec![PathBuf::from("/documents"), PathBuf::from("/my-lib")];
         let tree = Collections::from_index(&index, &roots);
         assert_eq!(tree.single_root(&roots), Some(Path::new("/my-lib")));
-        assert_eq!(tree.top_level_counts(&roots), (1, 1, 1));
+        assert_eq!(tree.top_level_counts(&roots), (1, 1, 2));
+        assert_eq!(tree.book_count(Some(Path::new("/my-lib"))), 2);
+        assert_eq!(tree.book_count(Some(Path::new("/my-lib/Sub"))), 1);
         assert_eq!(tree.restore_for(None, &roots), Some(PathBuf::from("/my-lib")));
         assert_eq!(tree.restore_for(Some(Path::new("/my-lib/Sub")), &roots), Some(PathBuf::from("/my-lib/Sub")));
         assert_eq!(tree.restore_for(Some(Path::new("/removed")), &roots), Some(PathBuf::from("/my-lib")));
@@ -306,7 +317,8 @@ mod tests {
         let multi_index = LibraryIndex { books: vec![index.books[0].clone(), second], ..Default::default() };
         let multi = Collections::from_index(&multi_index, &roots);
         assert_eq!(multi.single_root(&roots), None);
-        assert_eq!(multi.top_level_counts(&roots), (2, 2, 0));
+        assert_eq!(multi.top_level_counts(&roots), (2, 2, 2));
+        assert_eq!(multi.book_count(None), 2);
         assert_eq!(multi.restore_for(None, &roots), None);
         assert_eq!(multi.restore_for(Some(Path::new("/removed")), &roots), None);
 

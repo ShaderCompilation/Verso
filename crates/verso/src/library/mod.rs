@@ -162,7 +162,11 @@ impl PathChange {
     pub fn apply_home(&self, home: &mut home::Summary, roots: &[PathBuf]) {
         let is_top_child = |path: &std::path::Path| {
             let path = collections::normalize_cow(path);
-            roots.iter().any(|r| path.parent() == Some(r.as_path()))
+            roots.iter().any(|r| path.parent() == Some(collections::normalize_cow(r).as_ref()))
+        };
+        let in_roots = |path: &std::path::Path| {
+            let path = collections::normalize_cow(path);
+            roots.iter().any(|r| path.starts_with(collections::normalize_cow(r).as_ref()))
         };
         let is_epub = |path: &std::path::Path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub"));
         match self {
@@ -170,27 +174,26 @@ impl PathChange {
                 for entry in &mut home.books {
                     rewrite_path(&mut entry.book.path, from, to);
                 }
-                if home.library_root_count == 1 {
+                if home.library_root_count == 1 && !is_epub(from) {
                     let from_top = is_top_child(from);
                     let to_top = is_top_child(to);
                     if from_top != to_top {
-                        let count = if is_epub(from) { &mut home.library_books } else { &mut home.library_folders };
                         if to_top {
-                            *count += 1;
+                            home.library_folders += 1;
                         } else {
-                            *count = count.saturating_sub(1);
+                            home.library_folders = home.library_folders.saturating_sub(1);
                         }
                     }
                 }
             }
             Self::Remove(path) => {
                 home.books.retain(|e| !e.book.path.starts_with(path));
-                if home.library_root_count == 1 && is_top_child(path) {
-                    if is_epub(path) {
+                if is_epub(path) {
+                    if in_roots(path) {
                         home.library_books = home.library_books.saturating_sub(1);
-                    } else {
-                        home.library_folders = home.library_folders.saturating_sub(1);
                     }
+                } else if home.library_root_count == 1 && is_top_child(path) {
+                    home.library_folders = home.library_folders.saturating_sub(1);
                 }
             }
             Self::AddEmpty(path) => {
@@ -199,7 +202,7 @@ impl PathChange {
                 }
             }
             Self::Add(book) => {
-                if home.library_root_count == 1 && is_top_child(&book.path) {
+                if in_roots(&book.path) {
                     home.library_books += 1;
                 }
             }
@@ -570,5 +573,25 @@ mod identity_tests {
             let ids: HashSet<_> = books.iter().map(|b| &b.annotation_id).collect();
             assert_eq!(ids.len(), books.len());
         }
+    }
+    #[test]
+    fn path_change_apply_home_updates_recursive_book_counts() {
+        let roots = vec![PathBuf::from("/books")];
+        let mut home = home::Summary::default();
+        home.set_library_counts((1, 2, 5));
+
+        // Moving a book between root and a subfolder leaves the total unchanged.
+        PathChange::Move("/books/loose.epub".into(), "/books/Sub/loose.epub".into()).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 5));
+
+        // Removing or adding a nested book updates the recursive total.
+        PathChange::Remove("/books/Sub/nested.epub".into()).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 4));
+        PathChange::Add(Box::new(book("/books/Sub/Deep/new.epub", "n"))).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 5));
+
+        // Moving a top-level folder into a subfolder updates the folder count only.
+        PathChange::Move("/books/Sub".into(), "/books/Archive/Sub".into()).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (1, 5));
     }
 }

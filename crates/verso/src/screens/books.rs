@@ -563,14 +563,15 @@ impl Books {
         self.path_rect = Rect::new(left, header_y, (right - left).max(0), header_h);
     }
     /// Library folder header subtitle: `paste_reason()` whenever Paste is
-    /// disabled, otherwise `"Scanning…"` or the smart folder/book count.
+    /// disabled, otherwise `"Scanning…"` or the smart folder/book count
+    /// (counting all books in this folder and its subfolders).
     pub(super) fn library_subtitle(&self) -> String {
         if let Some(reason) = self.paste_reason() {
             reason.to_owned()
         } else if self.scanning {
             "Scanning…".into()
         } else {
-            smart_counts(self.folders.len(), self.books.len())
+            smart_counts(self.folders.len(), self.collections.book_count(self.navigation.folder.as_deref()))
         }
     }
     /// Loading the browsing model is explicitly deferred until the user asks for it.
@@ -6417,21 +6418,24 @@ mod tests {
         let screen = Rect::new(0, 0, 1272, 1696);
         let mut books =
             Books::with_library(&t, screen, Rc::new(Worker::stub()), store.clone(), Some(LibraryWorker::stub()));
-        assert_eq!(books.library_card_subtitle(), "1 folder · 1 book");
+        assert_eq!(books.library_card_subtitle(), "1 folder · 2 books");
         let home_battery = books.battery_rect;
         // Tapping the Library card skips the root chooser because only My Library has books.
         with_cx(&t, screen, |cx| {
             let card = books.library_card.center();
             tap(&mut books, card, cx);
+            books.scanning = false;
             assert!(!books.is_home());
             assert_eq!(books.navigation.folder, Some(library.clone()));
             assert!(books.is_top_level());
+            assert_eq!(books.library_subtitle(), "1 folder · 2 books");
             assert!(!books.back.enabled, "no Back arrow at single-root top level");
             assert!(books.new_folder.enabled, "New folder enabled at single-root top level");
             assert_eq!(books.battery_rect, home_battery, "battery stays fixed across Home & Library");
             // Entering subfolder enables Back.
             books.navigate(Some(library.join("Tolkien")), cx);
             assert!(!books.is_top_level());
+            assert_eq!(books.library_subtitle(), "1 book");
             assert!(books.back.enabled);
             // Tapping Home icon returns to Home.
             let home = books.home_action.rect().center();
