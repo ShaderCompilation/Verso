@@ -24,14 +24,18 @@ pub trait Translator {
     fn translate(&self, text: &str, source: Option<&str>, target: &str) -> Result<Translation, Error>;
 }
 
-/// Whether two language tags are one language to a reader. Norwegian is
-/// usually Bokmål.
-pub fn same_language(a: &str, b: &str) -> bool {
-    let code = |tag| match normalize_language(tag) {
+/// Verso's code for a language tag. Norwegian is usually Bokmål, so they are
+/// one language here.
+fn language_code(tag: &str) -> String {
+    match normalize_language(tag) {
         code if code == "nb" => "no".to_string(),
         code => code,
-    };
-    code(a) == code(b)
+    }
+}
+
+/// Whether two language tags are one language to a reader.
+pub fn same_language(a: &str, b: &str) -> bool {
+    language_code(a) == language_code(b)
 }
 
 /// What needs no network to refuse.
@@ -52,12 +56,12 @@ pub struct GoogleGtx<'a> {
 
 /// The languages that can be translated, by name. Google has no Nynorsk.
 pub fn languages() -> impl Iterator<Item = &'static str> {
-    all_languages().map(|(code, _)| code).filter(|code| *code != "nn")
+    all_languages().map(|(code, _)| code).filter(|code| *code != "nn" && language_code(code) == *code)
 }
 
 /// The one a tag means.
 pub fn language(tag: &str) -> Option<&'static str> {
-    let code = normalize_language(tag);
+    let code = language_code(tag);
     languages().find(|known| *known == code)
 }
 
@@ -89,7 +93,7 @@ fn parse_gtx(reply: &[u8]) -> Option<Translation> {
     let detected = detected.map(|code| match code {
         // Google's old code for Javanese.
         "jw" => "jv".to_string(),
-        code => normalize_language(code),
+        code => language_code(code),
     });
     (!text.trim().is_empty()).then_some(Translation { text, detected })
 }
@@ -102,9 +106,11 @@ mod tests {
     fn languages_map_to_googles() {
         let missing: Vec<&str> = all_languages().map(|(code, _)| code).filter(|c| google_code(c).is_err()).collect();
         assert_eq!(missing, ["nn"]);
-        for (tag, code) in [("zh-Hant", "zh-CN"), ("deu", "de"), ("iw", "he"), ("nb", "nb")] {
+        for (tag, code) in [("zh-Hant", "zh-CN"), ("deu", "de"), ("iw", "he"), ("nb-NO", "no")] {
             assert_eq!(google_code(tag), Ok(code), "{tag}");
         }
+        // None is listed under a second code.
+        assert!(languages().all(|code| language(code) == Some(code)));
         for tag in ["und", "x-klingon", "", "auto", "en&q=x"] {
             assert!(matches!(google_code(tag), Err(Error::Language(_))), "{tag:?}");
         }
@@ -132,6 +138,7 @@ mod tests {
         assert_eq!(detected("\"iw\"").as_deref(), Some("he"));
         assert_eq!(detected("\"zh-TW\"").as_deref(), Some("zh"));
         assert_eq!(detected("\"jw\"").as_deref(), Some("jv"));
+        assert_eq!(detected("\"nb\"").as_deref(), Some("no"));
         assert_eq!(detected("null"), None);
         for reply in ["", "<html>", "{}", "[]", "[null]", "[[]]", "[\"x\"]", r#"[[[null,"y"]],null,"de"]"#] {
             assert_eq!(parse_gtx(reply.as_bytes()), None, "{reply}");

@@ -575,7 +575,11 @@ fn translate_waits_for_a_language_and_translates_between_the_chosen_ones() {
     let rows = &lookup.list.as_ref().unwrap().rows;
     let first: Vec<_> = rows[..3].iter().map(|r| (r.label.as_str(), r.value.as_deref().unwrap_or(""))).collect();
     assert_eq!(first, [("English", ""), ("French", "This book"), ("Afrikaans", "")]);
-    assert!(rows.iter().all(|r| !r.label.contains("Nynorsk")));
+    // One Norwegian: no Nynorsk, and Bokmål isn't another.
+    let norwegian: Vec<_> = rows.iter().map(|r| r.label.as_str()).filter(|l| l.starts_with("Norwegian")).collect();
+    assert_eq!(norwegian, ["Norwegian"]);
+    let bokmal = Languages::for_test(Some("nb"), None);
+    assert_eq!(translate::sources(&bokmal, Some("no"))[..3], [None, Some("no"), Some("af")]);
     assert_eq!(hits(), 0);
     capture(&mut lookup, &t, screen, "translate-first");
     let p = lookup.list_point(0);
@@ -796,6 +800,46 @@ fn a_long_passage_opens_on_translate_and_cannot_be_edited_or_looked_up() {
     drop(lookup);
     drop(worker);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_passage_with_few_spaces_is_counted_in_characters() {
+    for (passage, expected) in [
+        ("It was the best of times, it was the worst of times,\nit was the age of wisdom.", "18 words"),
+        (
+            "Das Bundesverfassungsgericht erklärte die Wohnungsbauförderungsgesetze und das \
+             Rindfleischetikettierungsüberwachungsaufgabenübertragungsgesetz für verfassungswidrig, obwohl die \
+             Landesregierungen widersprachen.",
+            "14 words",
+        ),
+        (
+            "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。\n吾輩はここで始めて人間というものを見た。",
+            "53 characters",
+        ),
+        ("吾輩は猫である。名前はまだ無い。\u{3000}どこで生れたかとんと見当がつかぬ。", "33 characters"),
+        ("https://example.org/a/long/address", "34 characters"),
+        (
+            "ครั้งหนึ่งนานมาแล้ว มีกระต่ายตัวหนึ่งอาศัยอยู่ในป่าใหญ่ \
+             ทุกเช้ามันจะออกไปหาอาหาร และกลับมาก่อนพระอาทิตย์ตกดิน",
+            "106 characters",
+        ),
+    ] {
+        assert_eq!(length(passage), expected, "{passage}");
+    }
+}
+
+#[test]
+fn a_folded_wikipedia_grows_for_a_long_error_without_expanding_the_card() {
+    let (t, screen) = (Theme::for_dpi(167), Rect::new(0, 0, 600, 800));
+    let error = r#"{"error":{"code":"internal_api_error_Wikimedia\\RequestTimeout\\RequestTimeoutException"}}"#;
+    let server = Server::answering(move |_| Http::Ok(error.into()));
+    let mut lookup = wikipedia_card("usa", &server, &Arc::new(AtomicU64::new(2)), &t, screen);
+    lookup.place(&t);
+    let fold = lookup.expand_point();
+    tap(&mut lookup, fold, &t, screen);
+    answered(&mut lookup, &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+    assert!(lookup.grew && !lookup.folded && !lookup.expanded);
 }
 
 fn capture(lookup: &mut Lookup, t: &Theme, screen: Rect, name: &str) {

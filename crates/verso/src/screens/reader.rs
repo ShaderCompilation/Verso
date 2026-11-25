@@ -355,7 +355,7 @@ impl Reader {
                         && self.dictionary_prepare_at.is_none()
                         && self.dictionary.is_some()
                     {
-                        let selection = self.dictionary_selection();
+                        let selection = self.dictionary_selection(&self.store.book(&self.id));
                         self.dictionary_service().prepare(selection);
                     }
                 }
@@ -562,11 +562,8 @@ impl Reader {
     }
     /// The book's dictionary set choice and language, for lookups and the
     /// warm-up.
-    fn dictionary_selection(&self) -> crate::dictionary::sets::Selection {
-        crate::dictionary::sets::Selection {
-            book_set: self.store.book(&self.id).dictionary_set,
-            language: self.book_language(),
-        }
+    fn dictionary_selection(&self, state: &crate::store::BookState) -> crate::dictionary::sets::Selection {
+        crate::dictionary::sets::Selection { book_set: state.dictionary_set.clone(), language: self.book_language() }
     }
     /// Saves something chosen in the lookup card with the book.
     fn save_choice(&mut self, choose: impl FnOnce(&mut crate::store::BookState)) -> anyhow::Result<()> {
@@ -580,12 +577,12 @@ impl Reader {
         self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)))
     }
     /// What the lookup card's online tabs look things up in.
-    fn online_languages(&self, settings: &Settings) -> Languages {
+    fn online_languages(&self, state: &crate::store::BookState, settings: &Settings) -> Languages {
         use crate::online::{translate, wikipedia::Edition};
-        let chosen = self.store.book(&self.id).wikipedia_language;
+        let chosen = state.wikipedia_language.as_deref();
         let language = self.book_language();
         let book = Edition::for_language(&language);
-        let wikipedia = chosen.as_deref().and_then(Edition::for_language).or(book);
+        let wikipedia = chosen.and_then(Edition::for_language).or(book);
         Languages {
             wikipedia: wikipedia.unwrap_or(Edition::ENGLISH),
             book,
@@ -600,8 +597,10 @@ impl Reader {
         let settings = self.store.settings();
         // Without the word, the card takes its place at the bottom.
         let word = if settings.dictionary_at_bottom { None } else { self.selected_rect() };
-        let selection = self.dictionary_selection();
-        let tabs = Tabs::new(tab, self.store.online(), self.worker.waker(), self.online_languages(&settings));
+        let state = self.store.book(&self.id);
+        let selection = self.dictionary_selection(&state);
+        let languages = self.online_languages(&state, &settings);
+        let tabs = Tabs::new(tab, self.store.online(), self.worker.waker(), languages);
         let mut lookup = Lookup::new(query, service, cx.theme, self.screen, word, selection, tabs);
         if settings.dictionary_expanded {
             lookup = lookup.expanded(cx.theme);
@@ -2337,7 +2336,7 @@ impl Screen for Reader {
         }
         if self.dictionary_prepare_at.is_some_and(|t| cx.now >= t) {
             self.dictionary_prepare_at = None;
-            let selection = self.dictionary_selection();
+            let selection = self.dictionary_selection(&self.store.book(&self.id));
             self.dictionary_service().prepare(selection);
         }
         if self.language_detect_at.is_some_and(|t| cx.now >= t) {
@@ -3788,7 +3787,7 @@ mod tests {
     fn online_lookups_use_the_saved_languages() {
         let (mut r, _commands) = test_reader("online-languages");
         let languages = |r: &Reader| {
-            let languages = r.online_languages(&r.store.settings());
+            let languages = r.online_languages(&r.store.book(&r.id), &r.store.settings());
             (languages.wikipedia.code(), languages.target)
         };
         r.language_tag = "x-klingon".into();

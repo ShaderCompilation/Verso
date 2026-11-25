@@ -218,6 +218,14 @@ fn one_line(query: &str) -> String {
     query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// How long a passage is: in characters where spaces are too rare to count
+/// words by, as in scripts written without them and in addresses.
+fn length(passage: &str) -> String {
+    let words = passage.split_whitespace().count();
+    let characters = passage.chars().filter(|c| !c.is_whitespace()).count();
+    if characters < 15 * words { format!("{words} words") } else { format!("{characters} characters") }
+}
+
 /// What the online tabs' chooser is for.
 enum Choosing {
     /// One of Wikipedia's matches.
@@ -367,8 +375,8 @@ impl Lookup {
         mut tabs: Tabs,
     ) -> Self {
         let mut field = TextField::new("Word");
-        field.edit(&TextInput::Insert(one_line(query)));
         field.limit = Some(QUERY_LIMIT);
+        field.edit(&TextInput::Insert(one_line(query)));
         if too_long(query) {
             tabs.show(Tab::Translate);
         }
@@ -1568,11 +1576,15 @@ impl Lookup {
             // the length of a passage too long to edit.
             let crumb = match self.history.last() {
                 Some(v) => Some(format!("← {}", one_line(&v.query))),
-                None => too_long(&self.query).then(|| format!("{} words", self.query.split_whitespace().count())),
+                None => too_long(&self.query).then(|| length(&self.query)),
             };
             let crumb_style = t.small;
             let after = match &crumb {
-                Some(crumb) => (cx.text.width(crumb, crumb_style).ceil() as i32 + 2).min(r.w / 3),
+                // A length has to show whole, even on a side panel.
+                Some(crumb) => {
+                    let most = if self.history.is_empty() { r.w / 2 } else { r.w / 3 };
+                    (cx.text.width(crumb, crumb_style).ceil() as i32 + 2).min(most)
+                }
                 None if !self.picking() => t.icon_small,
                 None => 0,
             };
@@ -1684,8 +1696,12 @@ impl Lookup {
             // field: grow once to the expanded card rather than squeezing it.
             if matches!(&result, Ok((_, true))) && !roomy && !self.landscape() && !self.tall() && !self.grew {
                 self.grew = true;
-                self.expanded = true;
-                self.folded = false;
+                // As ⤢ does: Wikipedia's size isn't the card's.
+                if self.on_wikipedia() {
+                    self.folded = false;
+                } else {
+                    self.expanded = true;
+                }
                 self.place(t);
                 continue;
             }
