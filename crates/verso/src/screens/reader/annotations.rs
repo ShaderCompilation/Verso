@@ -348,8 +348,9 @@ impl State {
         self.ready && !self.resolving && !self.exporting && !self.collection.records.is_empty()
     }
     /// Writes the in-memory collection (including a snapshot still waiting
-    /// to be saved) as Markdown on the I/O thread.
-    pub fn export(&mut self, title: String, author: String) -> bool {
+    /// to be saved) as Markdown on the I/O thread. `total` is the page count
+    /// of the layout the entries were resolved in.
+    pub fn export(&mut self, title: String, author: String, total: usize) -> bool {
         if !self.can_export() {
             return false;
         }
@@ -362,7 +363,7 @@ impl State {
         self.exporting = true;
         self.export_result = None;
         if let Some(w) = &self.service {
-            w.send(worker::Command::Export(Export { title, author, records, pages }));
+            w.send(worker::Command::Export(Export { title, author, records, pages, total }));
         }
         true
     }
@@ -1628,15 +1629,15 @@ mod tests {
         let message = state.apply(worker::Reply::Saved(Err("disk full".into())), 1, &mut send);
         assert!(message.unwrap().starts_with("Couldn't save"));
         assert_eq!(state.collection.records[0].note.as_deref(), Some("Kept"), "visible until a retry");
-        assert!(state.export("Title".into(), "Author".into()), "the in-memory collection exports");
+        assert!(state.export("Title".into(), "Author".into(), 412), "the in-memory collection exports");
         assert!(state.exporting && !state.can_export());
-        assert!(!state.export("Title".into(), "Author".into()), "one export at a time");
+        assert!(!state.export("Title".into(), "Author".into(), 412), "one export at a time");
         let message = state.apply(worker::Reply::Exported(Err("read-only".into())), 1, &mut send);
         assert!(message.is_none(), "the status line reports exports");
         assert!(matches!(&state.export_result, Some(Err(e)) if e == "read-only"));
         assert!(!state.exporting);
         assert_eq!(state.save_error.as_deref(), Some("disk full"), "an export never clears a save error");
-        state.export("Title".into(), "Author".into());
+        state.export("Title".into(), "Author".into(), 412);
         let path = PathBuf::from("/mnt/us/verso/data/exports/Title (book).md");
         let message = state.apply(worker::Reply::Exported(Ok(path.clone())), 1, &mut send);
         assert!(message.is_none());

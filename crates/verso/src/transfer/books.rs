@@ -394,8 +394,9 @@ impl Books {
             title: book.metadata.title.clone(),
             author: book.metadata.authors.clone(),
             records: collection.records,
-            // No layout here: bookmarks are listed without a page.
+            // No layout here: entries are listed without a page.
             pages: vec![],
+            total: 0,
         };
         let md = export::markdown(&exp, &annotations::created_now());
         let name = export::file_name(&exp.title, ann_id);
@@ -431,8 +432,9 @@ impl Books {
                 title: book.metadata.title.clone(),
                 author: book.metadata.authors.clone(),
                 records: collection.records,
-                // No layout here: bookmarks are listed without a page.
+                // No layout here: entries are listed without a page.
                 pages: vec![],
+                total: 0,
             };
             let md = export::markdown(&exp, &exported);
             let mut entry_name = export::file_name(&exp.title, ann_id);

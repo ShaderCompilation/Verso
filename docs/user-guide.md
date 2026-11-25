@@ -232,9 +232,10 @@ instantly from cache.
   reading order with an **All · Highlights · Bookmarks** filter, **Import from
   KOReader** and **Export**.
 - **Export:** writes UTF-8 Markdown to
-  `/mnt/us/verso/data/exports/<Title> (<id>).md` grouped by chapter. Highlights
-  are also downloadable per book or all at once as a zip from the Wi-Fi
-  Transfer web app.
+  `/mnt/us/verso/data/exports/<Title> (<id>).md` grouped by chapter. Entries
+  found in the text have their page in the current layout (*p. 57 of 412*). Highlights are also
+  downloadable per book or all at once as a zip from the Wi-Fi Transfer web app,
+  without page numbers.
 
 ---
 

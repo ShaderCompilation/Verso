@@ -11,6 +11,7 @@ scripts/sim.py.
     python3 scripts/capture-bookmarks.py
 """
 import json
+import re
 import shutil
 
 import sim
@@ -188,8 +189,9 @@ def koreader(s, page2, corner, menu):
         assert len(exports) == 1, exports
         md = exports[0].read_text(encoding='utf-8')
         words = ' '.join(own['quotation'].split())
-        for expected in ['1 bookmark', f'**Bookmark** · p. 2 — "{words}…"', '**Note:** From KOReader']:
+        for expected in ['1 bookmark', '**Note:** From KOReader']:
             assert expected in md, (expected, md)
+        assert re.search(r'\*\*Bookmark\*\* · p\. 2 of \d+ — "' + re.escape(words) + '…"', md), md
         # Again: the resolved bookmark is already imported; the lost one is
         # still left out.
         run('koreader-again', 'pw6', {}, [*relisting, *s.tap(s.w * 0.27, top)], state=state)

@@ -1232,7 +1232,7 @@ impl Reader {
             },
             Event::Export => {
                 let (title, author) = self.export_names();
-                self.annotations.export(title, author);
+                self.annotations.export(title, author, self.pages);
             }
         }
         cx.redraw();

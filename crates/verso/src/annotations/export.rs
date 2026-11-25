@@ -7,13 +7,16 @@ use std::path::PathBuf;
 
 /// What the I/O thread needs to write one book's export. `records` are in
 /// reading order (unresolved entries last, in saved order); `pages` holds
-/// each one's page in the current layout, None when unresolved.
+/// each one's page in the current layout, None when unresolved, and `total`
+/// that layout's page count. A page only means something for the layout at
+/// export time, so it is always written with the total.
 #[derive(Clone, Debug)]
 pub struct Export {
     pub title: String,
     pub author: String,
     pub records: Vec<Annotation>,
     pub pages: Vec<Option<usize>>,
+    pub total: usize,
 }
 
 pub fn markdown(export: &Export, exported: &str) -> String {
@@ -40,12 +43,13 @@ pub fn markdown(export: &Export, exported: &str) -> String {
             chapter = Some(c);
         }
         out.push('\n');
+        let page = export.pages.get(i).copied().flatten().map(|p| format!("p. {} of {}", p + 1, export.total));
         if a.kind == Kind::Bookmark {
-            // One line: the page in the current layout (none when unresolved)
-            // and the opening words, or nothing more for a page without text.
+            // One line: the page (none when unresolved) and the opening
+            // words, or nothing more for a page without text.
             out.push_str("**Bookmark**");
-            if let Some(page) = export.pages.get(i).copied().flatten() {
-                out.push_str(&format!(" · p. {}", page + 1));
+            if let Some(page) = &page {
+                out.push_str(&format!(" · {page}"));
             }
             let words = one_line(&a.quotation);
             if !words.is_empty() {
@@ -64,8 +68,12 @@ pub fn markdown(export: &Export, exported: &str) -> String {
         if let Some(note) = a.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
             out.push_str(&format!("\n**Note:** {note}\n"));
         }
-        if !a.created.is_empty() {
-            out.push_str(&format!("\n*{}*\n", a.created));
+        // A bookmark's page is on its own line above.
+        let page = page.filter(|_| a.kind == Kind::Highlight);
+        let created = Some(a.created.clone()).filter(|c| !c.is_empty());
+        let footer: Vec<String> = [page, created].into_iter().flatten().collect();
+        if !footer.is_empty() {
+            out.push_str(&format!("\n*{}*\n", footer.join(" · ")));
         }
     }
     out
@@ -131,18 +139,24 @@ mod tests {
             author: "Лев Толстой".into(),
             records: vec![first, second, third],
             pages: vec![Some(2), Some(4), None],
+            total: 412,
         }
     }
     #[test]
-    fn markdown_has_title_author_chapters_quotes_and_notes() {
-        let md = markdown(&export(), "2026-11-15 12:00:00 UTC");
+    fn markdown_has_title_author_chapters_quotes_notes_and_pages() {
+        let mut e = export();
+        e.records[1].created.clear();
+        let md = markdown(&e, "2026-11-15 12:00:00 UTC");
         assert!(md.starts_with("# Война и мир\n\nЛев Толстой\n\n*3 highlights · 1 note · exported"));
         assert_eq!(md.matches("## Глава 1").count(), 1, "consecutive entries share a chapter heading");
         assert!(md.contains("> Первая строка\n>\n> second paragraph\n"));
         assert!(md.contains("**Note:** My *note*\n"));
         assert!(md.contains("## Untitled chapter"));
         assert_eq!(md.matches("**Note:**").count(), 1, "blank notes are left out");
-        assert!(!md.contains("bookmark") && !md.contains("p. "), "highlights alone read as before");
+        assert!(!md.contains("bookmark"), "not counted when there are none");
+        assert!(md.contains("\n*p. 3 of 412 · 2026-11-15*\n"), "{md}");
+        assert!(md.contains("\n*p. 5 of 412*\n"), "a page without a date");
+        assert!(md.ends_with("\n*2026-11-15*\n"), "an unresolved highlight has no page");
     }
     #[test]
     fn bookmarks_are_listed_in_reading_order_with_page_opening_words_and_note() {
@@ -168,10 +182,13 @@ mod tests {
         assert!(md.contains("*3 highlights · 3 bookmarks · 2 notes · exported"), "{md}");
         assert_eq!(md.matches("## Глава 1").count(), 1, "bookmarks share the chapter heading");
         assert!(
-            md.contains("\n**Bookmark** · p. 214 — \"It was a bright cold day…\"\n\n**Note:** Come back\n"),
+            md.contains("\n**Bookmark** · p. 214 of 412 — \"It was a bright cold day…\"\n\n**Note:** Come back\n"),
             "{md}"
         );
-        assert!(md.contains("\n**Bookmark** · p. 215\n"), "a page without text");
+        assert!(
+            md.contains("\n**Bookmark** · p. 215 of 412\n\n*2026-11-15*\n"),
+            "a page without text, its page not repeated"
+        );
         assert!(md.contains("\n**Bookmark** — \"Gone…\"\n"), "an unresolved bookmark has no page");
         let first = md.find("Первая строка").unwrap();
         let mark = md.find("p. 214").unwrap();
