@@ -459,9 +459,9 @@ mod crash {
         }
         let word = size_of::<usize>();
         let (low, high) = maps.stack;
-        let mut at = regs.sp.max(low).next_multiple_of(word);
+        let Some(mut at) = regs.sp.max(low).checked_next_multiple_of(word) else { return };
         let end = high.min(at.saturating_add(SCAN_BYTES));
-        while at + word <= end && frames < MAX_FRAMES {
+        while end.saturating_sub(at) >= word && frames < MAX_FRAMES {
             // SAFETY: within a readable mapping, and aligned.
             let value = unsafe { ptr::read_volatile(at as *const usize) };
             if value != last
