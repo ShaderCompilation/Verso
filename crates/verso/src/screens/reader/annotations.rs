@@ -342,8 +342,10 @@ impl State {
         }
     }
     /// True when there is something to export and no export is running.
+    /// Never while a resolution runs: the entries' pages and reading order
+    /// are known only after it.
     pub fn can_export(&self) -> bool {
-        self.ready && !self.exporting && !self.collection.records.is_empty()
+        self.ready && !self.resolving && !self.exporting && !self.collection.records.is_empty()
     }
     /// Writes the in-memory collection (including a snapshot still waiting
     /// to be saved) as Markdown on the I/O thread.
@@ -1755,6 +1757,7 @@ mod tests {
         assert!(state.remove_with(0, 1, &mut |c| sent.push(c)));
         assert!(matches!(sent.pop(), Some(Command::Resolve { .. })), "a highlight is painted: resolve again");
         assert!(state.pages().iter().all(Option::is_none), "pages are unknown while locating");
+        assert!(!state.can_export(), "an export would lose them");
         // While locating, a bookmark's removal resolves again too: the
         // running batch's indices no longer match.
         state.pending = false;
