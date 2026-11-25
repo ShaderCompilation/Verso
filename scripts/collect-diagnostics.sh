@@ -9,17 +9,20 @@ export PATH
 
 usage() {
     printf '%s\n' \
-        'Usage: sh collect-diagnostics.sh [--output FILE]' \
+        'Usage: sh collect-diagnostics.sh [--output FILE | --identity]' \
         'Print an e-reader hardware report to stdout, or create FILE.' \
+        'With --identity, print a brief 4-line model/firmware/kernel/libc summary.' \
         'Existing files are never overwritten. No network access is used.'
 }
 
 output=
+mode=report
 case $# in
     0) ;;
     1)
         case $1 in
             -h|--help) usage; exit 0 ;;
+            --identity) mode=identity ;;
             *) usage >&2; exit 2 ;;
         esac
         ;;
@@ -122,6 +125,118 @@ bounded_query() {
     fi
 }
 
+# Extract only the 2- or 3-character Kindle device type code from /proc/usid
+# (never the trailing unique serial digits), decode its FBInk device ID and map
+# known models (matching crates/verso/src/platform/kindle_profiles.rs).
+kindle_model() {
+    usid_file="${VERSO_USID_FILE:-/proc/usid}"
+    if [ ! -r "$usid_file" ]; then
+        printf '%s\n' '[unavailable]'
+        return
+    fi
+    awk '
+    BEGIN {
+        b32 = "0123456789ABCDEFGHJKLMNPQRSTUVWX"
+        hex = "0123456789ABCDEF"
+        # Known Kindle model IDs (hex -> marketing name), matching kindle_profiles.rs.
+        m["C89"]=m["C86"]=m["C7F"]=m["C7E"]=m["E2A"]=m["E25"]=m["E23"]=m["E28"]=m["E45"]=m["E5A"]="Kindle Paperwhite 6 (2024)"
+        m["690"]=m["700"]=m["6FF"]=m["7AD"]=m["829"]=m["82A"]=m["971"]=m["972"]=m["9B3"]="Kindle Paperwhite 5 (2021)"
+        m["E29"]=m["E24"]=m["E2B"]=m["E26"]=m["E22"]=m["C9F"]=m["E27"]=m["E5B"]=m["E46"]=m["10A6"]=m["10A5"]=m["11D7"]="Kindle Colorsoft (2024)"
+        m["84D"]=m["8BB"]=m["86A"]=m["958"]=m["957"]=m["7F1"]=m["84C"]="Kindle Basic 4 (2022)"
+        m["E85"]=m["E86"]=m["E84"]=m["E83"]=m["2909"]=m["E82"]=m["E75"]="Kindle Basic 5 (2024)"
+        m["8F2"]=m["974"]=m["8C3"]=m["847"]=m["975"]=m["874"]=m["875"]=m["8E0"]="Kindle Scribe (2022)"
+        m["FA0"]=m["FA1"]=m["FE5"]=m["F9D"]=m["FE4"]=m["FE3"]=m["102E"]=m["102D"]="Kindle Scribe 2 (2024)"
+        m["12F0"]=m["12EE"]=m["12F4"]=m["11E8"]=m["11EA"]=m["10A4"]="Kindle Scribe 3 (2025)"
+        m["13BF"]=m["12EF"]=m["12F1"]=m["11E9"]=m["11EB"]=m["10D7"]="Kindle Scribe Colorsoft (2025)"
+        m["2F7"]=m["361"]=m["362"]=m["363"]=m["364"]=m["365"]=m["366"]=m["367"]=m["372"]=m["373"]=m["374"]=m["375"]=m["376"]="Kindle Paperwhite 4 (2018)"
+        m["402"]=m["403"]=m["4D8"]=m["4D9"]=m["4DA"]=m["4DB"]=m["4DC"]=m["4DD"]="Kindle Paperwhite 4 (2018)"
+        m["414"]=m["3CF"]=m["3D0"]=m["3D1"]=m["3D2"]=m["3AB"]="Kindle Basic 3 (2019)"
+        m["434"]=m["3D8"]=m["3D7"]=m["3D6"]=m["3D5"]=m["3D4"]="Kindle Oasis 3 (2019)"
+        m["295"]=m["296"]=m["297"]=m["298"]=m["2E1"]=m["2E2"]=m["2E6"]=m["2E7"]=m["2E8"]=m["341"]=m["342"]=m["343"]=m["344"]=m["347"]=m["34A"]="Kindle Oasis 2 (2017)"
+        m["20C"]=m["20D"]=m["219"]=m["21A"]=m["21B"]=m["21C"]="Kindle Oasis (2016)"
+        m["201"]=m["202"]=m["204"]=m["205"]=m["206"]=m["207"]=m["26B"]=m["26C"]=m["26D"]=m["26E"]=m["26F"]=m["270"]=m["293"]=m["294"]="Kindle Paperwhite 3 (2015)"
+        m["1BC"]=m["269"]=m["26A"]="Kindle Basic 2 (2016)"
+        m["13"]=m["54"]=m["2A"]=m["4F"]=m["52"]=m["53"]="Kindle Voyage (2014)"
+        m["D4"]=m["5A"]=m["D5"]=m["D6"]=m["D7"]=m["D8"]=m["F2"]=m["17"]=m["60"]=m["F4"]=m["F9"]=m["62"]=m["61"]=m["5F"]="Kindle Paperwhite 2 (2013)"
+        m["C6"]=m["DD"]="Kindle Basic (2014)"
+    }
+    NR == 1 {
+        s = toupper($0)
+        gsub(/[^A-Z0-9]/, "", s)
+        first = substr(s, 1, 1)
+        if ((first == "B" || first == "9") && length(s) >= 4) {
+            code = substr(s, 3, 2)
+            val = 0
+            for (i = 1; i <= 2; i++) {
+                p = index(hex, substr(code, i, 1))
+                if (p == 0) { val = -1; break }
+                val = val * 16 + (p - 1)
+            }
+        } else if (length(s) >= 6) {
+            code = substr(s, 4, 3)
+            val = 0
+            for (i = 1; i <= 3; i++) {
+                p = index(b32, substr(code, i, 1))
+                if (p == 0) { val = -1; break }
+                val = val * 32 + (p - 1)
+            }
+        } else {
+            print "[unrecognized]"
+            exit
+        }
+        if (val < 0) {
+            printf "unknown (code %s)\n", code
+            exit
+        }
+        key = sprintf("%X", val)
+        name = (key in m) ? m[key] : "unknown"
+        printf "%s (code %s, id=0x%x)\n", name, code, val
+        exit
+    }
+    END { if (NR == 0) print "[empty]" }
+    ' "$usid_file" 2>/dev/null
+}
+
+kindle_firmware() {
+    pv_file="${VERSO_PRETTYVERSION_FILE:-/etc/prettyversion.txt}"
+    if [ ! -r "$pv_file" ]; then
+        printf '%s\n' '[unavailable]'
+        return
+    fi
+    val=$(awk '
+        { gsub(/[^[:print:]\t]/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+        $0 != "" { print substr($0, 1, 128); exit }
+    ' "$pv_file" 2>/dev/null)
+    if [ -n "$val" ]; then
+        printf '%s\n' "$val"
+    else
+        printf '%s\n' '[empty]'
+    fi
+}
+
+libc_summary() {
+    if command -v getconf >/dev/null 2>&1; then
+        val=$(getconf GNU_LIBC_VERSION 2>/dev/null)
+        if [ -n "$val" ]; then
+            printf '%s\n' "$val"
+            return
+        fi
+    fi
+    for p in /lib/libc-*.so /lib/*-linux-*/libc-*.so /lib/ld-musl-*.so*; do
+        [ -f "$p" ] || continue
+        printf '%s\n' "${p##*/}"
+        return
+    done
+    printf '%s\n' '[unavailable]'
+}
+
+identity() {
+    printf 'Kindle model: %s\n' "$(kindle_model)"
+    printf 'Kindle firmware: %s\n' "$(kindle_firmware)"
+    printf 'Kernel and architecture: %s\n' "$(uname -srm 2>/dev/null || printf '[unavailable]')"
+    printf 'libc: %s\n' "$(libc_summary)"
+}
+
 report() {
     printf '%s\n' \
         'Verso device diagnostics - format 1' \
@@ -130,6 +245,8 @@ report() {
         'Review vendor-provided hardware names before sharing.'
 
     section 'System and CPU'
+    printf 'Kindle model: %s\n' "$(kindle_model)"
+    printf 'Kindle firmware: %s\n' "$(kindle_firmware)"
     query 'Kernel and architecture' uname -srm
     query 'Collector effective UID' id -u
     if [ -r /proc/cpuinfo ]; then
@@ -232,7 +349,7 @@ report() {
     else
         printf '%s\n' 'Android property tool: [unavailable]'
     fi
-    printf '%s\n' 'Marketing model / firmware: please supply separately if not identified above.'
+    printf '%s\n' 'Marketing model / firmware: see System and CPU above; supply separately if unavailable.'
 
     section 'Available tools'
     for tool in sh awk sed head od getconf timeout busybox fbset \
@@ -247,4 +364,8 @@ report() {
     section 'End of report'
 }
 
-report
+if [ "$mode" = identity ]; then
+    identity
+else
+    report
+fi

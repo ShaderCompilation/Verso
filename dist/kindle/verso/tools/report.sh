@@ -475,6 +475,17 @@ rotate_crash_reports() {
     done
 }
 
+# Prints a brief non-PII device/ABI summary (Kindle model code, firmware,
+# kernel, libc). Delegates to collect-diagnostics.sh --identity when available.
+device_identity() {
+    if [ -r "${COLLECTOR}" ] && grep -q -- '--identity' "${COLLECTOR}" 2>/dev/null; then
+        sh "${COLLECTOR}" --identity 2>/dev/null && return
+    fi
+    printf 'Kernel and architecture: %s\n' "$(uname -srm 2>/dev/null || printf '[unavailable]')"
+    libc_ver="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+    printf 'libc: %s\n' "${libc_ver:-[unavailable]}"
+}
+
 do_crash() {
     ended="$1"
     mkdir -p "${REPORTS_DIR}" || exit 1
@@ -484,6 +495,9 @@ do_crash() {
         printf '%s\n' 'Verso crash report - format 1'
         printf 'Created: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
         printf 'Ended: %s\n' "${ended}"
+        installed_summary
+        printf '\n== Device identity ==\n'
+        device_identity
         printf '\n== Session header ==\n'
         extract_session_header
         printf '\n== Last 300 log lines (book names redacted) ==\n'
@@ -520,6 +534,7 @@ do_report() {
         installed_summary
         sess_ver="$(last_session_version)"
         printf 'Last session version: %s\n' "${sess_ver:-unknown}"
+        device_identity
         printf 'Settings (library folders and book names omitted):\n'
         settings_summary
 

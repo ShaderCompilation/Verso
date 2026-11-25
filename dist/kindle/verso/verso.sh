@@ -79,6 +79,78 @@ save_report() {
     [ -n "${REPORT_FILE}" ] && log "saved problem report: ${REPORT_FILE}"
 }
 
+# Installed version string from installed.json, if present.
+installed_version() {
+    [ -r "${APP_DIR}/installed.json" ] || return 0
+    awk '
+        { content = content " " $0 }
+        END {
+            if (match(content, /"version"[ \t]*:[ \t]*"[^"]*"/)) {
+                v = substr(content, RSTART, RLENGTH)
+                sub(/^"version"[ \t]*:[ \t]*"/, "", v); sub(/"$/, "", v)
+                print v
+            }
+        }
+    ' "${APP_DIR}/installed.json" 2>/dev/null
+}
+
+# Logs a single-line runtime environment stamp (model, firmware, kernel, libc).
+log_env() {
+    collector="${APP_DIR}/tools/collect-diagnostics.sh"
+    if [ -r "${collector}" ] && grep -q -- '--identity' "${collector}" 2>/dev/null; then
+        info="$(sh "${collector}" --identity 2>/dev/null | tr '\n' '|' | sed 's/|$//; s/|/ | /g')"
+    else
+        libc_ver="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+        info="Kernel and architecture: $(uname -srm 2>/dev/null || echo unknown) | libc: ${libc_ver:-unknown}"
+    fi
+    [ -n "${info}" ] && log "env: ${info}"
+}
+
+# Runs a command bounded to $1 seconds across GNU and old BusyBox timeout syntaxes.
+run_bounded() {
+    secs="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 1 sh -c 'exit 0' >/dev/null 2>&1; then
+            timeout "${secs}" "$@"
+            return $?
+        elif timeout -t 1 sh -c 'exit 0' >/dev/null 2>&1; then
+            timeout -t "${secs}" "$@"
+            return $?
+        fi
+    fi
+    return 127
+}
+
+# On signal crashes, capture filtered kernel fault/OOM lines and, when Verso
+# died before logging a single byte, a bounded dynamic-linker trace.
+probe_crash_context() {
+    [ "${VERSO_NO_CRASH_PROBES:-0}" = 1 ] && return 0
+    if command -v dmesg >/dev/null 2>&1; then
+        dm="$(dmesg 2>/dev/null | grep -Ei 'verso|segfault|unhandled|alignment|out of memory|killed process' | tail -n 15 | cut -c 1-256)"
+        if [ -n "${dm}" ]; then
+            log "dmesg (filtered):"
+            printf '%s\n' "${dm}" >>"${LOG}"
+        fi
+    fi
+    if [ "${VERSO_OUT_BYTES}" -eq 0 ]; then
+        case "${EXIT_SIG}" in
+            SIGSEGV | SIGILL | SIGBUS | SIGABRT)
+                probe_out="$(run_bounded 2 sh -c 'LD_DEBUG=files,libs exec ./verso --version' 2>&1)"
+                probe_rc=$?
+                if [ "${probe_rc}" -ne 127 ]; then
+                    log "early-crash ld.so probe (LD_DEBUG=files,libs, exit ${probe_rc}):"
+                    if [ -n "${probe_out}" ]; then
+                        printf '%s\n' "${probe_out}" | tail -n 30 | cut -c 1-256 >>"${LOG}"
+                    else
+                        log "ld.so probe produced no output"
+                    fi
+                fi
+                ;;
+        esac
+    fi
+}
+
 # Prepare the owner before claiming the lock, so even a kill at the instant of
 # acquisition leaves a recoverable owner. A hard link is atomic on /tmp.
 echo $$ >"${OWNERFILE}"
@@ -544,7 +616,10 @@ run_verso() {
         log "trying the new version (attempt ${ATTEMPTS})"
     fi
     mark_log
-    log "starting Verso"
+    VER="$(installed_version)"
+    START_EPOCH="$(date +%s 2>/dev/null || echo 0)"
+    log "starting Verso${VER:+ (${VER})}"
+    VERSO_LOG_START="$(stat -c %s "${LOG}" 2>/dev/null || echo 0)"
     ./verso >>"${LOG}" 2>&1 &
     VERSO_PID=$!
     if [ "${ON_TRIAL}" = yes ]; then
@@ -566,6 +641,12 @@ run_verso() {
         WATCHER=""
     fi
     VERSO_PID=""
+    END_EPOCH="$(date +%s 2>/dev/null || echo 0)"
+    ELAPSED=$((END_EPOCH - START_EPOCH))
+    [ "${ELAPSED}" -lt 0 ] && ELAPSED=0
+    VERSO_LOG_END="$(stat -c %s "${LOG}" 2>/dev/null || echo 0)"
+    VERSO_OUT_BYTES=$((VERSO_LOG_END - VERSO_LOG_START))
+    [ "${VERSO_OUT_BYTES}" -lt 0 ] && VERSO_OUT_BYTES=0
     EXIT_KIND=crash
     EXIT_SIG=""
     if [ "${RC}" -gt 128 ] && [ "${RC}" -le 192 ]; then
@@ -589,8 +670,9 @@ run_verso() {
     else
         EXIT_DESC="${EXIT_KIND} (code ${RC})"
     fi
-    log "Verso ended: ${EXIT_DESC}"
+    log "Verso ended: ${EXIT_DESC} (after ${ELAPSED}s, ${VERSO_OUT_BYTES}B logged)"
     if [ "${EXIT_KIND}" = crash ] || [ "${EXIT_KIND}" = panic ]; then
+        [ -n "${EXIT_SIG}" ] && probe_crash_context
         if [ -f "${APP_DIR}/tools/report.sh" ]; then
             CRASH_FILE="$(VERSO_STORAGE_ROOT="${ROOT}" sh "${APP_DIR}/tools/report.sh" crash "${EXIT_DESC}" 2>>"${LOG}")"
             [ -n "${CRASH_FILE}" ] && log "saved crash report: ${CRASH_FILE}"
@@ -624,6 +706,7 @@ if ! prepare; then
 fi
 
 cd "${APP_DIR}" || exit 1
+log_env
 RUNS=0
 while :; do
     run_verso

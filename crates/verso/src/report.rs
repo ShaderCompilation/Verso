@@ -318,4 +318,70 @@ mod tests {
         let notice2 = newest_unseen_crash(&data).expect("newer unseen crash");
         assert_eq!(notice2.filename, "crash-20261122-120010.txt");
     }
+
+    #[test]
+    fn diagnostics_and_crash_report_identify_kindle_model_without_leaking_serial() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let app = root.join("verso");
+        let data = app.join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(app.join("installed.json"), r#"{"format":1,"version":"0.1.0-beta.5","dev":false}"#).unwrap();
+        fs::write(app.join("verso.log"), "2026-11-24 19:47:47 launcher: starting Verso (0.1.0-beta.5)\n").unwrap();
+
+        let usid = root.join("usid");
+        let pv = root.join("prettyversion.txt");
+        // Modern base32 serial: "11L" -> 0x434 (Kindle Oasis 3); trailing digits must never appear.
+        fs::write(&usid, "G0011L9876543210\n").unwrap();
+        fs::write(&pv, "Kindle 5.18.2.1.1 (4358970010)\n").unwrap();
+
+        let collector = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/collect-diagnostics.sh");
+
+        let id_out = Command::new("sh")
+            .arg(&collector)
+            .arg("--identity")
+            .env("VERSO_USID_FILE", &usid)
+            .env("VERSO_PRETTYVERSION_FILE", &pv)
+            .output()
+            .unwrap();
+        assert!(id_out.status.success(), "{}", String::from_utf8_lossy(&id_out.stderr));
+        let id_text = String::from_utf8_lossy(&id_out.stdout);
+        assert!(id_text.contains("Kindle model: Kindle Oasis 3 (2019) (code 11L, id=0x434)"), "{id_text}");
+        assert!(id_text.contains("Kindle firmware: Kindle 5.18.2.1.1 (4358970010)"), "{id_text}");
+        assert!(!id_text.contains("9876543210"), "serial digits leaked:\n{id_text}");
+
+        // Legacy hex serial: B0[17]... -> 0x17 (Kindle Paperwhite 2).
+        let legacy_usid = root.join("usid-legacy");
+        fs::write(&legacy_usid, "B017987654321012\n").unwrap();
+        let leg_out = Command::new("sh")
+            .arg(&collector)
+            .arg("--identity")
+            .env("VERSO_USID_FILE", &legacy_usid)
+            .env("VERSO_PRETTYVERSION_FILE", &pv)
+            .output()
+            .unwrap();
+        assert!(leg_out.status.success());
+        let leg_text = String::from_utf8_lossy(&leg_out.stdout);
+        assert!(leg_text.contains("Kindle model: Kindle Paperwhite 2 (2013) (code 17, id=0x17)"), "{leg_text}");
+        assert!(!leg_text.contains("987654321012"), "legacy serial digits leaked:\n{leg_text}");
+
+        // Crash report embeds Installed version + Device identity even with no session header.
+        let crash = Command::new("sh")
+            .arg(script_path())
+            .args(["crash", "crash (SIGSEGV, code 139)"])
+            .env("VERSO_STORAGE_ROOT", root)
+            .env("VERSO_DATA", &data)
+            .env("VERSO_COLLECTOR", &collector)
+            .env("VERSO_USID_FILE", &usid)
+            .env("VERSO_PRETTYVERSION_FILE", &pv)
+            .output()
+            .unwrap();
+        assert!(crash.status.success(), "{}", String::from_utf8_lossy(&crash.stderr));
+        let crash_path = String::from_utf8_lossy(&crash.stdout).trim().to_owned();
+        let crash_text = fs::read_to_string(&crash_path).unwrap();
+        assert!(crash_text.contains("Installed version: 0.1.0-beta.5"), "{crash_text}");
+        assert!(crash_text.contains("Kindle model: Kindle Oasis 3 (2019) (code 11L, id=0x434)"), "{crash_text}");
+        assert!(crash_text.contains("Kindle firmware: Kindle 5.18.2.1.1 (4358970010)"), "{crash_text}");
+        assert!(!crash_text.contains("9876543210"), "serial digits leaked into crash report:\n{crash_text}");
+    }
 }

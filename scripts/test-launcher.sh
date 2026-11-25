@@ -58,15 +58,19 @@ TAB="$(printf '\t')"
 make_app() {
     printf '#!/bin/sh\n# Fake Verso %s (scripts/test-launcher.sh)\nV=%s\n' "$1" "$1"
     cat <<'EOF'
+if [ "${1:-}" = "--version" ]; then
+    echo "Verso ${V} (fake)"
+    exit 0
+fi
 T="${VERSO_TEST_DIR}"
 echo "${V}" >>"${T}/runs"
-echo "fake Verso ${V} running"
 b=""
 if [ -s "${T}/queue-${V}" ]; then
     b="$(head -n 1 "${T}/queue-${V}")"
     sed -i 1d "${T}/queue-${V}"
 fi
 [ -n "${b}" ] || b="$(cat "${T}/default-${V}" 2>/dev/null)"
+[ "${b}" = "silent_crash" ] || echo "fake Verso ${V} running"
 case "${b:-ok}" in
     ok) : >"${VERSO_STARTED_MARKER}"; exit 0 ;;
     stage) VERSO_TEST_STAGE=1 ${VERSO_TEST_SHELL} "${VERSO_TEST_SCRIPT}"; : >"${VERSO_STARTED_MARKER}"; exit 85 ;;
@@ -75,7 +79,7 @@ case "${b:-ok}" in
     restart) echo "${VERSO_LAUNCHER_PROTOCOL:-}" >>"${T}/protocol"; : >"${VERSO_STARTED_MARKER}"; exit 87 ;;
     fail) echo "Error: opening the framebuffer" >&2; exit 3 ;;
     unsupported) echo "this Kindle isn't supported yet: 32 bpp" >&2; exit 88 ;;
-    crash) kill -SEGV $$ ;;
+    crash | silent_crash) kill -SEGV $$ ;;
     panic)
         echo "thread 'main' panicked at crates/verso/src/main.rs:12:5:" >&2
         echo 'called `Option::unwrap()` on a "None" value \ here' >&2
@@ -114,6 +118,10 @@ EOF
     for c in killall lipc-set-prop eips; do
         printf '#!/bin/sh\necho "%s $*" >>"${VERSO_TEST_DIR}/calls"\n' "${c}" >"${B}/${c}"
     done
+    cat >"${B}/dmesg" <<'EOF'
+#!/bin/sh
+[ -f "${VERSO_TEST_DIR}/fake-dmesg" ] && cat "${VERSO_TEST_DIR}/fake-dmesg"
+EOF
     # A firewall that keeps its rules in a file, one per line.
     cat >"${B}/iptables" <<'EOF'
 #!/bin/sh
@@ -250,7 +258,7 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}"/queue-* \
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}"/queue-* \
         "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
@@ -626,10 +634,27 @@ echo crash >"${W}/queue-0.1.0"
 launch
 runs_are "0.1.0"
 ui_restored_once
+grep -q "launcher: env:" "${R}/verso/verso.log" || fail "launcher env line missing"
 grep -q "Verso ended: crash (SIGSEGV, code 139)" "${R}/verso/verso.log" || fail "SIGSEGV not logged by name"
 crash_file="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | head -n 1)"
 [ -n "${crash_file}" ] || fail "no crash report created on SIGSEGV"
 grep -q "Ended: crash (SIGSEGV, code 139)" "${crash_file}" || fail "crash report missing Ended line"
+grep -q "== Device identity ==" "${crash_file}" || fail "crash report missing Device identity section"
+
+begin "zero-output signal crash runs dmesg and ld.so probes"
+fresh
+printf 'unrelated wifi message\nverso[42]: unhandled fault in ld-2.20.so\n' >"${W}/fake-dmesg"
+echo silent_crash >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0"
+ui_restored_once
+crash_file="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | head -n 1)"
+[ -n "${crash_file}" ] || fail "no crash report created on silent SIGSEGV"
+grep -q "0B logged" "${crash_file}" || fail "expected 0B logged marker"
+grep -q "dmesg (filtered):" "${crash_file}" || fail "filtered dmesg missing"
+grep -q "unhandled fault in ld-2.20.so" "${crash_file}" || fail "dmesg fault line missing"
+! grep -q "unrelated wifi message" "${crash_file}" || fail "unrelated dmesg line leaked"
+grep -q "early-crash ld.so probe" "${crash_file}" || fail "early-crash ld.so probe missing"
 
 begin "crash report on panic exit"
 fresh

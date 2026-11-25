@@ -67,9 +67,17 @@ impl Kindle {
     pub fn open() -> Result<Self> {
         install_signal_handlers();
         let t0 = Instant::now();
+        log::info!("startup: opening display (FBInk)");
         let display = Display::open()?;
         let display_us = t0.elapsed().as_micros();
         let id = display.session.device_id;
+        log::info!(
+            "startup: display ready ({}, {}x{}, id={:#06x}); opening input and power",
+            display.name,
+            display.width,
+            display.height,
+            id,
+        );
         let profile = kindle_profiles::lookup(id);
         let probe_buttons = profile.is_none_or(|p| p.page_buttons);
         let mapping = Mapping {

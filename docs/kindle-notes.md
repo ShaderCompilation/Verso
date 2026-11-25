@@ -189,6 +189,14 @@ rather than stopping it:
   upstream Dropbear detached with `-F -D .` (relative path checks only `.`),
   sharing `/tmp/dropbear_koreader.pid` on port 2222 so Verso and KOReader see
   and can stop each other's server.
-- **Hardware diagnostics:** [collect-diagnostics.sh](../scripts/collect-diagnostics.sh)
-  is pure POSIX `sh` + BusyBox `awk`, bounds platform queries to 3 s, touches
-  nothing under `/etc` or `/var/local`, and works without installing Verso.
+- **Hardware diagnostics & crash context:** [collect-diagnostics.sh](../scripts/collect-diagnostics.sh)
+  is pure POSIX `sh` + BusyBox `awk`, bounds platform queries to 3 s, works
+  without installing Verso, and exposes `--identity` (extracting only the
+  non-PII 2–3 char model code from `/proc/usid` and the single firmware string
+  from `/etc/prettyversion.txt`, never full serials). `verso.sh` logs that
+  environment stamp, run duration and byte count, and on fatal-signal crashes
+  appends filtered `dmesg` fault/OOM lines plus a bounded `LD_DEBUG=files,libs`
+  probe when Verso died with 0 bytes logged. Inside Verso, `logging.rs` installs
+  an alternate-stack `SA_SIGINFO` handler for `SIGSEGV`/`SIGBUS`/`SIGILL`/
+  `SIGFPE`/`SIGABRT` to log signal, fault address, registers, `dladdr` module
+  offset and a raw backtrace before re-raising.

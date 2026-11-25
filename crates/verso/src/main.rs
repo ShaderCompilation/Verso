@@ -50,6 +50,10 @@ use ui::gesture::{GestureConfig, GestureDetector};
 const MAX_BATCH: usize = 64;
 
 fn main() {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("Verso {} ({})", env!("CARGO_PKG_VERSION"), env!("VERSO_GIT_COMMIT"));
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some(document::prelayout::ARG) {
         logging::init_tagged("prelayout");
         if let Err(e) = document::prelayout::run_child() {
@@ -59,6 +63,12 @@ fn main() {
         return;
     }
     logging::init();
+    log::info!(
+        "Verso {} ({}) starting (pid={})",
+        env!("CARGO_PKG_VERSION"),
+        env!("VERSO_GIT_COMMIT"),
+        std::process::id()
+    );
     match run() {
         Ok(0) => {}
         // Everything is saved and dropped; the launcher takes it from here.
@@ -233,7 +243,6 @@ fn run() -> Result<i32> {
         println!("{}", library::covers::benchmark(&store, &store.library()));
         return Ok(0);
     }
-    log::info!("Verso {} ({}) starting", env!("CARGO_PKG_VERSION"), env!("VERSO_GIT_COMMIT"));
     let started = Instant::now();
     let opts = if cfg!(feature = "desktop") { parse_args()? } else { Options::default() };
     let opened = match &opts.screenshot {
