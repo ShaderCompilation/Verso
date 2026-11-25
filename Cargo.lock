@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "crengine-sys"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 dependencies = [
  "cc",
 ]
@@ -633,7 +633,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fbink-sys"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 dependencies = [
  "cc",
 ]
@@ -884,7 +884,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hunspell-sys"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 dependencies = [
  "cc",
  "tempfile",
@@ -2572,7 +2572,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "verso"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "verso-update"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "verso-wordforms"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 dependencies = [
  "anyhow",
  "caseless",

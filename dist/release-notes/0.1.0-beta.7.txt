@@ -1,0 +1,9 @@
+Seventh closed beta of Verso.
+
+- Page-turner remotes: Bluetooth, USB, Kindle Click.
+- Oasis: fix reversed buttons; a new setting swaps them.
+- Fix Amazon's Home covering Verso after sleep.
+- Swipes no longer move the page slider.
+- Search ignores accents.
+- The charging icon updates right away.
+- Keep book names out of problem reports.
