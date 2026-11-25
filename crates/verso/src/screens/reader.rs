@@ -4290,7 +4290,7 @@ mod tests {
         let Overlay::Menu(menu) = &r.overlay else { panic!("menu did not open") };
         let on_slider = menu.progress.rect().center();
         let opened = cx.now;
-        for (start, end, jumps) in [(399, 600, false), (700, 750, true)] {
+        for (start, end, jumps) in [(249, 600, false), (700, 750, true)] {
             cx.now = opened + Duration::from_millis(start);
             r.on_gesture(Gesture::Down(on_slider), &mut cx);
             cx.now = opened + Duration::from_millis(end);

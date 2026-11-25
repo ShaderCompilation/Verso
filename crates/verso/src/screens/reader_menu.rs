@@ -8,7 +8,7 @@ use crate::ui::widgets::{Button, ButtonKind, IconButton, Slider, SliderEvent, To
 use std::time::{Duration, Instant};
 
 /// How long after a swipe opens the menu new touches on it don't count.
-const SWIPE_SETTLE: Duration = Duration::from_millis(400);
+const SWIPE_SETTLE: Duration = Duration::from_millis(250);
 
 pub enum MenuEvent {
     Books,
