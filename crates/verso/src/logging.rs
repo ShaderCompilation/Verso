@@ -50,16 +50,22 @@ fn panic_hook() {
 #[cfg(unix)]
 mod crash {
     use std::ptr;
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
     const ALT_STACK_SIZE: usize = 32 * 1024;
     static mut ALT_STACK: [u8; ALT_STACK_SIZE] = [0; ALT_STACK_SIZE];
 
     const FATAL_SIGNALS: &[libc::c_int] = &[libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGABRT];
 
-    /// Installs an alternate signal stack and one-shot `SA_SIGINFO` handlers
-    /// for fatal signals so native/FFI crashes write signal, fault address,
-    /// registers, module offset and a raw backtrace to stderr before dying with
-    /// the original signal.
+    /// The thread that crashed first (its `pthread_self`, 0 before that) and
+    /// the signal it got, which is what the process dies with.
+    static CRASHED_THREAD: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+    /// Installs an alternate signal stack and `SA_SIGINFO` handlers for fatal
+    /// signals so native/FFI crashes write signal, fault address, registers, a
+    /// raw backtrace and the module offset to stderr before dying with the
+    /// original signal.
     pub fn install() {
         // SAFETY: static buffer outlives the process; `sigaltstack` and
         // `sigaction` are standard POSIX calls with POD structs.
@@ -73,9 +79,10 @@ mod crash {
 
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = handler as *const () as usize;
-            // SA_RESETHAND ensures re-raising (or a nested fault inside the
-            // handler) terminates immediately with the default signal action.
-            sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESETHAND;
+            // Not SA_RESETHAND, and no signal is masked: a fault inside the
+            // handler, or in another thread meanwhile, must come back to the
+            // handler, which dies with the first signal, not the new one.
+            sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
             libc::sigemptyset(&mut sa.sa_mask);
             for &sig in FATAL_SIGNALS {
                 let _ = libc::sigaction(sig, &sa, ptr::null_mut());
@@ -261,13 +268,245 @@ mod crash {
         None
     }
 
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    unsafe extern "C" {
-        fn backtrace(buffer: *mut *mut libc::c_void, size: libc::c_int) -> libc::c_int;
-        fn backtrace_symbols_fd(buffer: *const *mut libc::c_void, size: libc::c_int, fd: libc::c_int);
+    /// Return addresses are looked for in this much of the stack.
+    const SCAN_BYTES: usize = 128 * 1024;
+    const MAX_FRAMES: usize = 64;
+    const MAX_MODULES: usize = 32;
+    const MAX_NAME: usize = 40;
+
+    /// An executable mapping of a file. `base` is where the file is loaded.
+    #[derive(Clone, Copy)]
+    struct Module {
+        start: usize,
+        end: usize,
+        base: usize,
+        name: [u8; MAX_NAME],
+        name_len: usize,
     }
 
-    extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, uctx: *mut libc::c_void) {
+    /// What the backtrace needs from `/proc/self/maps`. Static, as alternate
+    /// stacks can be 8 KiB; only the thread that crashed first uses it.
+    struct Maps {
+        modules: [Module; MAX_MODULES],
+        count: usize,
+        /// The readable mapping the stack pointer is in.
+        stack: (usize, usize),
+        /// The file of the last mapping, and where its first one starts.
+        file: [u8; MAX_NAME],
+        file_len: usize,
+        base: usize,
+        line: [u8; 256],
+        chunk: [u8; 1024],
+    }
+
+    static mut MAPS: Maps = Maps {
+        modules: [Module { start: 0, end: 0, base: 0, name: [0; MAX_NAME], name_len: 0 }; MAX_MODULES],
+        count: 0,
+        stack: (0, 0),
+        file: [0; MAX_NAME],
+        file_len: 0,
+        base: 0,
+        line: [0; 256],
+        chunk: [0; 1024],
+    };
+
+    fn parse_hex(bytes: &[u8]) -> usize {
+        bytes.iter().map_while(|&b| (b as char).to_digit(16)).fold(0, |v, d| (v << 4) | d as usize)
+    }
+
+    impl Maps {
+        fn load(&mut self, sp: usize) {
+            // SAFETY: `open`, `read` and `close` are async-signal-safe.
+            let fd = unsafe { libc::open(c"/proc/self/maps".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return;
+            }
+            let mut len = 0;
+            loop {
+                // SAFETY: reads into our own buffer.
+                let n = unsafe { libc::read(fd, self.chunk.as_mut_ptr().cast(), self.chunk.len()) };
+                if n <= 0 {
+                    break;
+                }
+                for i in 0..n as usize {
+                    let byte = self.chunk[i];
+                    if byte == b'\n' {
+                        self.add_line(len, sp);
+                        len = 0;
+                    } else if len < self.line.len() {
+                        // The end of an overlong path is dropped.
+                        self.line[len] = byte;
+                        len += 1;
+                    }
+                }
+            }
+            // SAFETY: our own descriptor.
+            unsafe { libc::close(fd) };
+        }
+
+        /// One line of `/proc/self/maps`: `start-end perms offset dev inode path`.
+        fn add_line(&mut self, len: usize, sp: usize) {
+            let line = &self.line[..len];
+            let mut fields = line.split(|&b| b == b' ');
+            let (Some(range), Some(perms)) = (fields.next(), fields.next()) else { return };
+            let Some(dash) = range.iter().position(|&b| b == b'-') else { return };
+            let (start, end) = (parse_hex(&range[..dash]), parse_hex(&range[dash + 1..]));
+            let readable = perms.first() == Some(&b'r');
+            // After a stack overflow the stack pointer is in or just below the
+            // guard area, so the stack is the mapping above it.
+            if self.stack.1 == 0 && readable && sp < end && start.saturating_sub(sp) <= SCAN_BYTES {
+                self.stack = (start, end);
+            }
+            let Some(slash) = line.iter().position(|&b| b == b'/') else { return };
+            let path = &line[slash..];
+            let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+            let name_len = name.len().min(MAX_NAME);
+            // Not the file offset: small files can have several mappings at 0.
+            if name[..name_len] != self.file[..self.file_len] {
+                self.file[..name_len].copy_from_slice(&name[..name_len]);
+                self.file_len = name_len;
+                self.base = start;
+            }
+            if readable && perms.get(2) == Some(&b'x') && self.count < MAX_MODULES {
+                let module = Module { start, end, base: self.base, name: self.file, name_len };
+                self.modules[self.count] = module;
+                self.count += 1;
+            }
+        }
+
+        fn module(&self, addr: usize) -> Option<&Module> {
+            self.modules[..self.count].iter().find(|m| (m.start..m.end).contains(&addr))
+        }
+    }
+
+    /// Whether the 8 bytes of ARM code just before a return address end in a call.
+    #[cfg(any(test, target_arch = "arm"))]
+    pub(super) fn is_arm_call(thumb: bool, before: [u16; 4]) -> bool {
+        let [earlier @ .., first, second] = before;
+        if thumb {
+            // BL and BLX to an address, or BLX to a register.
+            (first & 0xf800 == 0xf000 && second & 0xc000 == 0xc000) || second & 0xff87 == 0x4780
+        } else {
+            // BL, BLX to an address or a register, or the branch after
+            // `mov lr, pc` (how LLVM calls functions that never return).
+            let word = u32::from(second) << 16 | u32::from(first);
+            word & 0x0f00_0000 == 0x0b00_0000
+                || word & 0xfe00_0000 == 0xfa00_0000
+                || word & 0x0fff_fff0 == 0x012f_ff30
+                || (earlier == [0xe00f, 0xe1a0] && word & 0x0f00_0000 == 0x0a00_0000)
+        }
+    }
+
+    /// The module of a value that can be a return address.
+    fn return_address(maps: &Maps, value: usize) -> Option<&Module> {
+        #[cfg(target_arch = "arm")]
+        {
+            let thumb = value & 1 == 1;
+            let addr = value & !1;
+            let module = maps.module(addr)?;
+            if addr < module.start + 8 || (!thumb && addr & 3 != 0) {
+                return None;
+            }
+            // SAFETY: within a readable mapping, and 2-byte aligned.
+            let before = unsafe { ptr::read_volatile((addr - 8) as *const [u16; 4]) };
+            is_arm_call(thumb, before).then_some(module)
+        }
+        #[cfg(not(target_arch = "arm"))]
+        maps.module(value)
+    }
+
+    fn push_frame(out: &mut StackBuf, number: usize, addr: usize, module: Option<&Module>) {
+        out.push_str("  #");
+        out.push_u64(number as u64);
+        out.push_str(" ");
+        match module {
+            Some(m) => {
+                out.push_bytes(&m.name[..m.name_len]);
+                out.push_str("+");
+                out.push_hex(addr - m.base);
+            }
+            None => out.push_hex(addr),
+        }
+        out.push_str("\n");
+        out.flush_stderr();
+    }
+
+    /// Writes pc, lr and every value on the stack that follows a call, newest
+    /// first, as `module+offset`. Stale addresses left in unused stack slots
+    /// can be among them.
+    ///
+    /// Not glibc's `backtrace()`: it loads the Kindle's libgcc_s, whose ARM
+    /// unwinder hands its own context to the personality routines linked into
+    /// Verso, which pass it to LLVM's libunwind (Zig links that). The two
+    /// contexts differ, so it crashed on the first frame with a personality
+    /// routine. Unwinding also takes the dynamic linker's lock. Reading
+    /// `/proc/self/maps` and the stack needs neither an unwinder nor a lock.
+    fn write_backtrace(out: &mut StackBuf, regs: &Regs) {
+        // SAFETY: only the thread that crashed first gets here, once.
+        let maps = unsafe { &mut *ptr::addr_of_mut!(MAPS) };
+        maps.load(regs.sp);
+        let maps = &*maps;
+        out.push_str("fatal backtrace (pc, lr, then calls found on the stack; some may be stale):\n");
+        push_frame(out, 0, regs.pc, maps.module(regs.pc));
+        let mut frames = 1;
+        let mut last = regs.lr.unwrap_or(0);
+        if let Some(module) = return_address(maps, last) {
+            push_frame(out, frames, last & !usize::from(cfg!(target_arch = "arm")), Some(module));
+            frames += 1;
+        }
+        let word = size_of::<usize>();
+        let (low, high) = maps.stack;
+        let mut at = regs.sp.max(low).next_multiple_of(word);
+        let end = high.min(at.saturating_add(SCAN_BYTES));
+        while at + word <= end && frames < MAX_FRAMES {
+            // SAFETY: within a readable mapping, and aligned.
+            let value = unsafe { ptr::read_volatile(at as *const usize) };
+            if value != last
+                && let Some(module) = return_address(maps, value)
+            {
+                push_frame(out, frames, value & !usize::from(cfg!(target_arch = "arm")), Some(module));
+                frames += 1;
+                last = value;
+            }
+            at += word;
+        }
+    }
+
+    /// Ends the process with `sig`, whatever else is going on.
+    fn die(sig: libc::c_int) -> ! {
+        // SAFETY: all async-signal-safe, on our own data.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = libc::SIG_DFL;
+            libc::sigaction(sig, &sa, ptr::null_mut());
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, sig);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, ptr::null_mut());
+            libc::raise(sig);
+            libc::_exit(128 + sig);
+        }
+    }
+
+    pub(super) extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, uctx: *mut libc::c_void) {
+        // SAFETY: only reads the thread's own handle.
+        let thread = unsafe { libc::pthread_self() } as usize;
+        match CRASHED_THREAD.compare_exchange(0, thread, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => FIRST_SIGNAL.store(sig, Ordering::Release),
+            Err(first) if first == thread => {
+                let note = b"fatal signal handler faulted\n";
+                // SAFETY: `write` to fd 2 is async-signal-safe.
+                unsafe { libc::write(libc::STDERR_FILENO, note.as_ptr().cast(), note.len()) };
+                die(FIRST_SIGNAL.load(Ordering::Acquire));
+            }
+            Err(_) => {
+                // Another thread is writing its crash: let it finish.
+                // SAFETY: `sleep` is async-signal-safe.
+                unsafe { libc::sleep(2) };
+                die(FIRST_SIGNAL.load(Ordering::Acquire));
+            }
+        }
+
         // 1. Strictly async-signal-safe primary line: always flushed first.
         let mut out = StackBuf::new();
         out.push_str("fatal signal: ");
@@ -303,7 +542,12 @@ mod crash {
         out.push_str("\n");
         out.flush_stderr();
 
-        // 2. Best-effort module + file offset via dladdr (no heap allocation).
+        // 2. Raw backtrace: no locks, no heap.
+        if let Some(r) = &regs {
+            write_backtrace(&mut out, r);
+        }
+
+        // 3. Last, as it takes the dynamic linker's lock: the symbol, via dladdr.
         if let Some(r) = &regs
             && r.pc != 0
         {
@@ -338,27 +582,8 @@ mod crash {
             }
         }
 
-        // 3. Best-effort raw backtrace directly to fd 2 (glibc uses no malloc).
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        unsafe {
-            let mut frames: [*mut libc::c_void; 32] = [ptr::null_mut(); 32];
-            let n = backtrace(frames.as_mut_ptr(), frames.len() as libc::c_int);
-            if n > 0 {
-                out.push_str("fatal backtrace:\n");
-                out.flush_stderr();
-                backtrace_symbols_fd(frames.as_ptr(), n, libc::STDERR_FILENO);
-            }
-        }
-
-        // 4. Re-raise with the signal unblocked; SA_RESETHAND already restored SIG_DFL.
-        unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, sig);
-            libc::sigprocmask(libc::SIG_UNBLOCK, &set, ptr::null_mut());
-            libc::raise(sig);
-            libc::_exit(128 + sig);
-        }
+        // 4. Die with the original signal.
+        die(sig);
     }
 }
 
@@ -368,26 +593,58 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn fatal_signal_handler_logs_signal_location_and_reraises() {
-        if std::env::var("VERSO_TEST_RAISE_SEGV").as_deref() == Ok("1") {
-            super::crash::install();
-            // SAFETY: deliberate signal in isolated test child process.
-            unsafe {
-                libc::raise(libc::SIGSEGV);
+    fn fatal_signal_handler_logs_and_dies_with_the_first_signal() {
+        match std::env::var("VERSO_TEST_CRASH").as_deref() {
+            Ok("segv") => {
+                super::crash::install();
+                // SAFETY: deliberate signal in isolated test child process.
+                unsafe { libc::raise(libc::SIGSEGV) };
+                std::process::exit(0);
             }
-            std::process::exit(0);
+            Ok("nested") => {
+                super::crash::install();
+                // The unmapped siginfo makes the handler itself fault.
+                super::crash::handler(libc::SIGABRT, std::ptr::without_provenance_mut(0x1000), std::ptr::null_mut());
+                std::process::exit(0);
+            }
+            _ => {}
         }
+        let crash = |how: &str| {
+            let name = "logging::tests::fatal_signal_handler_logs_and_dies_with_the_first_signal";
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("VERSO_TEST_CRASH", how)
+                .output()
+                .unwrap();
+            (out.status.signal(), String::from_utf8_lossy(&out.stderr).into_owned())
+        };
 
-        let exe = std::env::current_exe().unwrap();
-        let out = Command::new(exe)
-            .args(["--exact", "logging::tests::fatal_signal_handler_logs_signal_location_and_reraises", "--nocapture"])
-            .env("VERSO_TEST_RAISE_SEGV", "1")
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.signal(), Some(libc::SIGSEGV), "child stderr:\n{stderr}");
+        let (signal, stderr) = crash("segv");
+        assert_eq!(signal, Some(libc::SIGSEGV), "child stderr:\n{stderr}");
         assert!(stderr.contains("fatal signal: SIGSEGV (11)"), "missing signal line:\n{stderr}");
         assert!(stderr.contains("pc=0x"), "missing pc register:\n{stderr}");
         assert!(stderr.contains("fatal location:"), "missing dladdr location:\n{stderr}");
+        let backtrace = stderr.split("fatal backtrace").nth(1).unwrap_or_default();
+        assert!(backtrace.contains("  #1 ") && backtrace.contains(" verso-"), "no backtrace:\n{stderr}");
+
+        // A fault inside the handler must not replace the first signal.
+        let (signal, stderr) = crash("nested");
+        assert_eq!(signal, Some(libc::SIGABRT), "child stderr:\n{stderr}");
+        assert!(stderr.contains("fatal signal handler faulted"), "child stderr:\n{stderr}");
+    }
+
+    #[test]
+    fn arm_calls_are_told_from_other_code() {
+        let after = |before: u32, word: u32| {
+            super::crash::is_arm_call(false, [before as u16, (before >> 16) as u16, word as u16, (word >> 16) as u16])
+        };
+        let arm = |word| after(0xe5901000, word);
+        assert!(after(0xe1a0e00f, 0xea0000c1), "mov lr, pc, then b");
+        assert!(arm(0xeb0000c1) && arm(0x0b0000c1), "bl, bleq");
+        assert!(arm(0xfa0000c1) && arm(0xe12fff33), "blx to an address, blx r3");
+        assert!(!arm(0xea0000c1) && !arm(0xe12fff13) && !arm(0xe5901000), "b, bx r3, ldr");
+        let thumb = |first, second| super::crash::is_arm_call(true, [0, 0, first, second]);
+        assert!(thumb(0xf7ff, 0xfffe) && thumb(0xf000, 0xe800) && thumb(0x0000, 0x4798), "bl, blx, blx r3");
+        assert!(!thumb(0xf000, 0xb800) && !thumb(0x0000, 0x4718), "b.w, bx r3");
     }
 }

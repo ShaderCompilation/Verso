@@ -195,8 +195,8 @@ rather than stopping it:
   non-PII 2–3 char model code from `/proc/usid` and the single firmware string
   from `/etc/prettyversion.txt`, never full serials). `verso.sh` logs that
   environment stamp, run duration and byte count, and on fatal-signal crashes
-  appends filtered `dmesg` fault/OOM lines plus a bounded `LD_DEBUG=files,libs`
-  probe when Verso died with 0 bytes logged. Inside Verso, `logging.rs` installs
-  an alternate-stack `SA_SIGINFO` handler for `SIGSEGV`/`SIGBUS`/`SIGILL`/
-  `SIGFPE`/`SIGABRT` to log signal, fault address, registers, `dladdr` module
-  offset and a raw backtrace before re-raising.
+  appends filtered `dmesg` fault/OOM lines plus both ends (40 lines each) of an
+  `LD_DEBUG=files,libs` probe when Verso died with 0 bytes logged. `logging.rs`
+  logs fatal signals (registers, a raw backtrace) and dies with the first one,
+  even if the handler faults. Never call glibc's `backtrace()` there: it loads
+  the Kindle's libgcc_s, whose ARM unwinder crashes in our LLVM libunwind.
