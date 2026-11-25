@@ -19,7 +19,9 @@ use crate::reader::speed::{ReadingSpeed, Sampler, Turn};
 use crate::reader::{self, PageCache, Refresh, TextMap, Zone};
 use crate::screens::books::ConfirmDelete;
 use crate::screens::contents::{Contents, ContentsEvent};
-use crate::screens::dictionary::{Languages, Lookup, LookupEvent, SelectionAction, SelectionActions, Tab, Tabs};
+use crate::screens::dictionary::{
+    Languages, Lookup, LookupEvent, SelectionAction, SelectionActions, Tab, Tabs, too_long,
+};
 use crate::screens::footnote::{Footnote, FootnoteEvent};
 use crate::screens::reader_menu::{MenuEvent, ReaderMenu};
 use crate::screens::text_sheet::{FontEvent, FontList, TextEvent, TextSheet};
@@ -612,7 +614,9 @@ impl Reader {
             if self.selection.extending {
                 return;
             }
-            if text.split_whitespace().count() == 1 {
+            // Without spaces a passage is one word too, but the card would
+            // open on Translate and send it unasked.
+            if text.split_whitespace().count() == 1 && !too_long(&text) {
                 self.lookup(&text, Tab::Dictionary, cx);
             } else {
                 self.open_passage_actions(cx);
@@ -3728,9 +3732,13 @@ mod tests {
             start_visible: true,
             end_visible: true,
         };
-        for (i, close) in [false, true].into_iter().enumerate() {
-            // A long press opens the card on Dictionary, asking nothing online.
-            let p = word.rects[0].center();
+        let long = Selection { text: "字".repeat(crate::online::QUERY_LIMIT + 1), ..word.clone() };
+        let settings = Settings { translate_language: Some("de".into()), ..r.store.settings() };
+        r.store.save_settings(&settings).unwrap();
+        for (i, (selected, close)) in [(&word, false), (&word, true), (&long, true)].into_iter().enumerate() {
+            // A long press asks nothing online: it opens the card on
+            // Dictionary, or the bar for a long passage without spaces.
+            let p = selected.rects[0].center();
             test_cx(&theme, |cx| {
                 r.on_gesture(Gesture::Down(p), cx);
                 r.on_gesture(Gesture::LongPress(p), cx);
@@ -3740,15 +3748,22 @@ mod tests {
                 .try_iter()
                 .find_map(|c| if let Command::Select { request, .. } = c { Some(request) } else { None })
                 .expect("a selection request");
-            test_cx(&theme, |cx| r.receive(Reply::Selection { request, result: Ok(Some(word.clone())) }, cx));
-            let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
-            assert_eq!(lookup.tab(), Tab::Dictionary);
+            test_cx(&theme, |cx| r.receive(Reply::Selection { request, result: Ok(Some(selected.clone())) }, cx));
             assert_eq!((gate.0.lock().unwrap().1, service.threads()), (i, 0), "no online request");
-            // Wikipedia's request is under way when the card goes.
-            let wikipedia = lookup.tab_point(Tab::Wikipedia);
+            let online = match &r.overlay {
+                Overlay::Lookup(lookup) if selected.text == word.text => {
+                    assert_eq!(lookup.tab(), Tab::Dictionary);
+                    lookup.tab_point(Tab::Wikipedia)
+                }
+                Overlay::SelectionActions(bar) if selected.text == long.text => {
+                    bar.cell(SelectionAction::Translate).center()
+                }
+                _ => panic!("no lookup or passage bar"),
+            };
+            // The online tab's request is under way when the card goes.
             test_cx(&theme, |cx| {
-                r.on_gesture(Gesture::Down(wikipedia), cx);
-                r.on_gesture(Gesture::Tap(wikipedia), cx);
+                r.on_gesture(Gesture::Down(online), cx);
+                r.on_gesture(Gesture::Tap(online), cx);
             });
             wait_until(&|| gate.0.lock().unwrap().1 == i + 1);
             if close {

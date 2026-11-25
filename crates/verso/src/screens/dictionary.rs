@@ -9,7 +9,7 @@ mod translate;
 mod wikipedia;
 
 pub use passage_bar::{SelectionAction, SelectionActions};
-pub use tabs::{Languages, Tab, Tabs};
+pub use tabs::{Languages, Tab, Tabs, too_long};
 
 use crate::{
     dictionary::{
@@ -35,7 +35,7 @@ use crate::{
 };
 use pickers::{Chooser, Chosen, DropDown};
 use std::rc::Rc;
-use tabs::{Replies, too_long};
+use tabs::Replies;
 use wikipedia::Wikipedia;
 
 const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
