@@ -285,7 +285,7 @@ impl Books {
 
         let group = group_label(&dest_dir, &roots);
         let filename = book.path.file_name().unwrap_or_default().to_string_lossy();
-        log::info!("web app: received {} → {} (id {})", name, book.path.display(), book.id);
+        log::info!("web app: received {} (id {})", book.path.display(), book.id);
         Response::json(201, &book_json(&book, &dest_dir, &group, &filename, None, 0))
     }
 
@@ -452,7 +452,7 @@ impl Books {
                 .start_file(&entry_name, options)
                 .and_then(|()| writer.write_all(md.as_bytes()).map_err(Into::into))
             {
-                log::warn!("web app: writing highlights zip entry {entry_name}: {e}");
+                log::warn!("web app: adding the highlights of {} to the zip: {e}", book.id);
                 return err(500, "Couldn't build the highlights archive.");
             }
             count += 1;

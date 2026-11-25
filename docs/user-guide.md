@@ -373,6 +373,7 @@ unexpectedly.
 
 Reports include a summary of recent sessions, version, update state,
 non-identifying settings, up to 1,000 log lines and hardware diagnostics.
-Configured library folders, hostname and book paths are automatically omitted or
-replaced with `<book N>`, though you should still review the text file before
-sharing it publicly.
+Book paths, library folders, the device's name and network addresses are
+automatically omitted or replaced (`<book N>`). Dictionary names, names of
+connected remotes, and names inside a faulty book (chapter files, fonts) can
+remain, so review the text file before sharing it publicly.

@@ -678,7 +678,12 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
         state.hostname = hostname;
         if (state.phase, state.address, state.hostname.clone()) != before {
             if state.phase != before.0 {
-                log::info!("Wi-Fi transfer: {:?} at {:?} as {:?}", state.phase, state.address, state.hostname);
+                log::info!(
+                    "Wi-Fi transfer: {:?}, address: {}, name advertised: {}",
+                    state.phase,
+                    state.address.is_some(),
+                    state.hostname.is_some()
+                );
             }
             state.revision += 1;
             waker.wake();

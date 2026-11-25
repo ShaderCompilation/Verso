@@ -194,7 +194,7 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, handler: &Arc<dyn H
         if shared.cancelled() {
             return;
         }
-        let (stream, peer) = match listener.accept() {
+        let (stream, _) = match listener.accept() {
             Ok(accepted) => accepted,
             Err(_) if shared.cancelled() => return,
             Err(e) => {
@@ -215,7 +215,7 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, handler: &Arc<dyn H
         let handle = match ready {
             Ok(handle) => handle,
             Err(e) => {
-                log::warn!("web app: preparing a connection from {peer}: {e}");
+                log::warn!("web app: preparing a connection: {e}");
                 continue;
             }
         };

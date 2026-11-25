@@ -183,7 +183,7 @@ impl FolderPicker {
                 self.error = None;
             }
             Err(e) => {
-                log::warn!("listing {}: {e}", dir.display());
+                log::warn!("listing a folder: {e}");
                 self.entries.clear();
                 self.error = Some("Couldn’t open this folder.".into());
             }

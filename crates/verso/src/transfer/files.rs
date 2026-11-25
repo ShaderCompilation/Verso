@@ -308,7 +308,7 @@ impl Files {
         let mut dir = base.to_path_buf();
         for name in &rel[..spelling_checked(rel)] {
             if self.alias(&dir, name)? {
-                log::info!("web app: refusing {name} in {}: not spelled as listed", dir.display());
+                log::info!("web app: refusing a name in {}: not spelled as listed", dir.display());
                 return Err(err(400, "Use the name as the folder lists it."));
             }
             dir.push(name);

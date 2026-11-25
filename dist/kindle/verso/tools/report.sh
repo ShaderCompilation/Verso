@@ -155,8 +155,9 @@ library_roots() {
         "${ROOT}/documents"
 }
 
-# Redacts book paths under any library root on stdin -> stdout.
-# Each unique path gets a deterministic <book N> placeholder for the whole stream.
+# Redacts book paths and the device name on stdin -> stdout. A path is replaced
+# by <book N>, numbered per stream by its spelling. Where a path ends is a
+# guess, as names hold quotes, colons and arrows: when unsure, redact too much.
 redact_stream() {
     roots_data="$(library_roots | awk '
         {
@@ -164,7 +165,7 @@ redact_stream() {
             if ($0 != "" && !seen[$0]++) print $0
         }
     ')"
-    awk -v roots_raw="${roots_data}" '
+    awk -v roots_raw="${roots_data}" -v storage_root="${ROOT}" '
     BEGIN {
         n_roots = 0
         if (roots_raw != "") {
@@ -186,6 +187,11 @@ redact_stream() {
             }
             roots[j + 1] = key
         }
+        storage[1] = "/mnt/us"
+        n_storage = 1
+        if (storage_root != storage[1]) storage[++n_storage] = storage_root
+        # Every Kindle has this folder, so its own name tells nothing.
+        for (i = 1; i <= n_storage; i++) plain[storage[i] "/documents"] = 1
         book_count = 0
     }
     function book_token(p) {
@@ -195,84 +201,111 @@ redact_stream() {
         }
         return "<book " book_id[p] ">"
     }
-    function find_end(s,    n, i, c, nextc, lower_s, epub_pos, q_limit) {
-        # First check for .epub before any quote/tab/CR: real book filenames
-        # often contain commas, parentheses, and brackets (e.g. "Author, Name (2024).epub").
-        n = length(s)
-        q_limit = n
-        for (i = 1; i <= n; i++) {
-            c = substr(s, i, 1)
-            if (c == "\"" || c == "\047" || c == "\t" || c == "\r") {
-                q_limit = i - 1
-                break
+    # Finds the first path to redact in s. Sets at (0: none), at_len (its root)
+    # and at_root ("" for the storage root, which counts on wide lines only).
+    function find_path(s, wide,    i, pos, base, rest) {
+        at = 0
+        for (i = 1; i <= n_roots; i++) {
+            pos = index(s, roots[i])
+            if (pos > 0 && (at == 0 || pos < at)) {
+                at = pos
+                at_len = length(roots[i])
+                at_root = roots[i]
             }
         }
-        lower_s = tolower(substr(s, 1, q_limit))
-        epub_pos = index(lower_s, ".epub")
-        if (epub_pos > 0) {
-            return epub_pos + 4
-        }
-        # Non-.epub path (e.g. a folder): find earliest delimiter.
-        best = q_limit
-        for (i = 1; i <= q_limit; i++) {
-            c = substr(s, i, 1)
-            if (c == "]" || c == ")") {
-                best = i - 1
-                break
-            }
-            if ((c == ":" || c == "," || c == ";") && i < q_limit) {
-                nextc = substr(s, i + 1, 1)
-                if (nextc == " " || nextc == "\t") {
-                    best = i - 1
-                    break
+        for (i = 1; wide && i <= n_storage; i++) {
+            base = 0
+            rest = s
+            while ((pos = index(rest, storage[i] "/")) > 0) {
+                pos += base
+                base = pos + length(storage[i])
+                rest = substr(s, base + 1)
+                if (rest ~ /^(extensions\/)?verso([\/":]|$)/) continue
+                if (at == 0 || pos < at) {
+                    at = pos
+                    at_len = length(storage[i])
+                    at_root = ""
                 }
+                break
             }
         }
-        return best
+        return at
     }
-    function redact_line(line,    out, pos, best_pos, best_r, i, r, pat, after, end_len, full_path) {
+    # Whether a library root stands alone, given the text after it.
+    function is_bare(s, quoted) {
+        if (quoted) return s ~ /^\\?"/
+        return s == "" || s == "\r" || s ~ /^\\?"/ || s ~ /^: [^\/]*$/
+    }
+    # The length of the path that s starts with; quoted: it follows a ".
+    function path_end(s, quoted, wide,    i, n, c, low, pos) {
+        n = length(s)
+        if (quoted) {
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (c == "\\") i++
+                else if (c == "\"") return i - 1
+            }
+            return n
+        }
+        if (find_path(s, wide)) s = substr(s, 1, at - 1)
+        # The last .epub, with what extends it (.part) unless it is a folder.
+        low = tolower(s)
+        n = 0
+        while ((pos = index(substr(low, n + 1), ".epub")) > 0) n += pos + 4
+        if (n > 0) {
+            while (substr(s, n + 1, 1) ~ /[A-Za-z0-9._-]/) n++
+            if (substr(s, n + 1, 1) != "/") return n
+        }
+        # All of it, but for an OS error or the words between two paths.
+        if (match(s, /: [^:\/]*\(os error [0-9]+\)[]",}]*$/)) return RSTART - 1
+        if (match(s, / (→|to) $/)) return RSTART - 1
+        return length(s)
+    }
+    function redact_line(line,    out, wide, root, after, len, quoted) {
         # Never leak custom library folder lists in "library folders changed: [...]".
         if (index(line, "library folders changed:") > 0) {
             sub(/library folders changed: \[.*\]/, "library folders changed: [<redacted>]", line)
         }
-        # Redact legacy metadata log lines ("book \"...\", authors \"...\", language ...").
+        # Lines of earlier versions, kept in the log across updates: titles in
+        # "book \"...\", authors \"...\", language ...", and names that are not
+        # paths. The first arrow may be in the title; only the last one is
+        # followed by a slash.
         if (index(line, "book \"") > 0 && index(line, ", authors \"") > 0 && index(line, ", language ") > 0) {
             sub(/book ".*", authors ".*", language /, "book <redacted>, language ", line)
         }
-        # Redact crengine cache filenames that embed the book filename (e.g. "File Book_Name.epub.571d7876.0.cr3").
-        if (index(line, ".epub.") > 0 && index(line, ".cr3") > 0) {
-            gsub(/[^ \t\/]+\.[eE][pP][uU][bB]\.[0-9a-fA-F]+\.[0-9]+\.cr3/, "<cache>", line)
+        sub(/web app: received .* → \//, "web app: received /", line)
+        sub(/highlights zip entry .*\.md/, "highlights zip entry <redacted>", line)
+        sub(/web app: refusing .* in \//, "web app: refusing a name in /", line)
+        sub(/mDNS: advertising .*\.local/, "mDNS: advertising <redacted>", line)
+        if (index(line, "Wi-Fi transfer: ") > 0) {
+            sub(/ at Some\([0-9.]+\) as /, " at <redacted> as ", line)
+            sub(/ as Some\(".*"\)/, " as <redacted>", line)
         }
+        sub(/web app: preparing a connection from [^ ]+: /, "web app: preparing a connection: ", line)
+        # crengine cache files are named after the book ("Book_Name.epub.571d7876.0.cr3").
+        if (index(line, ".cr3") > 0) {
+            gsub(/[^ \t\/"]+\.cr3/, "<cache>", line)
+        }
+        # These name the files and folders of the user anywhere in the storage.
+        # (Debug output may escape a folder so that it no longer matches its root.)
+        wide = line ~ /web app: |\] listing \/|collection switch |open book removed: /
         out = ""
-        while (length(line) > 0) {
-            best_pos = 0
-            best_r = 0
-            for (i = 1; i <= n_roots; i++) {
-                pat = roots[i] "/"
-                pos = index(line, pat)
-                if (pos > 0 && (best_pos == 0 || pos < best_pos)) {
-                    best_pos = pos
-                    best_r = i
-                }
-            }
-            if (best_pos == 0) {
-                out = out line
-                break
-            }
-            out = out substr(line, 1, best_pos - 1)
-            r = roots[best_r]
-            after = substr(line, best_pos + length(r) + 1)
-            end_len = find_end(after)
-            if (end_len <= 0) {
-                out = out r "/"
-                line = after
+        while (find_path(line, wide)) {
+            len = at_len
+            root = at_root
+            out = out substr(line, 1, at - 1)
+            line = substr(line, at)
+            after = substr(line, len + 1)
+            quoted = substr(out, length(out)) == "\""
+            if (root != "" && is_bare(after, quoted)) {
+                out = out ((root in plain) ? root : "<library folder>")
             } else {
-                full_path = r "/" substr(after, 1, end_len)
-                out = out book_token(full_path)
-                line = substr(after, end_len + 1)
+                len += path_end(after, quoted, wide)
+                out = out book_token(substr(line, 1, len))
             }
+            line = substr(line, len + 1)
         }
-        return out
+        return out line
     }
     { print redact_line($0) }
     '
@@ -500,7 +533,7 @@ do_crash() {
     out="$(unique_report_path crash)"
     tmp="${out}.tmp"
     {
-        printf '%s\n' 'Verso crash report - format 1'
+        printf '%s\n' 'Verso crash report - format 2'
         printf 'Created: %s (log times are UTC)\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
         printf 'Ended: %s\n' "${ended}"
         installed_summary
@@ -564,7 +597,8 @@ do_report() {
         fi
         if [ -r "${UPDATE_DIR}/rollback.json" ]; then
             printf '%s\n' 'Last rollback:'
-            redact_stream <"${UPDATE_DIR}/rollback.json"
+            # One log line a line, so that a path ends with its own.
+            awk '{ gsub(/","/, "\",\n\""); print }' "${UPDATE_DIR}/rollback.json" | redact_stream
         else
             printf '%s\n' 'Last rollback: none'
         fi
@@ -582,7 +616,12 @@ do_report() {
             newest="$(printf '%s\n' "${crashes}" | head -n 1)"
             if [ -n "${newest}" ] && [ -r "${REPORTS_DIR}/${newest}" ]; then
                 printf '\n--- Newest crash report: %s ---\n' "${newest}"
-                cat "${REPORTS_DIR}/${newest}" 2>/dev/null
+                # Format 1 cut titles in half, which can't be redacted any more.
+                awk '
+                    NR == 1 { old = / format 1$/ }
+                    { print }
+                    old && /^== Last / { print "[left out: written by an earlier version]"; exit }
+                ' "${REPORTS_DIR}/${newest}" 2>/dev/null | redact_stream
             fi
         fi
 

@@ -43,7 +43,7 @@ pub fn ensure(label: &str, pid: i32, name: &str) {
         .stdout(Stdio::null())
         .stderr(log);
     match spawn_detached(&mut command) {
-        Ok(true) => log::info!("mDNS: advertising {label}.local"),
+        Ok(true) => log::info!("mDNS: advertising the device name"),
         Ok(false) => log::warn!("mDNS: couldn't start the responder"),
         Err(e) => log::warn!("mDNS: couldn't start the responder: {e}"),
     }

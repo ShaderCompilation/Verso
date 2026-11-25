@@ -160,7 +160,7 @@ mod tests {
         fs::write(prev.join("plan.txt"), "verso-plan\t1\nversion\t0.1.0\nfrom\t0.0.9\n").unwrap();
         fs::write(
             update.join("rollback.json"),
-            r#"{"format":1,"from":"0.2.0","to":"0.1.0","reason":"exit","status":139,"time":1700000000,"log":["opening /mnt/us/Secret Shelf/Private Book.epub"]}"#,
+            r#"{"format":1,"from":"0.2.0","to":"0.1.0","reason":"exit","status":139,"time":1700000000,"log":["reading /mnt/us/Secret Shelf/Sub","opening /mnt/us/Secret Shelf/Private Book.epub"]}"#,
         )
         .unwrap();
 
@@ -191,7 +191,65 @@ mod tests {
             "library folders changed: [\"/mnt/us/Secret Shelf\"]",
         ]
         .join("\n");
-        fs::write(app.join("verso.log"), format!("{cur_log}\n")).unwrap();
+        // Lines and what the report shows of them, earlier versions' included.
+        let redacted = [
+            // Where a path ends: quotes, colons, commas and arrows don't end it.
+            ("opened /mnt/us/documents/The Hitchhiker's Guide.epub: parse 1 ms", "opened <book 6>: parse 1 ms"),
+            ("opened /mnt/us/documents/The Hitchhiker's Guide.epub: bad zip", "opened <book 6>: bad zip"),
+            (r#"removed Some("/mnt/us/documents/O'Brian")"#, r#"removed Some("<book 7>")"#),
+            (r#"removed Some("/mnt/us/documents/Sci-Fi: Best, of")"#, r#"removed Some("<book 8>")"#),
+            (r#"removed Some("/mnt/us/documents/Say \"Hi\".epub")"#, r#"removed Some("<book 9>")"#),
+            ("read /mnt/us/documents/Sci-Fi: Two: Denied (os error 13)", "read <book 10>: Denied (os error 13)"),
+            ("moved /mnt/us/documents/D1 to /mnt/us/documents/D2", "moved <book 11> to <book 12>"),
+            ("deleted /mnt/us/documents/Own.epub/Chapter.txt (files)", "deleted <book 13>"),
+            // Library folders themselves, and one whose name only starts like one.
+            (
+                r#"collection switch Some("/mnt/us/Secret Shelf"): 3 ms"#,
+                r#"collection switch Some("<library folder>"): 3 ms"#,
+            ),
+            (r#"collection switch Some("/mnt/us/Cafe\u{301}"): 3 ms"#, r#"collection switch Some("<book 14>"): 3 ms"#),
+            (
+                "Couldn't read /mnt/us/Secret Shelf: Denied (os error 13)",
+                "Couldn't read <library folder>: Denied (os error 13)",
+            ),
+            (
+                "Couldn't read /mnt/us/documents: Denied (os error 13)",
+                "Couldn't read /mnt/us/documents: Denied (os error 13)",
+            ),
+            ("opened /mnt/us/Secret Shelf 2/Two.epub: parse", "opened <book 15>: parse"),
+            // Names outside library folders.
+            ("web app: received Up.epub → /mnt/us/documents/Up.epub (id 1)", "web app: received <book 16> (id 1)"),
+            (
+                "web app: received A → B → C.epub → /mnt/us/documents/C.epub (id 2)",
+                "web app: received <book 17> (id 2)",
+            ),
+            ("web app: received /mnt/us/Outside/Title.epub (files)", "web app: received <book 18> (files)"),
+            ("web app: moved /mnt/us/Outside/E1 → /mnt/us/Outside/E2", "web app: moved <book 19> → <book 20>"),
+            (
+                "web app: deleted /mnt/us/verso/data/dictionaries/x.ifo",
+                "web app: deleted /mnt/us/verso/data/dictionaries/x.ifo",
+            ),
+            ("loading /mnt/us/fonts/Font.ttf: bad", "loading /mnt/us/fonts/Font.ttf: bad"),
+            ("[x] listing /mnt/us/Browsed: Denied (os error 13)", "[x] listing <book 21>: Denied (os error 13)"),
+            (
+                "web app: writing highlights zip entry Zip (1).md: full",
+                "web app: writing highlights zip entry <redacted>: full",
+            ),
+            (
+                "web app: refusing Ref in X.epub in /mnt/us/documents: not",
+                "web app: refusing a name in /mnt/us/documents: not",
+            ),
+            ("File ABC_.epub_noname.571d7876.0.cr3 is not", "File <cache> is not"),
+            // The device's name and addresses.
+            ("mDNS: advertising my-private-kindle.local", "mDNS: advertising <redacted>"),
+            (
+                r#"Wi-Fi transfer: Ready at Some(192.168.1.23) as Some("my-private-kindle")"#,
+                "Wi-Fi transfer: Ready at <redacted> as <redacted>",
+            ),
+            ("web app: preparing a connection from 192.168.1.23:5000: bad", "web app: preparing a connection: bad"),
+        ];
+        let lines: String = redacted.iter().map(|(line, _)| format!("{line}\n")).collect();
+        fs::write(app.join("verso.log"), format!("{cur_log}\n{lines}")).unwrap();
 
         // Also create a crash report first so section 3 includes it.
         let collector = write_fake_collector(root);
@@ -245,6 +303,7 @@ mod tests {
         assert!(text.contains("Previous version (available to go back): 0.0.9"));
         assert!(text.contains("\"reason\":\"exit\""));
         assert!(!text.contains("Private Book.epub"), "book in rollback.json leaked");
+        assert!(text.contains("\"opening <book 2>"), "a folder's path ended past its own log line:\n{text}");
 
         // 4. Crash report listed and included.
         assert!(text.contains("--- Newest crash report: crash-"));
@@ -266,8 +325,27 @@ mod tests {
         assert!(text.contains("book <redacted>, language \"EN-US\""));
         assert!(text.contains("library folders changed: [<redacted>]"));
 
+        let shown: String = redacted.iter().map(|(_, shown)| format!("{shown}\n")).collect();
+        let start = text[s4..].find("opened <book 6>").map(|i| s4 + i).expect("first line of the table");
+        assert!(text[start..].starts_with(&shown), "expected:\n{shown}\ngot:\n{}", &text[start..s5]);
+
         // 6. Diagnostics output included.
         assert!(text.contains("Fake hardware ok"));
+
+        // A crash report of an earlier version, with part of a title left.
+        let old = "Verso crash report - format 1\nEnded: old\n== Last 300 log lines ==\nopened <book 1>'s Guide.epub\n";
+        fs::write(app.join("reports/crash-29990101-000000.txt"), old).unwrap();
+        let rep = Command::new("sh")
+            .arg(script_path())
+            .args(["report", "--output", out_file.to_str().unwrap()])
+            .env("VERSO_STORAGE_ROOT", root)
+            .env("VERSO_DATA", &data)
+            .env("VERSO_COLLECTOR", &collector)
+            .output()
+            .unwrap();
+        assert!(rep.status.success());
+        let text = fs::read_to_string(&out_file).unwrap();
+        assert!(text.contains("Ended: old") && !text.contains("'s Guide"), "old crash report:\n{text}");
 
         // 7. Original log on device still has real book names.
         let raw_log = fs::read_to_string(app.join("verso.log")).unwrap();
