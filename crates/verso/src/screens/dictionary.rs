@@ -557,14 +557,14 @@ impl Lookup {
         !self.pending && matches!(self.state, State::Definition { .. })
     }
     /// The query field and Look up: while typing, and on a miss so editing
-    /// the query is one tap away.
+    /// the query is one tap away. Pickers take their place.
     fn edit_row(&self) -> bool {
         let missed = match self.tabs.current() {
             Tab::Dictionary => !self.pending && self.state == State::NoResult,
             Tab::Wikipedia => self.tabs.wikipedia().found_nothing(),
             Tab::Translate => false,
         };
-        self.keyboard.visible || missed
+        self.keyboard.visible || (!self.picking() && missed)
     }
     /// An online tab's error that may go away.
     fn retry_shown(&self) -> bool {

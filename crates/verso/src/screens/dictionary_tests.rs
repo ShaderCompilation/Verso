@@ -468,6 +468,7 @@ fn wikipedia_lists_matches_and_reports_misses_and_errors() {
         let p = lookup.other_matches.rect().center();
         tap(&mut lookup, p, &t, screen);
         assert_eq!(choices(&lookup)[per_page].1, "Current");
+        let divider = lookup.divider;
         let p = lookup.choice_point(0);
         tap(&mut lookup, p, &t, screen);
         answered(&mut lookup, &t, screen);
@@ -479,6 +480,10 @@ fn wikipedia_lists_matches_and_reports_misses_and_errors() {
         assert!(online_text(&lookup, &t).starts_with("No article found"));
         assert!(lookup.edit_row() && !lookup.retry_shown());
         capture(&mut lookup, &t, screen, "wikipedia-miss");
+        // The languages take the query field's place.
+        let p = lookup.edition_point();
+        tap(&mut lookup, p, &t, screen);
+        assert!(lookup.chooser.is_some() && lookup.divider == divider, "{} != {divider}", lookup.divider);
     }
 }
 
