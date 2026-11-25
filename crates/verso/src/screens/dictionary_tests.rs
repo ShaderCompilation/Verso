@@ -1281,7 +1281,8 @@ fn find_word(lookup: &mut Lookup, word: &str, text: &mut TextRenderer) -> crate:
 
 #[test]
 fn words_in_a_definition_look_up_on_tap_or_long_press_but_not_on_swipes() {
-    let (root, store) = words(&[("box", "A container, often a crate."), ("crate", "A wooden box.")]);
+    let long = "A wooden box. ".repeat(200);
+    let (root, store) = words(&[("box", "A container, often a crate."), ("crate", &long)]);
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
     let worker = Rc::new(Worker::new(store, Waker::new(|| {})));
@@ -1290,6 +1291,7 @@ fn words_in_a_definition_look_up_on_tap_or_long_press_but_not_on_swipes() {
         Lookup::new("box", worker.clone(), &t, screen, None, Default::default(), Tabs::offline(Tab::Dictionary));
     wait(&mut lookup, &t, screen);
     draw_hints(&mut lookup, &t, screen, &mut text);
+    let actions = lookup.actions.each_ref().map(Button::rect);
     let crate_at = find_word(&mut lookup, "crate", &mut text);
     // Down shows the word inverted with a fast refresh on the next draw.
     cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Down(crate_at), cx));
@@ -1321,6 +1323,16 @@ fn words_in_a_definition_look_up_on_tap_or_long_press_but_not_on_swipes() {
     assert!(lookup.back.rect().w > 0 && lookup.heading.x > lookup.back.rect().right());
     assert!(lookup.actions_divider.is_none() && !lookup.allows_handles());
     capture(&mut lookup, &t, screen, "chained");
+    // Taps where they were at depth 0 reach the pager, with › and ‹ at its ends.
+    let [first, .., last] = actions;
+    let mut taps = actions.map(|r| (r.center(), 1)).to_vec();
+    taps.insert(0, (crate::geom::Point::new(last.right() - t.target / 2, last.center().y), 1));
+    taps.push((crate::geom::Point::new(first.x + t.target / 2, first.center().y), 0));
+    for (p, page) in taps {
+        assert!(tap(&mut lookup, p, &t, screen).is_none(), "a hidden action took the tap at {p:?}");
+        draw_hints(&mut lookup, &t, screen, &mut text);
+        assert_eq!((lookup.depth(), lookup.pager.page), (1, page), "{p:?}");
+    }
     // Tapping the word shown (its headword) is no new step.
     let headword = find_word(&mut lookup, "crate", &mut text);
     tap(&mut lookup, headword, &t, screen);

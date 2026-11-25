@@ -1455,18 +1455,21 @@ impl Lookup {
                 self.cycle(1);
             }
         }
-        let [highlight, note, search, extend] = &mut self.actions;
-        if highlight.on_gesture(g) {
-            return Some(LookupEvent::Highlight);
-        }
-        if note.on_gesture(g) {
-            return Some(LookupEvent::Note);
-        }
-        if search.on_gesture(g) {
-            return Some(LookupEvent::Search(self.query.clone()));
-        }
-        if extend.on_gesture(g) {
-            return Some(LookupEvent::Extend);
+        // Hidden, they keep the places where they last showed.
+        if self.actions_shown() {
+            let [highlight, note, search, extend] = &mut self.actions;
+            if highlight.on_gesture(g) {
+                return Some(LookupEvent::Highlight);
+            }
+            if note.on_gesture(g) {
+                return Some(LookupEvent::Note);
+            }
+            if search.on_gesture(g) {
+                return Some(LookupEvent::Search(self.query.clone()));
+            }
+            if extend.on_gesture(g) {
+                return Some(LookupEvent::Extend);
+            }
         }
         if self.on_dictionary() {
             self.word_gesture(g, t);
