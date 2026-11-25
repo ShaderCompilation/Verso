@@ -754,8 +754,9 @@ impl TopDrawer {
         if let Gesture::Down(p) = *g {
             self.outside = !self.layout.panel.contains(p);
         }
-        // A slider owns a touch that started on it, wherever it ends. Their
-        // touch areas can overlap a little: light takes the touch first.
+        // A slider owns a drag that started on it, wherever it ends (a vertical
+        // swipe across it isn't a drag: that closes the drawer). Their touch
+        // areas can overlap a little: light takes the touch first.
         let mut moved = false;
         if let Some(s) = &mut self.light {
             moved |= s.on_gesture(g).is_some();

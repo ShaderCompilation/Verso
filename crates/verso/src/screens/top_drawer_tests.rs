@@ -322,6 +322,13 @@ fn light_sliders_drag_and_report_the_frontlight() {
     // Lifting with an upward flick finishes the drag; it doesn't close.
     let lift = Gesture::Swipe { dir: Direction::Up, from: right, to: Point::new(left.x, 10) };
     assert_eq!(d.on_gesture(&lift), Some(DrawerEvent::Light(Frontlight { brightness: 0, warmth: Some(6) })));
+    // Swiping up across a slider puts the light back and closes the drawer.
+    let above = Point::new(right.x, right.y - 60);
+    d.on_gesture(&Gesture::Down(right));
+    let back = Some(DrawerEvent::Light(Frontlight { brightness: 0, warmth: Some(6) }));
+    assert_eq!(d.on_gesture(&Gesture::Move(above)), back);
+    let swipe = Gesture::Swipe { dir: Direction::Up, from: right, to: Point::new(right.x, 10) };
+    assert_eq!(d.on_gesture(&swipe), Some(DrawerEvent::Close));
     let mid = Point::new(warmth.center().x, warmth.center().y);
     assert_eq!(
         d.on_gesture(&Gesture::Down(mid)),

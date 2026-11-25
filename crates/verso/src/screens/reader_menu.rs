@@ -5,6 +5,10 @@ use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{Button, ButtonKind, IconButton, Slider, SliderEvent, TopBar};
+use std::time::{Duration, Instant};
+
+/// How long after a swipe opens the menu new touches on it don't count.
+const SWIPE_SETTLE: Duration = Duration::from_millis(400);
 
 pub enum MenuEvent {
     Books,
@@ -43,6 +47,9 @@ pub struct ReaderMenu {
     text: Button,
     layout: Button,
     outside: bool,
+    /// Touches that start before this are ignored (see `opened_by_swipe`).
+    settled_at: Option<Instant>,
+    ignoring: bool,
 }
 impl ReaderMenu {
     pub fn new(t: &Theme, screen: Rect, title: &str, page: usize, pages: usize) -> Self {
@@ -113,7 +120,23 @@ impl ReaderMenu {
             text,
             layout,
             outside: false,
+            settled_at: None,
+            ignoring: false,
         }
+    }
+    /// The touch panel can lose a finger in the middle of the swipe, and a
+    /// second swipe can land before the menu shows. Either would reach the
+    /// controls under it, so touches count only after a moment.
+    pub fn opened_by_swipe(&mut self, now: Instant) {
+        self.settled_at = Some(now + SWIPE_SETTLE);
+    }
+    /// True while `g` belongs to a touch that started too soon after the
+    /// opening swipe. Ask for every gesture, before `on_gesture`.
+    pub fn ignores(&mut self, g: &Gesture, now: Instant) -> bool {
+        if matches!(g, Gesture::Down(_)) {
+            self.ignoring = self.settled_at.is_some_and(|t| now < t);
+        }
+        self.ignoring
     }
     #[cfg(test)]
     pub fn top_panel(&self) -> Rect {

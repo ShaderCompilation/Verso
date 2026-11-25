@@ -1765,6 +1765,9 @@ impl Reader {
                 }
             }
             Overlay::Menu(menu) => {
+                if menu.ignores(&g, cx.now) {
+                    return Action::None;
+                }
                 let before = menu.visual_state();
                 let event = menu.on_gesture(&g, !self.laying_out && self.layout_at.is_none());
                 if event.is_some() || menu.visual_state() != before {
@@ -1983,6 +1986,9 @@ impl Reader {
                             self.commit_turn(cx);
                         }
                         self.menu(cx);
+                        if let Overlay::Menu(menu) = &mut self.overlay {
+                            menu.opened_by_swipe(cx.now);
+                        }
                         cx.redraw();
                         return Action::None;
                     }
@@ -4276,6 +4282,26 @@ mod tests {
             r.overlay = Overlay::None;
             *cx.needs_redraw = false;
         }
+        // A touch that starts right after the opening swipe, like the rest of
+        // a swipe the panel lost halfway, moves nothing. A later one does.
+        let from = Point::new(636, 1600);
+        r.on_gesture(Gesture::Down(from), &mut cx);
+        r.on_gesture(Gesture::Swipe { dir: Direction::Up, from, to: Point::new(636, 1480) }, &mut cx);
+        let Overlay::Menu(menu) = &r.overlay else { panic!("menu did not open") };
+        let on_slider = menu.progress.rect().center();
+        let opened = cx.now;
+        for (start, end, jumps) in [(399, 600, false), (700, 750, true)] {
+            cx.now = opened + Duration::from_millis(start);
+            r.on_gesture(Gesture::Down(on_slider), &mut cx);
+            cx.now = opened + Duration::from_millis(end);
+            r.on_gesture(Gesture::Tap(on_slider), &mut cx);
+            assert_eq!(r.target != 0, jumps, "touch {start} ms after the swipe");
+        }
+        r.target = 0;
+        r.turn_pending = false;
+        r.overlay = Overlay::None;
+        r.back = None;
+        *cx.needs_redraw = false;
         // Horizontal swipes still turn pages, including from the same edges.
         for (dir, from_y, expected) in [(Direction::Left, 100, 1), (Direction::Right, 1600, 0)] {
             let (from_x, to_x) = if dir == Direction::Left { (1000, 300) } else { (300, 1000) };

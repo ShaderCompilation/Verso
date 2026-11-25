@@ -1,7 +1,9 @@
 //! A value on a track: tap to jump, or drag. Snaps to steps.
+//! A touch that sets off mostly vertically is a swipe across the slider, not a
+//! drag: the value goes back to what it was and the slider lets the touch go.
 //! Refreshed with `Fast` while the finger is down.
 
-use crate::geom::Rect;
+use crate::geom::{Point, Rect};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK3, LINE, PAPER, Theme};
@@ -9,10 +11,21 @@ use crate::ui::widget::DrawCx;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SliderEvent {
-    /// The value changed while the finger is down.
+    /// The value changed while the finger is down, or went back because the
+    /// touch turned out to be a vertical swipe.
     Moved(f32),
     /// The finger lifted; this is the final value.
     Released(f32),
+}
+
+/// The touch a slider is following.
+#[derive(Clone, Copy)]
+struct Drag {
+    start: Point,
+    /// The value before the touch.
+    before: f32,
+    /// Set off sideways, or held still: a drag wherever it goes next.
+    locked: bool,
 }
 
 pub struct Slider {
@@ -26,22 +39,12 @@ pub struct Slider {
     rect: Rect,
     hit: Rect,
     knob_r: i32,
-    dragging: bool,
+    drag: Option<Drag>,
 }
 
 impl Slider {
     pub fn new(min: f32, max: f32, step: f32, value: f32) -> Self {
-        Self {
-            min,
-            max,
-            step,
-            value,
-            ticks: false,
-            rect: Rect::default(),
-            hit: Rect::default(),
-            knob_r: 0,
-            dragging: false,
-        }
+        Self { min, max, step, value, ticks: false, rect: Rect::default(), hit: Rect::default(), knob_r: 0, drag: None }
     }
 
     pub fn with_ticks(mut self) -> Self {
@@ -66,7 +69,7 @@ impl Slider {
     }
 
     pub fn is_dragging(&self) -> bool {
-        self.dragging
+        self.drag.is_some()
     }
 
     /// The track runs between the knob's centre at either end.
@@ -90,20 +93,33 @@ impl Slider {
     }
 
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<SliderEvent> {
-        match *g {
-            Gesture::Down(p) if self.hit.contains(p) => {
-                self.dragging = true;
-                self.set(p.x).map(SliderEvent::Moved)
-            }
-            Gesture::Move(p) if self.dragging => self.set(p.x).map(SliderEvent::Moved),
-            Gesture::LongPress(_) => None,
-            _ if self.dragging && g.ends_touch() => {
-                self.dragging = false;
-                self.set(g.pos().x);
-                Some(SliderEvent::Released(self.value))
-            }
-            _ => None,
+        if let Gesture::Down(p) = *g {
+            self.drag = self.hit.contains(p).then_some(Drag { start: p, before: self.value, locked: false });
+            return self.drag.and_then(|_| self.set(p.x)).map(SliderEvent::Moved);
         }
+        let drag = self.drag.as_mut()?;
+        if matches!(g, Gesture::LongPress(_)) {
+            drag.locked = true;
+            return None;
+        }
+        let p = g.pos();
+        if !drag.locked {
+            if (p.y - drag.start.y).abs() > (p.x - drag.start.x).abs() {
+                let before = drag.before;
+                self.drag = None;
+                return (self.value != before).then(|| {
+                    self.value = before;
+                    SliderEvent::Moved(before)
+                });
+            }
+            drag.locked = true;
+        }
+        if g.ends_touch() {
+            self.drag = None;
+            self.set(p.x);
+            return Some(SliderEvent::Released(self.value));
+        }
+        self.set(p.x).map(SliderEvent::Moved)
     }
 
     /// Moves the knob to `x`; returns the new value if it changed.
@@ -140,7 +156,7 @@ impl Slider {
         let r = self.knob_r as f32;
         cx.canvas.fill_circle(kx as f32, cy as f32, r, PAPER);
         cx.canvas.stroke_circle(kx as f32, cy as f32, r, t.border as f32, INK);
-        if self.dragging {
+        if self.drag.is_some() {
             cx.hint(self.hit, RefreshMode::Fast);
         }
     }
@@ -149,7 +165,7 @@ impl Slider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::Point;
+    use crate::ui::gesture::Direction;
 
     fn slider() -> Slider {
         let theme = Theme::for_dpi(300);
@@ -177,13 +193,34 @@ mod tests {
         assert_eq!(s.on_gesture(&Gesture::Move(Point::new(1500, 130))), Some(SliderEvent::Moved(24.0)));
         // Lifting far below the slider still finishes the drag.
         assert_eq!(
-            s.on_gesture(&Gesture::Swipe {
-                dir: crate::ui::gesture::Direction::Left,
-                from: Point::new(600, 130),
-                to: Point::new(0, 900)
-            }),
+            s.on_gesture(&Gesture::Swipe { dir: Direction::Left, from: Point::new(600, 130), to: Point::new(0, 900) }),
             Some(SliderEvent::Released(0.0))
         );
+    }
+
+    #[test]
+    fn a_vertical_swipe_puts_the_value_back() {
+        let from = Point::new(600, 130);
+        let swipe = |to| Gesture::Swipe { dir: Direction::Up, from, to };
+        // Wherever it ends up, and also when no movement was reported.
+        for rest in [
+            vec![Gesture::Move(Point::new(610, 90)), swipe(Point::new(900, 20))],
+            vec![Gesture::Move(Point::new(610, 170)), Gesture::Cancel(Point::new(900, 170))],
+            vec![swipe(Point::new(620, 20))],
+        ] {
+            let mut s = slider();
+            assert_eq!(s.on_gesture(&Gesture::Down(from)), Some(SliderEvent::Moved(12.0)));
+            assert_eq!(s.on_gesture(&rest[0]), Some(SliderEvent::Moved(8.0)), "{rest:?}");
+            assert!(!s.is_dragging());
+            assert!(rest[1..].iter().all(|g| s.on_gesture(g).is_none()), "{rest:?}");
+            assert_eq!(s.value, 8.0);
+        }
+        // A finger held on the slider is dragging it, however it moves next.
+        let mut s = slider();
+        s.on_gesture(&Gesture::Down(from));
+        s.on_gesture(&Gesture::LongPress(from));
+        assert_eq!(s.on_gesture(&Gesture::Move(Point::new(600, 120))), None);
+        assert_eq!(s.on_gesture(&Gesture::End(Point::new(600, 120))), Some(SliderEvent::Released(12.0)));
     }
 
     #[test]
