@@ -80,6 +80,9 @@ behaviour on other models is **(to verify)**.
 - **MT Protocol B (measured):** uses `ABS_MT_SLOT`, `ABS_MT_TRACKING_ID` (`-1`
   on lift), `ABS_MT_POSITION_X/Y`, `SYN_REPORT` and `SYN_DROPPED`. PW6 emits no
   `BTN_TOUCH` and no single-touch `ABS_X/Y`.
+- **No slots:** a Basic 3 (fw 5.18.1.1.1) has `cyttsp5_mt` without
+  `ABS_MT_SLOT`; its lift is `BTN_TOUCH = 0`, per KOReader **(to verify)**. The
+  same driver on the Oasis 3 has slots. Rules: `platform/touch.rs`.
 - **Exclusive grab (`EVIOCGRAB`):** prevents Amazon's paused UI from queueing
   taps; the kernel releases it automatically on crash. Re-grabbing an
   already-held fd returns **`EBUSY`** **(measured)**, so `TouchInput` tracks

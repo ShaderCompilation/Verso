@@ -41,6 +41,9 @@ mod remote;
 #[cfg(feature = "desktop")]
 mod sim_device;
 pub mod ssh;
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+mod touch;
 pub mod wifi;
 
 /// How an area of the e-ink screen should be refreshed. The app states its

@@ -25,13 +25,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::kindle_profiles::{self, Lights};
 use super::power::Link;
 use super::remote::{self, Gate};
+use super::touch::Mapping;
 use super::{
     Battery, DeviceInfo, DeviceModel, Event, FrameCheck, Frontlight, Orientation, PageButtons, Platform, Unsupported,
     Update, Waker,
 };
 use crate::gfx::Canvas;
 use display::Display;
-use input::{KeySource, Mapping, Remote, TouchInput};
+use input::{KeySource, Remote, TouchInput};
 
 /// Set by SIGINT/SIGTERM/SIGHUP, so we can shut down cleanly.
 static QUIT: AtomicBool = AtomicBool::new(false);

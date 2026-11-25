@@ -1,8 +1,6 @@
 //! The touchscreen, read straight from the Linux input device (evdev).
 //!
-//! The Kindle's touchscreen speaks the multi-touch "protocol B": each finger
-//! lives in a numbered slot and has a tracking id (-1 when lifted), and a
-//! SYN_REPORT marks the end of each batch of changes.
+//! What its events mean is in `platform/touch.rs`.
 //!
 //! Page-turn buttons (Oasis) and remotes are separate key devices
 //! (`KeySource`), read alongside. Remotes come and go: `watch` follows
@@ -20,24 +18,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::geom::Point;
 use crate::platform::remote::{self, Gate, Kind};
-use crate::platform::{Event, KeyAction, Orientation, PageButtons, Touch, TouchPhase, Unsupported};
+use crate::platform::touch::{
+    ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, BTN_TOUCH, Decoder, MAX_SLOTS, Mapping,
+};
+use crate::platform::{Event, KeyAction, Orientation, PageButtons, Unsupported};
 
 // Event types and codes from <linux/input-event-codes.h>.
-const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_ABS: u16 = 0x03;
 const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_POWER: u16 = 116;
-const SYN_REPORT: u16 = 0;
-const SYN_DROPPED: u16 = 3;
-const ABS_MT_SLOT: u16 = 0x2f;
-const ABS_MT_POSITION_X: u16 = 0x35;
-const ABS_MT_POSITION_Y: u16 = 0x36;
-const ABS_MT_TRACKING_ID: u16 = 0x39;
-
-const MAX_SLOTS: usize = 10;
 
 /// `struct input_event` on 32-bit ARM: the timestamp is two `long`s.
 #[repr(C)]
@@ -84,54 +75,15 @@ const fn eviocgbit_key(len: u32) -> u32 {
 const fn eviocgabs(axis: u16) -> u32 {
     ioc(IOC_READ, 0x40 + axis as u32, size_of::<AbsInfo>() as u32)
 }
+const EVIOCGKEY: u32 = ioc(IOC_READ, 0x18, KEY_BYTES as u32);
 const EVIOCGRAB: u32 = ioc(IOC_WRITE, 0x90, size_of::<libc::c_int>() as u32);
-
-#[derive(Clone, Copy, Default)]
-struct Slot {
-    /// Tracking id the kernel reports; -1 when no finger.
-    id: i32,
-    x: i32,
-    y: i32,
-    /// What we last told the app about this slot.
-    reported_id: i32,
-    reported: Point,
-    changed: bool,
-}
-
-/// Raw-to-screen coordinate mapping.
-pub struct Mapping {
-    /// The panel's native (portrait) size.
-    pub width: u32,
-    pub height: u32,
-    pub swap_axes: bool,
-    pub mirror_x: bool,
-    pub mirror_y: bool,
-    pub orientation: Orientation,
-}
-
-impl Mapping {
-    /// Panel pixel → app screen pixel; the inverse of the display's rotation
-    /// (`Canvas::copy_gray_rotated`).
-    fn rotate(&self, p: Point) -> Point {
-        match self.orientation {
-            Orientation::Portrait => p,
-            Orientation::Landscape => Point::new(self.height as i32 - 1 - p.y, p.x),
-        }
-    }
-}
 
 pub struct TouchInput {
     grabbed: bool,
     file: File,
     path: String,
     device_name: String,
-    x_range: (i32, i32),
-    y_range: (i32, i32),
-    map: Mapping,
-    slots: [Slot; MAX_SLOTS],
-    slot: usize,
-    /// After SYN_DROPPED, ignore everything up to the next SYN_REPORT.
-    dropping: bool,
+    touches: Decoder,
     buf: Vec<InputEvent>,
 }
 
@@ -147,18 +99,13 @@ impl TouchInput {
         if unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1 as libc::c_int) } < 0 {
             bail!("can't grab {}: {}", path.display(), std::io::Error::last_os_error());
         }
-        let empty = Slot { id: -1, reported_id: -1, ..Slot::default() };
+        let slotted = abs_bits(fd).is_some_and(|bits| has_abs(&bits, ABS_MT_SLOT));
         let mut input = Self {
             grabbed: true,
             file,
             path: path.display().to_string(),
             device_name: name,
-            x_range: (x.minimum, x.maximum),
-            y_range: (y.minimum, y.maximum),
-            map,
-            slots: [empty; MAX_SLOTS],
-            slot: 0,
-            dropping: false,
+            touches: Decoder::new(map, (x.minimum, x.maximum), (y.minimum, y.maximum), slotted),
             buf: vec![InputEvent::default(); 64],
         };
         input.reset_contacts();
@@ -166,17 +113,18 @@ impl TouchInput {
     }
 
     pub fn summary(&self) -> String {
+        let Decoder { map, x_range, y_range, slotted, .. } = &self.touches;
         format!(
-            "{} ({}), x {}..{}, y {}..{}, swap={}, mirror_x={}, mirror_y={}",
+            "{} ({}), x {}..{}, y {}..{}, swap={}, mirror_x={}, mirror_y={}, slots={slotted}",
             self.path,
             self.device_name,
-            self.x_range.0,
-            self.x_range.1,
-            self.y_range.0,
-            self.y_range.1,
-            self.map.swap_axes,
-            self.map.mirror_x,
-            self.map.mirror_y,
+            x_range.0,
+            x_range.1,
+            y_range.0,
+            y_range.1,
+            map.swap_axes,
+            map.mirror_x,
+            map.mirror_y,
         )
     }
 
@@ -185,7 +133,7 @@ impl TouchInput {
     }
 
     pub fn set_orientation(&mut self, orientation: Orientation) {
-        self.map.orientation = orientation;
+        self.touches.map.orientation = orientation;
     }
 
     pub fn fd(&self) -> RawFd {
@@ -196,7 +144,6 @@ impl TouchInput {
         // Discard touches accumulated while Amazon owned the screensaver.
         self.read(&mut VecDeque::new())?;
         self.reset_contacts();
-        self.dropping = false;
         if self.grabbed == grab {
             return Ok(());
         }
@@ -210,27 +157,18 @@ impl TouchInput {
     fn reset_contacts(&mut self) {
         // evdev suppresses unchanged coordinates, even across EVIOCGRAB. Keep
         // the kernel's per-slot positions or the first tap after wake may have
-        // one axis at zero. Ignore already-held fingers until a new tracking id.
+        // one axis at zero. (Without slots evdev keeps and suppresses nothing.)
         for code in [ABS_MT_POSITION_X, ABS_MT_POSITION_Y] {
             let mut values = [0i32; MAX_SLOTS + 1];
             values[0] = code as i32;
             let request = ioc(IOC_READ, 0x0a, size_of_val(&values) as u32); // EVIOCGMTSLOTS
             if unsafe { libc::ioctl(self.fd(), request as _, values.as_mut_ptr()) } >= 0 {
-                for (slot, value) in self.slots.iter_mut().zip(&values[1..]) {
-                    if code == ABS_MT_POSITION_X {
-                        slot.x = *value;
-                    } else {
-                        slot.y = *value;
-                    }
-                }
+                self.touches.set_positions(code, &values[1..]);
             }
         }
-        for slot in &mut self.slots {
-            slot.id = -1;
-            slot.reported_id = -1;
-            slot.changed = false;
-        }
-        self.slot = abs_info(self.fd(), ABS_MT_SLOT).map_or(0, |info| (info.value.max(0) as usize).min(MAX_SLOTS - 1));
+        let slot = abs_info(self.fd(), ABS_MT_SLOT).map_or(0, |info| info.value);
+        let held = key_state(self.fd()).is_some_and(|keys| keys.has(BTN_TOUCH));
+        self.touches.reset(slot, held);
     }
 
     /// Reads everything available (without blocking) and queues touch events.
@@ -253,100 +191,12 @@ impl TouchInput {
             let now = Instant::now();
             for i in 0..n / event_size {
                 let ev = self.buf[i];
-                self.handle(ev, now, out);
-            }
-        }
-    }
-
-    fn handle(&mut self, ev: InputEvent, now: Instant, out: &mut VecDeque<Event>) {
-        match (ev.kind, ev.code) {
-            (EV_SYN, SYN_DROPPED) => {
-                log::warn!("touch events dropped; resetting");
-                self.dropping = true;
-            }
-            (EV_SYN, SYN_REPORT) if self.dropping => {
-                self.dropping = false;
-                // We lost track: lift every finger we reported.
-                for slot in &mut self.slots {
-                    if slot.reported_id >= 0 {
-                        let pos = slot.reported;
-                        out.push_back(touch(slot.reported_id, TouchPhase::Up, pos, now));
-                    }
+                if self.touches.handle(ev.kind, ev.code, ev.value, now, out) {
+                    self.reset_contacts();
                 }
-                self.reset_contacts();
-            }
-            (EV_SYN, SYN_REPORT) => self.flush(now, out),
-            _ if self.dropping => {}
-            (EV_ABS, ABS_MT_SLOT) => self.slot = (ev.value.max(0) as usize).min(MAX_SLOTS - 1),
-            (EV_ABS, ABS_MT_TRACKING_ID) => {
-                self.slots[self.slot].id = ev.value;
-                self.slots[self.slot].changed = true;
-            }
-            (EV_ABS, ABS_MT_POSITION_X) => {
-                self.slots[self.slot].x = ev.value;
-                self.slots[self.slot].changed = true;
-            }
-            (EV_ABS, ABS_MT_POSITION_Y) => {
-                self.slots[self.slot].y = ev.value;
-                self.slots[self.slot].changed = true;
-            }
-            _ => {}
-        }
-    }
-
-    /// End of a batch: report what changed in each slot.
-    fn flush(&mut self, now: Instant, out: &mut VecDeque<Event>) {
-        for i in 0..MAX_SLOTS {
-            let s = self.slots[i];
-            if !s.changed {
-                continue;
-            }
-            let pos = self.to_screen(s.x, s.y);
-            let slot = &mut self.slots[i];
-            slot.changed = false;
-            // A finger lifted, or replaced by another in the same batch.
-            if slot.reported_id >= 0 && slot.reported_id != s.id {
-                out.push_back(touch(slot.reported_id, TouchPhase::Up, slot.reported, now));
-                slot.reported_id = -1;
-            }
-            if s.id >= 0 {
-                if slot.reported_id < 0 {
-                    out.push_back(touch(s.id, TouchPhase::Down, pos, now));
-                } else if pos != slot.reported {
-                    out.push_back(touch(s.id, TouchPhase::Move, pos, now));
-                }
-                slot.reported_id = s.id;
-                slot.reported = pos;
             }
         }
     }
-
-    fn to_screen(&self, raw_x: i32, raw_y: i32) -> Point {
-        let (mut rx, mut ry, mut xr, mut yr) = (raw_x, raw_y, self.x_range, self.y_range);
-        if self.map.swap_axes {
-            (rx, ry, xr, yr) = (ry, rx, yr, xr);
-        }
-        let mut x = scale_axis(rx, xr, self.map.width);
-        let mut y = scale_axis(ry, yr, self.map.height);
-        if self.map.mirror_x {
-            x = self.map.width as i32 - 1 - x;
-        }
-        if self.map.mirror_y {
-            y = self.map.height as i32 - 1 - y;
-        }
-        self.map.rotate(Point::new(x, y))
-    }
-}
-
-/// Maps a raw evdev coordinate in `lo..=hi` onto `0..size`, clamping out-of-range
-/// values and returning `0` for degenerate (`hi <= lo`) or empty (`size == 0`) ranges.
-fn scale_axis(v: i32, (lo, hi): (i32, i32), size: u32) -> i32 {
-    if hi <= lo || size == 0 {
-        return 0;
-    }
-    let span = i64::from(hi) - i64::from(lo);
-    let clamped = (i64::from(v) - i64::from(lo)).clamp(0, span);
-    ((i128::from(clamped) * i128::from(size - 1)) / i128::from(span)) as i32
 }
 
 /// Page keys: the Kindle's own buttons or a remote (`platform/remote.rs`).
@@ -692,8 +542,9 @@ impl Drop for KeySource {
     }
 }
 
-/// A device's EV_KEY capability bits (KEY_MAX is 0x2ff).
-struct KeyBits([u8; 96]);
+/// A bit for each key (KEY_MAX is 0x2ff).
+const KEY_BYTES: usize = 96;
+struct KeyBits([u8; KEY_BYTES]);
 
 impl KeyBits {
     fn has(&self, code: u16) -> bool {
@@ -701,10 +552,20 @@ impl KeyBits {
     }
 }
 
+/// The keys a device has.
 fn key_bits(fd: RawFd) -> Option<KeyBits> {
-    let mut bits = KeyBits([0; 96]);
-    // SAFETY: the buffer is as long as the size encoded in the request.
-    let rc = unsafe { libc::ioctl(fd, eviocgbit_key(bits.0.len() as u32) as _, bits.0.as_mut_ptr()) };
+    read_keys(fd, eviocgbit_key(KEY_BYTES as u32))
+}
+
+/// The keys held down now.
+fn key_state(fd: RawFd) -> Option<KeyBits> {
+    read_keys(fd, EVIOCGKEY)
+}
+
+fn read_keys(fd: RawFd, request: u32) -> Option<KeyBits> {
+    let mut bits = KeyBits([0; KEY_BYTES]);
+    // SAFETY: the buffer is as long as the size encoded in both requests.
+    let rc = unsafe { libc::ioctl(fd, request as _, bits.0.as_mut_ptr()) };
     (rc >= 0).then_some(bits)
 }
 
@@ -715,16 +576,20 @@ impl Drop for TouchInput {
     }
 }
 
-fn touch(id: i32, phase: TouchPhase, pos: Point, time: Instant) -> Event {
-    Event::Touch(Touch { id, phase, pos, time })
+fn has_mt_position(fd: RawFd) -> bool {
+    abs_bits(fd).is_some_and(|bits| has_abs(&bits, ABS_MT_POSITION_X) && has_abs(&bits, ABS_MT_POSITION_Y))
 }
 
-fn has_mt_position(fd: RawFd) -> bool {
-    let mut bits = [0u8; 8]; // ABS_MAX is 0x3f, so 64 bits are enough
+/// The axes a device has (ABS_MAX is 0x3f, so 64 bits are enough).
+fn abs_bits(fd: RawFd) -> Option<[u8; 8]> {
+    let mut bits = [0u8; 8];
     // SAFETY: the buffer is as long as the size encoded in the request.
     let rc = unsafe { libc::ioctl(fd, eviocgbit_abs(bits.len() as u32) as _, bits.as_mut_ptr()) };
-    let has = |code: u16| bits[code as usize / 8] & (1 << (code % 8)) != 0;
-    rc >= 0 && has(ABS_MT_POSITION_X) && has(ABS_MT_POSITION_Y)
+    (rc >= 0).then_some(bits)
+}
+
+fn has_abs(bits: &[u8; 8], code: u16) -> bool {
+    bits[code as usize / 8] & (1 << (code % 8)) != 0
 }
 
 fn device_name(fd: RawFd) -> String {
@@ -761,31 +626,4 @@ fn abs_info(fd: RawFd, axis: u16) -> Result<AbsInfo> {
         bail!("can't read the range of touch axis {axis:#x}: {}", std::io::Error::last_os_error());
     }
     Ok(info)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::scale_axis;
-
-    #[test]
-    fn scales_clamps_and_handles_degenerate_axis_ranges() {
-        // Normal scaling across a typical touch axis range.
-        assert_eq!(scale_axis(0, (0, 4095), 1236), 0);
-        assert_eq!(scale_axis(4095, (0, 4095), 1236), 1235);
-        assert_eq!(scale_axis(500, (0, 1000), 101), 50);
-        assert_eq!(scale_axis(250, (100, 400), 301), 150);
-
-        // Out-of-range values clamp cleanly to the screen bounds.
-        assert_eq!(scale_axis(-50, (0, 1000), 101), 0);
-        assert_eq!(scale_axis(2000, (0, 1000), 101), 100);
-
-        // Degenerate/inverted ranges, empty screen, and extreme i32 bounds never panic or overflow.
-        assert_eq!(scale_axis(10, (100, 100), 1000), 0);
-        assert_eq!(scale_axis(10, (100, 50), 1000), 0);
-        assert_eq!(scale_axis(500, (0, 1000), 0), 0);
-        assert_eq!(scale_axis(500, (0, 1000), 1), 0);
-        assert_eq!(scale_axis(0, (i32::MIN, i32::MAX), 1001), 500);
-        assert_eq!(scale_axis(i32::MAX, (i32::MIN, i32::MAX), 1001), 1000);
-        assert_eq!(scale_axis(i32::MIN, (i32::MIN, i32::MAX), 1001), 0);
-    }
 }
