@@ -35,6 +35,8 @@ required), pausing Amazon's UI while you read and restoring it cleanly on exit.
 - **Offline dictionaries:** StarDict lookup with sets, language routing,
   built-in English and Russian word forms, and optional Hunspell dictionaries
   for other languages. Reuses KOReader's dictionary folder automatically.
+- **Wikipedia and Translate:** tabs on the same lookup card, over your Wi-Fi,
+  only when you ask.
 - **Built-in Wi-Fi transfer:** a local web app on `http://verso.local` to add
   EPUBs, upload dictionaries, export highlights and manage files from a phone
   or computer, with a 4-digit pairing code and QR code.

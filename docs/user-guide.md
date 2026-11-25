@@ -1,7 +1,7 @@
 # Verso User Guide
 
 Verso is a calm EPUB reader for jailbroken Kindles. This guide covers installing
-it, reading, organising your library, using offline dictionaries, transferring
+it, reading, organising your library, looking words up, transferring
 books over Wi-Fi, importing from KOReader, updating and reporting problems.
 
 ---
@@ -222,7 +222,7 @@ instantly from cache.
   bottom).
 - **Passage:** long-press and drag — or adjust the start/end handles after
   lifting — to open the floating bar: **Highlight**, **Note**, **Search**,
-  **Dict**, **Extend**.
+  **Dict**, **Wiki**, **Translate**, **Extend**.
 - **Cross-page highlight:** tap **Extend** to turn pages forward or back and
   tap where the passage ends.
 - **Editing:** tap any highlight on the page to view, add/edit/delete its note
@@ -239,7 +239,9 @@ instantly from cache.
 
 ---
 
-## 6. Offline dictionaries
+## 6. Dictionaries, Wikipedia and Translate
+
+The lookup card has three tabs. **Dictionary** works offline.
 
 Verso reads **StarDict** dictionaries (`.ifo`/`.ifo.gz`, `.idx`/`.idx.gz`,
 `.dict`/`.dict.dz`, optional `.syn`) with plain text, HTML, XDXF and Pango
@@ -282,6 +284,19 @@ The card opens expanded at first, then at whatever size you last left it with
 `⤢`. The smaller card stays at the bottom (on the right in landscape); turn
 off **Always at the bottom** in **Dictionaries → Lookup card** to have it open
 away from the word, so the word stays visible.
+
+### Wikipedia and Translate
+
+Both use the Wi-Fi you already have on, and send the word or passage to
+Wikipedia or Google only when you open their tab; if that fails, tap **Retry**.
+
+- **Wikipedia** opens a clear match or lists the results (**Other matches**
+  switches). It uses the book's language, else English; a choice is kept per book.
+- **Translate** uses Google Translate, up to 4,000 characters. It asks for a
+  target language the first time and detects the source (both can be changed).
+  Google may refuse some shared or VPN connections as busy.
+
+Passages over 120 characters can only be translated.
 
 ---
 

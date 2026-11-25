@@ -37,7 +37,7 @@ while keeping `verso`, `crengine-sys`, `tiny-skia`, `image`, codec crates and
 ├──────────────────────────────┬─────────────────────────────────────┤
 │ Graphics (gfx/): Canvas      │ Domain workers: Document (crengine) │
 │ (Gray8/Color32), cosmic-text │ Library · Dictionary · Annotations  │
-│ + swash, resvg SVG icons     │ Store · Transfer HTTP · Updates     │
+│ + swash, resvg SVG icons     │ Store · Transfer · Updates · Online │
 ├──────────────────────────────┴─────────────────────────────────────┤
 │ Platform trait: display · input · power · frontlight · battery     │
 ├──────────────────────────────┬─────────────────────────────────────┤
@@ -102,6 +102,7 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
 | `verso-net` | `App` (`DrawerWorker`, lazy) | Runs `lipc` Wi-Fi toggles and SSH start/stop off the UI thread. |
 | `transfer` / `web-*` | `transfer::Session` | Active only while Wi-Fi transfer is open: HTTP server (≤8 connection threads), firewall port 80, `verso-mdns`, 10-minute idle stop, 60 s sleep-timeout refresh. |
 | `update-check` / `update-wake` / `update-download` | `update::Updates` | One-shot HTTPS manifest check (`ureq` + `rustls`; after a wake, a due one waits up to 2 min for Wi-Fi), archive download, hash/signature check and staging. |
+| `online-lookup` | `online::Service` | Wikipedia and translation requests: at most 3 short-lived threads, each checking Wi-Fi before opening a socket; blocking calls can't be aborted, so each tab's `online::Worker` drops obsolete replies by request ID. |
 | `lipc-wait-event` | `Kindle::power` (child of thread `verso-power`) | Streams `com.lab126.powerd` events (`PR_SET_PDEATHSIG(SIGTERM)`). Unexpected exit emits `Event::Quit` so Verso returns cleanly via the launcher. |
 | `verso-remotes` / `verso-remote-port` | `platform::kindle` | Page-turner remotes: opens the ones that appear in `/dev/input` (inotify) and hands them to the UI thread; answers page turns on 127.0.0.1:8323. |
 | One-shot helpers | Various | `verso-input-init` (touch and buttons open during the first frame), `verso-postpone` (idle sleep, while a remote is used), `verso-frontlight` (startup read), `verso-language` (`whatlang`), `verso-koreader` (bulk import), `verso-report` (`report.sh`), `started` (5 s trial marker), `ssh-restart`. |
@@ -183,7 +184,7 @@ support are checked once per run).
   library-navigation.json      Saved Library folder and page
   reading-speed.json           Global seed reading speed (chars/sec)
   books/<id>.json              Authoritative BookState (XPointer, page, progress, finished,
-                               status_at, rereading, language, reading_speed, koreader_seen)
+                               status_at, rereading, language, reading_speed, koreader_seen, wikipedia_language)
   covers/<key>[-s|-WxH].png    Cached cover thumbnails (sizes tracked in covers/sizes.json)
   annotations/book-<id>.json   Atomic per-book manifest (v1, record ids + import tombstones)
   annotations/<rec-id>.json    Immutable highlight/bookmark records (never edited in place)
@@ -248,4 +249,7 @@ and Verso exits with `EXIT_RESTART` (87) for the launcher to relaunch cleanly.
 - **Launcher owns Kindle UI processes:** Rust never signals `awesome`,
   `JunoStatusBarDriver`, `pillow` or `volumd` directly; native sleep handoff
   uses acknowledged `SIGUSR1`/`SIGUSR2` with `verso.sh`.
+- **One HTTPS stack:** updates and online lookup both go through `net.rs`
+  (`ureq`, bundled `webpki-roots`, bounded replies). Looked-up text comes from
+  someone's book: it never goes into the log, and replies are never stored.
 - **Never edit `third_party/`:** patch library code at build time instead.
