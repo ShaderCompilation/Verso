@@ -175,8 +175,29 @@ if [ "\${COUNT_STEPS:-}" = 1 ] && [ -z "\${VERSO_TEST_STAGE:-}" ]; then
         fi
     fi
 fi
-${finish}
 EOF
+        if [ "${c}" = mv ]; then
+            cat >>"${B}/${c}" <<'EOF'
+if [ -f "${VERSO_TEST_DIR}/deny-docs-rename" ]; then
+    mv_src=""
+    mv_dst=""
+    for mv_arg in "$@"; do
+        case "${mv_arg}" in -*) continue ;; esac
+        mv_src="${mv_dst}"
+        mv_dst="${mv_arg}"
+    done
+    mv_s=0
+    mv_d=0
+    case "${mv_src}" in "${VERSO_STORAGE_ROOT}/documents/"*) mv_s=1 ;; esac
+    case "${mv_dst}" in "${VERSO_STORAGE_ROOT}/documents/"*) mv_d=1 ;; esac
+    if [ -n "${mv_src}" ] && [ "${mv_s}" != "${mv_d}" ]; then
+        echo "mv: can't rename '${mv_src}': Operation not permitted" >&2
+        exit 1
+    fi
+fi
+EOF
+        fi
+        printf '%s\n' "${finish}" >>"${B}/${c}"
     done
     chmod 755 "${B}"/*
 }
@@ -263,7 +284,7 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}/long-probe" "${W}"/queue-* \
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}/long-probe" "${W}/deny-docs-rename" "${W}"/queue-* \
         "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
@@ -285,6 +306,19 @@ launch() {
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" VERSO_BOOT_ID="${W}/boot-id" \
             setsid ${SH} "${R}/verso/verso.sh" </dev/null >/dev/null 2>&1 &
+        wait $!
+    ) 2>/dev/null
+}
+
+# Runs the installed launcher with explicit arguments (e.g. launch source).
+launch_args() {
+    : >"${W}/steps"
+    (
+        VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
+            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" VERSO_BOOT_ID="${W}/boot-id" \
+            setsid ${SH} "${R}/verso/verso.sh" "$@" </dev/null >/dev/null 2>&1 &
         wait $!
     ) 2>/dev/null
 }
@@ -470,10 +504,15 @@ if [ -f "${SCRIPTLET}" ]; then
     rm -f "${W}/sh-active"
     wait_scriptlet 1 || fail "scriptlet launch did not finish"
     runs_are "0.1.0"
-    grep -q "launched from library (waited [1-9][0-9]* of 50 times for Home)" "${R}/verso/verso.log" || fail "library launch not logged"
     ui_restored_once
     absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
     [ -z "$(ls "${W}/tmp"/verso-launcher* 2>/dev/null)" ] || fail "leftover launcher tmp files: $(ls "${W}/tmp"/verso-launcher*)"
+    # Keep verso.sh's library + wait-count log formatting tested while Verso.sh
+    # temporarily omits those arguments for the Beta 8 bridge release.
+    fresh
+    launch_args library 3
+    runs_are "0.1.0"
+    grep -q "launched from library (waited 3 of 50 times for Home)" "${R}/verso/verso.log" || fail "library launch not logged"
 
     begin "scriptlet repeated launches leave clean state"
     fresh
@@ -964,9 +1003,67 @@ if [ "$(id -u)" != 0 ]; then
     no_update_state
     absent "${U}/previous"
     rollback_says '"reason":"install"' '"from":"0.2.0"'
+
+    begin "install fails before replacing directory with file"
+    fresh
+    echo stage >"${W}/queue-0.1.0"
+    chmod 555 "${R}/verso/cre"
+    launch
+    chmod 755 "${R}/verso/cre"
+    runs_are "0.1.0 0.1.0"
+    installed_is 1
+    no_update_state
+    absent "${U}/previous"
+    rollback_says '"reason":"install"' '"from":"0.2.0"'
 else
-    echo "    (skipping 'install fails halfway': root ignores folder permissions)"
+    echo "    (skipping permission failure cases: root ignores folder permissions)"
 fi
+
+begin "fscrypt EPERM across documents/: update, crash rollback and go back"
+# Kernel 4.9 rejects rename(2) across encrypted documents/ and unencrypted verso/ with EPERM.
+fresh
+: >"${W}/deny-docs-rename"
+echo stage >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0 0.2.0"
+installed_is 2
+previous_is_v1
+no_update_state
+! grep -q "Operation not permitted" "${R}/verso/verso.log" || fail "cross-docs rename failed on update"
+absent "${R}/documents/.Verso.sh.tmp"
+
+fresh
+: >"${W}/deny-docs-rename"
+echo stage >"${W}/queue-0.1.0"
+echo crash >"${W}/default-0.2.0"
+launch
+runs_are "0.1.0 0.2.0 0.1.0"
+installed_is 1
+no_update_state
+absent "${U}/previous" "${R}/documents/.Verso.sh.tmp"
+! grep -q "Operation not permitted" "${R}/verso/verso.log" || fail "cross-docs rename failed on crash rollback"
+
+fresh
+: >"${W}/deny-docs-rename"
+echo stage >"${W}/queue-0.1.0"
+echo goback >"${W}/queue-0.2.0"
+launch
+runs_are "0.1.0 0.2.0 0.1.0"
+installed_is 1
+no_update_state
+absent "${U}/previous" "${R}/documents/.Verso.sh.tmp"
+! grep -q "Operation not permitted" "${R}/verso/verso.log" || fail "cross-docs rename failed on go back"
+
+fresh
+: >"${W}/deny-docs-rename"
+rm -f "${R}/documents/Verso.sh"
+echo stage >"${W}/queue-0.1.0"
+echo crash >"${W}/default-0.2.0"
+launch
+runs_are "0.1.0 0.2.0 0.1.0"
+absent "${R}/documents/Verso.sh" "${R}/documents/.Verso.sh.tmp" "${U}/previous"
+no_update_state
+! grep -q "Operation not permitted" "${R}/verso/verso.log" || fail "cross-docs rename failed on first-time scriptlet rollback"
 
 # Power loss before every step of a job, then a normal start: the job is
 # finished (or undone) and nothing is lost.

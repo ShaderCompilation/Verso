@@ -77,7 +77,7 @@ U=$APP/update
 ssh "$HOST" "mkdir -p $APP $EXT $DOCS && rm -f $APP/installed.json $APP/data/cre/.version $APP/wordforms/.version &&
     rm -rf $U/staged $U/download $U/previous $U/trial $U/rollback.json $U/rollback.json.new $U/journal-*"
 tar -C "$STAGE/kual" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $EXT"
-ssh "$HOST" "cat > $APP/Verso.sh.new && chmod 755 $APP/Verso.sh.new && mv -f $APP/Verso.sh.new $DOCS/Verso.sh" <"$STAGE/scriptlet/Verso.sh"
+ssh "$HOST" "cat > $DOCS/.Verso.sh.tmp && chmod 755 $DOCS/.Verso.sh.tmp && mv -f $DOCS/.Verso.sh.tmp $DOCS/Verso.sh" <"$STAGE/scriptlet/Verso.sh"
 tar -C "$STAGE/launcher" --owner=0 --group=0 -cf - . | ssh "$HOST" "tar -xf - -C $APP"
 # crengine's style sheets and hyphenation patterns, only when they changed.
 if [ "$(device_hash_of crengine-data)" != "$(hash_of crengine-data)" ]; then

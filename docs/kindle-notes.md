@@ -111,49 +111,50 @@ behaviour on other models is **(to verify)**.
 [verso.sh](../dist/kindle/verso/verso.sh) runs alongside Amazon's framework
 rather than stopping it:
 
-- **Self-copy & lock:** copies itself to `/tmp/verso-launcher-$$.sh` and
-  `exec`s it so deploys or in-app updates overwriting `/mnt/us/verso/verso.sh`
-  (FUSE) cannot break teardown. Uses an atomic `/tmp` hard-link lock and refuses
-  to start if Verso or KOReader (`reader.lua`) is running or `powerd state !=
-  active`.
-- **Log:** `verso.log` times are UTC. `verso/running` (boot id, start time)
-  exists during a session; the next launch logs one left without an end, and
-  whether the Kindle restarted.
-- **Pause order** (flags set *before* acting so `trap restore EXIT` always
-  undoes them): save `/dev/fb0` to `/tmp/verso-fb.dump`, disable `pillow`
-  (`com.lab126.pillow disableEnablePillow disable`), `SIGSTOP` `awesome`,
-  `SIGSTOP` `JunoStatusBarDriver` (separate clock/status-bar X window
-  `com.lab126.gtkstatusbar` on PW6 **(measured)**; `/proc/comm` truncated to
-  `JunoStatusBarDr`), `SIGSTOP` `volumd` (keeps `/mnt/us` mounted if USB is
-  plugged in).
+- **Self-copy & lock:** copies itself to `/tmp/verso-launcher-$$.sh` and `exec`s
+  it so deploys/updates overwriting `/mnt/us/verso/verso.sh` (FUSE) cannot break
+  teardown. Uses an atomic `/tmp` hard-link lock; refuses to start if Verso or
+  KOReader (`reader.lua`) is running or `powerd state != active`.
+- **Log:** UTC timestamps in `verso.log`. `verso/running` (boot id, start time)
+  exists during a session so the next launch notes unended sessions and reboots.
+- **Pause order** (flags set *before* acting so `trap restore EXIT` always undoes
+  them): save `/dev/fb0` to `/tmp/verso-fb.dump`, disable `pillow`
+  (`disableEnablePillow disable`), `SIGSTOP` `awesome`, `SIGSTOP`
+  `JunoStatusBarDriver` (separate `com.lab126.gtkstatusbar` X window on PW6
+  **(measured)**; `/proc/comm` truncated to `JunoStatusBarDr`), `SIGSTOP`
+  `volumd` (keeps `/mnt/us` mounted if USB is plugged in).
 - **Restore order** (ignores signals): `SIGCONT` `JunoStatusBarDriver` and
-  `awesome`, restore `/tmp/verso-fb.dump`, re-enable `pillow`, ask `appmgrd` for
-  `app://com.lab126.booklet.home`, clean up any stray `preventScreenSaver` or
-  port-80 firewall markers, finish all log writes, **then `SIGCONT volumd`
-  last** (a pending USB plug may unmount `/mnt/us` immediately).
+  `awesome`, restore `/tmp/verso-fb.dump`, re-enable `pillow`, start
+  `app://com.lab126.booklet.home`, clear stray `preventScreenSaver` or port-80
+  firewall markers, finish log writes, **then `SIGCONT volumd` last** (a pending
+  USB plug may unmount `/mnt/us` immediately).
 - **Native sleep handoff:** Verso sends `SIGUSR1` to resume `awesome` for
   Amazon's screensaver and `SIGUSR2` to pause it on wake, waiting for
   `$VERSO_SYSTEM_ACK`. Amazon's Home (`KPPMainApp`, never paused) redraws over
-  Verso 0.3–0.5 s after the wake frame **(measured)**; `frame_watch.rs`
-  repairs it. Cover sleep isn't affected **(measured)**.
-- **Exit codes & updates:** `0` normal, `85` install staged update, `86` go
-  back to `update/previous/`, `87` restart without saving (protocol 2, after
+  Verso 0.3–0.5 s after the wake frame **(measured)**; `frame_watch.rs` repairs
+  it. Cover sleep isn't affected **(measured)**.
+- **Exit codes & updates:** `0` normal, `85` install staged update, `86` go back
+  to `update/previous/`, `87` restart without saving (protocol 2, after
   developer live-data edits), `88` unsupported hardware. Updates use empty
   renamed journal files (`journal-install` / `rollback` / `cleanup`) + `sync`
   and a 120 s trial waiting for `/tmp/verso-started`; crash, hang or two
   interrupted starts roll back automatically. Non-zero/signal/panic exits write
   a crash report via `tools/report.sh`.
+- **`documents/` `fscrypt` boundary (measured):** on MTP Kindles `/mnt/us/documents`
+  is ext4 `fscrypt`-encrypted while `/mnt/us/verso` is not, so cross-directory
+  `rename(2)` fails with `EPERM` on kernel 4.9 (and falls back non-atomically
+  via `EXDEV` on 5.15); `verso.sh` and `deploy.sh` copy into a hidden `.tmp`
+  file inside `documents/` and rename in-place.
 - **Direct library scriptlet (`documents/Verso.sh`, measured):** `SH_Integration`
-  (PW6 5.18.5.0.1) scans only the first 6 lines (`# Name:`, `# Author:`,
-  `# DontUseFBInk`, `# Icon: data:image/…` base64 only), unloads via `kill -9`
-  on pause and loops `sleep(1)` → `waitpid` → `popAppHistory`. `Verso.sh`
-  detaches via `setsid`, exits `0` and waits for `sh_integration_launcher` to
-  exit and `activeApp` to clear (+200 ms) before `exec`ing `verso.sh`, avoiding
-  both mid-restore `SIGKILL` and frozen-`awesome` `popAppHistory` wedges.
-- **KPM `.kpkg` (5.19.4+):** KUAL is broken on 5.19.4+ and `.sh` indexing can
-  be unreliable there. Releases ship `verso-<version>.kpkg` (manifest v2,
-  `kindlehf`, `[major, minor, patch]`) with POSIX `sh` hooks (`launch.sh`
-  shares the `SH_Integration` handoff; `uninstall.sh` keeps `verso/data/` and `verso/ssh/`).
+  scans only the first 6 lines (`# Name:`, `# Author:`, `# DontUseFBInk`,
+  `# Icon: data:image/…` base64), unloads via `kill -9` on pause and loops
+  `sleep(1)` → `waitpid` → `popAppHistory`. `Verso.sh` detaches via `setsid`,
+  exits `0` and waits for `sh_integration_launcher` to exit and `activeApp` to
+  clear (+200 ms) before `exec`ing `verso.sh`.
+- **KPM `.kpkg` (5.19.4+):** KUAL is broken on 5.19.4+ and `.sh` indexing can be
+  unreliable; releases ship `verso-<version>.kpkg` (manifest v2, `kindlehf`)
+  with POSIX `sh` hooks (`launch.sh` shares the `SH_Integration` handoff;
+  `uninstall.sh` keeps `verso/data/` and `verso/ssh/`).
 
 ---
 

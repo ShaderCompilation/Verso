@@ -334,10 +334,35 @@ write_file() {
     printf '%s\n' "$2" >"$1.tmp" && sync && mv -f "$1.tmp" "$1" && sync
 }
 
+# put_copy SRC DST: moves a file across an fscrypt encryption boundary
+# (e.g. unencrypted verso/ <-> encrypted documents/) by copying into DST's
+# folder first and renaming atomically within it. Dotfile + .tmp avoids
+# Kindle indexing and is also cleaned on boot by userstore_common_utils.
+put_copy() {
+    tmp="${2%/*}/.${2##*/}.tmp"
+    if { rm -f "${tmp}" && cp -p "$1" "${tmp}" && sync && mv -f "${tmp}" "$2"; } 2>>"${LOG}"; then
+        rm -f "$1" 2>>"${LOG}"
+    else
+        rm -f "${tmp}" 2>/dev/null
+        return 1
+    fi
+}
+
 # put SRC DST: moves a file to DST, creating its folder. An empty folder
 # where the file goes (one version's folder, another's file) is removed.
+# Crossing the documents/ fscrypt boundary copies into DST's folder first;
+# other moves try zero-copy rename and fall back to put_copy on error.
 put() {
-    mkdir -p "${2%/*}" 2>>"${LOG}" && { [ ! -d "$2" ] || rmdir "$2" 2>>"${LOG}"; } && mv -f "$1" "$2" 2>>"${LOG}"
+    mkdir -p "${2%/*}" 2>>"${LOG}" && { [ ! -d "$2" ] || rmdir "$2" 2>>"${LOG}"; } || return 1
+    src_in_docs=0
+    dst_in_docs=0
+    case "$1" in "${ROOT}/documents/"*) src_in_docs=1 ;; esac
+    case "$2" in "${ROOT}/documents/"*) dst_in_docs=1 ;; esac
+    if [ "${src_in_docs}" != "${dst_in_docs}" ]; then
+        put_copy "$1" "$2"
+    else
+        mv -f "$1" "$2" 2>>"${LOG}" || put_copy "$1" "$2"
+    fi
 }
 
 # plan_value KEY FILE: a header value from a plan.
@@ -400,7 +425,7 @@ install_moves() {
         case "${op}" in install | replace) ;; *) continue ;; esac
         [ -f "${ROOT}/${a}" ] || continue
         old="${PREVIOUS}/files/${b}"
-        if [ -f "${ROOT}/${b}" ]; then
+        if [ -f "${ROOT}/${b}" ] && [ ! -f "${old}" ] && [ ! -f "${PREVIOUS}/added/${b}" ]; then
             if [ "${op}" = replace ]; then
                 { mkdir -p "${old%/*}" && cp -p "${ROOT}/${b}" "${old}.tmp" && sync &&
                     mv -f "${old}.tmp" "${old}"; } 2>>"${LOG}" || return 1
@@ -412,9 +437,10 @@ install_moves() {
     done <"${plan}"
 }
 
-# Back. Each old file is renamed over the new one (a file still staged was
-# never switched in: its old file goes back if it was moved aside), new
-# files are removed, then the removed files come back.
+# Back. Each old file is put back over the new one (skipping a still-staged
+# file whose target already matches it, e.g. a read-only folder), new files
+# are removed (leaving a directory that was never turned into a file), then
+# the removed files come back.
 rollback_moves() {
     plan="${PREVIOUS}/plan.txt"
     [ -f "${plan}" ] || return 1
@@ -422,14 +448,16 @@ rollback_moves() {
         case "${op}" in install | replace) ;; *) continue ;; esac
         old="${PREVIOUS}/files/${b}"
         added="${PREVIOUS}/added/${b}"
-        if [ -f "${ROOT}/${a}" ]; then
-            if [ ! -f "${ROOT}/${b}" ] && [ -f "${old}" ]; then
+        if [ -f "${old}" ]; then
+            if [ -f "${ROOT}/${a}" ] && [ -f "${ROOT}/${b}" ] && cmp -s "${old}" "${ROOT}/${b}" 2>/dev/null; then
+                rm -f "${old}" 2>>"${LOG}" || return 1
+            else
                 put "${old}" "${ROOT}/${b}" || return 1
             fi
-        elif [ -f "${old}" ]; then
-            put "${old}" "${ROOT}/${b}" || return 1
         elif [ -f "${added}" ]; then
-            { rm -f "${ROOT}/${b}" && rm -f "${added}"; } 2>>"${LOG}" || return 1
+            {
+                { [ ! -f "${ROOT}/${b}" ] && [ ! -L "${ROOT}/${b}" ]; } || rm -f "${ROOT}/${b}"
+            } 2>>"${LOG}" && rm -f "${added}" 2>>"${LOG}" || return 1
         fi
     done <"${plan}"
     while IFS="${TAB}" read -r op a b; do
@@ -495,7 +523,7 @@ go_back() {
     rollback_note "$1" "$2" "${from}" "${to}" >"${ROLLBACK}.new"
     log "going back from Verso ${from} to ${to:-the previous version} ($1${2:+ $2})"
     # A later update staged on top of this version doesn't fit the old one.
-    # (After a failed install, staged/ tells which files never moved.)
+    # (For a failed install, finish_cleanup removes staged/ once rollback finishes.)
     [ "$1" = install ] || rm -rf "${STAGED}"
     sync
     set_journal rollback || return 1
