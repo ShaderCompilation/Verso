@@ -1,0 +1,6 @@
+Sixth closed beta of Verso.
+
+- Fix screens not refreshing fully on some Kindles, such as the Basic 2024.
+- Fix a crash at launch on older firmware, such as on the Oasis 3.
+- Always show the SSH switch and drawer tile.
+- Better crash reports; safer image decoding.
