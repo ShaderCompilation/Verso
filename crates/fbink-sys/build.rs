@@ -1,5 +1,7 @@
-//! Compiles a minimal FBInk (no fonts/images; we draw everything ourselves)
-//! straight from the submodule. Only meaningful for e-reader (ARM) targets.
+//! Compiles a minimal FBInk (with draw and built-in bitmap font support for
+//! the refusal screen on unsupported Kindles; we draw everything else
+//! ourselves) straight from the submodule. Only meaningful for e-reader (ARM)
+//! targets.
 
 use std::env;
 use std::fs;
@@ -19,8 +21,14 @@ fn main() {
     let root = manifest.join("../../third_party/FBInk");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     println!("cargo:rerun-if-env-changed=VERSO_NATIVE_CACHE");
-    for f in ["fbink.c", "fbink.h", "cutef8/utf8.c", "cutef8/dfa.c"] {
+    for f in ["fbink.c", "fbink.h", "cutef8/utf8.c", "cutef8/dfa.c", "font8x8/font8x8_basic.h"] {
         println!("cargo:rerun-if-changed={}", root.join(f).display());
+    }
+    if !root.join("font8x8/font8x8_basic.h").is_file() {
+        panic!(
+            "third_party/FBInk/font8x8 is missing (required by FBINK_WITH_BITMAP for the refusal screen); \
+             run `git -C third_party/FBInk submodule update --init --depth=1 font8x8`"
+        );
     }
 
     let version = Command::new("git")
@@ -48,7 +56,8 @@ fn main() {
         .define("_GNU_SOURCE", None)
         .define("FBINK_FOR_KINDLE", None)
         .define("FBINK_MINIMAL", None)
-        .define("FBINK_WITH_INPUT", None)
+        .define("FBINK_WITH_DRAW", None)
+        .define("FBINK_WITH_BITMAP", None)
         .define("FBINK_VERSION", format!("\"{version}\"").as_str())
         .flag_if_supported("-mcpu=cortex-a9")
         .warnings(false)

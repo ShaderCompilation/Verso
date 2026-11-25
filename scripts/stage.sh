@@ -29,6 +29,7 @@ copy() {
 # - interpreter is /lib/ld-linux-armhf.so.3
 # - max required GLIBC version <= 2.20 (i.MX armhf Kindles like Oasis 3)
 # - DT_REL + DT_RELSZ == DT_JMPREL (contiguous .rel.dyn/.rel.plt for glibc <= 2.22, bug #14341)
+# - PT_TLS (if present) has vaddr % align == 0 (misaligned TLS corrupts TCB on glibc <= 2.34, bug #24606)
 # - PT_ARM_EXIDX is present
 check_kindle_elf() {
     python3 -I - "$@" <<'PY'
@@ -44,6 +45,21 @@ for path in sys.argv[1:]:
         sys.exit(f"stage.sh: {path}: expected /lib/ld-linux-armhf.so.3 interpreter")
     if "ARM_EXIDX" not in out:
         sys.exit(f"stage.sh: {path}: missing PT_ARM_EXIDX program header")
+    tls_line = re.search(r"^\s+TLS\b.*$", out, re.MULTILINE)
+    if tls_line:
+        tls = re.match(
+            r"^\s+TLS\s+0x[0-9a-f]+\s+0x([0-9a-f]+)\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+[RWE ]+\s+(?:0x)?([0-9a-f]+)\s*$",
+            tls_line.group(0),
+        )
+        if not tls:
+            sys.exit(f"stage.sh: {path}: could not parse PT_TLS header: {tls_line.group(0).strip()}")
+        vaddr = int(tls.group(1), 16)
+        align = int(tls.group(2), 16)
+        if align > 0 and vaddr % align != 0:
+            sys.exit(
+                f"stage.sh: {path}: PT_TLS vaddr (0x{vaddr:x}) is not aligned to p_align (0x{align:x}); "
+                "misaligned TLS crashes glibc <= 2.34 (bug #24606)"
+            )
     ver_section = out.split("Version needs section", 1)[-1]
     bad_vers = [
         v for v in re.findall(r"Name:\s+GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", ver_section)

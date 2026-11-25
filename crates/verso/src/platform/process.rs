@@ -5,16 +5,37 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// Invokes the kernel's fork/clone syscall directly without libc's
+/// `pthread_atfork` handlers or allocator locks, which can deadlock when run
+/// between `fork` and `exec` in a multithreaded process.
+unsafe fn raw_fork() -> libc::pid_t {
+    #[cfg(all(target_os = "linux", any(target_arch = "arm", target_arch = "x86_64", target_arch = "x86")))]
+    {
+        unsafe { libc::syscall(libc::SYS_fork) as libc::pid_t }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD, 0usize, 0usize, 0usize, 0usize) as libc::pid_t }
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "arm", target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
+    )))]
+    {
+        unsafe { libc::fork() }
+    }
+}
+
 /// Runs `command` detached like a daemon: init adopts it (no zombie left in
 /// Verso when it stops) and it has its own session, so it outlives Verso.
 /// Returns once the intermediate process has exited.
 pub fn spawn_detached(command: &mut Command) -> std::io::Result<bool> {
     // Fork once more and let the middle process exit.
-    // SAFETY: fork, _exit and setsid are async-signal-safe, as required
-    // between fork and exec.
+    // SAFETY: raw fork/clone syscall (avoiding pthread_atfork and malloc locks),
+    // _exit and setsid are async-signal-safe, as required between fork and exec.
     unsafe {
         command.pre_exec(|| {
-            match libc::fork() {
+            match raw_fork() {
                 -1 => return Err(std::io::Error::last_os_error()),
                 0 => {}
                 _ => libc::_exit(0),

@@ -315,12 +315,8 @@ impl TouchInput {
         if self.map.swap_axes {
             (rx, ry, xr, yr) = (ry, rx, yr, xr);
         }
-        let scale = |v: i32, (lo, hi): (i32, i32), size: u32| -> i32 {
-            let span = (hi - lo).max(1) as i64;
-            (((v - lo).clamp(0, hi - lo) as i64 * (size as i64 - 1)) / span) as i32
-        };
-        let mut x = scale(rx, xr, self.map.width);
-        let mut y = scale(ry, yr, self.map.height);
+        let mut x = scale_axis(rx, xr, self.map.width);
+        let mut y = scale_axis(ry, yr, self.map.height);
         if self.map.mirror_x {
             x = self.map.width as i32 - 1 - x;
         }
@@ -329,6 +325,17 @@ impl TouchInput {
         }
         self.map.rotate(Point::new(x, y))
     }
+}
+
+/// Maps a raw evdev coordinate in `lo..=hi` onto `0..size`, clamping out-of-range
+/// values and returning `0` for degenerate (`hi <= lo`) or empty (`size == 0`) ranges.
+fn scale_axis(v: i32, (lo, hi): (i32, i32), size: u32) -> i32 {
+    if hi <= lo || size == 0 {
+        return 0;
+    }
+    let span = i64::from(hi) - i64::from(lo);
+    let clamped = (i64::from(v) - i64::from(lo)).clamp(0, span);
+    ((i128::from(clamped) * i128::from(size - 1)) / i128::from(span)) as i32
 }
 
 /// The page-turn buttons: an evdev key device with page keys.
@@ -526,4 +533,31 @@ fn abs_info(fd: RawFd, axis: u16) -> Result<AbsInfo> {
         bail!("can't read the range of touch axis {axis:#x}: {}", std::io::Error::last_os_error());
     }
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_axis;
+
+    #[test]
+    fn scales_clamps_and_handles_degenerate_axis_ranges() {
+        // Normal scaling across a typical touch axis range.
+        assert_eq!(scale_axis(0, (0, 4095), 1236), 0);
+        assert_eq!(scale_axis(4095, (0, 4095), 1236), 1235);
+        assert_eq!(scale_axis(500, (0, 1000), 101), 50);
+        assert_eq!(scale_axis(250, (100, 400), 301), 150);
+
+        // Out-of-range values clamp cleanly to the screen bounds.
+        assert_eq!(scale_axis(-50, (0, 1000), 101), 0);
+        assert_eq!(scale_axis(2000, (0, 1000), 101), 100);
+
+        // Degenerate/inverted ranges, empty screen, and extreme i32 bounds never panic or overflow.
+        assert_eq!(scale_axis(10, (100, 100), 1000), 0);
+        assert_eq!(scale_axis(10, (100, 50), 1000), 0);
+        assert_eq!(scale_axis(500, (0, 1000), 0), 0);
+        assert_eq!(scale_axis(500, (0, 1000), 1), 0);
+        assert_eq!(scale_axis(0, (i32::MIN, i32::MAX), 1001), 500);
+        assert_eq!(scale_axis(i32::MAX, (i32::MIN, i32::MAX), 1001), 1000);
+        assert_eq!(scale_axis(i32::MIN, (i32::MIN, i32::MAX), 1001), 0);
+    }
 }

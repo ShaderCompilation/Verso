@@ -50,7 +50,7 @@ fn panic_hook() {
 #[cfg(unix)]
 mod crash {
     use std::ptr;
-    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
     const ALT_STACK_SIZE: usize = 32 * 1024;
     static mut ALT_STACK: [u8; ALT_STACK_SIZE] = [0; ALT_STACK_SIZE];
@@ -61,6 +61,8 @@ mod crash {
     /// the signal it got, which is what the process dies with.
     static CRASHED_THREAD: AtomicUsize = AtomicUsize::new(0);
     static FIRST_SIGNAL: AtomicI32 = AtomicI32::new(0);
+    /// Guards against infinite re-entry if the nested-fault path itself faults.
+    static NESTED_FAULT: AtomicBool = AtomicBool::new(false);
 
     /// Installs an alternate signal stack and `SA_SIGINFO` handlers for fatal
     /// signals so native/FFI crashes write signal, fault address, registers, a
@@ -79,10 +81,11 @@ mod crash {
 
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = handler as *const () as usize;
-            // Not SA_RESETHAND, and no signal is masked: a fault inside the
-            // handler, or in another thread meanwhile, must come back to the
-            // handler, which dies with the first signal, not the new one.
-            sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+            // Not SA_RESETHAND, and SA_NODEFER with an empty mask: a fault inside
+            // the handler (including the same signal), or in another thread
+            // meanwhile, must come back to the handler, which dies with the
+            // first signal, not the new one.
+            sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_NODEFER;
             libc::sigemptyset(&mut sa.sa_mask);
             for &sig in FATAL_SIGNALS {
                 let _ = libc::sigaction(sig, &sa, ptr::null_mut());
@@ -494,16 +497,24 @@ mod crash {
         match CRASHED_THREAD.compare_exchange(0, thread, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => FIRST_SIGNAL.store(sig, Ordering::Release),
             Err(first) if first == thread => {
+                let first = FIRST_SIGNAL.load(Ordering::Acquire);
+                let first_sig = if first != 0 { first } else { sig };
+                if NESTED_FAULT.swap(true, Ordering::AcqRel) {
+                    // SAFETY: `_exit` is async-signal-safe and avoids infinite
+                    // re-entry if the nested-fault path itself faults.
+                    unsafe { libc::_exit(128 + first_sig) };
+                }
                 let note = b"fatal signal handler faulted\n";
                 // SAFETY: `write` to fd 2 is async-signal-safe.
                 unsafe { libc::write(libc::STDERR_FILENO, note.as_ptr().cast(), note.len()) };
-                die(FIRST_SIGNAL.load(Ordering::Acquire));
+                die(first_sig);
             }
             Err(_) => {
                 // Another thread is writing its crash: let it finish.
                 // SAFETY: `sleep` is async-signal-safe.
                 unsafe { libc::sleep(2) };
-                die(FIRST_SIGNAL.load(Ordering::Acquire));
+                let first = FIRST_SIGNAL.load(Ordering::Acquire);
+                die(if first != 0 { first } else { sig });
             }
         }
 
@@ -548,13 +559,18 @@ mod crash {
         }
 
         // 3. Last, as it takes the dynamic linker's lock: the symbol, via dladdr.
+        // Bound with alarm(3) so a deadlock on `_dl_load_lock` cannot hang exit.
         if let Some(r) = &regs
             && r.pc != 0
         {
-            // SAFETY: `Dl_info` is a POD struct; `dladdr` does not allocate.
+            // SAFETY: `Dl_info` is a POD struct; `dladdr` does not allocate;
+            // `alarm` is async-signal-safe.
             unsafe {
                 let mut dl: libc::Dl_info = std::mem::zeroed();
-                if libc::dladdr(r.pc as *const libc::c_void, &mut dl) != 0 {
+                libc::alarm(3);
+                let found = libc::dladdr(r.pc as *const libc::c_void, &mut dl) != 0;
+                libc::alarm(0);
+                if found {
                     out.push_str("fatal location: ");
                     if !dl.dli_fname.is_null() {
                         out.push_cstr(dl.dli_fname, 160);
@@ -592,6 +608,12 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
 
+    extern "C" fn nested_segv_wrapper(sig: libc::c_int, _info: *mut libc::siginfo_t, _uctx: *mut libc::c_void) {
+        // Unmapped siginfo triggers a synchronous SIGSEGV while inside the
+        // kernel-delivered SIGSEGV handler.
+        super::crash::handler(sig, std::ptr::without_provenance_mut(0x1000), std::ptr::null_mut());
+    }
+
     #[test]
     fn fatal_signal_handler_logs_and_dies_with_the_first_signal() {
         match std::env::var("VERSO_TEST_CRASH").as_deref() {
@@ -605,6 +627,21 @@ mod tests {
                 super::crash::install();
                 // The unmapped siginfo makes the handler itself fault.
                 super::crash::handler(libc::SIGABRT, std::ptr::without_provenance_mut(0x1000), std::ptr::null_mut());
+                std::process::exit(0);
+            }
+            Ok("nested_same") => {
+                super::crash::install();
+                // Keep the exact sa_flags and sa_mask installed by `crash::install()`,
+                // swapping only the entry point so the handler faults with SIGSEGV
+                // while handling a kernel-delivered SIGSEGV (requires SA_NODEFER).
+                // SAFETY: isolated test child process.
+                unsafe {
+                    let mut sa: libc::sigaction = std::mem::zeroed();
+                    assert_eq!(libc::sigaction(libc::SIGSEGV, std::ptr::null(), &mut sa), 0);
+                    sa.sa_sigaction = nested_segv_wrapper as *const () as usize;
+                    assert_eq!(libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut()), 0);
+                    libc::raise(libc::SIGSEGV);
+                }
                 std::process::exit(0);
             }
             _ => {}
@@ -630,6 +667,11 @@ mod tests {
         // A fault inside the handler must not replace the first signal.
         let (signal, stderr) = crash("nested");
         assert_eq!(signal, Some(libc::SIGABRT), "child stderr:\n{stderr}");
+        assert!(stderr.contains("fatal signal handler faulted"), "child stderr:\n{stderr}");
+
+        // A nested same-signal fault (SIGSEGV inside SIGSEGV) must re-enter the handler.
+        let (signal, stderr) = crash("nested_same");
+        assert_eq!(signal, Some(libc::SIGSEGV), "child stderr:\n{stderr}");
         assert!(stderr.contains("fatal signal handler faulted"), "child stderr:\n{stderr}");
     }
 

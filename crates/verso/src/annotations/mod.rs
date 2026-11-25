@@ -81,13 +81,15 @@ pub fn same_quotation(text: &str, quotation: &str) -> bool {
     normalized(quotation).next().is_some() && normalized(text).eq(normalized(quotation))
 }
 pub fn created_now() -> String {
-    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
-        as libc::time_t;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let Ok(seconds) = libc::time_t::try_from(secs) else {
+        return secs.to_string();
+    };
     let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();
     // gmtime_r initializes the structure on success and has no shared state.
     let time = unsafe {
         if libc::gmtime_r(&seconds, time.as_mut_ptr()).is_null() {
-            return seconds.to_string();
+            return secs.to_string();
         }
         time.assume_init()
     };

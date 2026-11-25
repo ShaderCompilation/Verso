@@ -289,7 +289,10 @@ fn print_refusal(fd: i32, reason: &str) {
         let mut cfg: fb::FBInkConfig = std::mem::zeroed();
         cfg.is_quiet = true;
         cfg.is_flashing = true;
-        fb::fbink_cls(fd, &cfg, std::ptr::null(), false);
+        let rc = fb::fbink_cls(fd, &cfg, std::ptr::null(), false);
+        if rc < 0 {
+            log::warn!("refusal screen fbink_cls failed: {rc}");
+        }
         cfg.is_flashing = false;
         cfg.is_centered = true;
         cfg.is_halfway = true;
@@ -298,6 +301,9 @@ fn print_refusal(fd: i32, reason: &str) {
             let text = CString::new(line.replace('\0', " ")).unwrap_or_default();
             cfg.row = row;
             let rows = fb::fbink_print(fd, text.as_ptr(), &cfg);
+            if rows < 0 {
+                log::warn!("refusal screen fbink_print failed: {rows}");
+            }
             row = row.saturating_add(rows.clamp(1, 8) as i16 + 1);
         }
     }

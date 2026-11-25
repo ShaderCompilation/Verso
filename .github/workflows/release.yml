@@ -159,7 +159,9 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout submodules
-        run: git submodule update --init --depth=1 --jobs=8
+        run: |
+          git submodule update --init --depth=1 --jobs=8
+          git -C third_party/FBInk submodule update --init --depth=1 font8x8
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
