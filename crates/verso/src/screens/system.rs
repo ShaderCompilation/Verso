@@ -1042,7 +1042,6 @@ impl SystemSettings {
         };
         self.draw_help(cx, &mut col);
         col.gap(t);
-        col.label(cx, "Developer");
         let note = self.ssh_note();
         switch_row(cx, &mut self.ssh_toggle, ("SSH server", &note), col.x, col.y, col.w);
     }
