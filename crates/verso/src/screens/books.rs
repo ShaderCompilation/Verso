@@ -337,11 +337,11 @@ impl Books {
         let mut settings_action = IconButton::new(Icon::Settings);
         let settings_cx = exit_cx - exit_step;
         settings_action.place_at(Point::new(settings_cx, cy), t);
-        let mut transfer_action = IconButton::new(Icon::Wifi);
-        let wifi_cx = settings_cx - t.target;
-        transfer_action.place_at(Point::new(wifi_cx, cy), t);
+        let mut transfer_action = IconButton::new(Icon::Transfer);
+        let transfer_cx = settings_cx - t.target;
+        transfer_action.place_at(Point::new(transfer_cx, cy), t);
         let mut rescan_action = IconButton::new(Icon::Refresh);
-        let refresh_cx = wifi_cx - group_step;
+        let refresh_cx = transfer_cx - group_step;
         rescan_action.place_at(Point::new(refresh_cx, cy), t);
         let mut search_action = IconButton::new(Icon::Search);
         let search_cx = refresh_cx - t.target;
@@ -424,7 +424,7 @@ impl Books {
             library_card: Rect::default(),
             library_card_press: Press::default(),
             home_prompt: Rect::default(),
-            home_transfer: Button::new("Send books over Wi-Fi", ButtonKind::Primary).with_icon(Icon::Wifi),
+            home_transfer: Button::new("Send books over Wi-Fi", ButtonKind::Primary).with_icon(Icon::Transfer),
             home_folders: Button::new("Choose folders", ButtonKind::Secondary).with_icon(Icon::Folder),
             drawn_home: None,
             header: Rect::default(),

@@ -287,7 +287,7 @@ impl SetupScreen {
         let list_rect = Rect::new(body.x, list_top, body.w, pager.rect().y - list_top);
         // Placed under the rows when drawn.
         let status = Rect::new(body.x, list_rect.bottom(), body.w, t.mm(STATUS_MM));
-        let transfer = Button::new("Wi-Fi transfer", ButtonKind::Primary).with_icon(Icon::Wifi);
+        let transfer = Button::new("Wi-Fi transfer", ButtonKind::Primary).with_icon(Icon::Transfer);
         // From KOReader: at the bottom of the body, or of its left column in
         // landscape (the text takes the right one).
         let mut import = Button::new("Import", ButtonKind::Primary);

@@ -286,7 +286,7 @@ away from the word, so the word stays visible.
 
 ## 7. Wi-Fi transfer web app
 
-Start from the **Wi-Fi** icon on Home/Library, **Top Drawer → Wi-Fi transfer**
+Start from the **Transfer** (`⇄`) icon on Home/Library, **Top Drawer → Wi-Fi transfer**
 or **Settings → Device → Wi-Fi transfer**.
 
 Verso turns Wi-Fi on if needed (turning it back off when you leave if it turned

@@ -39,6 +39,7 @@ pub enum Icon {
     BatteryCharging,
     Globe,
     Wifi,
+    Transfer,
     Home,
     Refresh,
     Flame,
@@ -58,7 +59,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 40] = [
+    pub const ALL: [Icon; 41] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -86,6 +87,7 @@ impl Icon {
         Icon::BatteryCharging,
         Icon::Globe,
         Icon::Wifi,
+        Icon::Transfer,
         Icon::Home,
         Icon::Refresh,
         Icon::Flame,
@@ -130,6 +132,7 @@ impl Icon {
             Icon::BatteryCharging => include_str!("../../../../assets/icons/battery-charging.svg"),
             Icon::Globe => include_str!("../../../../assets/icons/globe.svg"),
             Icon::Wifi => include_str!("../../../../assets/icons/wifi.svg"),
+            Icon::Transfer => include_str!("../../../../assets/icons/arrow-left-right.svg"),
             Icon::Home => include_str!("../../../../assets/icons/house.svg"),
             Icon::Refresh => include_str!("../../../../assets/icons/rotate-cw.svg"),
             Icon::Flame => include_str!("../../../../assets/icons/flame.svg"),

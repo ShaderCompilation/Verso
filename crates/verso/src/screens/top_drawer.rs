@@ -744,8 +744,8 @@ impl TopDrawer {
                 Orientation::Landscape => (TileState::On, Icon::Landscape, "Orientation", "Landscape".to_owned()),
             },
             Tile::Refresh => (TileState::Off, Icon::Refresh, "Refresh", "Clear screen".to_owned()),
-            Tile::Transfer if six => (TileState::Off, Icon::Globe, "Transfer", "Web app".to_owned()),
-            Tile::Transfer => (TileState::Off, Icon::Globe, "Wi-Fi transfer", "Books & files".to_owned()),
+            Tile::Transfer if six => (TileState::Off, Icon::Transfer, "Transfer", "Web app".to_owned()),
+            Tile::Transfer => (TileState::Off, Icon::Transfer, "Wi-Fi transfer", "Books & files".to_owned()),
             Tile::Settings => (TileState::Off, Icon::Settings, "Settings", "All options".to_owned()),
         }
     }
