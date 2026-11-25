@@ -49,9 +49,10 @@ behaviour on other models is **(to verify)**.
   and submits dirty rects with `fbink_refresh(fd, y, x, w, h, &cfg)`.
 - **Trust FBInk's viewport, not marketing specs:** PW6 specs list 1264×1680,
   while the real visible framebuffer is **1272×1696** with stride 1272 and
-  virtual height 3392 **(measured)**. Refresh rectangles add
-  `view_hori_origin`/`view_vert_origin` because `fbink_refresh` passes
-  coordinates straight to the EPDC.
+  virtual height 3392 **(measured)**. Init FBInk with `no_viewport = true` and
+  subtract `view_vert_offset` from `view_vert_origin`: FBInk otherwise bakes
+  bitmap-row centering into `view_vert_origin` (`+4` px on 1448 px panels, `+8`
+  on 1648/1680/2480 px), pushing full refreshes past `yres` (MTK returns `EBADF`).
 - **Pixel formats:** accepts 8-bit (`Y8`, honouring `inverted_grayscale`) and
   32-bit (`RGBA`/`RGB32`, `BGRA`/`BGR32`). On 32-bit panels (Colorsoft),
   `Writer` swizzles R↔B row by row straight from the canvas and never reads

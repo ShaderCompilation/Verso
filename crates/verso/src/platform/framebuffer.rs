@@ -56,6 +56,25 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Physical framebuffer origin from FBInk's state.
+    ///
+    /// FBInk adds `view_vert_offset` (vertical padding to centre its bitmap
+    /// text grid when `view_height` isn't a multiple of its cell height) onto
+    /// `view_vert_origin`. Subtracting it recovers the real panel viewport
+    /// origin, matching FBInk's own `viewVertOrigin - viewVertOffset`.
+    pub fn fbink_origin(view_hori_origin: u8, view_vert_origin: u8, view_vert_offset: u8) -> (u32, u32) {
+        (view_hori_origin as u32, view_vert_origin.saturating_sub(view_vert_offset) as u32)
+    }
+
+    /// Whether the viewport lies inside the visible screen (`screen_width`×`screen_height`),
+    /// so every refresh rectangle stays within the EPDC's bounds.
+    pub fn fits_screen(&self, screen_width: u32, screen_height: u32) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.origin.0.checked_add(self.width).is_some_and(|r| r <= screen_width)
+            && self.origin.1.checked_add(self.height).is_some_and(|b| b <= screen_height)
+    }
+
     /// The bytes the mapping must hold for every viewport pixel, or `None`
     /// when the viewport doesn't fit in a row.
     pub fn required_len(&self) -> Option<usize> {
@@ -237,6 +256,34 @@ mod tests {
         assert_eq!(l.required_len(), Some((3 + 3) * l.stride + (2 + 6) * 4));
         assert_eq!(Layout { stride: 8 * 4 - 1, ..l }.required_len(), None);
         assert_eq!(Layout { height: 0, ..l }.required_len(), None);
+    }
+
+    #[test]
+    fn fbink_origin_strips_text_row_offset_and_fits_screen_catches_overflow() {
+        // Basic 5 (1072x1448): FBInk adds +4 px row centering onto view_vert_origin;
+        // PW5/Oasis/Scribe add +8 px. Physical viewport stays at (0, 0).
+        assert_eq!(Layout::fbink_origin(0, 4, 4), (0, 0));
+        assert_eq!(Layout::fbink_origin(0, 8, 8), (0, 0));
+        // A real hardware bezel viewport keeps its physical origin after stripping the text offset.
+        assert_eq!(Layout::fbink_origin(0, 14, 4), (0, 10));
+
+        let basic5 = Layout {
+            format: Format::Gray8,
+            stride: 1072,
+            origin: Layout::fbink_origin(0, 4, 4),
+            width: 1072,
+            height: 1448,
+            inverted: false,
+        };
+        assert!(basic5.fits_screen(1072, 1448));
+
+        // Shifting by the unstripped +4 px offset overflows the visible 1448 px screen
+        // even though it still fits inside a double-buffered 1072x2896 mapping.
+        let shifted = Layout { origin: (0, 4), ..basic5 };
+        assert!(shifted.required_len().unwrap() < 1072 * 2896);
+        assert!(!shifted.fits_screen(1072, 1448));
+        assert!(!Layout { origin: (1, 0), ..basic5 }.fits_screen(1072, 1448));
+        assert!(!Layout { width: 0, ..basic5 }.fits_screen(1072, 1448));
     }
 
     #[test]

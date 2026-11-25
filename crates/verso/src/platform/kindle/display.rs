@@ -87,6 +87,8 @@ impl Display {
             }
             let mut cfg: fb::FBInkConfig = std::mem::zeroed();
             cfg.is_quiet = true;
+            // Don't let FBInk shift view_vert_origin to centre its bitmap text rows.
+            cfg.no_viewport = true;
             if fb::fbink_init(fd, &cfg) < 0 {
                 fb::fbink_close(fd);
                 bail!("FBInk failed to initialise");
@@ -94,6 +96,7 @@ impl Display {
             let mut st: fb::FBInkState = std::mem::zeroed();
             fb::fbink_get_state(&cfg, &mut st);
 
+            let origin = Layout::fbink_origin(st.view_hori_origin, st.view_vert_origin, st.view_vert_offset);
             let text = |chars: &[std::ffi::c_char]| CStr::from_ptr(chars.as_ptr()).to_string_lossy().into_owned();
             let name = text(&st.device_name);
             let session = DisplaySession {
@@ -104,8 +107,8 @@ impl Display {
                 device_id: st.device_id,
                 view_width: st.view_width,
                 view_height: st.view_height,
-                view_hori_origin: st.view_hori_origin,
-                view_vert_origin: st.view_vert_origin,
+                view_hori_origin: origin.0 as u8,
+                view_vert_origin: origin.1 as u8,
                 screen_width: st.screen_width,
                 screen_height: st.screen_height,
                 stride: st.scanline_stride,
@@ -155,11 +158,17 @@ impl Display {
             let layout = Layout {
                 format,
                 stride: st.scanline_stride as usize,
-                origin: (st.view_hori_origin as u32, st.view_vert_origin as u32),
+                origin,
                 width,
                 height,
                 inverted: st.inverted_grayscale,
             };
+            if !layout.fits_screen(st.screen_width, st.screen_height) {
+                return fail(format!(
+                    "the screen's viewport ({width}x{height}+{}+{}) exceeds the {}x{} panel",
+                    layout.origin.0, layout.origin.1, st.screen_width, st.screen_height
+                ));
+            }
             let Some(needed) = layout.required_len() else {
                 return fail(format!(
                     "the screen's viewport ({width}x{height}+{}+{}) doesn't fit its {}-byte rows",
