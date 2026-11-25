@@ -11,7 +11,10 @@ use crate::{
 };
 use std::{
     fs,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -127,6 +130,68 @@ fn online() -> Server {
         Http::Ok(reply.into_bytes())
     })
 }
+/// Two Wikipedias: "usa" redirects to an article, "mercury" has 10 matches,
+/// "nothing" none, and opening "Gone" fails.
+fn wikipedias() -> Server {
+    Server::answering(|request| {
+        if let Some(query) = request.param("srsearch") {
+            let hits = match query.as_str() {
+                "usa" => vec![
+                    r#"{"ns":0,"title":"United States","redirecttitle":"USA","snippet":"A country"}"#.to_string(),
+                    r#"{"ns":0,"title":"Gone","snippet":""}"#.to_string(),
+                    r#"{"ns":0,"title":"USA Today","snippet":"A <b>newspaper</b>"}"#.to_string(),
+                ],
+                "mercury" => {
+                    (0..10).map(|i| format!(r#"{{"ns":0,"title":"Mercury ({i})","snippet":"No. {i}"}}"#)).collect()
+                }
+                _ => vec![],
+            };
+            return Http::Ok(format!(r#"{{"query":{{"search":[{}]}}}}"#, hits.join(",")).into_bytes());
+        }
+        let title = request.param("titles").unwrap();
+        if title == "Gone" {
+            return Http::Ok(br#"{"query":{"pages":[{"title":"Gone","missing":true}]}}"#.to_vec());
+        }
+        let language = &request.path[1..3];
+        let text = "A paragraph long enough to take several lines of the card. ".repeat(40);
+        let extract = format!("About {title}. {text}\\n\\n\\n== History ==\\n{text}\\n=== Origins ===\\n{text}");
+        let url = format!("https://{language}.wikipedia.org/wiki/{}", title.replace(' ', "_"));
+        Http::Ok(
+            format!(r#"{{"query":{{"pages":[{{"title":"{title}","extract":"{extract}","canonicalurl":"{url}"}}]}}}}"#)
+                .into_bytes(),
+        )
+    })
+}
+/// A card on Wikipedia for a French book whose reader chose English, with the
+/// link `state` (0 off, 1 connecting, 2 connected).
+fn wikipedia_card(query: &str, server: &Server, state: &Arc<AtomicU64>, t: &Theme, screen: Rect) -> Lookup {
+    let state = state.clone();
+    let link = move || {
+        Ok(match state.load(Ordering::Relaxed) {
+            0 => Link::Off,
+            1 => Link::Connecting,
+            _ => Link::Connected,
+        })
+    };
+    let service = Service::for_test(&server.base, Duration::from_secs(5), Box::new(link));
+    let languages = Languages { wikipedia: Edition::ENGLISH, book: Edition::for_language("fr"), translate: None };
+    let tabs = Tabs::new(Tab::Wikipedia, &service, Waker::new(|| {}), languages);
+    let store = Store::at(std::env::temp_dir().join(format!("verso-wikipedia-card-{}", std::process::id())));
+    Lookup::new(query, Rc::new(Worker::new(store, Waker::new(|| {}))), t, screen, None, Default::default(), tabs)
+}
+fn submit(lookup: &mut Lookup, query: &str, t: &Theme, screen: Rect) {
+    cx(t, screen, |cx| {
+        lookup.start_editing();
+        lookup.on_text_input(&TextInput::Clear, cx);
+        lookup.on_text_input(&TextInput::Insert(query.into()), cx);
+        lookup.on_text_input(&TextInput::Submit, cx);
+    });
+}
+/// The open chooser's rows and the notes beside them.
+fn choices(lookup: &Lookup) -> Vec<(String, String)> {
+    let rows = lookup.chooser.as_ref().unwrap().1.rows();
+    rows.iter().map(|r| (r.label.clone(), r.value.clone().unwrap_or_default())).collect()
+}
 /// Waits for the tab shown to have its reply.
 fn answered(lookup: &mut Lookup, t: &Theme, screen: Rect) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -138,6 +203,9 @@ fn answered(lookup: &mut Lookup, t: &Theme, screen: Rect) {
 }
 /// The text of the online tab shown.
 fn online_text(lookup: &Lookup, t: &Theme) -> String {
+    if let Some(hits) = lookup.tabs.wikipedia().listing().filter(|_| lookup.on_wikipedia()) {
+        return hits.iter().map(|h| h.title.as_str()).collect::<Vec<_>>().join("\n");
+    }
     let blocks = lookup.tabs.content(t);
     let texts =
         blocks.iter().filter_map(|b| if let StyledBlock::Paragraph(p) = b { Some(p.text.as_str()) } else { None });
@@ -153,7 +221,7 @@ fn tabs_ask_when_first_shown_and_once_per_word() {
     let server = online();
     let service = Service::for_test(&server.base, Duration::from_secs(5), Box::new(|| Ok(Link::Connected)));
     let tabs = |tab, translate: Option<&str>| {
-        let languages = Languages { wikipedia: Edition::ENGLISH, translate: translate.map(Into::into) };
+        let languages = Languages { wikipedia: Edition::ENGLISH, book: None, translate: translate.map(Into::into) };
         Tabs::new(tab, &service, Waker::new(|| {}), languages)
     };
     let hits = || server.requests.lock().unwrap().len();
@@ -180,11 +248,6 @@ fn tabs_ask_when_first_shown_and_once_per_word() {
     assert_eq!(lookup.rect(&t).h, 1696 * 4 / 5);
     capture(&mut lookup, &t, screen, "wikipedia");
     draw_hints(&mut lookup, &t, screen, &mut text);
-    // Its words can't be looked up.
-    let body = lookup.body;
-    tap(&mut lookup, crate::geom::Point::new(body.x + t.mm(3.0), body.y + t.mm(2.0)), &t, screen);
-    draw_hints(&mut lookup, &t, screen, &mut text);
-    assert_eq!(lookup.depth(), 0);
     go(&mut lookup, Tab::Dictionary);
     draw_hints(&mut lookup, &t, screen, &mut text);
     assert_eq!((lookup.rect(&t), lookup.request, lookup.pager.page), (compact, request, 1));
@@ -241,6 +304,194 @@ fn tabs_ask_when_first_shown_and_once_per_word() {
     drop(lookup);
     drop(worker);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn wikipedia_opens_a_clear_match_and_switches_matches_and_languages() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let (server, connected) = (wikipedias(), Arc::new(AtomicU64::new(2)));
+    let hits = || server.requests.lock().unwrap().len();
+    let mut text = TextRenderer::new();
+    let mut lookup = wikipedia_card("usa", &server, &connected, &t, screen);
+    answered(&mut lookup, &t, screen);
+    let ends = |lookup: &Lookup, language: &str, code: &str, title: &str| {
+        let end = format!("\nhttps://{code}.wikipedia.org/wiki/{title}\nWikipedia · {language} · CC BY-SA 4.0");
+        online_text(lookup, &t).ends_with(&end)
+    };
+    assert!(online_text(&lookup, &t).starts_with("United States\nRedirected from “USA”\nAbout United States."));
+    assert!(ends(&lookup, "English", "en", "United_States"));
+    // Headings keep with their text, and the rest is laid out while idle.
+    let kept = lookup.tabs.content(&t).iter().filter(|b| matches!(b, StyledBlock::Paragraph(p) if p.keep)).count();
+    assert_eq!(kept, 3, "two headings, and the address with the license");
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert!(lookup.pager.incomplete && lookup.paginating());
+    while lookup.paginating() {
+        lookup.on_idle(&mut text);
+    }
+    assert!(lookup.pager.pages > 2 && !lookup.busy());
+    capture(&mut lookup, &t, screen, "wikipedia-article");
+    // The article's words can't be looked up.
+    let body = lookup.body;
+    tap(&mut lookup, crate::geom::Point::new(body.x + t.mm(3.0), body.y + t.mm(2.0)), &t, screen);
+    draw_hints(&mut lookup, &t, screen, &mut text);
+    assert_eq!((lookup.depth(), hits()), (0, 2));
+    // Another match opens on its first page; one seen before isn't asked for again.
+    let swipe = Gesture::Swipe { dir: Direction::Left, from: screen.center(), to: screen.center() };
+    cx(&t, screen, |cx| lookup.on_gesture(&swipe, cx));
+    let other = |lookup: &mut Lookup, row: usize| {
+        let p = lookup.other_matches.rect().center();
+        tap(lookup, p, &t, screen);
+        let shown = choices(lookup);
+        capture(lookup, &t, screen, "wikipedia-matches");
+        let p = lookup.choice_point(row);
+        tap(lookup, p, &t, screen);
+        assert!(lookup.chooser.is_none());
+        answered(lookup, &t, screen);
+        draw_hints(lookup, &t, screen, &mut TextRenderer::new());
+        shown
+    };
+    let row = |label: &str, note: &str| (label.to_string(), note.to_string());
+    let rows = other(&mut lookup, 2);
+    assert_eq!(rows, [row("United States", "Current"), row("Gone", ""), row("USA Today", "")]);
+    assert_eq!((hits(), lookup.pager.page), (3, 0));
+    assert!(ends(&lookup, "English", "en", "USA_Today") && !online_text(&lookup, &t).contains("Redirected"));
+    assert_eq!(other(&mut lookup, 0)[2], row("USA Today", "Current"));
+    assert!(hits() == 3 && ends(&lookup, "English", "en", "United_States"));
+    // Nothing to retry for an article that's gone; the others are still there.
+    other(&mut lookup, 1);
+    assert!(online_text(&lookup, &t).starts_with("No article found"));
+    assert!(!lookup.retry_shown());
+    other(&mut lookup, 0);
+    // Another language looks the words up again and is the card's from now on.
+    submit(&mut lookup, "mercury", &t, screen);
+    answered(&mut lookup, &t, screen);
+    let before = hits();
+    let p = lookup.edition_point();
+    tap(&mut lookup, p, &t, screen);
+    assert_eq!(choices(&lookup)[..3], [row("French", "This book"), row("English", "Chosen"), row("Afrikaans", "")]);
+    capture(&mut lookup, &t, screen, "wikipedia-languages");
+    let p = lookup.choice_point(0);
+    let event = tap(&mut lookup, p, &t, screen);
+    assert!(matches!(event, Some(LookupEvent::Edition(e)) if e.code() == "fr"));
+    answered(&mut lookup, &t, screen);
+    assert_eq!(hits(), before + 1);
+    assert!(server.requests.lock().unwrap().last().unwrap().path.starts_with("/fr/"));
+    // The chain's earlier article was English.
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    answered(&mut lookup, &t, screen);
+    assert!(ends(&lookup, "French", "fr", "United_States"));
+}
+
+#[test]
+fn wikipedia_lists_matches_and_reports_misses_and_errors() {
+    let (server, link) = (wikipedias(), Arc::new(AtomicU64::new(0)));
+    let hits = || server.requests.lock().unwrap().len();
+    for (w, h, dpi) in [(1272, 1696, 300), (800, 600, 167)] {
+        let (t, screen) = (Theme::for_dpi(dpi), Rect::new(0, 0, w, h));
+        let sent = hits();
+        let retry = |lookup: &mut Lookup| {
+            let p = lookup.retry.rect().center();
+            tap(lookup, p, &t, screen);
+            answered(lookup, &t, screen);
+            draw_hints(lookup, &t, screen, &mut TextRenderer::new());
+        };
+        link.store(0, Ordering::Relaxed);
+        let mut lookup = wikipedia_card("mercury", &server, &link, &t, screen);
+        answered(&mut lookup, &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+        assert!(online_text(&lookup, &t).starts_with("Wi-Fi is off") && lookup.retry_shown());
+        assert!(
+            lookup
+                .body
+                .intersect(&lookup.retry.rect())
+                .is_none_or(|r| r.y >= lookup.body.y + lookup.text_height.unwrap())
+        );
+        assert!(lookup.sheet.rect().contains_rect(&lookup.retry.rect()) && !lookup.busy());
+        capture(&mut lookup, &t, screen, "wikipedia-offline");
+        link.store(1, Ordering::Relaxed);
+        retry(&mut lookup);
+        assert!(online_text(&lookup, &t).starts_with("Wi-Fi is still connecting") && lookup.retry_shown());
+        assert_eq!(hits(), sent, "nothing is sent without Wi-Fi");
+        link.store(2, Ordering::Relaxed);
+        // Submitting the same words is a retry too.
+        submit(&mut lookup, "mercury", &t, screen);
+        answered(&mut lookup, &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+        assert_eq!((hits(), lookup.depth()), (sent + 1, 0));
+        assert!(!lookup.retry_shown() && !lookup.busy());
+        let list = lookup.hits.as_ref().unwrap();
+        let per_page = list.paging().range(0).len();
+        assert!(per_page >= 2 && lookup.paged && lookup.body.contains_rect(&list.row_rect(per_page - 1)));
+        capture(&mut lookup, &t, screen, "wikipedia-list");
+        // The list keeps its page while another tab shows.
+        let swipe = Gesture::Swipe { dir: Direction::Left, from: screen.center(), to: screen.center() };
+        cx(&t, screen, |cx| lookup.on_gesture(&swipe, cx));
+        for tab in [Tab::Translate, Tab::Wikipedia] {
+            let p = lookup.tab_point(tab);
+            tap(&mut lookup, p, &t, screen);
+            draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+        }
+        assert_eq!(lookup.pager.page, 1);
+        let p = lookup.hits.as_ref().unwrap().row_rect(0).center();
+        tap(&mut lookup, p, &t, screen);
+        answered(&mut lookup, &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+        assert!(online_text(&lookup, &t).starts_with(&format!("Mercury ({per_page})\nAbout Mercury")));
+        assert_eq!((hits(), lookup.pager.page), (sent + 2, 0));
+        // Back from it to the matches.
+        let p = lookup.other_matches.rect().center();
+        tap(&mut lookup, p, &t, screen);
+        assert_eq!(choices(&lookup)[per_page].1, "Current");
+        let p = lookup.choice_point(0);
+        tap(&mut lookup, p, &t, screen);
+        answered(&mut lookup, &t, screen);
+        assert!(online_text(&lookup, &t).starts_with("Mercury (0)"));
+        // Nothing found: edit or pick another language, but no Retry.
+        submit(&mut lookup, "nothing", &t, screen);
+        answered(&mut lookup, &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+        assert!(online_text(&lookup, &t).starts_with("No article found"));
+        assert!(lookup.edit_row() && !lookup.retry_shown());
+        capture(&mut lookup, &t, screen, "wikipedia-miss");
+    }
+}
+
+#[test]
+fn a_late_wikipedia_reply_never_replaces_newer_words_or_languages() {
+    let t = Theme::for_dpi(300);
+    let screen = Rect::new(0, 0, 1272, 1696);
+    let (server, link) = (wikipedias(), Arc::new(AtomicU64::new(2)));
+    let searched = || {
+        let requests = server.requests.lock().unwrap();
+        requests.iter().filter(|r| r.param("srsearch").is_some()).count()
+    };
+    let arrived = |count| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while searched() < count {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        // It's in the card's mailbox, or about to be.
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut lookup = wikipedia_card("usa", &server, &link, &t, screen);
+    arrived(1);
+    submit(&mut lookup, "mercury", &t, screen);
+    arrived(2);
+    answered(&mut lookup, &t, screen);
+    assert!(online_text(&lookup, &t).starts_with("Mercury (0)\n"), "the list, not the article");
+    // Back asks again: the first reply never counted.
+    let back = lookup.back.rect().center();
+    tap(&mut lookup, back, &t, screen);
+    arrived(3);
+    let p = lookup.edition_point();
+    tap(&mut lookup, p, &t, screen);
+    let p = lookup.choice_point(0);
+    tap(&mut lookup, p, &t, screen);
+    answered(&mut lookup, &t, screen);
+    assert!(online_text(&lookup, &t).ends_with("Wikipedia · French · CC BY-SA 4.0"));
 }
 
 #[test]
@@ -469,10 +720,14 @@ fn the_compact_card_stands_away_from_the_word_and_expands_on_demand() {
             assert!(word.is_none_or(|word| card.intersect(&word).is_none()), "the word stays visible");
             // Three header rows, the definition and the action strip all fit.
             assert!(lookup.body_full.h >= 3 * t.dictionary_body.line_height() as i32, "{w}×{h}");
-            assert!(lookup.heading.bottom() < lookup.tabs.rect().y && lookup.tabs.rect().bottom() < lookup.switcher.y);
+            assert!(
+                lookup.heading.bottom() < lookup.tabs.rect().y
+                    && lookup.tabs.rect().bottom() < lookup.switcher.rect().y
+            );
             assert!(lookup.heading.y >= card.y && lookup.actions[3].rect().bottom() <= card.bottom());
             assert!(
-                lookup.switcher.bottom() < lookup.body_full.y && lookup.body_full.bottom() < lookup.actions[0].rect().y
+                lookup.switcher.rect().bottom() < lookup.body_full.y
+                    && lookup.body_full.bottom() < lookup.actions[0].rect().y
             );
             assert!(lookup.actions.iter().all(|b| b.rect().w >= t.mm(9.0)), "touch targets on {w}×{h}");
             assert_eq!(lookup.expand.icon, Icon::Expand);
@@ -564,7 +819,7 @@ fn picker_and_typing_expand_temporarily_and_actions_are_direct() {
     let expanded = Rect::new(0, 0, 1272, 1696 * 4 / 5);
     // The switcher opens the picker in the expanded layout; Back restores.
     {
-        let p = lookup.switcher.center();
+        let p = lookup.switcher.rect().center();
         tap(&mut lookup, p, &t, screen)
     };
     assert!(lookup.picker.is_some());

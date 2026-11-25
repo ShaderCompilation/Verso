@@ -566,6 +566,13 @@ impl Reader {
             language: self.book_language(),
         }
     }
+    /// Saves something chosen in the lookup card with the book.
+    fn save_choice(&mut self, choose: impl FnOnce(&mut crate::store::BookState)) -> anyhow::Result<()> {
+        self.flush_position()?;
+        let mut state = self.store.book(&self.id);
+        choose(&mut state);
+        self.store.save_book(&self.id, &state)
+    }
     /// Where the selection is on the page: the box around its rectangles.
     fn selected_rect(&self) -> Option<Rect> {
         self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)))
@@ -574,9 +581,13 @@ impl Reader {
     fn online_languages(&self, settings: &Settings) -> Languages {
         use crate::online::wikipedia::Edition;
         let chosen = self.store.book(&self.id).wikipedia_language;
-        let wikipedia = chosen.as_deref().and_then(Edition::for_language);
-        let wikipedia = wikipedia.or_else(|| Edition::for_language(&self.book_language()));
-        Languages { wikipedia: wikipedia.unwrap_or(Edition::ENGLISH), translate: settings.translate_language.clone() }
+        let book = Edition::for_language(&self.book_language());
+        let wikipedia = chosen.as_deref().and_then(Edition::for_language).or(book);
+        Languages {
+            wikipedia: wikipedia.unwrap_or(Edition::ENGLISH),
+            book,
+            translate: settings.translate_language.clone(),
+        }
     }
     pub(super) fn lookup(&mut self, query: &str, tab: Tab, cx: &mut EventCx) {
         self.dictionary_prepare_at = None;
@@ -1677,15 +1688,18 @@ impl Reader {
             Overlay::Lookup(lookup) => {
                 if let Some(event) = lookup.on_gesture(&g, cx) {
                     cx.redraw();
-                    if let LookupEvent::Set(set) = &event {
-                        let result = self.flush_position().and_then(|()| {
-                            let mut state = self.store.book(&self.id);
-                            state.dictionary_set = Some(set.clone());
-                            self.store.save_book(&self.id, &state)
-                        });
-                        if let Err(error) = result {
+                    if let LookupEvent::Set(set) = event {
+                        if let Err(error) = self.save_choice(|state| state.dictionary_set = Some(set)) {
                             log::error!("saving dictionary set: {error:#}");
                             cx.toast("Couldn’t save the dictionary set for this book", None);
+                        }
+                        return Action::None;
+                    }
+                    if let LookupEvent::Edition(edition) = event {
+                        let code = edition.code().to_owned();
+                        if let Err(error) = self.save_choice(|state| state.wikipedia_language = Some(code)) {
+                            log::error!("saving the Wikipedia language: {error:#}");
+                            cx.toast("Couldn’t save the Wikipedia language for this book", None);
                         }
                         return Action::None;
                     }
@@ -3761,6 +3775,22 @@ mod tests {
         r.store.save_settings(&settings).unwrap();
         r.store = Store::at(std::env::temp_dir().join(format!("verso-online-languages-{}", std::process::id())));
         assert_eq!(languages(&r), ("fr", Some("de".into())));
+        // The card's language list saves it: the book's own comes first.
+        let offline = || Ok(crate::platform::wifi::Link::Off);
+        let service = crate::online::Service::for_test("http://127.0.0.1:9", Duration::ZERO, Box::new(offline));
+        r.store = r.store.clone().with_online(service);
+        let theme = Theme::for_dpi(150);
+        test_cx(&theme, |cx| r.lookup("word", Tab::Wikipedia, cx));
+        for point in [Lookup::edition_point as fn(&Lookup) -> _, |lookup| lookup.choice_point(0)] {
+            let Overlay::Lookup(lookup) = &r.overlay else { panic!("no lookup") };
+            let p = point(lookup);
+            test_cx(&theme, |cx| {
+                r.on_gesture(Gesture::Down(p), cx);
+                r.on_gesture(Gesture::Tap(p), cx);
+            });
+        }
+        assert_eq!(r.store.book("book").wikipedia_language.as_deref(), Some("no"));
+        assert!(matches!(&r.overlay, Overlay::Lookup(_)));
     }
 
     #[test]

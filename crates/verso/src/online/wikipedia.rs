@@ -5,7 +5,7 @@
 use serde::Deserialize;
 
 use super::{Error, MAX_REPLY_BYTES, QUERY_LIMIT};
-use crate::dictionary::languages::normalize_language;
+use crate::dictionary::languages::{language_name, normalize_language};
 use crate::library::search::fold;
 use crate::net::Client;
 
@@ -43,6 +43,18 @@ impl Edition {
     pub fn code(self) -> &'static str {
         self.0
     }
+
+    /// The language's English name.
+    pub fn name(self) -> &'static str {
+        language_name(self.0)
+    }
+
+    /// Every edition, by name.
+    pub fn all() -> Vec<Self> {
+        let mut all: Vec<Self> = EDITIONS.iter().map(|e| Edition(e)).collect();
+        all.sort_by_key(|e| e.name());
+        all
+    }
 }
 
 /// A search result.
@@ -75,6 +87,30 @@ pub struct Article {
     /// A list of the title's meanings rather than an article.
     pub disambiguation: bool,
     pub blocks: Vec<Block>,
+}
+
+impl Article {
+    /// The address with its letters readable: "Толстой" rather than
+    /// "%D0%A2…". ASCII escapes stay, so it's still the same address.
+    pub fn readable_url(&self) -> String {
+        let bytes = self.url.as_bytes();
+        let mut readable = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let escaped = self.url.get(i..i + 3).and_then(|e| u8::from_str_radix(e.strip_prefix('%')?, 16).ok());
+            match escaped.filter(|b| !b.is_ascii()) {
+                Some(byte) => {
+                    readable.push(byte);
+                    i += 3;
+                }
+                None => {
+                    readable.push(bytes[i]);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(readable).unwrap_or_else(|_| self.url.clone())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,6 +393,27 @@ pub(super) mod tests {
         }
         for tag in ["", "und", "x-klingon", "mul", "zxx", "ak", "en.example.com/", "../en", "en/", "en@host", "e"] {
             assert_eq!(Edition::for_language(tag), None, "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn addresses_show_letters_but_keep_ascii_escapes() {
+        for (url, readable) in [
+            ("https://en.wikipedia.org/wiki/C%2B%2B", "https://en.wikipedia.org/wiki/C%2B%2B"),
+            ("https://ru.wikipedia.org/wiki/%D0%9C%D0%B8%D1%80%3F", "https://ru.wikipedia.org/wiki/Мир%3F"),
+            ("https://x/100%", "https://x/100%"),
+            // Not UTF-8.
+            ("https://x/%D0", "https://x/%D0"),
+        ] {
+            let article = Article {
+                edition: Edition::ENGLISH,
+                title: String::new(),
+                redirected_from: None,
+                url: url.into(),
+                disambiguation: false,
+                blocks: vec![],
+            };
+            assert_eq!(article.readable_url(), readable);
         }
     }
 

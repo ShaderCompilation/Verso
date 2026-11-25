@@ -24,7 +24,6 @@ pub enum Request {
     /// The best article for a query, or the hits to choose from.
     Wikipedia { edition: Edition, query: String },
     /// The article with a hit's title.
-    #[allow(dead_code)] // Other matches
     Article { edition: Edition, title: String },
     /// `source`: None to detect it.
     Translate { text: String, source: Option<String>, target: String },

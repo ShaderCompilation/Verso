@@ -1,8 +1,11 @@
 //! Lookup is an overlay over the unchanged cached book page: a card with
 //! three tabs. This file holds the card and its Dictionary tab; `tabs.rs`
-//! holds the online ones, `passage_bar.rs` the bar beside a passage.
+//! holds the online ones (Wikipedia's in `wikipedia.rs`), `pickers.rs` what
+//! they choose with and `passage_bar.rs` the bar beside a passage.
 mod passage_bar;
+mod pickers;
 mod tabs;
+mod wikipedia;
 
 pub use passage_bar::{SelectionAction, SelectionActions};
 pub use tabs::{Languages, Tab, Tabs};
@@ -18,7 +21,7 @@ use crate::{
         HAlign, Icon, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, StyledWordHit,
         TextRenderer, TextStyle, Weight,
     },
-    online::QUERY_LIMIT,
+    online::{Error, QUERY_LIMIT, wikipedia::Edition},
     platform::{RefreshMode, TextInput},
     screens::EventCx,
     ui::{
@@ -28,8 +31,10 @@ use crate::{
         widgets::{Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
     },
 };
+use pickers::{Chooser, Chosen, DropDown};
 use std::rc::Rc;
 use tabs::{Replies, too_long};
+use wikipedia::Wikipedia;
 
 const MISSING: &str = "No dictionaries found. Add a StarDict dictionary to Verso's dictionaries/ folder, \
                        then open Dictionaries and tap Rescan.";
@@ -60,7 +65,15 @@ fn span_style(style: Style) -> SpanStyle {
 /// Unstyled text. Status and provenance lines are `inert`: touches never
 /// look up their words.
 fn plain(text: String, base: TextStyle, inert: bool) -> StyledBlock {
-    StyledBlock::Paragraph(StyledParagraph { text, spans: Vec::new(), base, muted: INK2, indent: 0.0, inert })
+    StyledBlock::Paragraph(StyledParagraph {
+        text,
+        spans: Vec::new(),
+        base,
+        muted: INK2,
+        indent: 0.0,
+        inert,
+        keep: false,
+    })
 }
 
 /// A text or heading block with its styles and indentation.
@@ -79,6 +92,7 @@ fn styled(block: &Block, t: &Theme) -> StyledBlock {
         muted: INK2,
         indent: (i32::from(block.depth.min(MAX_DEPTH)) * t.dictionary_indent) as f32,
         inert: false,
+        keep: false,
     })
 }
 
@@ -147,6 +161,8 @@ pub enum LookupEvent {
     /// sets while the worker hasn't yet said which set the lookup resolves to.
     Manage(Option<String>),
     Set(String),
+    /// Another Wikipedia was chosen, for this book.
+    Edition(Edition),
     /// ⤢ expanded (true) or collapsed the card; the next lookup opens so.
     Resized(bool),
 }
@@ -192,6 +208,14 @@ fn same_query(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
+/// What the online tabs' chooser is for.
+enum Choosing {
+    /// One of Wikipedia's matches.
+    Match,
+    /// A Wikipedia, in the rows' order.
+    Edition(Vec<Edition>),
+}
+
 struct Picker {
     sets: bool,
     list: List,
@@ -235,6 +259,9 @@ pub struct Lookup {
     /// The page each tab showed when it was last left.
     tab_pages: [usize; 3],
     picker: Option<Picker>,
+    chooser: Option<(Choosing, Chooser)>,
+    /// Wikipedia's matches while they show as a list, paged by `pager`.
+    hits: Option<List>,
     /// Earlier lookups of a chain, newest last. Depth 0 (empty) is the
     /// word from the book.
     history: Vec<Visit>,
@@ -255,9 +282,15 @@ pub struct Lookup {
     close: IconButton,
     previous: Button,
     /// The dictionary switcher between ‹ and ›, which opens the picker.
-    switcher: Rect,
-    switcher_press: Press,
+    switcher: DropDown,
     next: Button,
+    /// Wikipedia's row: the other matches (or how many there are while they
+    /// show as a list), and its language.
+    other_matches: DropDown,
+    hit_count: Rect,
+    edition: DropDown,
+    /// Below an online tab's error.
+    retry: Button,
     /// The divider under the header rows, and the one above the action
     /// strip while it shows.
     divider: i32,
@@ -286,6 +319,8 @@ pub struct Lookup {
     /// for the completion debug log.
     layout_timing: (std::time::Instant, std::time::Duration),
     layout_error: Option<String>,
+    /// How far down the first page's text goes.
+    text_height: Option<i32>,
     pager: Pager,
     /// The pager shows: the content needs more than one page.
     paged: bool,
@@ -346,6 +381,8 @@ impl Lookup {
             tabs,
             tab_pages: [0; 3],
             picker: None,
+            chooser: None,
+            hits: None,
             history: Vec::new(),
             restore_page: None,
             session_live: true,
@@ -356,9 +393,12 @@ impl Lookup {
             expand: IconButton::new(Icon::Expand),
             close: IconButton::new(Icon::Close),
             previous: Button::new("‹", ButtonKind::Secondary),
-            switcher: Rect::default(),
-            switcher_press: Press::default(),
+            switcher: DropDown::default(),
             next: Button::new("›", ButtonKind::Secondary),
+            other_matches: DropDown::default(),
+            hit_count: Rect::default(),
+            edition: DropDown::default(),
+            retry: Button::new("Retry", ButtonKind::Primary),
             divider: 0,
             actions_divider: None,
             field,
@@ -377,6 +417,7 @@ impl Lookup {
             pages: None,
             layout_timing: (std::time::Instant::now(), std::time::Duration::ZERO),
             layout_error: None,
+            text_height: None,
             pager: Pager::new(1),
             paged: false,
             body_full: Rect::default(),
@@ -401,7 +442,7 @@ impl Lookup {
     /// Whether the book selection's handles can be dragged beside the card:
     /// only on the plain card, not while picking a dictionary or typing.
     pub fn allows_handles(&self) -> bool {
-        self.picker.is_none() && !self.keyboard.visible && self.history.is_empty()
+        !self.picking() && !self.keyboard.visible && self.history.is_empty()
     }
     /// How many looked-up words lead back to the book's word.
     #[cfg(test)]
@@ -416,6 +457,16 @@ impl Lookup {
     #[cfg(test)]
     pub(crate) fn tab_point(&self, tab: Tab) -> Point {
         self.tabs.rect().columns(3, 0)[tab.index()].center()
+    }
+    /// The middle of Wikipedia's language button.
+    #[cfg(test)]
+    pub(crate) fn edition_point(&self) -> Point {
+        self.edition.rect().center()
+    }
+    /// The middle of a visible row of the open chooser.
+    #[cfg(test)]
+    pub(crate) fn choice_point(&self, row: usize) -> Point {
+        self.chooser.as_ref().unwrap().1.row_point(row)
     }
     /// The middle of ⤢ (⤡ while expanded).
     #[cfg(test)]
@@ -433,11 +484,18 @@ impl Lookup {
     fn on_dictionary(&self) -> bool {
         self.tabs.current() == Tab::Dictionary
     }
+    fn on_wikipedia(&self) -> bool {
+        self.tabs.current() == Tab::Wikipedia
+    }
+    /// A picker takes the card's place.
+    fn picking(&self) -> bool {
+        self.picker.is_some() || self.chooser.is_some()
+    }
     /// Portrait: at 80% height, as ⤢ left the card, or because the tab, the
     /// picker or the keyboard needs the room.
     fn tall(&self) -> bool {
-        let tab = if self.tabs.current() == Tab::Wikipedia { !self.folded } else { self.expanded };
-        tab || self.picker.is_some() || self.keyboard.visible
+        let tab = if self.on_wikipedia() { !self.folded } else { self.expanded };
+        tab || self.picking() || self.keyboard.visible
     }
     /// Portrait: compact (~54%) or 80%, at the edge away from the word in
     /// every state, so the tabs stay under the finger. Landscape: a
@@ -466,7 +524,16 @@ impl Lookup {
     /// The query field and Look up: while typing, and on a miss so editing
     /// the query is one tap away.
     fn edit_row(&self) -> bool {
-        self.keyboard.visible || self.on_dictionary() && !self.pending && self.state == State::NoResult
+        let missed = match self.tabs.current() {
+            Tab::Dictionary => !self.pending && self.state == State::NoResult,
+            Tab::Wikipedia => self.tabs.wikipedia().found_nothing(),
+            Tab::Translate => false,
+        };
+        self.keyboard.visible || missed
+    }
+    /// An online tab's error that may go away.
+    fn retry_shown(&self) -> bool {
+        !self.keyboard.visible && !self.picking() && self.tabs.error().is_some_and(Error::retryable)
     }
     /// Manage dictionaries, below anything but a definition.
     fn manage_shown(&self) -> bool {
@@ -474,7 +541,7 @@ impl Lookup {
     }
     /// The book-selection actions, only for the book's own word.
     fn actions_shown(&self) -> bool {
-        self.picker.is_none() && !self.keyboard.visible && self.history.is_empty()
+        !self.picking() && !self.keyboard.visible && self.history.is_empty()
     }
     /// Places everything for the current mode. Cheap, and called before
     /// each gesture and draw, since replies, the keyboard and the picker
@@ -492,7 +559,7 @@ impl Lookup {
         let header = Rect::new(c.x, frame.y + t.mm(1.7), c.w, t.mm(8.6));
         let (side, cy) = (t.target, header.center().y);
         self.close.place(Rect::new(c.right() - side + t.mm(2.0), cy - side / 2, side, side));
-        let expandable = !landscape && self.picker.is_none() && !typing;
+        let expandable = !landscape && !self.picking() && !typing;
         self.expand.icon = if self.tall() { Icon::Collapse } else { Icon::Expand };
         self.expand.place(if expandable {
             Rect::new(self.close.rect().x - side, cy - side / 2, side, side)
@@ -501,7 +568,7 @@ impl Lookup {
         });
         let end = if expandable { self.expand.rect().x } else { self.close.rect().x };
         let mut start = c.x;
-        if !self.history.is_empty() && self.picker.is_none() && !typing {
+        if !self.history.is_empty() && !self.picking() && !typing {
             // Inset like the mockup's bordered square, so its edge lines up
             // with the switcher's ‹ below.
             let back = Rect::new(c.x, cy - side / 2, side, side);
@@ -521,13 +588,28 @@ impl Lookup {
             y = row.bottom();
         }
         let header_bottom = y;
+        let row = Rect::new(c.x, y + t.mm(1.2), c.w, t.mm(7.8));
+        let row = (!typing && !self.picking()).then_some(row);
         // Switcher: ‹ · name · i / N ▾ · ›
-        if !typing && self.picker.is_none() && self.on_dictionary() {
-            let row = Rect::new(c.x, y + t.mm(1.2), c.w, t.mm(7.8));
+        if let Some(row) = row.filter(|_| self.on_dictionary()) {
             let arrow = t.mm(if landscape { 7.1 } else { 8.1 });
             self.previous.place(Rect::new(row.x, row.y, arrow, row.h), t);
             self.next.place(Rect::new(row.right() - arrow, row.y, arrow, row.h), t);
-            self.switcher = Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h);
+            self.switcher.place(Rect::new(row.x + arrow + gap, row.y, row.w - 2 * (arrow + gap), row.h));
+            y = row.bottom();
+        }
+        // Wikipedia: Other matches · n ▾, language ▾
+        for hidden in [&mut self.other_matches, &mut self.edition] {
+            hidden.place(Rect::default());
+        }
+        if let Some(row) = row.filter(|_| self.on_wikipedia()) {
+            let (edition, rest) = row.split_right(row.w * 42 / 100);
+            self.edition.place(edition);
+            self.hit_count = Rect { w: rest.w - gap, ..rest };
+            let found = self.tabs.wikipedia();
+            if found.opened().is_some() && found.matches().len() > 1 {
+                self.other_matches.place(self.hit_count);
+            }
             y = row.bottom();
         }
         if self.edit_row() {
@@ -568,9 +650,19 @@ impl Lookup {
         };
         let pager = Rect::new(c.x, pager_bottom - t.mm(7.0), c.w, t.mm(7.0));
         self.pager.place(pager, t);
-        self.body_full = Rect::new(c.x, top, c.w, (lowest - top).max(1));
-        self.body_paged = Rect::new(c.x, top, c.w, (pager.y - t.mm(1.0) - top).max(1));
+        // Retry stands right below the message.
+        let retry_gap = t.mm(2.4);
+        let retry_h = if self.retry_shown() { t.target + retry_gap } else { 0 };
+        self.body_full = Rect::new(c.x, top, c.w, (lowest - top - retry_h).max(1));
+        self.body_paged = Rect::new(c.x, top, c.w, (pager.y - t.mm(1.0) - top - retry_h).max(1));
+        self.place_hits(t);
         self.body = if self.paged { self.body_paged } else { self.body_full };
+        let message = self.text_height.map_or(self.body.h, |h| h.min(self.body.h));
+        self.retry.place(Rect::new(c.x, top + message + retry_gap, t.mm(30.0), t.target), t);
+        if let Some((_, chooser)) = &mut self.chooser {
+            let area = Rect::new(c.x, top, c.w, frame.bottom() - t.mm(2.4) - top);
+            chooser.place(area, t);
+        }
         if let Some(p) = &mut self.picker {
             let area = Rect::new(c.x, header_bottom + gap, c.w, frame.bottom() - t.mm(2.4) - header_bottom - gap);
             let gap = t.mm(2.0);
@@ -585,6 +677,25 @@ impl Lookup {
             p.list.place(Rect::new(area.x, list_y, area.w, p.status.y - list_y), t.row2, 0);
         }
     }
+    /// Wikipedia's matches as a list in the body, with the pager once they
+    /// need it.
+    fn place_hits(&mut self, t: &Theme) {
+        let Some(matches) = self.tabs.wikipedia().listing().filter(|_| self.on_wikipedia()) else {
+            self.hits = None;
+            return;
+        };
+        let list = self.hits.get_or_insert_with(|| List::new(matches.iter().map(Wikipedia::row).collect()));
+        // Two rows a page even on a short side panel.
+        let row = if self.body_paged.h < 2 * t.row2 { t.row } else { t.row2 };
+        list.place(self.body_full, row, 0);
+        self.paged = list.paging().pages() > 1 && !self.keyboard.visible;
+        if self.paged {
+            list.place(self.body_paged, row, 0);
+        }
+        self.pager.set(self.restore_page.take().unwrap_or(self.pager.page), list.paging().pages());
+        self.pager.incomplete = false;
+        list.page = self.pager.page;
+    }
     /// The name, plus its source when another dictionary has the same name.
     fn title(&self, d: &Dictionary) -> String {
         if self.catalog.iter().filter(|o| o.name == d.name).count() > 1 {
@@ -596,7 +707,9 @@ impl Lookup {
     }
     pub fn busy(&self) -> bool {
         let waiting = if self.on_dictionary() { !self.complete || self.pending } else { self.tabs.waiting() };
-        waiting || (self.pages.is_none() && self.layout_error.is_none() || self.paginating())
+        let laid_out = self.pages.is_some() || self.layout_error.is_some() || self.hits.is_some();
+        // Nothing is laid out under a picker.
+        waiting || !laid_out && !self.picking() || self.paginating()
     }
     pub fn paginating(&self) -> bool {
         self.pages.as_ref().is_some_and(|p| !p.is_complete())
@@ -644,6 +757,9 @@ impl Lookup {
         if changed {
             self.forget_dictionary();
             self.reset_layout();
+        } else if self.tabs.error().is_some() {
+            self.tabs.retry();
+            self.reset_layout();
         }
         self.stop_typing();
         self.tabs.ask(&self.query);
@@ -655,7 +771,9 @@ impl Lookup {
     /// The content changed: it's laid out again, from its first page.
     fn reset_layout(&mut self) {
         self.pages = None;
+        self.hits = None;
         self.layout_error = None;
+        self.text_height = None;
         self.pager.set(0, 1);
         self.pager.incomplete = true;
     }
@@ -681,6 +799,7 @@ impl Lookup {
         self.tab_pages[left.index()] = self.restore_page.unwrap_or(self.pager.page);
         self.tabs.show(tab);
         self.picker = None;
+        self.chooser = None;
         self.word_press = None;
         self.folded = false;
         self.reset_layout();
@@ -755,6 +874,7 @@ impl Lookup {
         self.folded = false;
         self.word_press = None;
         self.picker = None;
+        self.chooser = None;
         self.field.edit(&TextInput::Clear);
         self.field.edit(&TextInput::Insert(visit.query.clone()));
         self.query = visit.query;
@@ -880,6 +1000,70 @@ impl Lookup {
             log::warn!("dictionary preferences: {error}");
             cx.toast("Couldn't save dictionary preferences", None);
         }
+    }
+    fn choose_match(&mut self) {
+        let found = self.tabs.wikipedia();
+        let rows = found
+            .matches()
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| Wikipedia::row(hit).value(if found.opened() == Some(i) { "Current" } else { "" }));
+        self.chooser = Some((Choosing::Match, Chooser::new(rows.collect())));
+    }
+    /// The likely ones first: the book's, the one in use and English.
+    fn choose_edition(&mut self) {
+        let languages = self.tabs.languages();
+        let mut editions: Vec<Edition> = Vec::new();
+        for edition in languages.book.into_iter().chain([languages.wikipedia, Edition::ENGLISH]).chain(Edition::all()) {
+            if !editions.contains(&edition) {
+                editions.push(edition);
+            }
+        }
+        let rows = editions.iter().map(|&edition| {
+            Row::new(edition.name()).value(if edition == languages.wikipedia {
+                "Chosen"
+            } else if languages.book == Some(edition) {
+                "This book"
+            } else {
+                ""
+            })
+        });
+        let chooser = Chooser::new(rows.collect());
+        self.chooser = Some((Choosing::Edition(editions), chooser));
+    }
+    fn chosen(&mut self, choosing: Choosing, row: usize) -> Option<LookupEvent> {
+        match choosing {
+            Choosing::Match => {
+                self.open_match(row);
+                None
+            }
+            Choosing::Edition(editions) => {
+                let edition = editions[row];
+                if edition == self.tabs.languages().wikipedia {
+                    return None;
+                }
+                self.tabs.set_edition(edition);
+                // The chain's earlier articles are in the other language.
+                for visit in &mut self.history {
+                    visit.online.forget_wikipedia();
+                    visit.pages[Tab::Wikipedia.index()] = 0;
+                }
+                self.show_new_reply();
+                Some(LookupEvent::Edition(edition))
+            }
+        }
+    }
+    fn open_match(&mut self, index: usize) {
+        if self.tabs.open_match(index) {
+            self.show_new_reply();
+        }
+    }
+    /// The online tab has something else to show, which may have to be asked
+    /// for first.
+    fn show_new_reply(&mut self) {
+        self.restore_page = None;
+        self.reset_layout();
+        self.tabs.ask(&self.query);
     }
     fn choose(&mut self, index: usize) {
         let Some(matched) = self.matches.get(index) else { return };
@@ -1052,7 +1236,7 @@ impl Lookup {
             return None;
         }
         if self.expand.on_gesture(g) {
-            if self.tabs.current() == Tab::Wikipedia {
+            if self.on_wikipedia() {
                 // Only for now: its size isn't the card's.
                 self.folded = !self.folded;
                 return None;
@@ -1063,6 +1247,14 @@ impl Lookup {
         if let Some(tab) = self.tabs.on_gesture(g) {
             self.show_tab(tab);
             return None;
+        }
+        if let Some((_, chooser)) = &mut self.chooser {
+            let chosen = chooser.on_gesture(g)?;
+            let (choosing, _) = self.chooser.take()?;
+            return match chosen {
+                Chosen::Back => None,
+                Chosen::Row(row) => self.chosen(choosing, row),
+            };
         }
         if let Some(p) = &mut self.picker {
             if p.manage.on_gesture(g) {
@@ -1109,8 +1301,21 @@ impl Lookup {
             self.start_editing();
             return None;
         }
-        if self.on_dictionary() && tapped(&mut self.switcher_press, self.switcher) {
+        if self.on_dictionary() && self.switcher.on_gesture(g) {
             self.open_picker(t);
+            return None;
+        }
+        if self.other_matches.on_gesture(g) {
+            self.choose_match();
+            return None;
+        }
+        if self.edition.on_gesture(g) {
+            self.choose_edition();
+            return None;
+        }
+        if self.retry_shown() && self.retry.on_gesture(g) {
+            self.tabs.retry();
+            self.show_new_reply();
             return None;
         }
         if self.manage_shown() && self.manage.on_gesture(g) {
@@ -1156,6 +1361,12 @@ impl Lookup {
         // Swipes turn pages even when the pager row had no room.
         if let Gesture::Swipe { dir, .. } = g {
             self.pager.on_swipe(*dir);
+        }
+        if let Some(list) = &mut self.hits {
+            list.page = self.pager.page;
+            if let Some(ListEvent::Tapped(index)) = list.on_gesture(g) {
+                self.open_match(index);
+            }
         }
         None
     }
@@ -1238,7 +1449,7 @@ impl Lookup {
             let crumb_style = t.small;
             let after = match &crumb {
                 Some(crumb) => (cx.text.width(crumb, crumb_style).ceil() as i32 + 2).min(r.w / 3),
-                None if self.picker.is_none() => t.icon_small,
+                None if !self.picking() => t.icon_small,
                 None => 0,
             };
             let w = (cx.text.width(label, style).ceil() as i32).min((r.w - gap - after).max(0));
@@ -1253,7 +1464,7 @@ impl Lookup {
             let beside = Rect::new(r.x + w + gap, r.y, after, r.h);
             match &crumb {
                 Some(crumb) => cx.line(crumb, crumb_style.gray(quiet), beside, HAlign::Left),
-                None if self.picker.is_none() => cx.icon(Icon::Pencil, beside, t.icon_small, quiet),
+                None if !self.picking() => cx.icon(Icon::Pencil, beside, t.icon_small, quiet),
                 None => {}
             }
         }
@@ -1269,36 +1480,29 @@ impl Lookup {
         self.close.draw(cx);
     }
     fn draw_switcher(&mut self, cx: &mut DrawCx, status: &str) {
-        let t = cx.theme;
         let index = self.matches.iter().position(|m| Some(&m.dictionary) == self.selected.as_ref());
         self.previous.enabled = index.is_some_and(|i| i > 0);
         self.next.enabled = index.is_some_and(|i| i + 1 < self.matches.len());
         self.previous.draw(cx);
         self.next.draw(cx);
-        let r = self.switcher;
-        let pressed = self.switcher_press.is_down();
-        let (fg, quiet) = if pressed {
-            cx.canvas.fill_rounded_rect(r, t.radius, INK);
-            cx.hint(r, RefreshMode::Fast);
-            (PAPER, PAPER)
-        } else {
-            cx.canvas.stroke_rounded_rect(r, t.radius, t.border as f32, INK);
-            (INK, INK2)
-        };
-        let (pad, icon) = (t.mm(2.2), t.icon_small);
-        let chevron = Rect::new(r.right() - pad - icon, r.y, icon, r.h);
-        cx.icon(Icon::ChevronDown, chevron, icon, quiet);
-        let meta_style = t.small.gray(quiet);
-        let meta_w = (cx.text.width(status, meta_style).ceil() as i32).min(r.w / 2);
-        let meta = Rect::new(chevron.x - t.mm(1.0) - meta_w, r.y, meta_w + 1, r.h);
-        cx.line(status, meta_style, meta, HAlign::Right);
         let name = self
             .catalog
             .iter()
             .find(|d| Some(&d.id) == self.selected.as_ref())
             .map_or_else(|| "Dictionaries".into(), |d| self.title(d));
-        let name_rect = Rect::new(r.x + pad, r.y, (meta.x - t.mm(1.5) - r.x - pad).max(0), r.h);
-        cx.line(&name, t.button.gray(fg), name_rect, HAlign::Left);
+        self.switcher.draw(cx, &name, status);
+    }
+    fn draw_wikipedia_row(&self, cx: &mut DrawCx) {
+        let found = self.tabs.wikipedia();
+        self.other_matches.draw(cx, "Other matches", &found.matches().len().saturating_sub(1).to_string());
+        if let Some(hits) = found.listing() {
+            let style = cx.theme.small.gray(INK2);
+            let count = format!("{} {}", hits.len(), if hits.len() == 1 { "result" } else { "results" });
+            let full = format!("No exact match · {count}");
+            let fits = cx.text.width(&full, style) <= self.hit_count.w as f32;
+            cx.line(if fits { &full } else { &count }, style, self.hit_count, HAlign::Left);
+        }
+        self.edition.draw(cx, self.tabs.languages().wikipedia.name(), "");
     }
     /// Lays out the first page. A definition that fits one page uses the
     /// pager's row too; a longer one gives that row back to the pager,
@@ -1312,7 +1516,7 @@ impl Lookup {
                 self.pages = None;
             }
         }
-        if self.pages.is_some() || self.layout_error.is_some() {
+        if self.pages.is_some() || self.layout_error.is_some() || self.hits.is_some() {
             return;
         }
         let started = std::time::Instant::now();
@@ -1362,6 +1566,7 @@ impl Lookup {
                 let count = pages.pages().len();
                 self.pager.set(target.min(count.saturating_sub(1)), count);
                 self.pager.incomplete = !pages.is_complete();
+                self.text_height = pages.pages().first().map(|p| p.height.ceil() as i32);
                 self.pages = Some(pages);
             }
             Err(e) => {
@@ -1371,7 +1576,7 @@ impl Lookup {
                 self.pager.incomplete = false;
             }
         }
-        self.body = if self.paged { self.body_paged } else { self.body_full };
+        self.place(t);
         self.layout_timing = (started, started.elapsed());
         log::debug!(
             "dictionary first page pagination: {:?}, {bytes} text bytes, {} pages, complete {}",
@@ -1409,8 +1614,16 @@ impl Lookup {
             cx.line(&status, t.small.gray(INK2), p.status, HAlign::Left);
             return;
         }
+        if let Some((_, chooser)) = &mut self.chooser {
+            rule(cx, self.divider, self.body_full);
+            chooser.draw(cx);
+            return;
+        }
         if !self.keyboard.visible && self.on_dictionary() {
             self.draw_switcher(cx, &status);
+        }
+        if !self.keyboard.visible && self.on_wikipedia() {
+            self.draw_wikipedia_row(cx);
         }
         if self.edit_row() {
             self.field.draw(cx);
@@ -1442,6 +1655,12 @@ impl Lookup {
                 cx.canvas.invert_rect(r);
                 cx.hint(r, RefreshMode::Fast);
             }
+        }
+        if let Some(list) = self.hits.as_ref().filter(|l| l.fits()) {
+            list.draw(cx);
+        }
+        if self.retry_shown() {
+            self.retry.draw(cx);
         }
         if let Some(error) = &self.layout_error {
             cx.text.draw(cx.canvas, error, t.body, self.body, HAlign::Left);
@@ -1486,7 +1705,11 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts>
                 buttons.extend([l.tabs.rect(), l.pager.rect()]);
                 buttons.extend(l.actions.iter().map(Button::rect));
                 if tab == Tab::Dictionary {
-                    buttons.extend([l.previous.rect(), l.switcher, l.next.rect()]);
+                    buttons.extend([l.previous.rect(), l.switcher.rect(), l.next.rect()]);
+                }
+                if tab == Tab::Wikipedia {
+                    // Other matches has the place of their count.
+                    buttons.extend([l.hit_count, l.edition.rect()]);
                 }
             }
             let body = if typing { l.body_full } else { l.body };
@@ -1496,6 +1719,23 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts>
                 parts = parts.keyboard(l.keyboard.rect());
             }
             samples.push(parts);
+            if tab != Tab::Wikipedia || typing {
+                continue;
+            }
+            // Offline: the message, Retry and no pager.
+            while l.tabs.waiting() {
+                l.tabs.receive();
+                std::thread::yield_now();
+            }
+            l.paged = false;
+            l.place(t);
+            let buttons = [l.edition.rect(), l.retry.rect()].into_iter().chain(l.actions.iter().map(Button::rect));
+            samples.push(Parts::new("Lookup error", l.sheet.rect(), buttons).body(l.body, 3 * line).dense(t.mm(7.0)));
+            l.choose_edition();
+            l.place(t);
+            let (_, chooser) = l.chooser.as_ref().unwrap();
+            let buttons = chooser.targets().into_iter().chain([l.tabs.rect()]);
+            samples.push(Parts::new("Lookup languages", l.sheet.rect(), buttons).dense(t.mm(7.0)));
         }
     }
     samples

@@ -12,12 +12,15 @@ Taps are worked out from the theme's millimetre sizes (`ui/theme.rs`), so a
 scene plays on every screen. When a layout changes, fix the position here
 once. Run `cargo build` first.
 """
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import shutil
 import struct
 import subprocess
+import threading
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSO = ROOT / 'target/debug/verso'
@@ -198,6 +201,46 @@ def run(png, steps=(), data=None, library=None, *, size=None, device=None, scree
                           stderr=subprocess.DEVNULL if quiet else None).returncode
     assert code in codes, f'{Path(png).name}: exit code {code}'
     return data
+
+
+def wikipedia():
+    """A local Wikipedia with original text: "mercury" has 10 matches,
+    "nothing" none, and any other word redirects to an article. Returns the
+    value for VERSO_WIKIPEDIA_URL."""
+    text = 'This is original sample text for the captures, with sentences long enough to wrap on every screen. ' * 5
+
+    def answer(language, query):
+        words = query.get('srsearch')
+        if words:
+            titles = ['Greeting', f'{words} (song)', 'Salutation', 'Good morning']
+            if words == 'mercury':
+                titles = [f'Mercury ({kind})' for kind in (
+                    'planet', 'element', 'mythology', 'band', 'album', 'car', 'newspaper', 'river', 'surname', 'film')]
+            hits = [{'title': t, 'snippet': f'A line of the article about {t}, which is cut short'} for t in titles]
+            if words != 'mercury':
+                hits[0]['redirecttitle'] = words
+            return {'search': [] if words == 'nothing' else hits}
+        title = query['titles']
+        extract = f'{title} is an article. {text}\n{text}\n\n\n== History ==\n=== Origins ===\n{text}\n== Uses ==\n{text}'
+        return {'pages': [{'title': title, 'extract': extract,
+                           'canonicalurl': f'https://{language}.wikipedia.org/wiki/{title.replace(" ", "_")}'}]}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            url = urlsplit(self.path)
+            query = {k: v[0] for k, v in parse_qs(url.query).items()}
+            body = json.dumps({'query': answer(url.path.strip('/'), query)}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f'http://127.0.0.1:{server.server_port}/{{lang}}'
 
 
 def read_json(path):

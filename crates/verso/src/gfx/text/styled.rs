@@ -56,6 +56,8 @@ pub struct StyledParagraph {
     /// Touches never pick words in it: provenance and status text, which
     /// isn't worth looking up.
     pub inert: bool,
+    /// A heading, which starts a new page rather than end one.
+    pub keep: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -267,6 +269,24 @@ impl StyledPagination {
         }
     }
 
+    /// What has to fit on the page below a heading's first line: the rest of
+    /// it, and a line of the text it's for.
+    fn kept_below(&self, piece: &PaginatedParagraph) -> f32 {
+        if piece.source_bytes.start > 0 || !source(&self.blocks, piece.block).keep {
+            return 0.0;
+        }
+        let mut height: f32 = piece.lines.iter().skip(1).map(|l| l.height).sum();
+        for block in &self.blocks[piece.block + 1..] {
+            match block {
+                StyledBlock::Gap(space) => height += space,
+                StyledBlock::Rule { .. } => break,
+                StyledBlock::Paragraph(p) if p.keep => height += p.base.line_height(),
+                StyledBlock::Paragraph(p) => return height + p.base.line_height(),
+            }
+        }
+        height
+    }
+
     fn finish_page(&mut self) {
         self.pages.push(std::mem::take(&mut self.page));
         self.missing_logged.push(false);
@@ -286,7 +306,9 @@ impl StyledPagination {
             } else {
                 self.gap
             };
-            if self.page.height + space + record.height > height {
+            let below = if line == 0 { self.kept_below(&piece) } else { 0.0 };
+            let full = self.page.height + space + record.height + below > height;
+            if full && !self.page.paragraphs.is_empty() {
                 self.finish_page();
             } else {
                 if !self.page.paragraphs.is_empty()
@@ -363,6 +385,7 @@ impl StyledParagraph {
             muted: self.muted,
             indent: self.indent,
             inert: self.inert,
+            keep: self.keep,
         }
     }
 }
@@ -877,7 +900,15 @@ mod tests {
     const BODY: TextStyle = TextStyle::new(24.0, Weight::Regular, Family::Serif);
 
     fn paragraph(text: &str) -> StyledParagraph {
-        StyledParagraph { text: text.into(), spans: Vec::new(), base: BODY, muted: INK2, indent: 0.0, inert: false }
+        StyledParagraph {
+            text: text.into(),
+            spans: Vec::new(),
+            base: BODY,
+            muted: INK2,
+            indent: 0.0,
+            inert: false,
+            keep: false,
+        }
     }
 
     fn styled(text: &str, style: SpanStyle) -> StyledParagraph {
@@ -928,6 +959,24 @@ mod tests {
         for (p, end) in pagination.paragraphs().iter().zip(next_line) {
             assert_eq!(end, p.lines.len());
             assert_eq!(p.lines.last().unwrap().bytes.end, p.source_bytes.len());
+        }
+    }
+
+    #[test]
+    fn a_heading_starts_the_next_page_rather_than_end_one() {
+        let mut renderer = TextRenderer::new();
+        let heading = |text| StyledBlock::Paragraph(StyledParagraph { keep: true, ..paragraph(text) });
+        let line = BODY.line_height().ceil() as i32;
+        let blocks = || {
+            let text = |s| StyledBlock::Paragraph(paragraph(s));
+            vec![text("one"), text("two"), heading("Section"), heading("Part"), text("three"), text("four")]
+        };
+        for (lines, starts) in [(6, vec![0]), (5, vec![0, 5]), (4, vec![0, 2]), (1, vec![0, 1, 2, 3, 4, 5])] {
+            let mut pages = renderer.paginate_styled(blocks(), 600, 6 * line).unwrap();
+            pages.repage(lines * line).unwrap();
+            assert_partition(&pages);
+            let first: Vec<usize> = pages.pages().iter().map(|p| p.paragraphs[0].paragraph).collect();
+            assert_eq!(first, starts, "{lines} lines a page");
         }
     }
 

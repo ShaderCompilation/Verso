@@ -1,19 +1,15 @@
 //! The lookup card's tabs, and what the online ones asked for the word shown.
 //! A tab asks when it's first shown, never before, and keeps its reply until
 //! the word changes; everything goes when the card does.
-use super::plain;
+use super::{plain, wikipedia::Wikipedia};
 use crate::{
-    dictionary::languages::language_name,
     geom::Rect,
-    gfx::{StyledBlock, Weight},
-    online::{
-        Answer, Error, QUERY_LIMIT, Request, Service, Worker,
-        wikipedia::{Article, Block, Edition, Found},
-    },
+    gfx::StyledBlock,
+    online::{Answer, Error, QUERY_LIMIT, Request, Service, Worker, wikipedia::Edition},
     platform::Waker,
     ui::{
         gesture::Gesture,
-        theme::{INK2, LINE, Theme},
+        theme::{INK2, Theme},
         widget::DrawCx,
         widgets::Segmented,
     },
@@ -43,21 +39,35 @@ pub fn too_long(query: &str) -> bool {
 /// What the online tabs look things up in.
 pub struct Languages {
     pub wikipedia: Edition,
+    /// The Wikipedia in the book's language, if there is one.
+    pub book: Option<Edition>,
     /// None until the reader chooses; nothing is translated before.
     pub translate: Option<String>,
 }
 
-/// What an online tab knows about the word shown.
+/// One request and what came of it.
 #[derive(Default)]
-enum Slot {
+pub enum Slot<T> {
     #[default]
     Unasked,
     /// The request's ID.
     Waiting(u64),
-    Done(Result<Answer, Error>),
+    Done(Result<T, Error>),
 }
 
-impl Slot {
+impl<T> Slot<T> {
+    pub fn waiting(&self) -> bool {
+        matches!(self, Slot::Waiting(_))
+    }
+
+    pub fn waits_for(&self, request: u64) -> bool {
+        matches!(self, Slot::Waiting(id) if *id == request)
+    }
+
+    pub fn error(&self) -> Option<&Error> {
+        if let Slot::Done(Err(e)) = self { Some(e) } else { None }
+    }
+
     /// Keeps a finished reply only: the request behind another is cancelled.
     fn finished(self) -> Self {
         if matches!(self, Slot::Done(_)) { self } else { Slot::Unasked }
@@ -67,13 +77,18 @@ impl Slot {
 /// Both online tabs' replies for one word.
 #[derive(Default)]
 pub struct Replies {
-    wikipedia: Slot,
-    translate: Slot,
+    wikipedia: Wikipedia,
+    translate: Slot<Answer>,
 }
 
 impl Replies {
     pub fn is_empty(&self) -> bool {
-        matches!((&self.wikipedia, &self.translate), (Slot::Unasked, Slot::Unasked))
+        self.wikipedia.is_unasked() && matches!(self.translate, Slot::Unasked)
+    }
+
+    /// After another Wikipedia was chosen.
+    pub fn forget_wikipedia(&mut self) {
+        self.wikipedia = Wikipedia::default();
     }
 }
 
@@ -136,9 +151,10 @@ impl Tabs {
             return;
         }
         match self.current {
-            Tab::Wikipedia if matches!(self.replies.wikipedia, Slot::Unasked) => {
-                let request = Request::Wikipedia { edition: self.languages.wikipedia, query: query.into() };
-                self.replies.wikipedia = Slot::Waiting(self.wikipedia.request(request));
+            Tab::Wikipedia => {
+                if let Some(request) = self.replies.wikipedia.wanted(self.languages.wikipedia, query) {
+                    self.replies.wikipedia.asked(self.wikipedia.request(request));
+                }
             }
             Tab::Translate if matches!(self.replies.translate, Slot::Unasked) => {
                 let Some(target) = self.languages.translate.clone() else { return };
@@ -152,18 +168,65 @@ impl Tabs {
     /// Takes in replies; true when the tab shown has a new one.
     pub fn receive(&mut self) -> bool {
         let mut shown = false;
-        for (tab, worker, slot) in [
-            (Tab::Wikipedia, &self.wikipedia, &mut self.replies.wikipedia),
-            (Tab::Translate, &self.translate, &mut self.replies.translate),
-        ] {
-            if let Some(reply) = worker.receive()
-                && matches!(slot, Slot::Waiting(id) if *id == reply.id)
-            {
-                *slot = Slot::Done(reply.result);
-                shown |= tab == self.current;
-            }
+        if let Some(reply) = self.wikipedia.receive()
+            && self.replies.wikipedia.receive(reply)
+        {
+            shown |= self.current == Tab::Wikipedia;
+        }
+        if let Some(reply) = self.translate.receive()
+            && self.replies.translate.waits_for(reply.id)
+        {
+            self.replies.translate = Slot::Done(reply.result);
+            shown |= self.current == Tab::Translate;
         }
         shown
+    }
+
+    /// What Wikipedia has for the word shown.
+    pub fn wikipedia(&self) -> &Wikipedia {
+        &self.replies.wikipedia
+    }
+
+    pub fn languages(&self) -> &Languages {
+        &self.languages
+    }
+
+    /// Opens one of Wikipedia's matches; `ask` then asks for its article.
+    /// False when it's open already.
+    pub fn open_match(&mut self, index: usize) -> bool {
+        let wikipedia = &mut self.replies.wikipedia;
+        if wikipedia.opened() == Some(index) && wikipedia.error().is_none() {
+            return false;
+        }
+        // Another article may be on its way.
+        self.wikipedia.cancel();
+        wikipedia.open(index);
+        true
+    }
+
+    /// Looks words up in another Wikipedia; `ask` then asks it.
+    pub fn set_edition(&mut self, edition: Edition) {
+        self.languages.wikipedia = edition;
+        self.wikipedia.cancel();
+        self.replies.forget_wikipedia();
+    }
+
+    /// Why the tab shown has no answer.
+    pub fn error(&self) -> Option<&Error> {
+        match self.current {
+            Tab::Dictionary => None,
+            Tab::Wikipedia => self.replies.wikipedia.error(),
+            Tab::Translate => self.replies.translate.error(),
+        }
+    }
+
+    /// Drops the tab's error, so `ask` asks again.
+    pub fn retry(&mut self) {
+        match self.current {
+            Tab::Dictionary => {}
+            Tab::Wikipedia => self.replies.wikipedia.retry(),
+            Tab::Translate => self.replies.translate = Slot::Unasked,
+        }
     }
 
     /// Hands over the replies before the word changes, and cancels what's
@@ -186,33 +249,18 @@ impl Tabs {
     pub fn waiting(&self) -> bool {
         match self.current {
             Tab::Dictionary => false,
-            Tab::Wikipedia => matches!(self.replies.wikipedia, Slot::Waiting(_)),
-            Tab::Translate => matches!(self.replies.translate, Slot::Waiting(_)),
+            Tab::Wikipedia => self.replies.wikipedia.waiting(),
+            Tab::Translate => self.replies.translate.waiting(),
         }
     }
 
-    /// What an online tab shows. Its words can't be looked up.
+    /// What an online tab shows, apart from Wikipedia's list of matches. Its
+    /// words can't be looked up.
     pub fn content(&self, t: &Theme) -> Vec<StyledBlock> {
         let line = |s: &str| vec![plain(s.into(), t.body, true)];
         match self.current {
             Tab::Dictionary => Vec::new(),
-            Tab::Wikipedia => match &self.replies.wikipedia {
-                Slot::Unasked => line("Edit the words above to look them up."),
-                Slot::Waiting(_) => {
-                    let language = language_name(self.languages.wikipedia.code());
-                    line(&format!("Searching {language} Wikipedia…"))
-                }
-                Slot::Done(Ok(Answer::Found(Found::Article { article, .. }) | Answer::Article(article))) => {
-                    article_blocks(article, t)
-                }
-                Slot::Done(Ok(Answer::Found(Found::Hits(hits)))) if !hits.is_empty() => {
-                    hits.iter().map(|hit| plain(hit.title.clone(), t.dictionary_body, true)).collect()
-                }
-                Slot::Done(Ok(_)) => {
-                    message("No article found", "Edit the words above, or choose another language.", t)
-                }
-                Slot::Done(Err(e)) => message(&e.title("Wikipedia"), &e.plain(), t),
-            },
+            Tab::Wikipedia => self.replies.wikipedia.content(self.languages.wikipedia, t),
             Tab::Translate => match &self.replies.translate {
                 _ if self.languages.translate.is_none() => line("Translate into which language?"),
                 Slot::Unasked => line("Edit the words above to translate them."),
@@ -239,29 +287,11 @@ impl Tabs {
         use crate::platform::wifi::Link;
         let service =
             Service::for_test("http://127.0.0.1:9", std::time::Duration::from_secs(1), Box::new(|| Ok(Link::Off)));
-        let languages = Languages { wikipedia: Edition::ENGLISH, translate: None };
+        let languages = Languages { wikipedia: Edition::ENGLISH, book: None, translate: None };
         Self::new(current, &service, Waker::new(|| {}), languages)
     }
 }
 
-fn message(title: &str, text: &str, t: &Theme) -> Vec<StyledBlock> {
+pub fn message(title: &str, text: &str, t: &Theme) -> Vec<StyledBlock> {
     vec![plain(title.into(), t.button, true), plain(text.into(), t.body.gray(INK2), true)]
-}
-
-fn article_blocks(article: &Article, t: &Theme) -> Vec<StyledBlock> {
-    let gap = t.dictionary_body.line_height() / 2.0;
-    let mut blocks = vec![plain(article.title.clone(), t.dictionary_headword, true)];
-    for block in &article.blocks {
-        blocks.push(StyledBlock::Gap(gap));
-        blocks.push(match block {
-            Block::Heading { text, .. } => plain(text.clone(), t.dictionary_body.weight(Weight::SemiBold), true),
-            Block::Paragraph(text) => plain(text.clone(), t.dictionary_body, true),
-        });
-    }
-    blocks.push(StyledBlock::Rule { space: gap, thickness: t.hairline, gray: LINE });
-    let source = format!("Wikipedia · {} · CC BY-SA 4.0", language_name(article.edition.code()));
-    for text in [article.url.clone(), source] {
-        blocks.push(plain(text, t.small.gray(INK2), true));
-    }
-    blocks
 }

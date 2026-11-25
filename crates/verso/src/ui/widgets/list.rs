@@ -160,6 +160,17 @@ impl List {
             .map(|(k, i)| (i, Rect::new(self.rect.x, self.rect.y + k as i32 * self.row_h, self.rect.w, self.row_h)))
     }
 
+    /// Whether even one row fits where the list is placed.
+    pub fn fits(&self) -> bool {
+        self.rect.h >= self.row_h
+    }
+
+    /// Where the visible row `i` is.
+    #[cfg(test)]
+    pub fn row_rect(&self, i: usize) -> Rect {
+        Rect::new(self.rect.x, self.rect.y + i as i32 * self.row_h, self.rect.w, self.row_h)
+    }
+
     /// The lead's touch area: from the row's left edge to a slot past the text inset.
     fn lead_rect(&self, r: Rect) -> Rect {
         Rect::new(r.x, r.y, self.pad + self.slot, r.h)

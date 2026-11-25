@@ -18,7 +18,6 @@ import sys
 import sim
 
 OUT = sim.out_dir('devices')
-WIKIPEDIA = 'http://127.0.0.1:9/{lang}'
 
 
 def scenes(s):
@@ -38,9 +37,19 @@ def scenes(s):
     # The lookup card: a side panel on the right in landscape, else the lower 80%.
     panel = max(s.w * 52 // 100, s.mm(72)) if s.w > s.h else s.w
     card_y = 0 if s.w > s.h else s.h - s.h * 4 // 5
+    panel_swipe = (s.w - panel * 0.2, s.h * 0.6, s.w - panel * 0.8, s.h * 0.6)
     tab = lambda i: s.tap(s.w - panel + margin + (i + 0.5) * (panel - 2 * margin) / 3, card_y + s.mm(15.2))
-    drag = lambda y: ['--hold-drag', f'{round(hello_x)},{s.mm(9.3)},{round(hello_x) + s.mm(30)},{y}']
-    lookup = [*book, *s.long_press(hello_x, s.mm(9.3))]
+    row_y = card_y + s.mm(24.2)  # Wikipedia's matches and language
+    inner = panel - 2 * margin
+    other_matches = s.tap(s.w - panel + margin + inner * 0.29, row_y)
+    language = s.tap(s.w - margin - inner * 0.21, row_y)
+    close = s.tap(s.w - margin + s.mm(2) - s.mm(9) / 2, card_y + s.mm(6))
+    edit = [*s.tap(s.w - panel + margin + s.mm(4), card_y + s.mm(6)), '--edit', 'clear']
+    wifi = s.tap(margin + (s.w - 2 * margin) / (10 if s.w > s.h else 6), s.mm(27 if s.w > s.h else 36.5))
+    offline = [*s.swipe(cx, 2, cx, s.h * 0.55), *wifi, *s.tap(cx, s.h * 0.95)]
+    drag = lambda y: ['--hold-drag', f'{round(hello_x)},{s.mm(6)},{round(hello_x) + s.mm(30)},{y}']
+    lookup = [*book, *s.long_press(hello_x, s.mm(6))]
+    wikipedia = [*lookup, *tab(1)]
     menu_button = lambda i: s.tap(margin + (i + 0.5) * column, s.h - margin - s.mm(10) / 2)
     return {
         'home': ('all', {}, []),
@@ -58,10 +67,17 @@ def scenes(s):
         # "Hello" starts the first line; landscape pages centre a line of
         # about 107 mm.
         'dictionary': ('one', {'footer': False}, lookup),
-        # Nothing answers at WIKIPEDIA, so this shows its error.
-        'wikipedia': ('one', {'footer': False}, [*lookup, *tab(1)]),
+        'wikipedia': ('one', {'footer': False}, wikipedia),
+        'wikipedia-end': ('one', {'footer': False}, [*wikipedia, *s.swipe(*panel_swipe) * 9]),
+        'wikipedia-matches': ('one', {'footer': False}, [*wikipedia, *other_matches]),
+        'wikipedia-languages': ('one', {'footer': False}, [*wikipedia, *language]),
+        'wikipedia-list': ('one', {'footer': False}, [*wikipedia, *edit, '--text', 'mercury', '--edit', 'submit']),
+        'wikipedia-miss': ('one', {'footer': False}, [*wikipedia, *edit, '--text', 'nothing', '--edit', 'submit']),
+        'wikipedia-offline': ('one', {'footer': False}, [*book, *offline, *wikipedia[len(book):]]),
+        'wikipedia-closed': ('one', {'footer': False}, [*wikipedia, *close]),
+        'wikipedia-page': ('one', {'footer': False}, book),
         'translate': ('one', {'footer': False}, [*lookup, *tab(2)]),
-        'passage': ('one', {'footer': False}, [*book, *drag(s.mm(9.3))]),
+        'passage': ('one', {'footer': False}, [*book, *drag(s.mm(6))]),
         'passage-long': ('one', {'footer': False}, [*book, *drag(s.mm(45))]),
         'settings': ('all', {}, [], 'settings'),
     }
@@ -80,6 +96,7 @@ def main():
             'a second line on every screen size.</def><def>A second meaning, for the card height.</def></ar>')
         for w in ['Hello', 'selection', 'foundation', 'typography', 'book', 'text']])
     made = {}
+    wikipedia = sim.wikipedia()
     for device, orientation, s in sim.device_screens(devices):
         for name, (folder, settings, steps, *screen) in scenes(s).items():
             if only and name not in only:
@@ -91,8 +108,11 @@ def main():
                              {'dictionary-folders.json': {'version': 1, 'folders': []}})
             shutil.copytree(dictionaries / 'dictionaries', data / 'dictionaries')
             sim.run(out, steps, data, books[folder], device=device, screen=screen[0] if screen else None,
-                    env={'VERSO_WIKIPEDIA_URL': WIKIPEDIA})
+                    env={'VERSO_WIKIPEDIA_URL': wikipedia})
             made.setdefault(name, []).append(out)
+    # Closing the card puts back the page exactly.
+    for closed, page in zip(made.get('wikipedia-closed', []), made.get('wikipedia-page', [])):
+        assert closed.read_bytes() == page.read_bytes(), f'{closed} differs from {page}'
     if shutil.which('montage'):
         for name, files in made.items():
             subprocess.run(['montage', *map(str, files), '-geometry', '+8+8', '-tile', 'x2', '-resize', 'x700',
