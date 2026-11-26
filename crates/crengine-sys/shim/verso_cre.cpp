@@ -1082,6 +1082,9 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         props->setInt(PROP_FONT_HINTING, 2);      // autohinter (as KOReader)
         props->setInt(PROP_EMBEDDED_STYLES, 1);
         props->setInt(PROP_EMBEDDED_FONTS, 1);
+        // Justified spaces shrink to 75% at most (as KOReader); at crengine's
+        // default of 50% the words of a tight line run together.
+        props->setInt(PROP_FORMAT_MIN_SPACE_CONDENSING_PERCENT, 75);
         props->setInt(PROP_MIN_FILE_SIZE_TO_CACHE, 0); // cache every book (see crsetup.h)
         v->propsApply(props);
         v->Resize(width, height);
