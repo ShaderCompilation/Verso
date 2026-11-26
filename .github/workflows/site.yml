@@ -1,0 +1,23 @@
+name: Update website
+
+# Rebuilds verso-reader.app when a release is published, so the site's Guide
+# and download follow the new release. release.yml only creates a draft, and
+# the site ignores drafts, so this waits for the release to be published.
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  deploy-hook:
+    name: Rebuild verso-reader.app
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudflare Pages build
+        env:
+          HOOK: ${{ secrets.SITE_DEPLOY_HOOK }}
+        run: |
+          [ -n "$HOOK" ] || { echo "SITE_DEPLOY_HOOK secret is not set" >&2; exit 1; }
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Website build triggered"
