@@ -50,31 +50,36 @@ impl Translate {
         let Ok(update) = serde_json::from_slice::<Update>(&bytes) else {
             return Response::json(400, &json!({ "error": "Invalid JSON body." }));
         };
-        let mut settings = self.store.settings();
-        let mut activity_label = None;
-        if let Some(raw_key) = update.api_key {
-            match parse_deepl_key(&raw_key) {
-                Ok(parsed) => {
-                    activity_label = Some(if parsed.is_some() {
-                        "DeepL API key saved".to_owned()
-                    } else {
-                        "DeepL API key removed".to_owned()
-                    });
-                    settings.deepl_api_key = parsed;
-                }
+        let parsed_key = match update.api_key {
+            Some(raw_key) => match parse_deepl_key(&raw_key) {
+                Ok(parsed) => Some(parsed),
                 Err(msg) => return Response::json(400, &json!({ "error": msg })),
+            },
+            None => None,
+        };
+        let mut activity_label = None;
+        let mut updated = None;
+        if let Err(e) = self.store.update_settings(|settings| {
+            if let Some(parsed) = parsed_key {
+                activity_label = Some(if parsed.is_some() {
+                    "DeepL API key saved".to_owned()
+                } else {
+                    "DeepL API key removed".to_owned()
+                });
+                settings.deepl_api_key = parsed;
             }
-        }
-        if let Some(provider) = update.provider {
-            if activity_label.is_none() && settings.translate_provider != provider {
-                activity_label = Some(format!("Translate: {}", provider.service_name()));
+            if let Some(provider) = update.provider {
+                if activity_label.is_none() && settings.translate_provider != provider {
+                    activity_label = Some(format!("Translate: {}", provider.service_name()));
+                }
+                settings.translate_provider = provider;
             }
-            settings.translate_provider = provider;
-        }
-        if let Err(e) = self.store.save_settings(&settings) {
+            updated = Some(settings.clone());
+        }) {
             log::error!("web app: saving translation settings: {e:#}");
             return Response::json(500, &json!({ "error": "Couldn't save translation settings." }));
         }
+        let settings = updated.unwrap();
         log::info!(
             "web app: updated translation settings (provider={:?}, key_set={})",
             settings.translate_provider,

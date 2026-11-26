@@ -231,6 +231,9 @@ pub struct Store {
     /// Cached normalized `Settings`, populated on first read and updated on
     /// `save_settings` so repeated lookups avoid FUSE reads and JSON parses.
     settings_cache: std::sync::Arc<std::sync::Mutex<Option<Settings>>>,
+    /// Serializes `settings.json` writes (shared `.tmp` file) and
+    /// read-modify-write updates so concurrent writers never clobber each other.
+    settings_write: std::sync::Arc<std::sync::Mutex<()>>,
     /// Counts external book-state writes through this store and its clones, so
     /// the position writer knows when to re-read its cached `BookState`.
     book_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -284,6 +287,7 @@ impl Store {
             opened_leader: Default::default(),
             settings_saves: Default::default(),
             settings_cache: Default::default(),
+            settings_write: Default::default(),
             book_saves: Default::default(),
             bulk_saves: Default::default(),
             dictionary_service: Default::default(),
@@ -336,16 +340,26 @@ impl Store {
         s
     }
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
-        let result = atomic(&self.root.join("settings.json"), s);
-        if result.is_ok() {
-            *self.settings_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(normalize_settings(s.clone()));
-        }
-        self.settings_saves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        result
+        let _guard = self.settings_write.lock().unwrap_or_else(|e| e.into_inner());
+        self.write_settings_locked(s).map(|_| ())
+    }
+    /// Serialized read-modify-write of `settings.json`, returning the
+    /// `(before, after)` `settings_saves` counters for this write.
+    pub fn update_settings(&self, edit: impl FnOnce(&mut Settings)) -> Result<(u64, u64)> {
+        let _guard = self.settings_write.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = self.settings();
+        edit(&mut settings);
+        self.write_settings_locked(&settings)
+    }
+    fn write_settings_locked(&self, s: &Settings) -> Result<(u64, u64)> {
+        atomic(&self.root.join("settings.json"), s)?;
+        *self.settings_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(normalize_settings(s.clone()));
+        let before = self.settings_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
+        Ok((before, before + 1))
     }
     /// Changes whenever settings were saved; compare to notice edits.
     pub fn settings_saves(&self) -> u64 {
-        self.settings_saves.load(std::sync::atomic::Ordering::Relaxed)
+        self.settings_saves.load(std::sync::atomic::Ordering::Acquire)
     }
     pub fn navigation(&self) -> Navigation {
         read(&self.root.join("library-navigation.json")).unwrap_or_default()
@@ -626,10 +640,11 @@ impl Store {
     }
     /// Saves the folder list edited in Settings.
     pub fn save_library_folders(&self, folders: Vec<PathBuf>) -> Result<()> {
-        let mut settings = self.settings();
-        settings.library_folders = Some(folders);
-        settings.library_folder = None;
-        self.save_settings(&settings)
+        self.update_settings(|settings| {
+            settings.library_folders = Some(folders);
+            settings.library_folder = None;
+        })
+        .map(|_| ())
     }
     #[cfg(test)]
     pub fn at(root: PathBuf) -> Self {
@@ -640,6 +655,7 @@ impl Store {
             opened_leader: Default::default(),
             settings_saves: Default::default(),
             settings_cache: Default::default(),
+            settings_write: Default::default(),
             book_saves: Default::default(),
             bulk_saves: Default::default(),
             dictionary_service: Default::default(),
@@ -1044,6 +1060,73 @@ mod tests {
         assert_ne!(other.settings_saves(), before);
         assert_eq!(other.settings().library_folders, Some(vec![PathBuf::from("/books")]));
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn concurrent_update_settings_never_corrupts_or_loses_fields() -> Result<()> {
+        use crate::library::sort::Sort;
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        let rounds = 20usize;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let key = "12345678-1234-1234-1234-1234567890ab:fx";
+
+        let s1 = store.clone();
+        let b1 = barrier.clone();
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            (0..rounds)
+                .map(|i| {
+                    let sort = if i + 1 == rounds { Sort::Series } else { Sort::ALL[i % Sort::ALL.len()] };
+                    s1.update_settings(|s| s.library_sort = sort).unwrap()
+                })
+                .collect::<Vec<_>>()
+        });
+        let s2 = store.clone();
+        let b2 = barrier.clone();
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            (0..rounds).map(|_| s2.update_settings(|s| s.page_flash += 1).unwrap()).collect::<Vec<_>>()
+        });
+        let s3 = store.clone();
+        let b3 = barrier.clone();
+        let t3 = std::thread::spawn(move || {
+            b3.wait();
+            (0..rounds)
+                .map(|i| {
+                    let provider = if i + 1 == rounds { TranslateProvider::DeepL } else { TranslateProvider::Google };
+                    s3.update_settings(|s| {
+                        s.translate_provider = provider;
+                        s.deepl_api_key = Some(key.to_owned());
+                    })
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let mut pairs = Vec::new();
+        for t in [t1, t2, t3] {
+            pairs.extend(t.join().unwrap());
+        }
+        assert_eq!(pairs.len(), rounds * 3);
+        let mut befores: Vec<u64> = pairs
+            .iter()
+            .map(|&(before, after)| {
+                assert_eq!(after, before + 1);
+                before
+            })
+            .collect();
+        befores.sort_unstable();
+        assert_eq!(befores, (0..(rounds * 3) as u64).collect::<Vec<_>>());
+        assert_eq!(store.settings_saves(), (rounds * 3) as u64);
+
+        // Both cached and freshly read settings on disk preserve every thread's edits.
+        for settings in [store.settings(), Store::at(dir.path().to_path_buf()).settings()] {
+            assert_eq!(settings.library_sort, Sort::Series);
+            assert_eq!(settings.page_flash, DEFAULT_PAGE_FLASH + rounds as u32);
+            assert_eq!(settings.translate_provider, TranslateProvider::DeepL);
+            assert_eq!(settings.deepl_api_key.as_deref(), Some(key));
+        }
         Ok(())
     }
     #[test]

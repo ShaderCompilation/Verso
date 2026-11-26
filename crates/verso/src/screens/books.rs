@@ -195,6 +195,8 @@ pub struct Books {
     navigation: Navigation,
     /// Navigation changed since it was last sent to the writer; see `persist_navigation`.
     navigation_unsaved: bool,
+    /// Sort changed since it was last sent to the writer; see `persist_navigation`.
+    sort_unsaved: bool,
     navigation_writer: NavigationWriter,
     navigation_error: Option<String>,
     home_action: IconButton,
@@ -405,6 +407,7 @@ impl Books {
             folders: Vec::new(),
             navigation,
             navigation_unsaved: false,
+            sort_unsaved: false,
             navigation_writer,
             navigation_error: None,
             home_action,
@@ -1044,17 +1047,32 @@ impl Books {
         self.navigation.set_page(self.pager.page);
         self.navigation_unsaved = true;
     }
-    /// Hands navigation to its writer thread once its frame is on screen. The
-    /// synced write took 5–951 ms on the Kindle (measured); on the UI thread
-    /// it held back the frame, and later the next touch.
+    /// Hands navigation and sort changes to the writer thread once their frame
+    /// is on screen. A synced write took 5–951 ms on the Kindle (measured); on
+    /// the UI thread it held back the frame, and later the next touch.
     fn persist_navigation(&mut self) {
         if std::mem::take(&mut self.navigation_unsaved)
             && let Err(e) = self.navigation_writer.save(self.navigation.clone())
         {
-            self.navigation_failed(e);
+            self.navigation_failed(anyhow::anyhow!("Couldn't save library navigation: {e:#}"));
+        }
+        if std::mem::take(&mut self.sort_unsaved)
+            && let Err(e) = self.navigation_writer.save_sort(self.sort)
+        {
+            self.navigation_failed(anyhow::anyhow!("Couldn't save the sort: {e:#}"));
         }
     }
-    /// Sleep and quit wait until the newest navigation is durably written.
+    /// Advances `settings_seen` past our own completed background sort writes
+    /// so they don't look like external edits and trigger `prelayout_due`.
+    fn drain_sort_saves(&mut self) {
+        for (before, after) in self.navigation_writer.sort_saves() {
+            if before == self.settings_seen {
+                self.settings_seen = after;
+            }
+        }
+    }
+    /// Sleep, quit, relayout and opening Settings/Transfer wait until the
+    /// newest navigation and sort are durably written.
     fn flush_navigation(&mut self) {
         self.persist_navigation();
         if let Err(e) = self.navigation_writer.flush() {
@@ -1062,10 +1080,11 @@ impl Books {
             self.navigation_writer.errors().for_each(drop);
             self.navigation_failed(e);
         }
+        self.drain_sort_saves();
     }
     /// Shown as a toast at the next tick.
     fn navigation_failed(&mut self, e: anyhow::Error) {
-        self.navigation_error = Some(format!("Couldn't save library navigation: {e:#}"));
+        self.navigation_error = Some(format!("{e:#}"));
     }
     /// Flashes only the browsing grid (covering its previous and current bounds)
     /// so the top bar, tabs and other chrome stay steady.
@@ -1107,23 +1126,24 @@ impl Books {
         menu.set_checked(Sort::ALL.iter().position(|&s| s == self.sort));
         self.sort_menu = Some(menu);
     }
-    /// Saves `sort` and shows page 1 in it. Only the grid flashes, as in
-    /// paging; the pager and the menu's area take a `Ui` pass.
+    /// Switches to `sort` and shows page 1 in it; persistence goes to
+    /// `verso-navigation` after the frame presents. Only the grid flashes, as
+    /// in paging; the pager and the menu's area take a `Ui` pass.
     fn set_sort(&mut self, sort: Sort, cx: &mut EventCx) {
         if sort == self.sort {
             return;
         }
         log::info!("library sort: {sort:?}");
-        let settings = crate::store::Settings { library_sort: sort, ..self.store.settings() };
-        if let Err(e) = self.store.save_settings(&settings) {
-            cx.toast(format!("Couldn't save the sort: {e:#}"), None);
-        }
         self.sort = sort;
+        self.sort_unsaved = true;
         self.warm_seq = self.warm_seq.wrapping_add(1);
         let previous = self.grid.rect();
         self.pager.page = 0;
+        if !self.navigation.folder_pages.is_empty() {
+            self.navigation.folder_pages.clear();
+            self.navigation_unsaved = true;
+        }
         self.refresh(cx.theme);
-        self.save_navigation();
         self.refresh_grid(cx, previous);
     }
     fn open_library(&mut self, cx: &mut EventCx) {
@@ -1167,6 +1187,7 @@ impl Books {
     /// Library folders edited in Settings: scan the new list. The index that
     /// scan publishes rebuilds collections and restores navigation as usual.
     fn apply_folder_changes(&mut self, cx: &mut EventCx) {
+        self.drain_sort_saves();
         let saves = self.store.settings_saves();
         if saves == self.settings_seen {
             return;
@@ -1192,7 +1213,13 @@ impl Books {
         if settings.library_sort != self.sort {
             log::info!("library sort: {:?}", settings.library_sort);
             self.sort = settings.library_sort;
+            self.sort_unsaved = false;
             self.warm_seq = self.warm_seq.wrapping_add(1);
+            self.pager.page = 0;
+            if !self.navigation.folder_pages.is_empty() {
+                self.navigation.folder_pages.clear();
+                self.navigation_unsaved = true;
+            }
             if self.is_home() {
                 self.warm_due = true;
             } else {
@@ -2594,6 +2621,7 @@ impl Books {
             return Action::None;
         }
         if self.selection.is_none() && self.settings_action.on_gesture(g) {
+            self.flush_navigation();
             return Action::Push(Box::new(crate::screens::system::SystemSettings::new(
                 cx.theme,
                 self.screen,
@@ -2602,6 +2630,7 @@ impl Books {
             )));
         }
         if self.selection.is_none() && self.transfer_action.on_gesture(g) {
+            self.flush_navigation();
             return Action::Push(Box::new(crate::screens::transfer::TransferScreen::new(
                 cx.theme,
                 self.screen,
@@ -2682,6 +2711,7 @@ impl Books {
         self.home_transfer.enabled = no_books;
         self.home_folders.enabled = no_books && !Store::library_folders_overridden();
         if self.home_transfer.on_gesture(g) {
+            self.flush_navigation();
             return Action::Push(Box::new(crate::screens::transfer::TransferScreen::new(
                 cx.theme,
                 self.screen,
@@ -2690,6 +2720,7 @@ impl Books {
             )));
         }
         if self.home_folders.on_gesture(g) {
+            self.flush_navigation();
             let (store, waker) = (self.store.clone(), self.worker.waker());
             let settings = crate::screens::system::SystemSettings::new(cx.theme, self.screen, store, waker);
             return Action::Push(Box::new(settings.on_library_tab()));
@@ -3584,6 +3615,7 @@ impl Screen for Books {
         Action::None
     }
     fn top_drawer_opened(&mut self) {
+        self.flush_navigation();
         if let Some(reader) = &mut self.reader {
             reader.top_drawer_opened();
         }
@@ -4985,10 +5017,11 @@ mod tests {
             tap(&mut books, author, cx);
             assert!(books.sort_menu.is_none());
             assert_eq!(books.sort, Sort::Author);
-            assert_eq!(store.settings().library_sort, Sort::Author);
+            assert_eq!(store.settings().library_sort, Sort::Title, "sort write waits for after_present");
             assert_eq!((books.pager.page, books.grid.page), (0, 0));
             books.after_present();
             books.navigation_writer.flush().unwrap();
+            assert_eq!(store.settings().library_sort, Sort::Author);
             assert_eq!(store.navigation().page(), 0);
             tap(&mut books, button, cx);
             assert_eq!(books.sort_menu.as_ref().unwrap().checked(), Some(1));
@@ -5006,6 +5039,148 @@ mod tests {
         // A new start takes the saved sort.
         let books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
         assert_eq!(books.sort, Sort::Author);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn sort_save_avoids_prelayout_flushes_for_settings_and_toasts_on_error() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("sort-off-thread")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.prelayout_due = false;
+        with_cx(&t, screen, |cx| {
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            books.set_sort(Sort::Author, cx);
+            assert!(books.sort_unsaved);
+            assert_eq!(store.settings().library_sort, Sort::Title);
+            books.after_present();
+            books.navigation_writer.flush().unwrap();
+            assert_eq!(store.settings().library_sort, Sort::Author);
+            // Draining our own sort-save counter advances settings_seen without re-arming prelayout.
+            books.on_background(cx);
+            assert!(!books.prelayout_due, "own sort write must not trigger prelayout_due");
+
+            // Opening Settings flushes a pending sort write before Settings reads settings.
+            books.set_sort(Sort::Series, cx);
+            assert_eq!(store.settings().library_sort, Sort::Author);
+            let settings_btn = books.settings_action.rect().center();
+            books.on_gesture(Gesture::Down(settings_btn), cx);
+            assert!(matches!(books.on_gesture(Gesture::Tap(settings_btn), cx), Action::Push(_)));
+            assert_eq!(store.settings().library_sort, Sort::Series);
+            books.on_background(cx);
+            assert!(!books.prelayout_due);
+
+            // Opening Transfer flushes a pending sort write too.
+            books.set_sort(Sort::RecentlyRead, cx);
+            assert_eq!(store.settings().library_sort, Sort::Series);
+            let transfer_btn = books.transfer_action.rect().center();
+            books.on_gesture(Gesture::Down(transfer_btn), cx);
+            assert!(matches!(books.on_gesture(Gesture::Tap(transfer_btn), cx), Action::Push(_)));
+            assert_eq!(store.settings().library_sort, Sort::RecentlyRead);
+            books.on_background(cx);
+            assert!(!books.prelayout_due);
+
+            // An external settings change still triggers prelayout_due (even interleaved with a sort write).
+            books.set_sort(Sort::RecentlyAdded, cx);
+            store.update_settings(|s| s.page_flash = 6).unwrap();
+            books.after_present();
+            books.navigation_writer.flush().unwrap();
+            books.on_background(cx);
+            assert!(books.prelayout_due, "external settings change must still trigger prelayout_due");
+            assert_eq!(store.settings().page_flash, 6);
+            assert_eq!(store.settings().library_sort, Sort::RecentlyAdded);
+
+            // A failed background sort write wakes the UI and shows a toast.
+            let tmp = root.join("settings.json.tmp");
+            std::fs::create_dir(&tmp).unwrap();
+            books.set_sort(Sort::Title, cx);
+            books.after_present();
+            let started = std::time::Instant::now();
+            while books.navigation_error.is_none() && started.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::yield_now();
+                books.on_background(cx);
+            }
+            assert!(books.deadline().is_some());
+            books.on_tick(cx);
+            assert!(cx.toast.as_ref().unwrap().text.starts_with("Couldn't save the sort"));
+            std::fs::remove_dir(&tmp).unwrap();
+            books.flush_navigation();
+            assert_eq!(store.settings().library_sort, Sort::Title);
+        });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn sort_change_resets_folder_pages_without_redundant_writes_and_mirrors_external_changes() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("sort-pages")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        let nested = PathBuf::from("/books/Fiction/Nested");
+        let fiction = PathBuf::from("/books/Fiction");
+        with_cx(&t, screen, |cx| {
+            // Save non-zero pages across multiple folders.
+            books.navigation.folder_pages.insert(fiction.clone(), 2);
+            books.navigate(Some(nested.clone()), cx);
+            books.go_to_page(1, cx);
+            books.flush_navigation();
+            assert_eq!(store.navigation().folder_pages.get(&fiction), Some(&2));
+            assert_eq!(store.navigation().folder_pages.get(&nested), Some(&1));
+
+            // Changing sort in a folder clears every folder's saved page to 1.
+            books.set_sort(Sort::Author, cx);
+            assert_eq!((books.pager.page, books.grid.page), (0, 0));
+            assert!(books.navigation.folder_pages.is_empty());
+            assert!(books.navigation_unsaved);
+            books.flush_navigation();
+            assert!(store.navigation().folder_pages.is_empty());
+            assert_eq!(store.navigation().page(), 0);
+
+            // A second sort change when folder_pages is already empty skips redundant navigation writes.
+            books.set_sort(Sort::Series, cx);
+            assert!(!books.navigation_unsaved, "empty folder_pages needs no navigation write");
+            books.flush_navigation();
+
+            // Changing sort from Search also clears every folder's saved page, and only writes once.
+            books.navigation.folder_pages.insert(fiction.clone(), 2);
+            books.navigation.folder_pages.insert(nested.clone(), 1);
+            books.navigation_unsaved = true;
+            books.flush_navigation();
+            books.toggle_search(cx);
+            books.search.as_mut().unwrap().keyboard.visible = false;
+            books.go_to_page(1, cx);
+            assert_eq!(books.search.as_ref().unwrap().page, 1);
+            books.set_sort(Sort::RecentlyAdded, cx);
+            assert_eq!((books.pager.page, books.grid.page), (0, 0));
+            assert_eq!(books.search.as_ref().unwrap().page, 0);
+            assert!(books.navigation.folder_pages.is_empty());
+            assert!(books.navigation_unsaved);
+            books.flush_navigation();
+            assert!(store.navigation().folder_pages.is_empty());
+            // Repeated sort change in Search avoids a redundant navigation write.
+            books.set_sort(Sort::RecentlyRead, cx);
+            assert!(!books.navigation_unsaved, "repeated sort change in Search needs no navigation write");
+            books.flush_navigation();
+            // Leaving Search lands back on page 1.
+            books.toggle_search(cx);
+            assert_eq!((books.pager.page, books.grid.page), (0, 0));
+
+            // An external library_sort change mirrors page reset and folder_pages clearing.
+            books.navigation.folder_pages.insert(fiction.clone(), 2);
+            books.go_to_page(1, cx);
+            books.flush_navigation();
+            books.prelayout_due = false;
+            store.update_settings(|s| s.library_sort = Sort::Title).unwrap();
+            books.on_background(cx);
+            assert_eq!(books.sort, Sort::Title);
+            assert_eq!((books.pager.page, books.grid.page), (0, 0));
+            assert!(books.navigation.folder_pages.is_empty());
+            assert!(books.navigation_unsaved);
+            assert!(books.prelayout_due);
+        });
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
