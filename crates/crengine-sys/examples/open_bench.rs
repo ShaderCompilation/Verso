@@ -51,7 +51,24 @@ fn main() {
         let face = c("Literata");
         verso_cre_set_font_face(doc, face.as_ptr());
         verso_cre_set_font_size(doc, px);
-        assert_eq!(verso_cre_typography(doc, face.as_ptr(), px, 100, mm(4.0), mm(6.0), mm(12.0), 1, 0), 0);
+        verso_cre_set_hanging_punctuation(doc, 1);
+        let settings = VersoCreTypography {
+            face: face.as_ptr(),
+            px,
+            line_spacing: 100,
+            margin: mm(4.0),
+            top: mm(6.0),
+            bottom: mm(12.0),
+            justify: 1,
+            publisher: 0,
+            weight: 400,
+            gamma_index: 15,
+            word_spacing: 100,
+            paragraphs: 0,
+            hyphenate: 1,
+            book_styles: 1,
+        };
+        assert_eq!(verso_cre_typography(doc, &settings), 0);
         let t = Instant::now();
         assert_eq!(verso_cre_load(doc, c(book).as_ptr()), 0, "load failed");
         let parse = ms(t);

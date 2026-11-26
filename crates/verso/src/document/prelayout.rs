@@ -51,7 +51,8 @@ impl Job {
 }
 
 /// Identifies the layout settings crengine caches a book for. A book laid out
-/// at another key is laid out again when opened.
+/// at another key is laid out again when opened. Contrast and hanging
+/// punctuation only redraw, so they aren't part of it.
 pub fn key(layout: &Layout, typography: &Typography, page: &PageLayout, dpi: u32) -> String {
     let mut t = typography.clone();
     t.normalize();
@@ -60,7 +61,7 @@ pub fn key(layout: &Layout, typography: &Typography, page: &PageLayout, dpi: u32
     let px = t.font_px(dpi as f32);
     let g = p.geometry(layout.width as i32, layout.height as i32, dpi as f32, px);
     let text = format!(
-        "{}|{}x{}@{dpi}|{:?}|{:?}|{}|{}|{px}|{}|{}|{},{},{}",
+        "{}|{}x{}@{dpi}|{:?}|{:?}|{}|{}|{px}|{}|{}|{}|{:?}|{}|{}|{}|{},{},{}",
         env!("CARGO_PKG_VERSION"),
         layout.width,
         layout.height,
@@ -68,8 +69,13 @@ pub fn key(layout: &Layout, typography: &Typography, page: &PageLayout, dpi: u32
         layout.margins,
         layout.font_size,
         t.font,
-        t.spacing,
+        t.weight,
+        t.line_spacing,
+        t.word_spacing,
+        t.paragraphs,
         t.justify,
+        t.hyphenate,
+        t.book_styles,
         g.side,
         g.top,
         g.bottom
@@ -724,12 +730,32 @@ mod tests {
 
     #[test]
     fn key_follows_what_changes_the_layout() {
-        let layout = Layout { width: 1272, height: 1696, margins: [83; 4], font_size: 42, shaping: TextShaping::Light };
+        let layout = Layout {
+            width: 1272,
+            height: 1696,
+            margins: [83; 4],
+            font_size: 42,
+            shaping: TextShaping::Light,
+            hanging_punctuation: true,
+        };
         let (t, p) = (Typography::default(), PageLayout::default());
         let k = key(&layout, &t, &p, 300);
         assert_eq!(k, key(&layout, &t, &p, 300));
-        assert_ne!(k, key(&layout, &Typography { size_pt: 11.0, ..t.clone() }, &p, 300));
-        assert_ne!(k, key(&layout, &Typography { justify: false, ..t.clone() }, &p, 300));
+        for changed in [
+            Typography { size_pt: 11.0, ..t.clone() },
+            Typography { weight: 450, ..t.clone() },
+            Typography { line_spacing: 125, ..t.clone() },
+            Typography { word_spacing: 90, ..t.clone() },
+            Typography { paragraphs: super::super::Paragraphs::Spaced, ..t.clone() },
+            Typography { justify: false, ..t.clone() },
+            Typography { hyphenate: false, ..t.clone() },
+            Typography { book_styles: false, ..t.clone() },
+        ] {
+            assert_ne!(k, key(&layout, &changed, &p, 300), "{changed:?}");
+        }
+        // These only redraw.
+        assert_eq!(k, key(&layout, &Typography { contrast: 4, ..t.clone() }, &p, 300));
+        assert_eq!(k, key(&Layout { hanging_punctuation: false, ..layout.clone() }, &t, &p, 300));
         assert_ne!(k, key(&Layout { width: 1696, height: 1272, ..layout.clone() }, &t, &p, 300));
         assert_ne!(k, key(&Layout { shaping: TextShaping::Full, ..layout.clone() }, &t, &p, 300));
         let job = Job { layout, typography: t, page: p, dpi: 300 };

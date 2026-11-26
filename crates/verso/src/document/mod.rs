@@ -38,6 +38,9 @@ pub struct Layout {
     pub margins: [u32; 4],
     pub font_size: u32,
     pub shaping: TextShaping,
+    /// Punctuation hangs into the margin. Settings → Advanced; doesn't move
+    /// page breaks, so it isn't part of the pre-layout key.
+    pub hanging_punctuation: bool,
 }
 
 /// How the engine shapes text: a trade between layout speed and typography.
@@ -65,9 +68,19 @@ impl TextShaping {
 pub struct Typography {
     pub font: String,
     pub size_pt: f32,
-    /// 0 = tight, 1 = normal, 2 = loose.
-    pub spacing: usize,
+    /// CSS weight of regular text (400); bold text moves with it.
+    pub weight: i32,
+    /// Steps of glyph gamma from none (0); higher is darker. Only redraws.
+    pub contrast: i32,
+    /// Line height, percent of the font's.
+    pub line_spacing: i32,
+    /// Width of spaces, percent of the font's.
+    pub word_spacing: i32,
+    pub paragraphs: Paragraphs,
     pub justify: bool,
+    pub hyphenate: bool,
+    /// The book's own CSS (sizes, indents, colours); off uses only Verso's.
+    pub book_styles: bool,
     /// The old Narrow/Normal/Wide preset, read once to migrate settings into
     /// `PageLayout` and never written again.
     #[serde(rename = "margins", skip_serializing)]
@@ -76,14 +89,69 @@ pub struct Typography {
 
 impl Default for Typography {
     fn default() -> Self {
-        Self { font: "Literata".into(), size_pt: 10.0, spacing: 1, justify: true, legacy_margins: None }
+        Self {
+            font: "Literata".into(),
+            size_pt: 10.0,
+            weight: 400,
+            contrast: 0,
+            line_spacing: 120,
+            word_spacing: 100,
+            paragraphs: Paragraphs::Book,
+            justify: true,
+            hyphenate: true,
+            book_styles: true,
+            legacy_margins: None,
+        }
+    }
+}
+
+/// How paragraphs are set apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Paragraphs {
+    /// As the book's CSS says.
+    #[default]
+    Book,
+    /// A first-line indent and no gap.
+    Indented,
+    /// A gap and no indent.
+    Spaced,
+}
+impl Paragraphs {
+    pub const ALL: [Paragraphs; 3] = [Paragraphs::Book, Paragraphs::Indented, Paragraphs::Spaced];
+}
+
+/// A setting's range and step.
+#[derive(Clone, Copy, Debug)]
+pub struct Steps {
+    pub min: i32,
+    pub max: i32,
+    pub step: i32,
+}
+impl Steps {
+    pub fn clamp(self, v: i32) -> i32 {
+        v.clamp(self.min, self.max)
+    }
+    /// One step up (`more`) or down, within the range.
+    pub fn next(self, v: i32, more: bool) -> i32 {
+        self.clamp(v + if more { self.step } else { -self.step })
     }
 }
 
 impl Typography {
+    pub const SIZE: Steps = Steps { min: 6, max: 24, step: 1 };
+    pub const WEIGHT: Steps = Steps { min: 300, max: 700, step: 25 };
+    /// Gamma 0.8 to 2.0 (crengine's table index 10 to 31).
+    pub const CONTRAST: Steps = Steps { min: -5, max: 16, step: 1 };
+    pub const LINE_SPACING: Steps = Steps { min: 90, max: 200, step: 5 };
+    pub const WORD_SPACING: Steps = Steps { min: 50, max: 200, step: 10 };
+
     pub fn normalize(&mut self) {
         self.size_pt = if self.size_pt.is_finite() { self.size_pt.clamp(6.0, 24.0) } else { 10.0 };
-        self.spacing = self.spacing.min(2);
+        self.weight = Self::WEIGHT.clamp(self.weight);
+        self.contrast = Self::CONTRAST.clamp(self.contrast);
+        self.line_spacing = Self::LINE_SPACING.clamp(self.line_spacing);
+        self.word_spacing = Self::WORD_SPACING.clamp(self.word_spacing);
     }
     /// The engine's font size in pixels.
     pub fn font_px(&self, dpi: f32) -> i32 {
@@ -287,7 +355,14 @@ mod tests {
         };
         let book = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reader.epub");
         let engine = CreEngine::new(paths, 300).expect("engine starts");
-        let layout = Layout { width: 600, height: 800, margins: [40; 4], font_size: 30, shaping: TextShaping::Full };
+        let layout = Layout {
+            width: 600,
+            height: 800,
+            margins: [40; 4],
+            font_size: 30,
+            shaping: TextShaping::Full,
+            hanging_punctuation: true,
+        };
         let mut doc = engine.open(&book, &layout, None).expect("book opens");
         let pages = doc.page_count();
         assert!(pages > 10, "{pages} pages");
@@ -336,10 +411,61 @@ mod tests {
         assert!(doc.progress().abs_diff(progress) < 100, "position should preserve text progress");
         doc.draw(&mut buf, 600).unwrap();
         let left = buf.clone();
-        doc.set_typography(&Typography { justify: true, ..typography }, 150, &PageLayout::default()).unwrap();
+        let base = Typography { justify: true, ..typography };
+        doc.set_typography(&base, 150, &PageLayout::default()).unwrap();
         doc.draw(&mut buf, 600).unwrap();
         assert_ne!(left, buf, "justification changes rendering");
+        // Every other text setting reaches the engine; contrast only redraws.
+        let justified = buf.clone();
+        let page_count = doc.page_count();
+        for changed in [
+            Typography { weight: 550, ..base.clone() },
+            Typography { contrast: 8, ..base.clone() },
+            Typography { line_spacing: 150, ..base.clone() },
+            Typography { word_spacing: 150, ..base.clone() },
+            Typography { paragraphs: Paragraphs::Spaced, ..base.clone() },
+            Typography { hyphenate: false, ..base.clone() },
+        ] {
+            doc.set_typography(&changed, 150, &PageLayout::default()).unwrap();
+            doc.go_to_position(&position).unwrap();
+            doc.draw(&mut buf, 600).unwrap();
+            assert_ne!(justified, buf, "{changed:?} changes the page");
+            if changed.contrast != 0 {
+                assert_eq!(doc.page_count(), page_count, "contrast keeps the layout");
+                let ink = |b: &[u8]| b.iter().map(|&g| 255 - g as u64).sum::<u64>();
+                assert!(ink(&buf) > ink(&justified), "more contrast is darker");
+            }
+            doc.set_typography(&base, 150, &PageLayout::default()).unwrap();
+        }
+        doc.go_to_position(&position).unwrap();
+        doc.draw(&mut buf, 600).unwrap();
+        assert_eq!(justified, buf, "settings back as they were draw the same page");
         drop(doc);
+        // Hanging punctuation is set when a book opens.
+        let mut hanging = engine
+            .open(
+                &book,
+                &Layout { hanging_punctuation: false, ..layout.clone() },
+                Some((&base, &PageLayout::default())),
+            )
+            .unwrap();
+        let mut hung = engine.open(&book, &layout, Some((&base, &PageLayout::default()))).unwrap();
+        let (mut a, mut b) = (vec![255u8; 600 * 800], vec![255u8; 600 * 800]);
+        hanging.go_to_page(5);
+        hung.go_to_page(5);
+        hanging.draw(&mut a, 600).unwrap();
+        hung.draw(&mut b, 600).unwrap();
+        assert_ne!(a, b, "punctuation hangs into the margin");
+        drop((hanging, hung));
+        // This book has no CSS of its own; the dictionary fixture's sets margins and line height.
+        let styled = book.with_file_name("dictionary-words.epub");
+        let mut other = engine.open(&styled, &layout, Some((&base, &PageLayout::default()))).unwrap();
+        other.draw(&mut buf, 600).unwrap();
+        let with_styles = buf.clone();
+        other.set_typography(&Typography { book_styles: false, ..base.clone() }, 150, &PageLayout::default()).unwrap();
+        other.draw(&mut buf, 600).unwrap();
+        assert_ne!(with_styles, buf, "turning the book's styles off changes the page");
+        drop(other);
         let mut reopened = engine.open(&book, &layout, None).unwrap();
         // A saved position keeps its saved progress; other pages are counted.
         reopened.remember_progress(position.clone(), 4321);

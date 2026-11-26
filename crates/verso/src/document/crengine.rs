@@ -10,10 +10,12 @@ use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
 
 use super::{
-    Document, FontFace, Layout, Link, Metadata, Note, Opening, PageInfo, Paths, Position, SearchBatch, SearchHit,
-    SearchStatus, Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
+    Document, FontFace, Layout, Link, Metadata, Note, Opening, PageInfo, Paragraphs, Paths, Position, SearchBatch,
+    SearchHit, SearchStatus, Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
 };
 
+/// crengine's gamma table without correction; `Typography::contrast` steps from it.
+const GAMMA_NONE: c_int = 15;
 /// Upper limit for crengine's on-disk document cache.
 const CACHE_MAX_BYTES: c_int = 64 << 20;
 /// The font list's file in crengine's cache folder, which crengine leaves
@@ -227,6 +229,7 @@ impl CreEngine {
                     TextShaping::Full => 3,
                 },
             );
+            sys::verso_cre_set_hanging_punctuation(raw, layout.hanging_punctuation as c_int);
             sys::verso_cre_set_font_face(raw, face.as_ptr());
             sys::verso_cre_set_font_size(raw, layout.font_size as c_int);
             sys::verso_cre_set_margins(raw, l, t, r, b);
@@ -507,19 +510,27 @@ impl Document for CreDocument {
         layout.normalize();
         let g = layout.geometry(self.width as i32, self.height as i32, dpi as f32, px);
         let started = Instant::now();
-        let rc = unsafe {
-            sys::verso_cre_typography(
-                self.raw,
-                face.as_ptr(),
-                px,
-                [100, 120, 140][t.spacing],
-                g.side,
-                g.top,
-                g.bottom,
-                t.justify as c_int,
-                (t.font == "Publisher font") as c_int,
-            )
+        let settings = sys::VersoCreTypography {
+            face: face.as_ptr(),
+            px,
+            line_spacing: t.line_spacing,
+            margin: g.side,
+            top: g.top,
+            bottom: g.bottom,
+            justify: t.justify as c_int,
+            publisher: (t.font == "Publisher font") as c_int,
+            weight: t.weight,
+            gamma_index: GAMMA_NONE + t.contrast,
+            word_spacing: t.word_spacing,
+            paragraphs: match t.paragraphs {
+                Paragraphs::Book => 0,
+                Paragraphs::Indented => 1,
+                Paragraphs::Spaced => 2,
+            },
+            hyphenate: t.hyphenate as c_int,
+            book_styles: t.book_styles as c_int,
         };
+        let rc = unsafe { sys::verso_cre_typography(self.raw, &settings) };
         anyhow::ensure!(rc == 0, "couldn't apply text settings");
         self.counted = false;
         log::info!("typography applied in {:?}", started.elapsed());

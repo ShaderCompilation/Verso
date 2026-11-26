@@ -180,7 +180,7 @@ impl LayoutView {
                 stepper
             })
             .collect();
-        let spacing = [1.0, 1.2, 1.4][typography.spacing.min(2)];
+        let spacing = typography.line_spacing as f32 / 100.0;
         let font_px = typography.font_px(t.dpi);
         let mut view = Self {
             layout: layout.clone(),

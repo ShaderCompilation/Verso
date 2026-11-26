@@ -248,6 +248,7 @@ pub struct SystemSettings {
     report_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
     report_sheet: Option<ReportSheet>,
     shaping: Segmented,
+    hanging: Toggle,
 }
 impl SystemSettings {
     pub fn new(t: &Theme, screen: Rect, store: Store, waker: Waker) -> Self {
@@ -396,6 +397,7 @@ impl SystemSettings {
             report_rx: None,
             report_sheet: None,
             shaping,
+            hanging: Toggle::new(settings.hanging_punctuation),
         };
         this.load_folders(t);
         this.sync_check_button();
@@ -1133,7 +1135,10 @@ impl SystemSettings {
             }
         });
         col.note(cx, notes[self.shaping.selected], &notes);
-        col.note(cx, "Applies from the next book you open. Each book is laid out again once.", &[]);
+        col.y += t.mm(3.5);
+        let hanging = ("Hanging punctuation", "Punctuation at line ends hangs into the margin.");
+        col.y = switch_row(cx, &mut self.hanging, hanging, col.x, col.y, col.w) - t.mm(SECTION_GAP_MM);
+        col.note(cx, "Both apply from the next book you open.", &[]);
         // Translate, Help and the SSH section below in portrait, or on the right in landscape.
         let mut col = if portrait {
             col.y += t.mm(3.5);
@@ -1184,6 +1189,11 @@ impl SystemSettings {
             && let Some(on) = self.ssh_toggle.on_gesture(g)
         {
             self.ssh_pending = Some(on);
+        }
+        if let Some(on) = self.hanging.on_gesture(g)
+            && !self.save(cx, "hanging punctuation", |s| s.hanging_punctuation = on)
+        {
+            self.hanging.on = !on;
         }
         if let Some(i) = self.shaping.on_gesture(g)
             && !self.save(cx, "text shaping", |s| s.text_shaping = TextShaping::ALL[i])

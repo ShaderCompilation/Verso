@@ -61,6 +61,8 @@ pub struct Settings {
     pub hostname: String,
     /// Settings → Advanced. Applies from the next book open.
     pub text_shaping: TextShaping,
+    /// Settings → Advanced. Applies from the next book open.
+    pub hanging_punctuation: bool,
     /// Check for updates when Verso starts or the Kindle wakes (at most every
     /// `CHECK_EVERY`, never turning Wi-Fi on). Settings → Device.
     pub check_updates: bool,
@@ -111,6 +113,7 @@ impl Default for Settings {
             developer: false,
             hostname: verso_mdns::DEFAULT_LABEL.to_owned(),
             text_shaping: TextShaping::default(),
+            hanging_punctuation: true,
             check_updates: true,
             folder_preview: FolderPreview::default(),
             library_sort: Default::default(),

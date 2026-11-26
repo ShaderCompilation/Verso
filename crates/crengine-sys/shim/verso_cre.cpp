@@ -1166,6 +1166,13 @@ void verso_cre_set_line_spacing(VersoCreDoc *doc, int percent) {
     }
 }
 
+void verso_cre_set_hanging_punctuation(VersoCreDoc *doc, int on) {
+    try {
+        set_int(doc->view, PROP_FLOATING_PUNCTUATION, on ? 1 : 0);
+    } catch (...) {
+    }
+}
+
 void verso_cre_set_size(VersoCreDoc *doc, int width, int height) {
     try {
         doc->view->Resize(width, height);
@@ -1366,20 +1373,30 @@ int verso_cre_page_info(VersoCreDoc *doc, const char *skip_pos, char *pos_buf, i
         return 0;
     })
 }
-int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,
-                         int margin, int top, int bottom, int justify, int publisher) {
+int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
     GUARD(-1, {
         LVDocView *v = doc->view;
+        const char *face = t->face;
         ldomXPointer pos = v->getDocument() ? v->getBookmark() : ldomXPointer();
         CRPropRef props = LVCreatePropsContainer();
         props->setString(PROP_FONT_FACE, face);
-        props->setInt(PROP_EMBEDDED_FONTS, publisher);
+        props->setInt(PROP_EMBEDDED_FONTS, t->publisher);
+        props->setInt(PROP_EMBEDDED_STYLES, t->book_styles);
+        props->setInt(PROP_FONT_BASE_WEIGHT, t->weight);
+        props->setInt(PROP_TEXTLANG_HYPHENATION_ENABLED, t->hyphenate);
+        props->setInt(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, t->word_spacing);
         v->propsApply(props);
-        v->setFontSize(px);
-        v->setDefaultInterlineSpace(spacing);
-        v->setPageMargins(lvRect(margin, top, margin, bottom));
+        // propsApply() keeps the embedded-styles flag for the next document
+        // only; an open one needs the command.
+        if (v->getDocument() && v->getDocument()->getDocFlag(DOC_FLAG_ENABLE_INTERNAL_STYLES) != (t->book_styles != 0))
+            v->doCommand(DCMD_SET_INTERNAL_STYLES, t->book_styles);
+        // Global, like the base weight: glyphs are cached per gamma, layout isn't.
+        fontMan->SetGammaIndex(t->gamma_index);
+        v->setFontSize(t->px);
+        v->setDefaultInterlineSpace(t->line_spacing);
+        v->setPageMargins(lvRect(t->margin, t->top, t->margin, t->bottom));
         lString8 css = doc->css;
-        if (!publisher) {
+        if (!t->publisher) {
             lString8 escaped;
             for (const char *p = face; *p; ++p) {
                 if (*p == '\'' || *p == '\\') escaped << "\\";
@@ -1387,7 +1404,11 @@ int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing
             }
             css << "\n* { font-family: '" << escaped << "' !important; }\n";
         }
-        css << (justify ? "\np, li { text-align: justify !important; }" : "\np, li { text-align: left !important; }");
+        css << (t->justify ? "\np, li { text-align: justify !important; }" : "\np, li { text-align: left !important; }");
+        if (t->paragraphs == 1)
+            css << "\np { text-indent: 1.2em !important; margin-top: 0 !important; margin-bottom: 0 !important; }";
+        else if (t->paragraphs == 2)
+            css << "\np { text-indent: 0 !important; margin-top: 0 !important; margin-bottom: 0.6em !important; }";
         v->setStyleSheet(css, false);
         if (v->getDocument()) {
             v->Render();

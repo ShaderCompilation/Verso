@@ -1594,6 +1594,7 @@ impl Books {
             margins: [margin; 4],
             font_size: t.pt(settings.typography.size_pt) as u32,
             shaping: settings.text_shaping,
+            hanging_punctuation: settings.hanging_punctuation,
         };
         (layout, settings.typography.clone(), settings.page_layout.clone())
     }

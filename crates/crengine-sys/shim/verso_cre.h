@@ -12,6 +12,30 @@ extern "C" {
 
 typedef struct VersoCreDoc VersoCreDoc;
 typedef struct VersoCreRect { int left, top, right, bottom; } VersoCreRect;
+/* Text settings for verso_cre_typography. Booleans are 0 or 1. */
+typedef struct VersoCreTypography {
+    const char *face;
+    int px;
+    /* Line height, percent of the font's. */
+    int line_spacing;
+    int margin, top, bottom;
+    int justify;
+    /* The book's own fonts instead of `face`. */
+    int publisher;
+    /* CSS weight of regular text (400); bold text moves with it. */
+    int weight;
+    /* crengine's glyph gamma table (15 = none, higher is darker). Only
+     * redraws: the layout doesn't change. */
+    int gamma_index;
+    /* Width of spaces, percent of the font's. */
+    int word_spacing;
+    /* 0 the book's, 1 indented without gaps, 2 gaps without indent. */
+    int paragraphs;
+    int hyphenate;
+    /* The book's own CSS. */
+    int book_styles;
+} VersoCreTypography;
+
 typedef struct VersoCrePageInfo {
     int page;
     int progress;
@@ -102,6 +126,8 @@ int verso_cre_get_font_size(VersoCreDoc *doc);
 void verso_cre_set_margins(VersoCreDoc *doc, int left, int top, int right, int bottom);
 void verso_cre_set_line_spacing(VersoCreDoc *doc, int percent);
 void verso_cre_set_size(VersoCreDoc *doc, int width, int height);
+/* Punctuation hangs into the margin. Doesn't move page breaks. */
+void verso_cre_set_hanging_punctuation(VersoCreDoc *doc, int on);
 
 /* Opens a book and picks the hyphenation language from its metadata.
  * Returns 0 on success. */
@@ -145,8 +171,9 @@ int verso_cre_progress(VersoCreDoc *doc);
 long long verso_cre_text_offset(VersoCreDoc *doc, const char *position);
 /* Characters of text in the whole book. */
 long long verso_cre_text_length(VersoCreDoc *doc);
-int verso_cre_typography(VersoCreDoc *doc, const char *face, int px, int spacing,
-                         int margin, int top, int bottom, int justify, int publisher);
+/* Applies text settings; after loading, lays the book out again (when they
+ * change it) and keeps the reading position. Returns 0 on success. */
+int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t);
 int verso_cre_toc_count(VersoCreDoc *doc);
 int verso_cre_toc_entry(VersoCreDoc *doc, int index, int field, char *buf, int len);
 int verso_cre_images(VersoCreDoc *doc);

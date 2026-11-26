@@ -202,14 +202,17 @@ or `☀` / battery in the Reader Menu) to open the **Top Drawer**:
 Typography and page layout are **global** across your library so books reopen
 instantly from cache.
 
-- **Text** (Reader Menu → **Text**, live preview above the sheet):
+- **Text** (Reader Menu → **Text**, two pages, live preview above the sheet):
   - **Font:** bundled **Literata** (default), the Kindle's built-in fonts
     (Bookerly, Caecilia, Baskerville, Palatino, etc.), and any `.ttf`/`.otf`
     files you drop into `/mnt/us/fonts/`. Books with embedded fonts also list
     **Publisher font** first.
-  - **Size:** 6–24 pt in 1 pt steps (hold to repeat).
-  - **Spacing:** Tight, Normal or Loose.
-  - **Justify:** justified or left-aligned.
+  - **Size** 6–24 pt, **Weight** 300–700 (400 regular; fonts without that
+    weight are thickened or thinned), **Contrast** (darker or lighter letters,
+    without laying the book out again), **Line spacing** 90–200% and **Word
+    spacing** 50–200%. Hold a side to repeat.
+  - **Paragraphs** (the book's, *Indent* or *Spaced*), **Justify**,
+    **Hyphenation**, and **Book styles** (off ignores the book's own CSS).
 - **Layout** (Reader Menu → **Layout**, full-screen editor applied on close):
   - **Top bar** (default Off) and **Bottom bar** (default On: chapter title,
     page / total, percent): three tappable slots each (left, centre, right).
@@ -222,12 +225,12 @@ instantly from cache.
     2–20 mm. Landscape centres the text column to keep line length comfortable.
 - **Refresh interval** (**Settings → Display → Full page refresh**): *Every
   page*, *Every 6*, *Every 12* or *Never* (default). Chapter starts and images
-  always flash cleanly; rapid flipping defers periodic flashes so turns stay
-  responsive.
+  always flash; rapid flipping defers periodic flashes.
 - **Text shaping** (**Settings → Advanced**): *Light* (default, HarfBuzz
   kerning without ligatures), *Full* (full HarfBuzz ligatures and complex
-  scripts) or *FreeType* (fastest layout, simpler spacing). Applies from the
-  next book open.
+  scripts) or *FreeType* (fastest layout, simpler spacing). **Hanging
+  punctuation** (default On) lets punctuation at line ends sit in the margin.
+  Both apply from the next book open.
 
 ---
 

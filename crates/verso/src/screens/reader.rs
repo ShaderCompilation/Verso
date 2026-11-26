@@ -5518,7 +5518,7 @@ mod tests {
         let Overlay::Text(sheet) = &mut r.overlay else { unreachable!() };
         let more = crate::geom::Point::new(
             r.screen.w - theme.margin - 4,
-            r.screen.bottom() - theme.mm(64.0) + theme.mm(13.0) + theme.mm(11.5) + theme.mm(5.5),
+            r.screen.bottom() - theme.mm(TextSheet::HEIGHT_MM) + theme.mm(13.0) + theme.mm(11.5) + theme.mm(5.5),
         );
         let _ = sheet.on_gesture(&Gesture::Down(more), &mut r.settings.typography);
         let _ = sheet.on_gesture(&Gesture::LongPress(more), &mut r.settings.typography);

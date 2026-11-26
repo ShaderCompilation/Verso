@@ -18,6 +18,26 @@ pub struct VersoCreRect {
     pub bottom: c_int,
 }
 
+/// Text settings for `verso_cre_typography` (see `verso_cre.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VersoCreTypography {
+    pub face: *const c_char,
+    pub px: c_int,
+    pub line_spacing: c_int,
+    pub margin: c_int,
+    pub top: c_int,
+    pub bottom: c_int,
+    pub justify: c_int,
+    pub publisher: c_int,
+    pub weight: c_int,
+    pub gamma_index: c_int,
+    pub word_spacing: c_int,
+    pub paragraphs: c_int,
+    pub hyphenate: c_int,
+    pub book_styles: c_int,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct VersoCrePageInfo {
@@ -90,6 +110,7 @@ unsafe extern "C" {
     pub fn verso_cre_set_margins(doc: *mut VersoCreDoc, left: c_int, top: c_int, right: c_int, bottom: c_int);
     pub fn verso_cre_set_line_spacing(doc: *mut VersoCreDoc, percent: c_int);
     pub fn verso_cre_set_size(doc: *mut VersoCreDoc, width: c_int, height: c_int);
+    pub fn verso_cre_set_hanging_punctuation(doc: *mut VersoCreDoc, on: c_int);
 
     pub fn verso_cre_load(doc: *mut VersoCreDoc, path: *const c_char) -> c_int;
     pub fn verso_cre_render(doc: *mut VersoCreDoc);
@@ -123,17 +144,7 @@ unsafe extern "C" {
     pub fn verso_cre_progress(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_text_offset(doc: *mut VersoCreDoc, position: *const c_char) -> std::os::raw::c_longlong;
     pub fn verso_cre_text_length(doc: *mut VersoCreDoc) -> std::os::raw::c_longlong;
-    pub fn verso_cre_typography(
-        doc: *mut VersoCreDoc,
-        face: *const c_char,
-        px: c_int,
-        spacing: c_int,
-        margin: c_int,
-        top: c_int,
-        bottom: c_int,
-        justify: c_int,
-        publisher: c_int,
-    ) -> c_int;
+    pub fn verso_cre_typography(doc: *mut VersoCreDoc, t: *const VersoCreTypography) -> c_int;
     pub fn verso_cre_toc_count(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_toc_entry(
         doc: *mut VersoCreDoc,
