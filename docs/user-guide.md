@@ -208,11 +208,12 @@ instantly from cache.
     files you drop into `/mnt/us/fonts/`. Books with embedded fonts also list
     **Publisher font** first.
   - **Size** 6–24 pt, **Weight** 300–700 (400 regular; fonts without that
-    weight are thickened or thinned), **Contrast** (darker or lighter letters,
-    without laying the book out again), **Line spacing** 90–200% and **Word
-    spacing** 50–200%. Hold a side to repeat.
-  - **Paragraphs** (the book's, *Indent* or *Spaced*), **Justify**,
-    **Hyphenation**, and **Book styles** (off ignores the book's own CSS).
+    weight are thickened or thinned), **Line spacing** 90–200% and
+    **Hyphenation**.
+  - On the second page: **Contrast** (darker or lighter letters, without
+    laying the book out again), **Word spacing** 50–200%, **Paragraphs** (the
+    book's, *Indent* or *Spaced*), **Justify**, and **Book styles** (off
+    ignores the book's own CSS). Hold a side of a number to repeat.
 - **Layout** (Reader Menu → **Layout**, full-screen editor applied on close):
   - **Top bar** (default Off) and **Bottom bar** (default On: chapter title,
     page / total, percent): three tappable slots each (left, centre, right).

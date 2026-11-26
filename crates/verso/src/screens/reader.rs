@@ -5591,11 +5591,14 @@ mod tests {
         r.shown = Some(test_page(1, 3));
         r.cache.insert(test_page(1, 4), 3);
         r.text(&theme);
+        // Contrast's + is on the first row of the sheet's second page.
         let more = crate::geom::Point::new(
             r.screen.w - theme.margin - 4,
-            r.screen.bottom() - theme.mm(TextSheet::HEIGHT_MM) + theme.mm(13.0) + 3 * theme.mm(11.5) + theme.mm(5.5),
+            r.screen.bottom() - theme.mm(TextSheet::HEIGHT_MM) + theme.mm(13.0) + theme.mm(5.5),
         );
+        let (from, to) = (more, crate::geom::Point::new(theme.margin, more.y));
         test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Swipe { dir: Direction::Left, from, to }, cx);
             r.on_gesture(Gesture::Down(more), cx);
             r.on_gesture(Gesture::Tap(more), cx);
         });

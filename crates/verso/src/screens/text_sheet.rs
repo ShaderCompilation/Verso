@@ -16,8 +16,8 @@ pub enum TextEvent {
 
 /// The rows of each page, in order of how often they're changed.
 const PAGES: [[&str; 5]; 2] = [
-    ["Font", "Size", "Weight", "Contrast", "Line spacing"],
-    ["Word spacing", "Paragraphs", "Justify", "Hyphenation", "Book styles"],
+    ["Font", "Size", "Weight", "Line spacing", "Hyphenation"],
+    ["Contrast", "Word spacing", "Paragraphs", "Justify", "Book styles"],
 ];
 const ROW_MM: f32 = 11.5;
 
@@ -413,12 +413,12 @@ mod tests {
             sheet.on_gesture(&Gesture::Down(p), typography);
             sheet.on_gesture(&Gesture::Tap(p), typography)
         };
-        // Hyphenation's switch sits where Contrast's stepper is on the first page.
-        let hyphenation = sheet.hyphenate.rect().center();
-        assert!(matches!(tap(&mut sheet, &mut typography, hyphenation), Some(TextEvent::Changed)));
-        assert_eq!((typography.contrast, typography.hyphenate), (Typography::CONTRAST.step, true));
+        // Both pages end in a switch: Hyphenation, then Book styles in its place.
+        let last = sheet.hyphenate.rect().center();
+        assert!(matches!(tap(&mut sheet, &mut typography, last), Some(TextEvent::Changed)));
+        assert_eq!((typography.hyphenate, typography.book_styles), (false, true));
         sheet.pager.page = 1;
-        assert!(matches!(tap(&mut sheet, &mut typography, hyphenation), Some(TextEvent::Changed)));
-        assert_eq!((typography.contrast, typography.hyphenate), (Typography::CONTRAST.step, false));
+        assert!(matches!(tap(&mut sheet, &mut typography, last), Some(TextEvent::Changed)));
+        assert_eq!((typography.hyphenate, typography.book_styles), (false, false));
     }
 }
