@@ -1,7 +1,8 @@
 //! The update screens: the sheet that offers an
 //! update (Home's notice and Settings open it), the screen that downloads
 //! it and restarts Verso to install it, the question before going back to
-//! the previous version, and the sheet that says why the launcher went back.
+//! the previous version, the sheet that says why the launcher went back,
+//! and "What's new" after an update.
 use std::sync::Arc;
 
 use verso_update::Version;
@@ -18,6 +19,7 @@ use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::{Button, ButtonKind, Sheet, TopBar};
 use crate::update::download::{DownloadError, Step};
+use crate::update::whats_new::{self, WhatsNew};
 use crate::update::{self, DownloadState, Status, Updates};
 
 /// A sheet at the bottom in portrait, or at the right in landscape, where a
@@ -564,6 +566,107 @@ impl RollbackSheet {
     }
 }
 
+/// "Updated to Verso X": once, on the first start after an update, over
+/// whatever screen is open (an app `Notice`), with the notes of every
+/// version since the one before and "From Verso Y" where that is known.
+/// Settings opens it for this version alone (`for_version`). The notes
+/// fill the sheet above OK; notes that need pages get a pager and, in
+/// portrait, the tallest sheet, as on the offer sheet.
+pub struct WhatsNewSheet {
+    sheet: Sheet,
+    screen: Rect,
+    /// "From Verso Y", small, above the notes.
+    from: Option<String>,
+    from_rect: Rect,
+    notes: PagedText,
+    ok: Button,
+    /// After an update: told on close, so the sheet isn't shown again.
+    updates: Option<Arc<Updates>>,
+}
+
+impl WhatsNewSheet {
+    /// After an update; closing it remembers this version as seen.
+    pub fn after_update(t: &Theme, screen: Rect, updates: Arc<Updates>, news: &WhatsNew) -> Self {
+        let from = news.from.as_ref().map(|v| format!("From Verso {v}"));
+        Self::new(t, screen, format!("Updated to Verso {}", news.version), from, &news.text(), Some(updates))
+    }
+
+    /// The built-in notes of one version (Settings: this version), or a
+    /// line saying there are none.
+    #[allow(dead_code)] // For Settings → Updates, which doesn't open it yet.
+    pub fn for_version(t: &Theme, screen: Rect, version: &Version) -> Self {
+        let notes = whats_new::notes_for(version).unwrap_or_default();
+        Self::new(t, screen, format!("What’s new in Verso {version}"), None, notes, None)
+    }
+
+    fn new(
+        t: &Theme,
+        screen: Rect,
+        title: String,
+        from: Option<String>,
+        notes: &str,
+        updates: Option<Arc<Updates>>,
+    ) -> Self {
+        let mut this = Self {
+            sheet: sheet(title, t.mm(100.0), screen, t),
+            screen,
+            from,
+            from_rect: Rect::default(),
+            notes: release_notes::paged(notes, Rect::default(), t),
+            ok: Button::new("OK", ButtonKind::Primary),
+            updates,
+        };
+        this.place(t);
+        this
+    }
+
+    /// OK along the bottom, "From" at the top, the notes between.
+    fn place(&mut self, t: &Theme) {
+        let c = self.sheet.content(t);
+        self.ok.place(Rect::new(c.x, c.bottom() - t.margin - t.button_h, c.w, t.button_h), t);
+        self.from_rect = Rect { h: if self.from.is_some() { t.mm(7.0) } else { 0 }, ..c };
+        let top = self.from_rect.bottom() + if self.from.is_some() { t.mm(3.0) } else { 0 };
+        let bottom = self.ok.rect().y - t.mm(4.0);
+        self.notes.place(Rect::new(c.x, top, c.w, (bottom - top).max(1)), t);
+    }
+
+    /// Lays the notes out; notes that need pages get the tallest bottom sheet.
+    fn lay_out(&mut self, text: &mut crate::gfx::TextRenderer, t: &Theme) {
+        if self.notes.laid_out() {
+            return;
+        }
+        self.notes.lay_out(text);
+        if self.screen.w <= self.screen.h && self.notes.pager.pages > 1 {
+            self.sheet = sheet(self.sheet.title.clone(), self.screen.h, self.screen, t);
+            self.place(t);
+            self.notes.lay_out(text);
+        }
+    }
+
+    pub fn draw(&mut self, cx: &mut DrawCx) {
+        let t = cx.theme;
+        self.lay_out(cx.text, t);
+        self.sheet.draw(cx);
+        if let Some(from) = &self.from {
+            cx.paragraph(from, t.small.gray(INK2), self.from_rect, HAlign::Left);
+        }
+        self.notes.draw(cx);
+        self.ok.draw(cx);
+    }
+
+    /// True when OK was tapped (or the sheet closed). Swipes turn the pages.
+    pub fn on_gesture(&mut self, g: &Gesture) -> bool {
+        if self.sheet.on_gesture(g) || self.ok.on_gesture(g) {
+            if let Some(updates) = &self.updates {
+                updates.saw_whats_new();
+            }
+            return true;
+        }
+        self.notes.on_gesture(g);
+        false
+    }
+}
+
 #[cfg(test)]
 fn sample_offer(notes: &str) -> Offer {
     Offer {
@@ -607,6 +710,27 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
             sheet = sheet.body(r, text_h(text, why, t.small, r.w));
         }
         samples.push(sheet);
+    }
+    let several = |n: usize| WhatsNew {
+        version: "10.12.3".parse().unwrap(),
+        from: Some("10.11.0".parse().unwrap()),
+        notes: vec![("10.12.3".parse().unwrap(), "Faster page turns.\n\n- Dictionary fixes.\n"); n],
+    };
+    let updates = Arc::new(Updates::new(update::Paths { root: "/nonexistent".into() }, update::Source::configured()));
+    for (name, news) in [("WhatsNewSheet", several(1)), ("WhatsNewSheet pages", several(5))] {
+        let mut w = WhatsNewSheet::after_update(t, screen, updates.clone(), &news);
+        w.lay_out(text, t);
+        let mut buttons = vec![w.ok.rect()];
+        if w.notes.pager.visible() {
+            buttons.push(w.notes.pager.rect());
+        }
+        let needed = w.notes.one_page_height().unwrap_or(t.body.line_height().ceil() as i32);
+        let from = w.from.clone().unwrap_or_default();
+        samples.push(
+            Parts::new(name, w.sheet.rect(), buttons)
+                .body(w.notes.body(), needed)
+                .body(w.from_rect, text_h(text, &from, t.small, w.from_rect.w)),
+        );
     }
     let back = GoBackSheet::new(t, screen, &"10.12.3".parse().unwrap(), &"10.11.0".parse().unwrap());
     samples.push(

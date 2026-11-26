@@ -7,6 +7,7 @@
 //! repeatable, played in order) run first.
 //! `--device basic-167|basic-300|pw5|pw6|oasis3|colorsoft|scribe` picks the
 //! simulated Kindle, with or without a window (platform/sim_device.rs).
+//! `VERSO_WHATS_NEW_FROM=<version>` shows "What's new" since that version.
 
 #[cfg(all(feature = "desktop", feature = "kindle"))]
 compile_error!("Enable exactly one backend: `desktop` (default) or `kindle`.");
@@ -306,11 +307,26 @@ fn run() -> Result<i32> {
         log::info!("showing the rollback note: {:?}", rollback.reason);
         app.show_rollback(screens::update::RollbackSheet::new(&theme, bounds, store.updates(), &rollback));
     }
+    let home = matches!(opts.screen.as_deref(), None | Some("home"));
+    let setup = home && screens::setup::due(&store.settings());
+    // After an update, what's new in it, once; not over first-time setup.
+    if let Some(news) = store.updates().whats_new() {
+        if setup {
+            store.updates().saw_whats_new();
+        } else {
+            log::info!("showing what's new since {:?}", news.from);
+            app.show_notice(app::Notice::WhatsNew(Box::new(screens::update::WhatsNewSheet::after_update(
+                &theme,
+                bounds,
+                store.updates(),
+                &news,
+            ))));
+        }
+    }
     let model = platform.model();
     app.set_light_range(model.light_range);
     // First-time setup over Home; it shows the untested-model line itself.
-    let home = matches!(opts.screen.as_deref(), None | Some("home"));
-    if home && screens::setup::due(&store.settings()) {
+    if setup {
         log::info!("showing first-time setup");
         let note = screens::setup::untested_note(&store, &model);
         app.push_screen(Box::new(screens::setup::SetupScreen::new(

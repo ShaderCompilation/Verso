@@ -2,7 +2,7 @@
 //! into redraws, and works out which parts of the display to refresh.
 //!
 //! App-wide overlays draw in fixed z-order over the active screen: `TopDrawer`,
-//! queued startup `Notice`s (rollback, untested model), `UsbPrompt`,
+//! queued startup `Notice`s (rollback, what's new, untested model), `UsbPrompt`,
 //! `ExitPrompt` and `Toast`. `fast_debt` queues areas last refreshed with
 //! `RefreshMode::Fast` (1-bit DU) for an automatic `Ui` pass once the finger
 //! lifts. Live orientation changes save screens via `prepare_orientation`, drop
@@ -19,7 +19,7 @@ use crate::platform::{
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
 use crate::screens::untested::UntestedSheet;
-use crate::screens::update::RollbackSheet;
+use crate::screens::update::{RollbackSheet, WhatsNewSheet};
 use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBookAction};
 use crate::store::Store;
 use crate::ui::damage::{self, FrameDiff};
@@ -46,14 +46,17 @@ impl Services {
 pub enum Notice {
     /// Why the launcher went back to this version.
     Rollback(RollbackSheet),
+    /// What changed since the version before an update.
+    WhatsNew(Box<WhatsNewSheet>),
     /// This Kindle model hasn't been tested yet.
     Untested(UntestedSheet),
 }
 
 impl Notice {
-    fn draw(&self, cx: &mut DrawCx) {
+    fn draw(&mut self, cx: &mut DrawCx) {
         match self {
             Self::Rollback(sheet) => sheet.draw(cx),
+            Self::WhatsNew(sheet) => sheet.draw(cx),
             Self::Untested(sheet) => sheet.draw(cx),
         }
     }
@@ -62,6 +65,7 @@ impl Notice {
     fn on_gesture(&mut self, g: &Gesture) -> bool {
         match self {
             Self::Rollback(sheet) => sheet.on_gesture(g),
+            Self::WhatsNew(sheet) => sheet.on_gesture(g),
             Self::Untested(sheet) => sheet.on_gesture(g),
         }
     }
@@ -237,6 +241,7 @@ impl App {
         } else if let Some(notice) = self.notices.front() {
             match notice {
                 Notice::Rollback(_) => "RollbackNotice",
+                Notice::WhatsNew(_) => "WhatsNewNotice",
                 Notice::Untested(_) => "UntestedNotice",
             }
         } else if self.drawer.is_some() {
@@ -372,7 +377,7 @@ impl App {
             if let Some(drawer) = &mut self.drawer {
                 drawer.draw(&mut cx);
             }
-            if let Some(notice) = self.notices.front() {
+            if let Some(notice) = self.notices.front_mut() {
                 notice.draw(&mut cx);
             }
             if let Some(prompt) = &mut self.usb_prompt {

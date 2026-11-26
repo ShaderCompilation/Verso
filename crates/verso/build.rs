@@ -42,4 +42,31 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_owned());
 
     println!("cargo:rustc-env=VERSO_GIT_COMMIT={commit}");
+
+    embed_release_notes();
+}
+
+/// `dist/release-notes/<version>.txt` as `(version, text)` pairs in
+/// `$OUT_DIR/release_notes.rs`, for "What's new" (`update/whats_new.rs`).
+fn embed_release_notes() {
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../dist/release-notes");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut notes: Vec<(String, PathBuf)> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter_map(|p| Some((p.file_name()?.to_str()?.strip_suffix(".txt")?.to_owned(), p.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    notes.sort();
+    let mut out = String::from("&[\n");
+    for (version, path) in notes {
+        let path = path.canonicalize().expect("a release notes file");
+        out.push_str(&format!("    ({version:?}, include_str!({:?})),\n", path.display().to_string()));
+    }
+    out.push_str("]\n");
+    let target = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("release_notes.rs");
+    std::fs::write(target, out).expect("writing release_notes.rs");
 }

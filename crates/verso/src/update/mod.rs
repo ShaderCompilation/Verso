@@ -2,8 +2,10 @@
 //! fetches the signed release manifest, verifies it, works out what would
 //! change and saves the result in `state.json`; Settings shows it. The
 //! download: another worker fetches the changed components' archives,
-//! verifies and stages them for the launcher (`download.rs`).
+//! verifies and stages them for the launcher (`download.rs`). After an
+//! update, "What's new" (`whats_new.rs`).
 pub mod download;
+pub mod whats_new;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +21,7 @@ use crate::net::{Client, FetchError};
 use crate::platform::wifi::{self, Link};
 use crate::platform::{Battery, Waker, awake};
 use download::{DownloadError, Step};
+use whats_new::{Due, WhatsNew};
 
 /// The newest release's manifest: a stable GitHub link that redirects to
 /// the latest release's file. `VERSO_UPDATE_URL` replaces it.
@@ -825,6 +828,37 @@ impl Updates {
         Some((current, previous?))
     }
 
+    /// At start: the notes to show once after an update, from the last
+    /// version seen (else the one the launcher updated from); otherwise
+    /// None, remembering this version quietly where it is new (see
+    /// `whats_new::due`). One or two small file reads.
+    /// `VERSO_WHATS_NEW_FROM=<version>` pretends that version was seen
+    /// last on a release install, for simulator captures.
+    pub fn whats_new(&self) -> Option<WhatsNew> {
+        let pretend: Option<Version> = std::env::var("VERSO_WHATS_NEW_FROM").ok().and_then(|v| v.parse().ok());
+        let seen = pretend.clone().or_else(|| read_seen(&self.paths.root.join(whats_new::SEEN_PATH)));
+        let updated_from =
+            || launcher::previous(&self.paths.root).filter(|p| p.current == self.app).and_then(|p| p.previous);
+        let seen = seen.or_else(updated_from);
+        let dev = pretend.is_none() && self.lock().installed.as_ref().and_then(Option::as_ref).is_none_or(|i| i.dev);
+        match whats_new::due(&self.app, seen.as_ref(), dev, &whats_new::built_in()) {
+            Due::Nothing => None,
+            Due::Remember => {
+                self.saw_whats_new();
+                None
+            }
+            Due::Show(notes) => Some(WhatsNew { version: self.app.clone(), from: updated_from().or(seen), notes }),
+        }
+    }
+
+    /// "What's new" for this version was seen (or isn't for showing).
+    pub fn saw_whats_new(&self) {
+        let path = self.paths.root.join(whats_new::SEEN_PATH);
+        if let Err(e) = crate::store::atomic_bytes(&path, format!("{}\n", self.app).as_bytes()) {
+            log::error!("writing {}: {e:#}", path.display());
+        }
+    }
+
     /// At startup: if the launcher went back from a version (it didn't
     /// start, or the person asked), that version counts as skipped, so it
     /// isn't offered again. `rollback.json` stays for the message.
@@ -981,6 +1015,11 @@ fn read_installed(path: &Path) -> Option<Installed> {
             None
         }
     }
+}
+
+fn read_seen(path: &Path) -> Option<Version> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.trim().parse().map_err(|_| log::warn!("ignoring {}: {:?}", path.display(), text.trim())).ok()
 }
 
 fn read_state(path: &Path) -> State {
