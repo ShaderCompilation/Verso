@@ -5,7 +5,7 @@
 //! work without the sheet, which setup's From KOReader page also shows.
 use crate::geom::Rect;
 use crate::gfx::HAlign;
-use crate::koreader::bulk::{Event, Imported, Job, Preview, Scan, UNREADABLE_SHOWN};
+use crate::koreader::bulk::{Event, ImportPhase, Imported, Job, Preview, Scan, UNREADABLE_SHOWN};
 use crate::platform::Waker;
 use crate::store::Store;
 use crate::ui::gesture::Gesture;
@@ -17,8 +17,8 @@ enum Stage {
     /// Books read so far, of the books to read (0 of 0 until the list is in).
     Scanning(usize, usize),
     Preview(Box<Scan>),
-    /// Writing this many books' states.
-    Importing(usize),
+    /// Writing books' states or highlights: phase, done so far, of the phase's total.
+    Importing(ImportPhase, usize, usize),
     /// What was imported.
     Done(String),
     /// What went wrong.
@@ -47,7 +47,7 @@ impl Flow {
     }
 
     pub(crate) fn importing(&self) -> bool {
-        matches!(self.stage, Stage::Importing(_))
+        matches!(self.stage, Stage::Importing(..))
     }
 
     /// Finished: a preview, the import's result or an error.
@@ -60,8 +60,15 @@ impl Flow {
         if !self.importable() {
             return;
         }
-        let Stage::Preview(scan) = std::mem::replace(&mut self.stage, Stage::Importing(0)) else { return };
-        self.stage = Stage::Importing(scan.preview.changes.max(scan.preview.highlight_books));
+        let Stage::Preview(scan) = std::mem::replace(&mut self.stage, Stage::Importing(ImportPhase::Progress, 0, 0))
+        else {
+            return;
+        };
+        self.stage = if scan.preview.changes > 0 {
+            Stage::Importing(ImportPhase::Progress, 0, scan.preview.changes)
+        } else {
+            Stage::Importing(ImportPhase::Highlights, 0, scan.preview.highlight_books)
+        };
         self.job = Some(Job::import(self.store.clone(), *scan, self.waker.clone()));
     }
 
@@ -70,31 +77,49 @@ impl Flow {
         self.job = None;
     }
 
+    fn apply(&mut self, event: Event) -> Option<String> {
+        match event {
+            Event::Scanning(done, total) => {
+                self.stage = Stage::Scanning(done, total);
+                None
+            }
+            Event::Scanned(scan) => {
+                self.stage = Stage::Preview(scan);
+                None
+            }
+            Event::Importing(phase, done, total) => {
+                self.stage = Stage::Importing(phase, done, total);
+                None
+            }
+            Event::Imported(result) => match &result.error {
+                None => {
+                    let text = imported_text(&result);
+                    self.stage = Stage::Done(text.clone());
+                    Some(text)
+                }
+                Some(e) => {
+                    log::error!("KOReader import: {e:#}");
+                    self.stage = Stage::Failed(format!(
+                        "{}, then couldn't save: {e}.\n\nRun the import again to finish the rest.",
+                        failed_text(&result),
+                    ));
+                    None
+                }
+            },
+        }
+    }
+
     /// Takes the job's events: whether the stage or the progress changed,
     /// and what was imported once the import finished.
     pub(crate) fn on_background(&mut self) -> (bool, Option<String>) {
         let Some(job) = self.job.as_ref() else { return (false, None) };
         let finished = job.finished();
+        let events = job.events();
         let (mut changed, mut imported) = (false, None);
-        for event in job.events() {
+        for event in events {
             changed = true;
-            match event {
-                Event::Scanning(done, total) => self.stage = Stage::Scanning(done, total),
-                Event::Scanned(scan) => self.stage = Stage::Preview(scan),
-                Event::Imported(result) => match &result.error {
-                    None => {
-                        let text = imported_text(&result);
-                        self.stage = Stage::Done(text.clone());
-                        imported = Some(text);
-                    }
-                    Some(e) => {
-                        log::error!("KOReader import: {e:#}");
-                        self.stage = Stage::Failed(format!(
-                            "{}, then couldn't save: {e}.\n\nRun the import again to finish the rest.",
-                            failed_text(&result),
-                        ));
-                    }
-                },
+            if let Some(text) = self.apply(event) {
+                imported = Some(text);
             }
         }
         if finished {
@@ -102,7 +127,7 @@ impl Flow {
             // The thread ended without its result: it couldn't start.
             match self.stage {
                 Stage::Scanning(..) => self.stage = Stage::Failed("Couldn't read KOReader data.".into()),
-                Stage::Importing(_) => self.stage = Stage::Failed("Couldn't import from KOReader.".into()),
+                Stage::Importing(..) => self.stage = Stage::Failed("Couldn't import from KOReader.".into()),
                 _ => {}
             }
             changed = true;
@@ -116,7 +141,13 @@ impl Flow {
             Stage::Scanning(_, 0) => ("Reading KOReader data…".into(), ""),
             Stage::Scanning(done, total) => (format!("Reading KOReader data… {done} of {total}"), ""),
             Stage::Preview(scan) => preview_text(&scan.preview),
-            Stage::Importing(n) => (format!("Importing {}…", counted(*n, "book")), ""),
+            Stage::Importing(phase, done, total) => {
+                let what = match phase {
+                    ImportPhase::Progress => "progress",
+                    ImportPhase::Highlights => "highlights",
+                };
+                (format!("Importing {what}… {done} of {total}"), "")
+            }
             Stage::Done(text) => (format!("{text}."), ""),
             Stage::Failed(message) => (message.clone(), ""),
         }
@@ -413,5 +444,47 @@ mod tests {
         assert_eq!(preview_text(&Preview::default()).0, "No KOReader progress or highlights found.");
         let only = Preview { highlight_books: 1, notes: 1, ..Default::default() };
         assert_eq!(preview_text(&only).0, "1 book with new highlights: 1 note");
+    }
+
+    #[test]
+    fn importing_progress_uses_phase_specific_wording_and_preview_denominators() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().to_path_buf());
+        let mut scan = Scan::default();
+        scan.preview = Preview { changes: 26, highlight_books: 22, ..Default::default() };
+        let mut flow =
+            Flow { store: store.clone(), waker: Waker::new(|| {}), stage: Stage::Preview(Box::new(scan)), job: None };
+
+        // Starting import from progress + highlights begins in the progress phase with the preview's changes count.
+        flow.import();
+        assert!(flow.importing());
+        assert_eq!(flow.text(), ("Importing progress… 0 of 26".into(), ""));
+        flow.job = None;
+
+        // Progress updates reflect each phase and its own denominator.
+        assert_eq!(flow.apply(Event::Importing(ImportPhase::Progress, 12, 26)), None);
+        assert_eq!(flow.text(), ("Importing progress… 12 of 26".into(), ""));
+        assert_eq!(flow.apply(Event::Importing(ImportPhase::Highlights, 0, 22)), None);
+        assert_eq!(flow.text(), ("Importing highlights… 0 of 22".into(), ""));
+        assert_eq!(flow.apply(Event::Importing(ImportPhase::Highlights, 22, 22)), None);
+        assert_eq!(flow.text(), ("Importing highlights… 22 of 22".into(), ""));
+
+        let done = flow.apply(Event::Imported(Imported {
+            written: 26,
+            total: 26,
+            highlights_written: 22,
+            highlights_total: 22,
+            error: None,
+        }));
+        assert!(!flow.importing());
+        assert_eq!(done.as_deref(), Some("Imported KOReader progress for 26 books and highlights for 22"));
+
+        // Highlights-only preview starts directly in the highlights phase.
+        let mut hl_scan = Scan::default();
+        hl_scan.preview = Preview { highlight_books: 4, highlights: 9, ..Default::default() };
+        let mut hl_flow = Flow { store, waker: Waker::new(|| {}), stage: Stage::Preview(Box::new(hl_scan)), job: None };
+        hl_flow.import();
+        assert_eq!(hl_flow.text(), ("Importing highlights… 0 of 4".into(), ""));
+        hl_flow.job = None;
     }
 }

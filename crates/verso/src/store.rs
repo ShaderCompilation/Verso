@@ -459,11 +459,19 @@ impl Store {
     /// at the first failure. Home and the opened order aren't updated per
     /// book: the caller rebuilds them once. Returns how many were written,
     /// and the error that stopped the rest.
-    pub fn save_books(&self, states: &[(String, BookState)]) -> (usize, Option<anyhow::Error>) {
+    /// `progress(written, total)` hears of each committed book, starting
+    /// with `(0, total)` when `states` isn't empty.
+    pub fn save_books(
+        &self,
+        states: &[(String, BookState)],
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> (usize, Option<anyhow::Error>) {
         if states.is_empty() {
             return (0, None);
         }
-        let mut files = Vec::with_capacity(states.len());
+        let total = states.len();
+        progress(0, total);
+        let mut files = Vec::with_capacity(total);
         for (id, state) in states {
             match serde_json::to_vec(state) {
                 Ok(bytes) => files.push((format!("{id}.json"), bytes)),
@@ -472,7 +480,7 @@ impl Store {
                 }
             }
         }
-        let (written, error) = atomic_batch(&self.root.join("books"), &files);
+        let (written, error) = atomic_batch_with_progress(&self.root.join("books"), &files, progress);
         let error = error.map(|(index, e)| match index.and_then(|i| states.get(i)) {
             Some((id, _)) => e.context(format!("saving the reading state of {id}")),
             None => e.context("saving reading states"),
@@ -877,15 +885,28 @@ pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 /// into place and `error` carries the failing file index (`None` for a batch or
 /// directory sync failure).
 pub(crate) fn atomic_batch(dir: &Path, files: &[(String, Vec<u8>)]) -> (usize, Option<(Option<usize>, anyhow::Error)>) {
+    atomic_batch_with_progress(dir, files, &mut |_, _| {})
+}
+
+fn atomic_batch_with_progress(
+    dir: &Path,
+    files: &[(String, Vec<u8>)],
+    progress: &mut dyn FnMut(usize, usize),
+) -> (usize, Option<(Option<usize>, anyhow::Error)>) {
     if files.is_empty() {
         return (0, None);
     }
+    let total = files.len();
     if frozen(dir) {
-        return (files.len(), None);
+        progress(total, total);
+        return (total, None);
     }
     if let [(name, bytes)] = files {
         return match atomic_bytes(&dir.join(name), bytes) {
-            Ok(()) => (1, None),
+            Ok(()) => {
+                progress(1, 1);
+                (1, None)
+            }
             Err(e) => (0, Some((Some(0), e))),
         };
     }
@@ -954,6 +975,7 @@ pub(crate) fn atomic_batch(dir: &Path, files: &[(String, Vec<u8>)]) -> (usize, O
             break;
         }
         written += 1;
+        progress(written, total);
     }
 
     if written > 0 {
@@ -1188,8 +1210,8 @@ mod tests {
         store.save_library(&LibraryIndex::default())?;
         store.save_navigation(&Navigation::default())?;
         store.save_book("new", &BookState::default())?;
-        let (written, err) =
-            store.save_books(&[("b1".into(), BookState::default()), ("b2".into(), BookState::default())]);
+        let (written, err) = store
+            .save_books(&[("b1".into(), BookState::default()), ("b2".into(), BookState::default())], &mut |_, _| {});
         assert_eq!((written, err.is_none()), (2, true));
         store.remove_book("kept")?;
         store.save_dictionary_folders(&[])?;
@@ -1381,11 +1403,11 @@ mod tests {
 
         // Empty batch does nothing.
         let before_syncs = batch_sync_count();
-        assert_eq!(store.save_books(&[]).0, 0);
+        assert_eq!(store.save_books(&[], &mut |_, _| {}).0, 0);
         assert_eq!((batch_sync_count(), store.book_saves(), store.bulk_saves()), (before_syncs, 0, 0));
 
         // Single-file batch uses f.sync_all() rather than sync_batch_data().
-        let (written, err) = store.save_books(&[("solo".into(), state("/solo"))]);
+        let (written, err) = store.save_books(&[("solo".into(), state("/solo"))], &mut |_, _| {});
         assert_eq!((written, err.is_none()), (1, true));
         assert_eq!(batch_sync_count(), before_syncs, "single file must not trigger a batch sync");
         assert_eq!(store.book("solo").position.0, "/solo");
@@ -1393,8 +1415,10 @@ mod tests {
 
         // Multi-file batch uses one batch sync and recovers if the cached folder was removed.
         std::fs::remove_dir_all(&books_dir)?;
-        let (written, err) =
-            store.save_books(&[("a".into(), state("/a")), ("b".into(), state("/b")), ("c".into(), state("/c"))]);
+        let (written, err) = store.save_books(
+            &[("a".into(), state("/a")), ("b".into(), state("/b")), ("c".into(), state("/c"))],
+            &mut |_, _| {},
+        );
         assert_eq!((written, err.is_none()), (3, true));
         assert_eq!(batch_sync_count(), before_syncs + 1);
         assert_eq!((store.book("a").position.0.as_str(), store.book("c").position.0.as_str()), ("/a", "/c"));
@@ -1403,8 +1427,10 @@ mod tests {
         // Phase 1 (.tmp create) failure writes nothing and cleans up earlier .tmp files.
         let blocked_tmp = books_dir.join("p1.json.tmp");
         std::fs::create_dir(&blocked_tmp)?;
-        let (written, err) =
-            store.save_books(&[("p0".into(), state("/p0")), ("p1".into(), state("/p1")), ("p2".into(), state("/p2"))]);
+        let (written, err) = store.save_books(
+            &[("p0".into(), state("/p0")), ("p1".into(), state("/p1")), ("p2".into(), state("/p2"))],
+            &mut |_, _| {},
+        );
         assert_eq!(written, 0);
         assert!(err.unwrap().to_string().contains("p1"));
         assert!(store.book("p0").position.0.is_empty());
@@ -1414,8 +1440,10 @@ mod tests {
         // Phase 3 (mid-batch rename) failure stops at first error and removes all unrenamed .tmp files.
         let blocked_dst = books_dir.join("m1.json");
         std::fs::create_dir_all(blocked_dst.join("in-the-way"))?;
-        let (written, err) =
-            store.save_books(&[("m0".into(), state("/m0")), ("m1".into(), state("/m1")), ("m2".into(), state("/m2"))]);
+        let (written, err) = store.save_books(
+            &[("m0".into(), state("/m0")), ("m1".into(), state("/m1")), ("m2".into(), state("/m2"))],
+            &mut |_, _| {},
+        );
         assert_eq!(written, 1);
         assert!(err.unwrap().to_string().contains("m1"));
         assert_eq!(store.book("m0").position.0, "/m0");
@@ -1424,7 +1452,8 @@ mod tests {
         std::fs::remove_dir_all(&blocked_dst)?;
 
         // Retrying the remaining entries succeeds.
-        let (written, err) = store.save_books(&[("m1".into(), state("/m1")), ("m2".into(), state("/m2"))]);
+        let (written, err) =
+            store.save_books(&[("m1".into(), state("/m1")), ("m2".into(), state("/m2"))], &mut |_, _| {});
         assert_eq!((written, err.is_none()), (2, true));
         assert_eq!((store.book("m1").position.0.as_str(), store.book("m2").position.0.as_str()), ("/m1", "/m2"));
         assert!(tmp_files().is_empty());

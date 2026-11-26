@@ -701,6 +701,13 @@ impl SetupScreen {
         self.flow.as_ref().is_some_and(Flow::importing)
     }
 
+    fn sync_nav_enabled(&mut self) {
+        let enabled = !self.importing();
+        self.skip.enabled = enabled;
+        self.back.enabled = enabled;
+        self.next.enabled = enabled;
+    }
+
     /// From KOReader's intro, and the area for the import's text under it.
     /// In landscape the intro and *Import* share the left column.
     fn koreader_areas(&self, text: &mut TextRenderer, t: &Theme) -> (Rect, Rect) {
@@ -739,6 +746,7 @@ impl SetupScreen {
             && self.import.on_gesture(g)
         {
             flow.import();
+            self.sync_nav_enabled();
         }
     }
 
@@ -786,6 +794,7 @@ impl Screen for SetupScreen {
         let waiting = self.flow.is_none();
         self.sync_koreader();
         let (moved, _) = self.flow.as_mut().map_or((false, None), Flow::on_background);
+        self.sync_nav_enabled();
         if self.current() == Page::Koreader && (moved || waiting != self.flow.is_none()) {
             cx.redraw();
         }
@@ -833,6 +842,7 @@ impl Screen for SetupScreen {
             self.draw_welcome(cx);
             return;
         }
+        self.sync_nav_enabled();
         self.top.draw(cx);
         if page != Page::Ready {
             self.skip.draw(cx);
@@ -1167,6 +1177,26 @@ mod tests {
         }
         let preview = s.flow.as_ref().and_then(Flow::preview).unwrap();
         assert_eq!(preview.not_started, 1, "the second folder's book is in the scan");
+
+        // Starting the import disables Skip, Back and Next until it finishes.
+        assert!(s.skip.enabled && s.back.enabled && s.next.enabled);
+        tap(&mut s, &t, |s| s.import.rect());
+        assert!(s.importing());
+        assert!(!s.skip.enabled && !s.back.enabled && !s.next.enabled);
+        assert!(matches!(tap(&mut s, &t, |s| s.skip.rect()), Action::None));
+        assert!(matches!(tap(&mut s, &t, |s| s.back.rect()), Action::None));
+        assert!(matches!(tap(&mut s, &t, |s| s.next.rect()), Action::None));
+        assert_eq!(s.current(), Page::Koreader);
+
+        let started = Instant::now();
+        while s.importing() {
+            assert!(started.elapsed().as_secs() < 20, "import did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            with_cx(&t, |cx| s.on_background(cx));
+        }
+        assert!(s.skip.enabled && s.back.enabled && s.next.enabled);
+        tap(&mut s, &t, |s| s.next.rect());
+        assert_eq!(s.current(), Page::Ready);
         Ok(())
     }
 

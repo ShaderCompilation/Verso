@@ -5568,7 +5568,7 @@ mod tests {
         let finished = BookState { finished: true, ..store.book("3") };
         // A scan that ended under Settings or setup left its summary untaken.
         books.library.post_home(store.home_summary().unwrap());
-        let (written, error) = store.save_books(&[("7".into(), imported), ("3".into(), finished)]);
+        let (written, error) = store.save_books(&[("7".into(), imported), ("3".into(), finished)], &mut |_, _| {});
         assert_eq!((written, error.is_none()), (2, true));
         store.rebuild_home_summary(&index)?;
         with_cx(&t, screen, |cx| {

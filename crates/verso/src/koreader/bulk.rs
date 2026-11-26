@@ -25,8 +25,15 @@ use std::time::{Duration, Instant};
 
 /// How many unreadable sidecars the preview names.
 pub const UNREADABLE_SHOWN: usize = 3;
-/// Scan progress reaches the screen at most this often.
+/// Scan and import progress reaches the screen at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(400);
+
+/// Which part of the import is writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportPhase {
+    Progress,
+    Highlights,
+}
 
 /// KOReader's folder: `$VERSO_KOREADER` (for development), else its
 /// folder on the Kindle. The simulator has none by default.
@@ -188,8 +195,9 @@ pub fn scan(
             scan.entries.push(Entry { id: book.id.clone(), sidecar: found, opened });
         }
     }
+    let records: usize = scan.annotations.iter().map(|(_, r)| r.len()).sum();
     log::info!(
-        "KOReader scan: books={total} found={} changes={} highlight_books={} unreadable={} elapsed_ms={}",
+        "KOReader scan: books={total} found={} changes={} highlight_books={} records={records} unreadable={} elapsed_ms={}",
         scan.preview.found(),
         scan.preview.changes,
         scan.preview.highlight_books,
@@ -238,19 +246,29 @@ pub struct Imported {
     pub error: Option<anyhow::Error>,
 }
 
-/// Writes the states the scan decided on, in one pass, then rebuilds Home
-/// and the opened order from every state. Each book is decided again from
-/// its current state, so a state changed since the scan isn't overwritten
-/// with a stale decision.
-pub fn import(store: &Store, scan: &Scan, index: &LibraryIndex) -> Imported {
+/// Writes the states the scan decided on, in one pass, then commits each
+/// book's new annotations and rebuilds Home and the opened order once. Each
+/// book is decided again from its current state, so a state changed since the
+/// scan isn't overwritten with a stale decision. `progress` gets
+/// `(phase, books done, books in that phase)`.
+pub fn import(
+    store: &Store,
+    scan: &Scan,
+    index: &LibraryIndex,
+    progress: &mut dyn FnMut(ImportPhase, usize, usize),
+) -> Imported {
     let started = Instant::now();
     let states: Vec<(String, BookState)> = scan
         .entries
         .iter()
         .filter_map(|e| Some((e.id.clone(), super::import(&store.book(&e.id), &e.sidecar, e.opened).state?)))
         .collect();
-    let (written, error) = store.save_books(&states);
-    let (highlights_written, highlights_error) = save_annotations(store, &scan.annotations);
+    let (written, error) = store.save_books(&states, &mut |done, total| progress(ImportPhase::Progress, done, total));
+    let books_ms = started.elapsed().as_millis();
+    let annotations_started = Instant::now();
+    let (highlights_written, records_written, highlights_error) =
+        save_annotations(store, &scan.annotations, &mut |done, total| progress(ImportPhase::Highlights, done, total));
+    let annotations_ms = annotations_started.elapsed().as_millis();
     let error = error.or(highlights_error);
     if written > 0 {
         let counts = store.home_summary().map_or_else(
@@ -265,7 +283,7 @@ pub fn import(store: &Store, scan: &Scan, index: &LibraryIndex) -> Imported {
         }
     }
     log::info!(
-        "KOReader import: written={written} of {} highlight_books={highlights_written} of {} error={} elapsed_ms={}",
+        "KOReader import: written={written} of {} highlight_books={highlights_written} of {} records={records_written} books_ms={books_ms} annotations_ms={annotations_ms} error={} elapsed_ms={}",
         states.len(),
         scan.annotations.len(),
         error.is_some(),
@@ -277,8 +295,18 @@ pub fn import(store: &Store, scan: &Scan, index: &LibraryIndex) -> Imported {
 /// Adds each book's new records to its collection and commits it (one
 /// manifest swap per book), stopping at the first failure. Records imported
 /// since the scan, by either import, are skipped by their identity.
-fn save_annotations(store: &Store, books: &[(String, Vec<Annotation>)]) -> (usize, Option<anyhow::Error>) {
+fn save_annotations(
+    store: &Store,
+    books: &[(String, Vec<Annotation>)],
+    progress: &mut dyn FnMut(usize, usize),
+) -> (usize, usize, Option<anyhow::Error>) {
+    let total = books.len();
+    if total == 0 {
+        return (0, 0, None);
+    }
+    progress(0, total);
     let mut written = 0;
+    let mut records_written = 0;
     for (book, records) in books {
         let result = Collection::load(store, book).and_then(|mut c| {
             let before = c.records.len();
@@ -287,14 +315,24 @@ fn save_annotations(store: &Store, books: &[(String, Vec<Annotation>)]) -> (usiz
                     c.add(a.clone());
                 }
             }
-            if c.records.len() > before { c.commit_from(store, book, before) } else { Ok(()) }
+            let added = c.records.len() - before;
+            if added > 0 {
+                c.commit_from(store, book, before)?;
+            }
+            Ok(added)
         });
-        if let Err(e) = result {
-            return (written, Some(e.context(format!("saving highlights for book {book}"))));
+        match result {
+            Ok(added) => {
+                written += 1;
+                records_written += added;
+                progress(written, total);
+            }
+            Err(e) => {
+                return (written, records_written, Some(e.context(format!("saving highlights for book {book}"))));
+            }
         }
-        written += 1;
     }
-    (written, None)
+    (written, records_written, None)
 }
 
 /// What a [`Job`] reports.
@@ -303,7 +341,30 @@ pub enum Event {
     /// Books read so far, of the books to read.
     Scanning(usize, usize),
     Scanned(Box<Scan>),
+    /// Books written so far in the current import phase, of the books in it.
+    Importing(ImportPhase, usize, usize),
     Imported(Imported),
+}
+
+/// Lets the start, the end, a phase change, and at most one update per
+/// interval through so e-ink doesn't redraw on every book.
+struct Throttle<K> {
+    every: Duration,
+    last: Option<(K, Instant)>,
+}
+impl<K: Copy + PartialEq> Throttle<K> {
+    fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+    fn allow(&mut self, key: K, done: usize, total: usize, now: Instant) -> bool {
+        let send = done == 0
+            || done == total
+            || self.last.is_none_or(|(k, at)| k != key || now.saturating_duration_since(at) >= self.every);
+        if send {
+            self.last = Some((key, now));
+        }
+        send
+    }
 }
 
 /// The scan or the import on its own thread. Holds a `CoverPause` on the
@@ -321,10 +382,9 @@ impl Job {
     pub fn scan(store: Store, open: Option<String>, waker: Waker) -> Self {
         Self::spawn(store, waker, move |store, tx, cancel| {
             let index = store.library();
-            let mut last = None::<Instant>;
+            let mut throttle = Throttle::new(PROGRESS_EVERY);
             let mut report = |done: usize, total: usize| {
-                if done == 0 || done == total || last.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
-                    last = Some(Instant::now());
+                if throttle.allow((), done, total, Instant::now()) {
                     tx.send(Event::Scanning(done, total));
                 }
             };
@@ -337,7 +397,13 @@ impl Job {
     pub fn import(store: Store, scan: Scan, waker: Waker) -> Self {
         Self::spawn(store, waker, move |store, tx, _| {
             let index = store.library();
-            tx.send(Event::Imported(import(store, &scan, &index)));
+            let mut throttle = Throttle::new(PROGRESS_EVERY);
+            let mut report = |phase: ImportPhase, done: usize, total: usize| {
+                if throttle.allow(phase, done, total, Instant::now()) {
+                    tx.send(Event::Importing(phase, done, total));
+                }
+            };
+            tx.send(Event::Imported(import(store, &scan, &index, &mut report)));
         })
     }
     fn spawn(store: Store, waker: Waker, work: impl FnOnce(&Store, &Reporter, &AtomicBool) + Send + 'static) -> Self {
@@ -443,6 +509,9 @@ mod tests {
     fn run_scan(store: &Store, index: &LibraryIndex, history: &Path, open: Option<&str>) -> Scan {
         scan(store, index, history, open, &|| false, &mut |_, _| {}).expect("not cancelled")
     }
+    fn run_import(store: &Store, found: &Scan, index: &LibraryIndex) -> Imported {
+        import(store, found, index, &mut |_, _, _| {})
+    }
 
     #[test]
     fn every_row_then_import_and_run_again() -> anyhow::Result<()> {
@@ -496,7 +565,7 @@ mod tests {
         assert_eq!(p.complete_only, 1);
         assert_eq!((p.unreadable, p.unreadable_books.clone(), p.changes, p.found()), (1, vec![path(6)], 4, 6));
 
-        let imported = import(&store, &found, &index);
+        let imported = run_import(&store, &found, &index);
         assert_eq!((imported.written, imported.total, imported.error.is_none()), (4, 4, true));
         let s = store.book("2");
         assert_eq!((s.position.0.as_str(), s.progress, s.page, s.last_opened), ("/k2", 5000, 0, 5000));
@@ -532,7 +601,7 @@ mod tests {
         let p = &again.preview;
         assert_eq!((p.not_started, p.newer_in_koreader, p.newer_in_verso, p.up_to_date), (0, 1, 1, 5));
         assert_eq!((p.finished, p.complete_only, p.changes, p.open_skipped), (0, 0, 1, 0));
-        assert_eq!(import(&store, &again, &index).written, 1);
+        assert_eq!(run_import(&store, &again, &index).written, 1);
         assert_eq!(store.book("7").position.0, "/k7");
         let p = run_scan(&store, &index, &history, None).preview;
         assert_eq!((p.up_to_date, p.changes), (6, 0));
@@ -567,7 +636,7 @@ mod tests {
         let p = &found.preview;
         assert_eq!((p.highlight_books, p.highlights, p.notes, p.bookmarks), (2, 2, 2, 1));
         assert_eq!((p.open_skipped, p.importable()), (1, true));
-        let imported = import(&store, &found, &index);
+        let imported = run_import(&store, &found, &index);
         assert_eq!((imported.highlights_written, imported.highlights_total, imported.error.is_none()), (2, 2, true));
         assert_eq!(records(0).len(), 3, "the highlights joined the bookmark imported before");
         let lone = &records(1);
@@ -607,7 +676,7 @@ mod tests {
         let found = run_scan(&store, &index, history, None);
         let p = &found.preview;
         assert_eq!((p.finished, p.complete_only, p.newer_in_verso, p.not_started, p.changes), (2, 1, 1, 1, 3));
-        assert_eq!(import(&store, &found, &index).written, 3);
+        assert_eq!(run_import(&store, &found, &index).written, 3);
         let s = store.book("0");
         assert_eq!((s.finished, s.status_at, s.position.0.as_str()), (true, 2000, "/v0"));
         let day = crate::clock::LocalDateTime::midnight("2026-11-20").unwrap();
@@ -627,7 +696,7 @@ mod tests {
         let again = run_scan(&store, &index, history, None);
         let p = &again.preview;
         assert_eq!((p.finished, p.newer_in_koreader, p.changes), (1, 1, 1));
-        assert_eq!(import(&store, &again, &index).written, 1);
+        assert_eq!(run_import(&store, &again, &index).written, 1);
         let s = store.book("0");
         assert_eq!((s.finished, s.status_at, s.position.0.as_str()), (true, later, "/k0"));
         assert!(!store.book("1").finished, "its sidecar wasn't saved again");
@@ -663,7 +732,7 @@ mod tests {
         std::fs::create_dir_all(blocked.join("in-the-way"))?;
         let found = run_scan(&store, &index, Path::new("/nonexistent"), None);
         assert_eq!(found.preview.changes, 3);
-        let imported = import(&store, &found, &index);
+        let imported = run_import(&store, &found, &index);
         assert_eq!((imported.written, imported.total), (1, 3));
         assert!(imported.error.is_some());
         assert_eq!(store.book("0").position.0, "/k0");
@@ -679,7 +748,7 @@ mod tests {
         std::fs::remove_dir_all(&blocked)?;
         let again = run_scan(&store, &index, Path::new("/nonexistent"), None);
         assert_eq!((again.preview.up_to_date, again.preview.not_started, again.preview.changes), (1, 2, 2));
-        let imported = import(&store, &again, &index);
+        let imported = run_import(&store, &again, &index);
         assert_eq!((imported.written, imported.error.is_none()), (2, true));
         assert_eq!(store.book("2").position.0, "/k2");
         Ok(())
@@ -694,7 +763,7 @@ mod tests {
         assert_eq!(found.preview.not_started, 1);
         // Read on in Verso since (not possible under the sheet today).
         store.save_book("0", &verso("/v", 3000))?;
-        let imported = import(&store, &found, &index);
+        let imported = run_import(&store, &found, &index);
         assert_eq!((imported.written, imported.total), (0, 0));
         assert_eq!(store.book("0").position.0, "/v");
         Ok(())
@@ -720,9 +789,77 @@ mod tests {
         let Some(Event::Scanned(scan)) = events.into_iter().last() else { panic!("no preview") };
         assert_eq!(scan.preview.not_started, 1);
         let job = Job::import(store.clone(), *scan, Waker::new(|| {}));
-        let Some(Event::Imported(imported)) = wait(&job).into_iter().last() else { panic!("no result") };
+        let events = wait(&job);
+        assert!(matches!(events.first(), Some(Event::Importing(ImportPhase::Progress, 0, 1))), "{events:?}");
+        let Some(Event::Imported(imported)) = events.into_iter().last() else { panic!("no result") };
         assert_eq!((imported.written, imported.total), (1, 1));
         assert_eq!(store.book("1").position.0, "/k");
+        Ok(())
+    }
+
+    #[test]
+    fn import_reports_phase_progress_and_throttles_events() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (store, index) = library(dir.path(), 3);
+        store.save_library(&index)?;
+        let marks = "annotations = { { drawer='lighten', pos0='/p/text().0', pos1='/p/text().5', text='Quote' } }";
+        // Book 0: progress + highlight. Book 1: progress only. Book 2: highlight only.
+        sidecar(
+            &index.books[0].path,
+            &format!("return {{ last_xpointer = '/k0', percent_finished = 0.5, {marks} }}"),
+            2000,
+        );
+        sidecar(&index.books[1].path, &koreader("/k1", "reading"), 2000);
+        sidecar(&index.books[2].path, &format!("return {{ {marks} }}"), 2000);
+
+        let found = run_scan(&store, &index, Path::new("/nonexistent"), None);
+        assert_eq!((found.preview.changes, found.preview.highlight_books), (2, 2));
+
+        // Direct import reports every step per phase with denominators matching preview.
+        let mut reports = Vec::new();
+        let imported = import(&store, &found, &index, &mut |phase, done, total| reports.push((phase, done, total)));
+        assert_eq!((imported.written, imported.highlights_written, imported.error.is_none()), (2, 2, true));
+        assert_eq!(
+            reports,
+            vec![
+                (ImportPhase::Progress, 0, 2),
+                (ImportPhase::Progress, 1, 2),
+                (ImportPhase::Progress, 2, 2),
+                (ImportPhase::Highlights, 0, 2),
+                (ImportPhase::Highlights, 1, 2),
+                (ImportPhase::Highlights, 2, 2),
+            ]
+        );
+
+        // Highlights-only import skips the progress phase.
+        let dir2 = tempfile::tempdir()?;
+        let (store2, index2) = library(dir2.path(), 2);
+        sidecar(&index2.books[0].path, &format!("return {{ {marks} }}"), 2000);
+        sidecar(&index2.books[1].path, &format!("return {{ {marks} }}"), 2000);
+        let found2 = run_scan(&store2, &index2, Path::new("/nonexistent"), None);
+        let mut only_highlights = Vec::new();
+        let imported2 =
+            import(&store2, &found2, &index2, &mut |phase, done, total| only_highlights.push((phase, done, total)));
+        assert_eq!((imported2.written, imported2.highlights_written), (0, 2));
+        assert_eq!(
+            only_highlights,
+            vec![(ImportPhase::Highlights, 0, 2), (ImportPhase::Highlights, 1, 2), (ImportPhase::Highlights, 2, 2),]
+        );
+
+        // Throttle enforces PROGRESS_EVERY within a phase while passing start, end, and phase changes.
+        let t0 = Instant::now();
+        let mut throttle = Throttle::new(PROGRESS_EVERY);
+        assert!(throttle.allow(ImportPhase::Progress, 0, 5, t0));
+        assert!(!throttle.allow(ImportPhase::Progress, 1, 5, t0 + Duration::from_millis(100)));
+        assert!(!throttle.allow(ImportPhase::Progress, 2, 5, t0 + Duration::from_millis(399)));
+        assert!(throttle.allow(ImportPhase::Progress, 3, 5, t0 + PROGRESS_EVERY));
+        assert!(!throttle.allow(ImportPhase::Progress, 4, 5, t0 + PROGRESS_EVERY + Duration::from_millis(100)));
+        assert!(throttle.allow(ImportPhase::Progress, 5, 5, t0 + PROGRESS_EVERY + Duration::from_millis(100)));
+        // Phase switch passes immediately even within PROGRESS_EVERY.
+        assert!(throttle.allow(ImportPhase::Highlights, 0, 3, t0 + PROGRESS_EVERY + Duration::from_millis(105)));
+        assert!(!throttle.allow(ImportPhase::Highlights, 1, 3, t0 + PROGRESS_EVERY + Duration::from_millis(200)));
+        assert!(throttle.allow(ImportPhase::Highlights, 3, 3, t0 + PROGRESS_EVERY + Duration::from_millis(200)));
+
         Ok(())
     }
 
@@ -826,7 +963,7 @@ mod tests {
         let started = Instant::now();
         let found = run_scan(&store, &index, Path::new("/nonexistent"), None);
         let scanned = started.elapsed();
-        let imported = import(&store, &found, &index);
+        let imported = run_import(&store, &found, &index);
         let total = started.elapsed();
         eprintln!(
             "10,000 books: scan {scanned:?}, scan and import {total:?}, {} written, highlights for {}",
