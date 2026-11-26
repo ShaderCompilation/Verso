@@ -59,10 +59,11 @@ Verso opens on **Home**:
   available) and **Exit**.
 - **Continue reading:** the most recently opened book that is in progress (or
   being re-read), with cover, title, author, progress bar and percentage.
-- **Recent books:** up to four recently opened books (three beside Continue
-  reading in landscape).
-- **Start reading:** until a second book is opened, up to eight books to start with,
-  newest files first (one row under Continue reading).
+- **Recent books:** up to four recently opened books in progress or being
+  re-read (three beside Continue reading in landscape).
+- **Start reading:** when there are no other books in progress, up to eight
+  unopened books to start with, newest files first (one row under Continue
+  reading).
 - **No books:** *Finding your books…* while the first scan runs; when it finds no
   EPUBs, **Send books over Wi-Fi** and **Choose folders** (Settings → Library).
 - **Notice bar:** appears above the Library card for an available update or an

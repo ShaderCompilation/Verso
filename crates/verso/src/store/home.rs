@@ -346,12 +346,10 @@ mod tests {
             at: 99,
         })?;
         writer.flush()?;
-        // Opening a finished book keeps it finished and out of Continue reading.
+        // Opening a finished book keeps it finished and out of Home (Continue and Recent).
         let summary = store.home_summary().unwrap();
         assert_eq!(summary.resume().unwrap().book.id, "0");
-        let entry = summary.books.iter().find(|e| e.book.id == "11").unwrap();
-        assert!(entry.status.finished && !entry.status.rereading);
-        assert_eq!(entry.status.progress, 3456);
+        assert!(!summary.recents(4).iter().any(|e| e.book.id == "11"));
         assert_eq!(store.book("11").position.0, "latest exact anchor");
         // Re-reading brings it back with its real progress.
         let mut state = store.book("11");

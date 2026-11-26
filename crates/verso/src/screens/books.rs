@@ -5578,7 +5578,7 @@ mod tests {
         assert!(books.states["3"].finished);
         assert_eq!(books.states["7"].progress, 4000);
         assert_eq!(books.home.resume().unwrap().book.id, "7", "Continue reading");
-        assert_eq!(books.home.recents(4).iter().map(|e| e.book.id.as_str()).collect::<Vec<_>>(), ["3"]);
+        assert!(books.home.recents(4).is_empty(), "finished book 3 stays out of Recent books");
         // Nothing new: nothing is reloaded.
         books.states.insert("3".into(), BookState::default());
         with_cx(&t, screen, |cx| books.on_return(cx));
@@ -7293,8 +7293,8 @@ mod tests {
             store.save_book(
                 &b.id,
                 &BookState {
-                    position: crate::document::Position("done".into()),
-                    finished: true,
+                    position: crate::document::Position("paused".into()),
+                    hidden_from_continue: true,
                     last_opened: 10 + i as u64,
                     ..Default::default()
                 },
@@ -7311,7 +7311,7 @@ mod tests {
 
         // 3. Continue-only (no Recent books): Continue reading shown, no orphan divider, card stays at bottom.
         books.home.books.truncate(1);
-        books.home.books[0].status.finished = false;
+        books.home.books[0].status.hidden_from_continue = false;
         books.refresh(&t);
         assert!(books.continue_id.is_some() && books.books.is_empty());
         assert!(books.home_divider_y.is_none(), "no divider without Recent books below");

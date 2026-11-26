@@ -507,12 +507,12 @@ mod tests {
         for i in [0, 1, 6, 8, 9] {
             assert!(store.book(&i.to_string()).position.0.is_empty(), "{i}");
         }
-        // Continue reading is KOReader's latest book, and Recent follows.
+        // Continue reading is KOReader's latest book, and Recent follows (excluding finished book 4).
         let home = store.home_summary().expect("rebuilt");
         assert!(home.complete);
         assert_eq!(home.resume().unwrap().book.id, "2");
         let recents: Vec<_> = home.recents(4).iter().map(|e| e.book.id.clone()).collect();
-        assert_eq!(recents, ["7", "4", "3", "5"]);
+        assert_eq!(recents, ["7", "3", "5"]);
         let opened: Vec<_> = store.opened().unwrap().books.into_iter().map(|(id, _)| id).collect();
         assert_eq!(opened, ["2", "7", "4", "3", "5"]);
         // KOReader's files are never written.

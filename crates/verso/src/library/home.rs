@@ -63,6 +63,10 @@ impl Entry {
             && (!self.status.finished || self.status.rereading)
             && !self.status.hidden_from_continue
     }
+    /// Opened and still in progress (or being re-read): eligible for Recent books.
+    pub fn can_recent(&self) -> bool {
+        self.book.available && self.status.last_opened > 0 && (!self.status.finished || self.status.rereading)
+    }
     /// Never opened, readable and not finished elsewhere.
     fn can_start(&self) -> bool {
         self.book.available
@@ -103,7 +107,7 @@ impl Default for Summary {
     }
 }
 impl Summary {
-    pub const VERSION: u32 = 4;
+    pub const VERSION: u32 = 5;
     pub fn set_library_counts(&mut self, (roots, folders, books): (usize, usize, usize)) {
         self.library_root_count = roots;
         self.library_folders = folders;
@@ -122,7 +126,7 @@ impl Summary {
         let featured = self.resume().map(|entry| &entry.book.id);
         self.books
             .iter()
-            .filter(|entry| entry.book.available && entry.status.last_opened > 0 && Some(&entry.book.id) != featured)
+            .filter(|entry| entry.can_recent() && Some(&entry.book.id) != featured)
             .take(limit.min(4))
             .collect()
     }
@@ -142,21 +146,21 @@ impl Summary {
         books.retain(|entry| seen.insert(entry.book.id.clone()));
         let resume = books.iter().find(|entry| entry.can_resume()).map(|entry| entry.book.id.clone());
         let is_resume = |entry: &Entry| Some(&entry.book.id) == resume.as_ref();
-        let (mut books, mut unopened): (Vec<_>, Vec<_>) =
-            books.into_iter().partition(|entry| entry.status.last_opened > 0 || is_resume(entry));
+        let (mut books, mut rest): (Vec<_>, Vec<_>) =
+            books.into_iter().partition(|entry| entry.can_recent() || is_resume(entry));
         let mut recent = 0;
         books.retain(|entry| {
-            let keep_recent = entry.status.last_opened > 0 && recent < RECENT_CANDIDATES;
+            let keep_recent = entry.can_recent() && recent < RECENT_CANDIDATES;
             recent += usize::from(keep_recent);
             keep_recent || is_resume(entry)
         });
         if books.iter().all(is_resume) {
             // Newest first, the order pre-layout prepares unopened books in.
             let newest = |e: &Entry| (e.book.stamp.modified_secs, e.book.stamp.modified_nanos);
-            unopened.sort_by(|a, b| {
+            rest.sort_by(|a, b| {
                 (!a.can_start(), newest(b), &a.book.path).cmp(&(!b.can_start(), newest(a), &b.book.path))
             });
-            books.extend(unopened.into_iter().take(SHELF));
+            books.extend(rest.into_iter().take(SHELF));
         }
         Self { books, ..Default::default() }
     }
@@ -168,7 +172,7 @@ mod tests {
     use crate::{document::Position, library::selection_tests::book};
 
     #[test]
-    fn older_resume_is_retained_with_four_finished_or_hidden_recents() {
+    fn older_resume_is_retained_with_hidden_recents_and_finished_books_are_excluded() {
         let mut entries: Vec<_> = (0..30)
             .map(|id| {
                 Entry::new(
@@ -176,14 +180,15 @@ mod tests {
                     &BookState {
                         position: Position("saved".into()),
                         last_opened: id as u64 + 1,
-                        finished: id != 0,
+                        finished: (20..25).contains(&id),
+                        hidden_from_continue: id != 0,
                         ..Default::default()
                     },
                 )
             })
             .collect();
-        entries[29].status.hidden_from_continue = true;
-        entries[29].status.finished = false;
+        // Finished books stay out of Recent books unless actively re-reading.
+        entries[24].status.rereading = true;
         entries[28].book.available = false;
         entries.push(entries[29].clone());
         let summary = Summary::select(entries);
@@ -191,6 +196,8 @@ mod tests {
         assert_eq!(summary.books.len(), RECENT_CANDIDATES + 1);
         assert_eq!(summary.resume().unwrap().book.id, "0");
         assert_eq!(summary.recents(4).iter().map(|e| e.book.id.as_str()).collect::<Vec<_>>(), ["29", "27", "26", "25"]);
+        assert!(summary.books.iter().any(|e| e.book.id == "24"), "re-reading finished book stays eligible");
+        assert!(!summary.books.iter().any(|e| e.book.id == "23"), "finished book is excluded from recents");
         assert!(!serde_json::to_string(&summary).unwrap().contains("saved"));
     }
 
@@ -224,7 +231,7 @@ mod tests {
         let unreadable = Summary::select(unopened[8..].to_vec());
         assert_eq!(ids(&unreadable), ["9", "8"]);
         assert!(unreadable.shelf(8).is_empty());
-        // The first book opened leaves them; a second one is a recent.
+        // The first book opened leaves them; a finished book doesn't displace the shelf.
         let mut books = summary.books.clone();
         books.push(opened(7, 5));
         books.rotate_right(1);
@@ -232,6 +239,13 @@ mod tests {
         assert!(one.valid() && one.resume().is_some_and(|e| e.book.id == "7"));
         assert_eq!(ids(&one), ["7", "6", "5", "4", "3", "2", "1", "0"]);
         assert_eq!(one.shelf(8).len(), 7, "the opened book left the shelf");
+        let mut finished_other = one.books.clone();
+        let mut done = opened(6, 9);
+        done.status.finished = true;
+        finished_other.insert(0, done);
+        let with_finished = Summary::select(finished_other);
+        assert!(with_finished.recents(4).is_empty() && with_finished.shelf(8).len() == 6);
+        // A second unfinished book becomes a recent and hides the shelf.
         let mut books = one.books.clone();
         books.insert(0, opened(6, 9));
         assert_eq!(ids(&Summary::select(books)), ["6", "7"]);
