@@ -289,6 +289,12 @@ redact_stream() {
         if (quoted) return s ~ /^\\?"/
         return s == "" || s == "\r" || s ~ /^\\?"/ || s ~ /^: [^\/]*$/
     }
+    # Last byte offset of case-folded `ext` in `low`, or 0 when absent.
+    function last_ext_end(low, ext,    n, pos) {
+        n = 0
+        while ((pos = index(substr(low, n + 1), ext)) > 0) n += pos + length(ext) - 1
+        return n
+    }
     # The length of the path that s starts with; quoted: it follows a ".
     function path_end(s, quoted, wide,    i, n, c, low, pos) {
         n = length(s)
@@ -301,10 +307,11 @@ redact_stream() {
             return n
         }
         if (find_path(s, wide)) s = substr(s, 1, at - 1)
-        # The last .epub, with what extends it (.part) unless it is a folder.
+        # The last .epub, .markdown or .md, with what extends it (.part) unless it is a folder.
         low = tolower(s)
-        n = 0
-        while ((pos = index(substr(low, n + 1), ".epub")) > 0) n += pos + 4
+        n = last_ext_end(low, ".epub")
+        pos = last_ext_end(low, ".markdown"); if (pos > n) n = pos
+        pos = last_ext_end(low, ".md"); if (pos > n) n = pos
         if (n > 0) {
             while (substr(s, n + 1, 1) ~ /[A-Za-z0-9._-]/) n++
             if (substr(s, n + 1, 1) != "/") return n

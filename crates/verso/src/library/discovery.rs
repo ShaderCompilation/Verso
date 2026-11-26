@@ -1,11 +1,12 @@
 //! Finding the folders that hold books, for the setup's Library page.
 //! [`discover`] lists the fixed folders (the default and the saved list),
 //! KOReader's home folder (`home_dir` in its `settings.reader.lua`), and
-//! every top-level folder of the storage root with EPUBs anywhere below it,
-//! counting each folder's EPUBs up to [`COUNT_CAP`]. It walks like the
+//! every top-level folder of the storage root with supported books anywhere below
+//! it, counting each folder's books up to [`COUNT_CAP`]. It walks like the
 //! library scanner (no dot entries, `.sdr` folders or symlinks) and skips
 //! the Kindle's and the apps' own folders. [`Discovery`] runs it on its own
 //! thread; the page fills in as folders arrive.
+use super::format::BookFormat;
 use crate::annotations::lua;
 use crate::platform::Waker;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ const SKIPPED: [&str; 11] = [
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Folder {
     pub path: PathBuf,
-    /// EPUBs below it, at most [`COUNT_CAP`].
+    /// Supported books below it, at most [`COUNT_CAP`].
     pub books: usize,
     /// KOReader's home folder.
     pub koreader_home: bool,
@@ -73,8 +74,8 @@ fn normalize(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-/// EPUBs in `dir` and below, at most `cap`.
-pub fn count_epubs(dir: &Path, cap: usize, cancelled: &dyn Fn() -> bool) -> usize {
+/// Supported books in `dir` and below, at most `cap`.
+pub fn count_books(dir: &Path, cap: usize, cancelled: &dyn Fn() -> bool) -> usize {
     fn walk(dir: &Path, cap: usize, count: &mut usize, cancelled: &dyn Fn() -> bool) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.filter_map(Result::ok) {
@@ -90,7 +91,7 @@ pub fn count_epubs(dir: &Path, cap: usize, cancelled: &dyn Fn() -> bool) -> usiz
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_dir() && !name.ends_with(".sdr") {
                 walk(&entry.path(), cap, count, cancelled);
-            } else if kind.is_file() && Path::new(&*name).extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")) {
+            } else if kind.is_file() && BookFormat::is_book(Path::new(&*name)) {
                 *count += 1;
             }
         }
@@ -132,7 +133,7 @@ pub fn discover(sources: &Sources, cancelled: &dyn Fn() -> bool, mut send: impl 
     for path in &sources.fixed {
         let path = normalize(path);
         if !inside(&listed, &path) {
-            let books = count_epubs(&path, COUNT_CAP, cancelled);
+            let books = count_books(&path, COUNT_CAP, cancelled);
             list(&mut listed, path, books, false);
         }
     }
@@ -144,7 +145,7 @@ pub fn discover(sources: &Sources, cancelled: &dyn Fn() -> bool, mut send: impl 
             if inside(&listed, &path) {
                 continue;
             }
-            let books = count_epubs(&path, COUNT_CAP, cancelled);
+            let books = count_books(&path, COUNT_CAP, cancelled);
             if books > 0 {
                 list(&mut listed, path, books, true);
             }
@@ -153,7 +154,7 @@ pub fn discover(sources: &Sources, cancelled: &dyn Fn() -> bool, mut send: impl 
     if let Some(home) = &home
         && !inside(&listed, home)
     {
-        list(&mut listed, home.clone(), count_epubs(home, COUNT_CAP, cancelled), true);
+        list(&mut listed, home.clone(), count_books(home, COUNT_CAP, cancelled), true);
     }
 }
 
@@ -235,10 +236,13 @@ mod tests {
         epubs(&root.join("Books/Fiction/Tolkien"), 2)?;
         std::fs::write(root.join("Books/notes.txt"), b"")?;
         std::fs::write(root.join("Books/Upper.EPUB"), b"")?;
-        // Not books: hidden, reading data, app folders, a folder without EPUBs.
+        std::fs::write(root.join("Books/Notes.md"), b"")?;
+        std::fs::write(root.join("Books/Essay.MarkDown"), b"")?;
+        // Not books: hidden, reading data, app folders, a folder without books.
         epubs(&root.join("Books/.hidden"), 3)?;
         epubs(&root.join("Books/Fiction/Tolkien/0.sdr"), 1)?;
         std::fs::write(root.join("Books/.dot.epub"), b"")?;
+        std::fs::write(root.join("Books/.dot.md"), b"")?;
         for skipped in ["koreader", "System", "extensions", "lost+found", ".trash"] {
             epubs(&root.join(skipped), 1)?;
         }
@@ -258,7 +262,7 @@ mod tests {
             [
                 ("documents".into(), 1, false, false),
                 ("Saved".into(), 0, false, false),
-                ("Books".into(), 3, false, true),
+                ("Books".into(), 5, false, true),
             ]
         );
         // VERSO_BOOKS: the fixed folders only.
@@ -305,8 +309,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         epubs(&dir.path().join("a"), 4)?;
         epubs(&dir.path().join("b"), 4)?;
-        assert_eq!(count_epubs(dir.path(), 5, &|| false), 5);
-        assert_eq!(count_epubs(dir.path(), 100, &|| false), 8);
+        assert_eq!(count_books(dir.path(), 5, &|| false), 5);
+        assert_eq!(count_books(dir.path(), 100, &|| false), 8);
         Ok(())
     }
 }

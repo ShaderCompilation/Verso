@@ -1826,7 +1826,7 @@ impl Books {
     fn show_synopsis(&mut self, id: &str, cx: &mut EventCx) {
         let Some(book) = self.book(id) else { return };
         let started = std::time::Instant::now();
-        match library::epub::synopsis(&book.path) {
+        match library::read_synopsis(&book.path) {
             Ok(Some(text)) => {
                 let sheet = Sheet::open("Synopsis", self.screen.h * 3 / 4, self.screen, cx.theme);
                 let html = synopsis_html(&text);
@@ -2263,7 +2263,7 @@ impl HomeMessage {
     fn text(self) -> &'static str {
         match self {
             Self::Finding => "Finding your books…",
-            Self::NoBooks => "No books yet. Verso reads EPUB files.",
+            Self::NoBooks => "No books yet. Verso reads EPUB and Markdown files.",
             Self::OpenLibrary => "Open a book from Library to start reading",
         }
     }
@@ -3228,7 +3228,7 @@ impl Screen for Books {
                 )
             } else {
                 format!(
-                    "No EPUB books found in {}.\nAdd books, then tap Refresh.",
+                    "No books found in {}.\nAdd books, then tap Refresh.",
                     self.roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" • ")
                 )
             };
@@ -3868,7 +3868,7 @@ impl Screen for Books {
         };
         let mut book = book.clone();
         if book.metadata.cover.is_none() {
-            book.metadata = library::epub::read(&book.path).ok()?;
+            book.metadata = library::read_metadata(&book.path).ok()?;
         }
         match covers::sleep_cover(&book, width, height, 0, self.store.color_mode()) {
             Ok(image) => Some(image),
@@ -6948,7 +6948,9 @@ mod tests {
             r#"<package><metadata><title>T</title><description>&lt;p&gt;A &lt;i&gt;sweeping&lt;/i&gt; saga.&lt;/p&gt;</description></metadata></package>"#,
             &[],
         )?;
-        let shelf: Vec<_> = (0..2)
+        let md_with = root.join("books-folder/2.md");
+        std::fs::write(&md_with, "---\ntitle: Field Notes\ndescription: Plain Markdown synopsis.\n---\n\nBody\n")?;
+        let mut shelf: Vec<_> = (0..2)
             .map(|i| {
                 let mut b = book(i);
                 b.path = root.join(format!("books-folder/{i}.epub"));
@@ -6956,6 +6958,10 @@ mod tests {
                 b
             })
             .collect();
+        let mut md_book = book(2);
+        md_book.path = md_with;
+        md_book.metadata = library::read_metadata(&md_book.path)?;
+        shelf.push(md_book);
         store.save_library(&LibraryIndex { books: shelf, ..Default::default() })?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
@@ -6996,6 +7002,12 @@ mod tests {
             // The items after it still do what they say.
             books.open_menu("0".into(), Point::new(600, 800), &t);
             tap(&mut books, cx, "Mark finished");
+            // Markdown synopsis dispatches through library::read_synopsis.
+            books.open_menu("2".into(), Point::new(600, 800), &t);
+            tap(&mut books, cx, "Synopsis");
+            let sheet = books.synopsis.as_ref().expect("markdown synopsis opens");
+            let crate::gfx::StyledBlock::Paragraph(p) = &sheet.text.blocks()[0] else { panic!() };
+            assert_eq!(p.text, "Plain Markdown synopsis.");
         });
         assert!(books.store.book("0").finished);
         drop(books);

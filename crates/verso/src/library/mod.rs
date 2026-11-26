@@ -1,19 +1,18 @@
 //! The library index is independent of the reading engine.
 //!
-//! `epub` parses OPF metadata/covers without opening crengine; `worker` scans
-//! configured roots incrementally by `(size, mtime)`, generates cover and tile
-//! thumbnails (`covers`), builds the folder hierarchy (`collections`) and runs
-//! off-thread Home/Library warm-up (`home`, `previews`). Each book keeps a
-//! stable `id` (preserved across moves), an `annotation_id` (content-based),
-//! and `legacy_id` for state lookup; `search` filters cached metadata in memory
-//! and `sort` orders books.
+//! `epub` and `markdown` parse metadata/covers without opening crengine;
+//! `worker` scans configured roots incrementally by `(size, mtime)`, generates
+//! cover and tile thumbnails (`covers`), builds the folder hierarchy
+//! (`collections`) and runs off-thread Home/Library warm-up (`home`,
+//! `previews`). Each book keeps a stable `id` (preserved across moves), an
+//! `annotation_id` (content-based), and `legacy_id` for state lookup; `search`
+//! filters cached metadata in memory and `sort` orders books.
 
 pub mod collections;
 pub mod covers;
 pub mod discovery;
 pub mod epub;
 pub mod files;
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod format;
 pub mod home;
 pub mod language;
@@ -50,12 +49,12 @@ pub struct Metadata {
     pub series_index: String,
     /// The first creator's `file-as` name (`Sanderson, Brandon`).
     pub author_sort: String,
-    /// The `epub::read_metadata` version that produced this record. The scan
+    /// The `read_metadata` version that produced this record. The scan
     /// re-reads older records in the background while they stay shown.
     pub version: u32,
 }
 impl Metadata {
-    /// Bumped when `epub::read_metadata` learns a field or changes parsing.
+    /// Bumped when `read_metadata` learns a field or changes parsing.
     pub const VERSION: u32 = 2;
 
     /// `Mistborn · Book 3`, `Mistborn` without a number, `None` without a series.
@@ -65,6 +64,25 @@ impl Metadata {
         }
         let number = series_number(&self.series_index);
         Some(if number.is_empty() { self.series.clone() } else { format!("{} · Book {number}", self.series) })
+    }
+}
+
+/// Reads display metadata for a supported book file, filling an empty title
+/// from the filename stem.
+pub fn read_metadata(path: &std::path::Path) -> anyhow::Result<Metadata> {
+    match format::BookFormat::from_path(path) {
+        Some(format::BookFormat::Epub) => epub::read(path),
+        Some(format::BookFormat::Markdown) => crate::markdown::read(path),
+        None => anyhow::bail!("Unsupported book format: {}", path.display()),
+    }
+}
+
+/// Reads the book's synopsis text (`description` or `synopsis`), or `None` when absent.
+pub fn read_synopsis(path: &std::path::Path) -> anyhow::Result<Option<String>> {
+    match format::BookFormat::from_path(path) {
+        Some(format::BookFormat::Epub) => epub::synopsis(path),
+        Some(format::BookFormat::Markdown) => crate::markdown::synopsis(path),
+        None => anyhow::bail!("Unsupported book format: {}", path.display()),
     }
 }
 
@@ -221,13 +239,13 @@ impl PathChange {
             let path = collections::normalize_cow(path);
             roots.iter().any(|r| path.starts_with(collections::normalize_cow(r).as_ref()))
         };
-        let is_epub = |path: &std::path::Path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub"));
+        let is_book = |path: &std::path::Path| format::BookFormat::is_book(path);
         match self {
             Self::Move(from, to) => {
                 for entry in &mut home.books {
                     rewrite_path(&mut entry.book.path, from, to);
                 }
-                if home.library_root_count == 1 && !is_epub(from) {
+                if home.library_root_count == 1 && !is_book(from) {
                     let from_top = is_top_child(from);
                     let to_top = is_top_child(to);
                     if from_top != to_top {
@@ -241,7 +259,7 @@ impl PathChange {
             }
             Self::Remove(path) => {
                 home.books.retain(|e| !e.book.path.starts_with(path));
-                if is_epub(path) {
+                if is_book(path) {
                     if in_roots(path) {
                         home.library_books = home.library_books.saturating_sub(1);
                     }
@@ -571,8 +589,36 @@ mod identity_tests {
         PathChange::Add(Box::new(book("/books/Sub/Deep/new.epub", "n"))).apply_home(&mut home, &roots);
         assert_eq!((home.library_folders, home.library_books), (2, 5));
 
+        // Markdown files (.md and .markdown) follow the same count rules.
+        PathChange::Add(Box::new(book("/books/notes.md", "md"))).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 6));
+        PathChange::Move("/books/notes.md".into(), "/books/Sub/notes.md".into()).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 6));
+        PathChange::Remove("/books/Sub/notes.md".into()).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 5));
+        PathChange::Remove("/books/Sub/essay.markdown".into()).apply_home(&mut home, &roots);
+        assert_eq!((home.library_folders, home.library_books), (2, 4));
+
         // Moving a top-level folder into a subfolder updates the folder count only.
         PathChange::Move("/books/Sub".into(), "/books/Archive/Sub".into()).apply_home(&mut home, &roots);
-        assert_eq!((home.library_folders, home.library_books), (1, 5));
+        assert_eq!((home.library_folders, home.library_books), (1, 4));
+    }
+
+    #[test]
+    fn read_metadata_and_read_synopsis_dispatch_by_format() -> anyhow::Result<()> {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let epub_meta = read_metadata(&fixtures.join("library3.epub"))?;
+        assert!(!epub_meta.title.is_empty());
+        let md_meta = read_metadata(&fixtures.join("rich.md"))?;
+        assert_eq!(md_meta.title, "Field Notes on E-Ink Typography");
+        assert_eq!(md_meta.synopsis, Some(true));
+        let md_syn = read_synopsis(&fixtures.join("rich.md"))?.expect("rich.md synopsis");
+        assert!(md_syn.contains("Practical notes on layouts"));
+        let prose_meta = read_metadata(&fixtures.join("prose.markdown"))?;
+        assert_eq!(prose_meta.title, "Plain Prose Notes");
+        assert_eq!(read_synopsis(&fixtures.join("prose.markdown"))?, None);
+        assert!(read_metadata(&fixtures.join("markdown-cover.png")).is_err());
+        assert!(read_synopsis(&fixtures.join("markdown-cover.png")).is_err());
+        Ok(())
     }
 }

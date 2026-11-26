@@ -1,8 +1,9 @@
 //! The book's language, detected once from a sample of its own text with
-//! whatlang. EPUB language tags are often missing or wrong (conversion tools
+//! whatlang. Embedded language tags are often missing or wrong (conversion tools
 //! stamp `en` on books in any language), so a reliable detection beats the
 //! tag.
 use super::epub;
+use super::format::BookFormat;
 use crate::dictionary::languages::normalize_language;
 use anyhow::{Context, Result, ensure};
 use quick_xml::{Reader, events::Event};
@@ -47,8 +48,8 @@ impl DetectedLanguage {
 }
 
 /// The book language lookups use, by the trust order: a reliable detection,
-/// then the EPUB tag. (A dictionary set chosen for the book beats both; the
-/// script default comes after both. The dictionary sets apply those two.)
+/// then the tagged language. (A dictionary set chosen for the book beats both;
+/// the script default comes after both. The dictionary sets apply those two.)
 pub fn resolve(tag: &str, detected: Option<&DetectedLanguage>) -> String {
     detected.and_then(DetectedLanguage::trusted).map_or_else(|| tag.to_owned(), str::to_owned)
 }
@@ -95,7 +96,7 @@ pub fn detect(text: &str) -> DetectedLanguage {
 }
 
 /// Explicit opt-in diagnostic (`VERSO_LANGUAGE_BENCH=1`): detects the language
-/// of every available EPUB in the library, read only, and reports how long it
+/// of every available book in the library, read only, and reports how long it
 /// took, how many books have no tag (or `und`), and how many reliable
 /// detections disagree with a real tag.
 /// Nothing is stored. Mismatches are listed by file name for checking by hand.
@@ -103,7 +104,7 @@ pub fn benchmark(index: &super::LibraryIndex) -> serde_json::Value {
     let (mut times, mut unreadable, mut unreliable, mut mismatches) = (Vec::new(), 0, 0, Vec::new());
     let mut untagged = 0;
     for book in index.books.iter().filter(|b| b.available) {
-        if !book.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")) {
+        if !BookFormat::is_book(&book.path) {
             continue;
         }
         let tag = normalize_language(&book.metadata.language);
@@ -143,12 +144,16 @@ pub fn benchmark(index: &super::LibraryIndex) -> serde_json::Value {
     })
 }
 
-/// Up to `SAMPLE_LIMIT` bytes of body text centred on the middle of the
-/// book's spine, skipping `linear="no"` documents, markup, scripts and styles.
-/// The middle avoids front and back matter, which is often in another
-/// language (an English licence around a German book).
+/// Up to `SAMPLE_LIMIT` bytes of body text for language detection.
+/// For EPUBs, samples from the middle of the linear spine to avoid front/back
+/// matter in another language; for Markdown, strips frontmatter and markup from
+/// the opening prose.
 pub fn sample(path: &Path) -> Result<String> {
-    sample_with(path, LIMITS)
+    match BookFormat::from_path(path) {
+        Some(BookFormat::Epub) => sample_with(path, LIMITS),
+        Some(BookFormat::Markdown) => crate::markdown::sample_text(path, SAMPLE_LIMIT),
+        None => anyhow::bail!("Unsupported book format: {}", path.display()),
+    }
 }
 
 fn sample_with(path: &Path, limits: Limits) -> Result<String> {
@@ -544,6 +549,32 @@ pub(crate) mod tests {
         assert_eq!(default.form_languages(&resolve("en", Some(&german)), "Häuser"), ["de", "en"]);
     }
 
+    #[test]
+    fn markdown_files_detect_language_from_stripped_prose() {
+        let dir = tempfile::tempdir().unwrap();
+        // Frontmatter lang: en is wrong; code blocks are English; prose is German.
+        let md_path = dir.path().join("notes.md");
+        let md = format!(
+            "---\ntitle: Test\nlang: en\n---\n\n# Kapitel\n\n```rust\nlet english_code_comment = \"the lighthouse keeper\";\n```\n\n{}",
+            GERMAN.repeat(3)
+        );
+        std::fs::write(&md_path, md).unwrap();
+        let detected = detect_book(&md_path).unwrap();
+        assert_eq!(detected, DetectedLanguage { code: "de".into(), reliable: true, version: DETECTOR_VERSION });
+
+        // .markdown extension also detects reliably.
+        let markdown_path = dir.path().join("story.markdown");
+        std::fs::write(&markdown_path, FRENCH.repeat(3)).unwrap();
+        assert_eq!(detect_book(&markdown_path).unwrap().code, "fr");
+
+        // Code-only Markdown yields empty sample without error.
+        let code_only = dir.path().join("code.md");
+        std::fs::write(&code_only, "```py\nprint('hello world')\n```\n").unwrap();
+        let empty = detect_book(&code_only).unwrap();
+        assert_eq!(empty.code, "");
+        assert!(!empty.reliable);
+    }
+
     /// Detects every book in `testbooks/` and prints tag against detection:
     /// `cargo test -p verso --release detect_testbooks -- --ignored --nocapture`.
     #[test]
@@ -553,7 +584,7 @@ pub(crate) mod tests {
         let mut paths: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")))
+            .filter(|p| BookFormat::is_book(p))
             .collect();
         paths.sort();
         println!(
@@ -561,7 +592,7 @@ pub(crate) mod tests {
             "book", "tag", "det", "reliable", "confidence", "sample", "time"
         );
         for path in paths {
-            let tag = epub::read(&path).map(|m| normalize_language(&m.language)).unwrap_or_default();
+            let tag = crate::library::read_metadata(&path).map(|m| normalize_language(&m.language)).unwrap_or_default();
             let started = std::time::Instant::now();
             let result = sample(&path).map(|text| (detect(&text), whatlang::detect(&text), text.len()));
             let elapsed = started.elapsed();

@@ -5,7 +5,7 @@ use super::collections::{self, Collections, Navigation};
 use super::home::Summary;
 use super::previews;
 use super::sort::{self, Sort};
-use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, epub};
+use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, read_metadata};
 use crate::platform::Waker;
 use crate::store::{BookState, FolderPreview, Store, book_id};
 use anyhow::Result;
@@ -631,6 +631,15 @@ impl Background {
             pending.remove(&next);
             match covers::generate(&self.index.books[next], &self.store, &self.tile_sizes) {
                 Ok(cover) if cover != self.index.books[next].cover => {
+                    let next_key = match &cover {
+                        Cover::Ready(k) | Cover::Unavailable(k) => Some(k.as_str()),
+                        Cover::Pending => None,
+                    };
+                    if let Cover::Ready(old) = &self.index.books[next].cover
+                        && next_key != Some(old.as_str())
+                    {
+                        covers::remove(&self.store, old, &self.tile_sizes);
+                    }
                     self.index.books[next].cover = cover;
                     self.changed();
                     changed += 1;
@@ -1404,11 +1413,7 @@ fn enumerate(
             Ok(kind) if kind.is_dir() && !name.to_string_lossy().ends_with(".sdr") => {
                 enumerate(&item.path(), cancelled, files, uncertain, empty_folders, errors)
             }
-            Ok(kind)
-                if kind.is_file() && item.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("epub")) =>
-            {
-                files.push(item.path())
-            }
+            Ok(kind) if kind.is_file() && super::format::BookFormat::is_book(&item.path()) => files.push(item.path()),
             Ok(_) => {}
             Err(e) => {
                 uncertain.push(item.path());
@@ -1478,7 +1483,7 @@ pub fn scan_roots(
         {
             let mut b = (*cached).clone();
             b.available = true;
-            // Read by an older `epub::read_metadata`: read it again in the
+            // Read by an older `read_metadata`: read it again in the
             // background, keeping the record shown meanwhile.
             if b.metadata.version < Metadata::VERSION && b.error.is_none() {
                 dirty.insert(path.clone());
@@ -1502,7 +1507,7 @@ pub fn scan_roots(
         let mut error = None;
         if changed && cached.is_some() {
             reads += 1;
-            match epub::read(&path) {
+            match read_metadata(&path) {
                 Ok(parsed) => metadata = parsed,
                 Err(e) => error = Some(format!("{e:#}")),
             }
@@ -1574,7 +1579,7 @@ pub fn scan_roots(
             continue;
         }
         reads += 1;
-        match epub::read(&book.path) {
+        match read_metadata(&book.path) {
             Ok(metadata) => book.metadata = metadata,
             Err(e) => book.error = Some(format!("{e:#}")),
         }
@@ -2268,7 +2273,7 @@ mod folder_tests {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
         std::fs::copy(&fixture, &epub)?;
         std::fs::copy(&fixture, &unscanned)?;
-        let metadata = epub::read(&epub)?;
+        let metadata = read_metadata(&epub)?;
         let file_stamp = stamp(&std::fs::metadata(&epub)?)?;
         let fp = fingerprint_for_test(&epub)?;
 
@@ -2369,6 +2374,32 @@ mod folder_tests {
         });
         let warm = wait_warm(&worker);
         assert!(warm.opened_ranks.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn scans_mixed_epub_md_and_markdown_roots() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("library");
+        std::fs::create_dir_all(root.join("Notes"))?;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        std::fs::copy(fixtures.join("library3.epub"), root.join("book.epub"))?;
+        std::fs::copy(fixtures.join("rich.md"), root.join("rich.md"))?;
+        std::fs::copy(fixtures.join("markdown-cover.png"), root.join("markdown-cover.png"))?;
+        std::fs::copy(fixtures.join("prose.markdown"), root.join("Notes/prose.markdown"))?;
+        std::fs::write(root.join("Notes/bare.MD"), "Plain text without heading.\n")?;
+        std::fs::write(root.join("ignore.txt"), "not a book\n")?;
+
+        let scanned = scan(&root, &Default::default(), false, &|| false, |_| {}).unwrap();
+        assert_eq!(scanned.metadata_reads, 4);
+        assert_eq!(scanned.index.books.len(), 4);
+        let by_name = |name: &str| scanned.index.books.iter().find(|b| b.path.ends_with(name)).unwrap();
+        assert_eq!(by_name("rich.md").metadata.title, "Field Notes on E-Ink Typography");
+        assert_eq!(by_name("rich.md").metadata.authors, "Ada Lovelace, Charles Babbage");
+        assert_eq!(by_name("rich.md").metadata.cover.as_deref(), Some("markdown-cover.png"));
+        assert_eq!(by_name("prose.markdown").metadata.title, "Plain Prose Notes");
+        assert_eq!(by_name("bare.MD").metadata.title, "bare");
+        assert!(by_name("book.epub").error.is_none());
         Ok(())
     }
 }

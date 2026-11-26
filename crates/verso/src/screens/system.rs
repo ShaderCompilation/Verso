@@ -690,9 +690,9 @@ impl SystemSettings {
         let note = if Store::library_folders_overridden() {
             "Set by VERSO_BOOKS for this session."
         } else if self.folders.len() == 1 {
-            "Verso shows EPUB books from these folders and their subfolders. Add another folder before removing this one."
+            "Verso shows EPUB and Markdown books from these folders and their subfolders. Add another folder before removing this one."
         } else {
-            "Verso shows EPUB books from these folders and their subfolders. Removing a folder keeps its books and reading progress on the Kindle."
+            "Verso shows EPUB and Markdown books from these folders and their subfolders. Removing a folder keeps its books and reading progress on the Kindle."
         };
         let y = self.add_folder.rect().bottom() + t.mm(2.0);
         cx.paragraph(note, t.small.gray(INK2), Rect::new(c.x, y, c.w, t.mm(14.0)), HAlign::Left);

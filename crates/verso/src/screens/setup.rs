@@ -513,7 +513,7 @@ impl SetupScreen {
         self.pager.set(self.list.page, self.list.paging().pages());
     }
 
-    /// No EPUBs in any listed folder, once the walk is done.
+    /// No books in any listed folder, once the walk is done.
     fn no_books(&self) -> bool {
         self.discovery.is_none() && self.rows.iter().all(|r| r.books.unwrap_or(0) == 0)
     }
@@ -526,7 +526,7 @@ impl SetupScreen {
         } else if self.discovery.is_some() {
             Some("Looking for books on this Kindle…")
         } else if self.no_books() {
-            Some("No EPUB books on this Kindle yet. Send some from a computer or phone over Wi-Fi.")
+            Some("No books on this Kindle yet. Send some from a computer or phone over Wi-Fi.")
         } else {
             None
         }
@@ -566,7 +566,7 @@ impl SetupScreen {
 
     fn draw_library(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
-        let intro = "Verso shows the EPUB books in the folders switched on here, and in their subfolders.";
+        let intro = "Verso shows EPUB and Markdown books in the folders switched on here, and in their subfolders.";
         cx.paragraph(intro, t.body, self.intro, HAlign::Left);
         self.list.draw(cx);
         if self.pager.pages > 1 {
@@ -1140,6 +1140,12 @@ mod tests {
         std::fs::write(root.join("Other/a.epub"), b"")?;
         walk(&mut s, &t, vec![root.join("documents")], &root);
         assert!(!s.no_books());
+        // Markdown files also count as books during folder discovery.
+        std::fs::remove_file(root.join("Other/a.epub"))?;
+        std::fs::write(root.join("Other/notes.md"), b"# Notes")?;
+        walk(&mut s, &t, vec![root.join("documents")], &root);
+        assert!(!s.no_books());
+        assert_eq!(s.rows.iter().find(|r| r.path == root.join("Other")).and_then(|r| r.books), Some(1));
         Ok(())
     }
 

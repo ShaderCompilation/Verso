@@ -255,6 +255,13 @@ mod tests {
                 "Authorization: DeepL-Auth-Key <redacted>",
             ),
             ("debug key 12345678-1234-1234-1234-1234567890ab:fx leaked", "debug key <redacted> leaked"),
+            // Markdown (.md and .markdown) book paths and cache files.
+            ("opened /mnt/us/documents/Field Notes.md: parse 3 ms", "opened <book 22>: parse 3 ms"),
+            ("opened /mnt/us/documents/Long Essay.markdown: parse 5 ms", "opened <book 23>: parse 5 ms"),
+            ("writing /mnt/us/documents/Draft.md.part: full", "writing <book 24>: full"),
+            ("moved /mnt/us/documents/A.md to /mnt/us/documents/B.markdown", "moved <book 25> to <book 26>"),
+            ("deleted /mnt/us/documents/Own.md/note.txt (files)", "deleted <book 27>"),
+            ("File Field_Notes.md.571d7876.0.cr3 is not", "File <cache> is not"),
         ];
         let lines: String = redacted.iter().map(|(line, _)| format!("{line}\n")).collect();
         fs::write(app.join("verso.log"), format!("{cur_log}\n{lines}")).unwrap();

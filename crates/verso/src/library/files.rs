@@ -90,9 +90,7 @@ pub fn count_contents(path: &Path) -> Result<Contents> {
                 }
                 result.folders += 1;
                 walk(&entry.path(), result)?;
-            } else if entry.file_type()?.is_file()
-                && entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
-            {
+            } else if entry.file_type()?.is_file() && super::format::BookFormat::is_book(&entry.path()) {
                 result.books += 1;
             } else {
                 result.other_files += 1;
@@ -775,6 +773,8 @@ mod tests {
         assert!(occupied.exists(), "an empty destination must never be replaced");
         std::fs::create_dir(folder.join("nested"))?;
         std::fs::write(folder.join("nested/Book.EPUB"), b"book")?;
+        std::fs::write(folder.join("nested/notes.md"), b"# Notes")?;
+        std::fs::write(folder.join("essay.markdown"), b"# Essay")?;
         std::fs::write(folder.join("paper.pdf"), b"pdf")?;
         std::fs::create_dir(folder.join("Book.sdr"))?;
         std::fs::write(folder.join("Book.sdr/metadata.epub.lua"), b"progress")?;
@@ -783,7 +783,7 @@ mod tests {
         std::fs::write(folder.join(".git/config"), b"hidden")?;
         let contents = count_contents(&folder)?;
         // Sidecars and hidden entries are deleted but not named in the message.
-        assert_eq!(contents, Contents { books: 1, folders: 1, other_files: 1 });
+        assert_eq!(contents, Contents { books: 3, folders: 1, other_files: 1 });
         let store = Store::at(root.join("state"));
         let state = BookState { position: Position("exact-anchor".into()), progress: 4200, ..Default::default() };
         store.save_book("7", &state)?;

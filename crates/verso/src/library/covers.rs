@@ -1,6 +1,7 @@
 //! Fixed-size cover cache (8-bit grayscale in `Gray8`, 24-bit RGB in `Color32`).
 //! All source decoding happens on the library thread.
-use super::{Book, Cover, LibraryIndex, epub};
+use super::format::BookFormat;
+use super::{Book, Cover, LibraryIndex, Stamp, epub};
 use crate::geom::Rect;
 use crate::gfx::{Canvas, ColorMode, luma};
 use crate::store::{Store, atomic_bytes};
@@ -84,13 +85,30 @@ impl CoverImage {
     }
 }
 
+/// External cover file stamp for Markdown books with a `cover:` frontmatter
+/// path, so replacing or removing the cover image invalidates the cache key.
+fn external_cover_stamp(book: &Book) -> Option<Stamp> {
+    if BookFormat::from_path(&book.path) != Some(BookFormat::Markdown) {
+        return None;
+    }
+    let cover_ref = book.metadata.cover.as_deref()?;
+    let cover_path = crate::markdown::resolve_cover_path(&book.path, cover_ref).ok()?;
+    let meta = std::fs::metadata(&cover_path).ok()?;
+    super::worker::stamp(&meta).ok()
+}
+
 /// Cache key for `book` in `color` mode. `Gray8` keeps the original hash so
 /// existing monochrome caches stay valid; `Color32` hashes a distinct key so
 /// switching simulator presets never mixes gray and color thumbnails.
 pub fn key(book: &Book, color: ColorMode) -> String {
-    let value = match color {
-        ColorMode::Gray8 => serde_json::to_vec(&(VERSION, &book.id, &book.stamp)),
-        ColorMode::Color32 => serde_json::to_vec(&(VERSION, "color", &book.id, &book.stamp)),
+    let external = external_cover_stamp(book);
+    let value = match (color, external) {
+        (ColorMode::Gray8, None) => serde_json::to_vec(&(VERSION, &book.id, &book.stamp)),
+        (ColorMode::Color32, None) => serde_json::to_vec(&(VERSION, "color", &book.id, &book.stamp)),
+        (ColorMode::Gray8, Some(cover_stamp)) => serde_json::to_vec(&(VERSION, &book.id, &book.stamp, cover_stamp)),
+        (ColorMode::Color32, Some(cover_stamp)) => {
+            serde_json::to_vec(&(VERSION, "color", &book.id, &book.stamp, cover_stamp))
+        }
     }
     .expect("serializable cover key");
     format!("{:x}", Sha256::digest(value))
@@ -379,11 +397,29 @@ fn svg(bytes: &[u8], width: u32, height: u32) -> Result<RgbaImage> {
     }
     Ok(image)
 }
+fn read_bounded_image(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    ensure!(file.metadata()?.len() <= limit, "cover image exceeds {limit} bytes");
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "cover image exceeds {limit} bytes");
+    Ok(bytes)
+}
+
 /// Fits the cover inside `width` x `height`, centred on a `background` gray.
 pub fn sleep_cover(book: &Book, width: u32, height: u32, background: u8, color: ColorMode) -> Result<CoverImage> {
     let cover = book.metadata.cover.as_ref().context("no cover")?;
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(&book.path)?)?;
-    let bytes = epub::entry(&mut zip, cover, epub::IMAGE_LIMIT)?;
+    let bytes = match BookFormat::from_path(&book.path) {
+        Some(BookFormat::Epub) => {
+            let mut zip = zip::ZipArchive::new(std::fs::File::open(&book.path)?)?;
+            epub::entry(&mut zip, cover, epub::IMAGE_LIMIT)?
+        }
+        Some(BookFormat::Markdown) => {
+            let cover_path = crate::markdown::resolve_cover_path(&book.path, cover)?;
+            read_bounded_image(&cover_path, epub::IMAGE_LIMIT)?
+        }
+        None => anyhow::bail!("unsupported book format"),
+    };
     let image = if cover.rsplit('.').next().is_some_and(|s| s.eq_ignore_ascii_case("svg")) {
         svg(&bytes, width, height)?
     } else {
@@ -901,6 +937,81 @@ mod tests {
         assert!(!dir.join("abc.png.tmp").exists());
         assert!(!dir.join("legacy.json.tmp").exists());
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_covers_generate_invalidate_on_cover_edit_and_fall_back() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let store = Store::at(root.join("state"));
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+        // 1. Markdown with a valid relative PNG cover generates thumbnails and sleep cover.
+        std::fs::copy(fixtures.join("rich.md"), root.join("rich.md"))?;
+        std::fs::copy(fixtures.join("markdown-cover.png"), root.join("markdown-cover.png"))?;
+        // 2. Markdown with an SVG cover.
+        std::fs::write(root.join("svg.md"), "---\ntitle: SVG\ncover: art.svg\n---\n\nBody\n")?;
+        std::fs::write(
+            root.join("art.svg"),
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="180"><rect width="120" height="180" fill="#202020"/></svg>"##,
+        )?;
+        // 3. Markdown without cover -> clean Unavailable fallback.
+        std::fs::copy(fixtures.join("prose.markdown"), root.join("prose.markdown"))?;
+        // 4. Markdown pointing at a missing cover -> clean Unavailable fallback, then recovers when file appears.
+        std::fs::write(root.join("missing.md"), "---\ntitle: Missing\ncover: soon.png\n---\n\nText\n")?;
+
+        let scanned = scan(root, &Default::default(), false, &|| false, |_| {}).unwrap().index;
+        let find = |name: &str| scanned.books.iter().find(|b| b.path.ends_with(name)).unwrap().clone();
+
+        let rich = find("rich.md");
+        let Cover::Ready(k_png) = generate(&rich, &store, &[])? else { panic!("rich.md cover missing") };
+        assert_eq!(load(&store.cover_path(&k_png), ColorMode::Gray8)?.dimensions(), (WIDTH, HEIGHT));
+        assert_eq!(sleep_cover(&rich, 600, 800, 0, ColorMode::Gray8)?.dimensions(), (600, 800));
+
+        // Replacing the external cover image changes covers::key even when rich.md is untouched.
+        let bigger = image::DynamicImage::ImageLuma8(GrayImage::from_pixel(40, 60, image::Luma([32])));
+        bigger.save(root.join("markdown-cover.png"))?;
+        let k_png_edited = key(&rich, ColorMode::Gray8);
+        assert_ne!(k_png_edited, k_png, "external cover edit must invalidate cache key");
+        let Cover::Ready(k_new) = generate(&rich, &store, &[])? else { panic!("edited cover failed") };
+        assert_eq!(k_new, k_png_edited);
+
+        let svg_book = find("svg.md");
+        let Cover::Ready(k_svg) = generate(&svg_book, &store, &[])? else { panic!("svg.md cover missing") };
+        assert_eq!(load(&store.cover_path(&k_svg), ColorMode::Gray8)?.dimensions(), (WIDTH, HEIGHT));
+
+        let prose = find("prose.markdown");
+        assert!(matches!(generate(&prose, &store, &[])?, Cover::Unavailable(_)));
+
+        let mut missing = find("missing.md");
+        let Cover::Unavailable(k_miss) = generate(&missing, &store, &[])? else {
+            panic!("missing cover should fall back")
+        };
+        missing.cover = Cover::Unavailable(k_miss.clone());
+        // Adding the cover image later changes the key and generates the thumbnail.
+        std::fs::copy(fixtures.join("markdown-cover.png"), root.join("soon.png"))?;
+        assert_ne!(key(&missing, ColorMode::Gray8), k_miss);
+        assert!(matches!(generate(&missing, &store, &[])?, Cover::Ready(_)));
+
+        // Escaping cover paths are rejected by sleep_cover and fall back cleanly.
+        std::fs::write(root.join("outside.png"), std::fs::read(fixtures.join("markdown-cover.png"))?)?;
+        let mut escaping = prose.clone();
+        escaping.metadata.cover = Some("../outside.png".into());
+        assert!(sleep_cover(&escaping, WIDTH, HEIGHT, 255, ColorMode::Gray8).is_err());
+        assert!(matches!(generate(&escaping, &store, &[])?, Cover::Unavailable(_)));
+
+        #[cfg(unix)]
+        {
+            let outside_dir = tempfile::tempdir()?;
+            std::fs::copy(fixtures.join("markdown-cover.png"), outside_dir.path().join("secret.png"))?;
+            std::os::unix::fs::symlink(outside_dir.path().join("secret.png"), root.join("escape.png"))?;
+            let mut symlink_book = prose;
+            symlink_book.metadata.cover = Some("escape.png".into());
+            assert!(sleep_cover(&symlink_book, WIDTH, HEIGHT, 255, ColorMode::Gray8).is_err());
+            assert!(matches!(generate(&symlink_book, &store, &[])?, Cover::Unavailable(_)));
+        }
+
         Ok(())
     }
 }
