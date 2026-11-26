@@ -37,8 +37,47 @@ pub struct Metadata {
     pub language: String,
     pub cover: Option<String>,
     /// Whether the package has a description (synopsis) with text; `None`
-    /// until the book has been read for one. The text is read when shown.
+    /// in records older than metadata version 1. The text is read when shown.
     pub synopsis: Option<bool>,
+    /// The series name from calibre or an EPUB 3 `series` collection.
+    pub series: String,
+    /// The book's number in its series as written (`"3"`, `"1.5"`,
+    /// `"3.0"`); parsed when sorting so `Metadata` stays `Eq`.
+    pub series_index: String,
+    /// The first creator's `file-as` name (`Sanderson, Brandon`).
+    pub author_sort: String,
+    /// The `epub::read_metadata` version that produced this record. The scan
+    /// re-reads older records in the background while they stay shown.
+    pub version: u32,
+}
+impl Metadata {
+    /// Bumped when `epub::read_metadata` learns a field.
+    pub const VERSION: u32 = 1;
+
+    /// `Mistborn · Book 3`, `Mistborn` without a number, `None` without a series.
+    pub fn series_label(&self) -> Option<String> {
+        if self.series.is_empty() {
+            return None;
+        }
+        let number = series_number(&self.series_index);
+        Some(if number.is_empty() { self.series.clone() } else { format!("{} · Book {number}", self.series) })
+    }
+}
+
+/// A series number for display: a whole number without `.0` (`3.0` → `3`),
+/// anything else as written.
+pub fn series_number(index: &str) -> &str {
+    let index = index.trim();
+    match index.split_once('.') {
+        Some((whole, fraction))
+            if !whole.is_empty()
+                && whole.bytes().all(|b| b.is_ascii_digit())
+                && fraction.bytes().all(|b| b == b'0') =>
+        {
+            whole
+        }
+        _ => index,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1462,9 +1462,9 @@ pub fn scan_roots(
         {
             let mut b = (*cached).clone();
             b.available = true;
-            // Indexed before synopses were recorded: read it again in the
+            // Read by an older `epub::read_metadata`: read it again in the
             // background, keeping the record shown meanwhile.
-            if b.metadata.synopsis.is_none() && b.error.is_none() {
+            if b.metadata.version < Metadata::VERSION && b.error.is_none() {
                 dirty.insert(path.clone());
             }
             books.push(b);
@@ -1650,16 +1650,28 @@ mod tests {
         let unchanged = run(&root, &initial.index, false);
         assert_eq!(unchanged.metadata_reads, 0);
         assert_eq!(run(&root, &unchanged.index, true).metadata_reads, 1);
-        // A book indexed before synopses were recorded is read once more and
-        // keeps its identity; the broken one isn't retried.
-        let mut unknown = unchanged.index.clone();
-        unknown.books.iter_mut().for_each(|b| b.metadata.synopsis = None);
-        let refreshed = run(&root, &unknown, false);
+        // A book read by an older metadata version is read once more in the
+        // background: its record stays shown meanwhile and keeps its identity
+        // and cover. The broken one isn't retried.
+        let mut older = unchanged.index.clone();
+        for b in &mut older.books {
+            b.metadata.version = Metadata::VERSION - 1;
+            b.metadata.title = "Shown".into();
+            b.cover = Cover::Ready("cover".into());
+        }
+        let mut shown = Vec::new();
+        let refreshed = scan(&root, &older, false, &|| false, |index| {
+            let one = index.books.iter().find(|b| b.path == a).unwrap();
+            shown.push((one.metadata.title.clone(), one.metadata_pending));
+        })
+        .unwrap();
+        assert_eq!(shown, [("Shown".to_owned(), false)]);
         assert_eq!(refreshed.metadata_reads, 1);
         let one = refreshed.index.books.iter().find(|b| b.path == a).unwrap();
+        let before = unchanged.index.books.iter().find(|b| b.path == a).unwrap();
         assert_eq!(
-            (one.metadata.synopsis, &one.id),
-            (Some(false), &unchanged.index.books.iter().find(|b| b.path == a).unwrap().id)
+            (one.metadata.version, one.metadata.title.as_str(), &one.id, &one.cover),
+            (Metadata::VERSION, "one", &before.id, &Cover::Ready("cover".into()))
         );
         assert_eq!(run(&root, &refreshed.index, false).metadata_reads, 0);
         let id = initial.index.books.iter().find(|b| b.path == a).unwrap().id.clone();

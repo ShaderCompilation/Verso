@@ -3712,9 +3712,10 @@ pub(crate) struct Details {
 impl Details {
     fn new(t: &Theme, screen: Rect, book: &Book, state: &BookState) -> Self {
         let content = format!(
-            "{}\n\nAuthor: {}\n\nLanguage: {}\n\nStatus: {}{}\n\nFile: {}{}",
+            "{}\n\nAuthor: {}{}\n\nLanguage: {}\n\nStatus: {}{}\n\nFile: {}{}",
             book.metadata.title,
             if book.metadata.authors.is_empty() { "Unknown" } else { &book.metadata.authors },
+            book.metadata.series_label().map(|s| format!("\n\nSeries: {s}")).unwrap_or_default(),
             library::language::describe(&book.metadata.language, state.language.as_ref()),
             status(state),
             if state.hidden_from_continue { " (removed from continue reading)" } else { "" },

@@ -145,7 +145,11 @@ pub fn resolve(base: &str, reference: &str) -> Result<String> {
 }
 
 fn text(node: Option<&Node>) -> String {
-    node.map(|n| n.text.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default()
+    node.map(|n| squash(&n.text)).unwrap_or_default()
+}
+/// Collapses runs of whitespace into single spaces and trims the ends.
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 fn cover_page<R: Read + Seek>(zip: &mut ZipArchive<R>, path: &str) -> Option<String> {
     let page = xml(&entry(zip, path, XML_LIMIT).ok()?).ok()?;
@@ -186,7 +190,7 @@ pub(super) fn package<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<(String
 pub fn read_metadata(path: &Path) -> Result<Metadata> {
     let mut zip = open(path)?;
     let (package_path, package) = package(&mut zip)?;
-    let mut result = Metadata { synopsis: Some(false), ..Metadata::default() };
+    let mut result = Metadata { synopsis: Some(false), version: Metadata::VERSION, ..Metadata::default() };
     let mut cover_id = "";
     if let Some(meta) = package.find("metadata") {
         let identifier = package.attr("unique-identifier");
@@ -198,6 +202,8 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
             meta.all("creator").map(|n| text(Some(n))).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
         result.language = text(meta.find("language"));
         result.synopsis = Some(meta.all("description").any(|n| has_text(&n.text)));
+        (result.series, result.series_index) = series(meta);
+        result.author_sort = author_sort(meta);
         cover_id = meta.all("meta").find(|n| n.attr("name") == "cover").map_or("", |n| n.attr("content"));
     }
     let mut candidates = Vec::new();
@@ -236,6 +242,40 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
         }
     }
     Ok(result)
+}
+
+/// EPUB 3 `<meta refines="#id" property="…">` text for an element's id.
+fn refinement(meta: &Node, id: &str, property: &str) -> String {
+    if id.is_empty() {
+        return String::new();
+    }
+    text(meta.all("meta").find(|n| n.attr("refines").strip_prefix('#') == Some(id) && n.attr("property") == property))
+}
+
+/// Series name and number: calibre's metas, else the first EPUB 3 collection
+/// whose `collection-type` is `series` (a `set` is no reading order).
+fn series(meta: &Node) -> (String, String) {
+    let calibre = |name| {
+        meta.all("meta").find(|n| n.attr("name") == name).map_or_else(String::new, |n| squash(n.attr("content")))
+    };
+    let name = calibre("calibre:series");
+    if !name.is_empty() {
+        return (name, calibre("calibre:series_index"));
+    }
+    meta.all("meta")
+        .filter(|n| n.attr("property") == "belongs-to-collection")
+        .filter(|n| refinement(meta, n.attr("id"), "collection-type") == "series")
+        .map(|n| (text(Some(n)), refinement(meta, n.attr("id"), "group-position")))
+        .find(|(name, _)| !name.is_empty())
+        .unwrap_or_default()
+}
+
+/// The first creator's sort name: EPUB 2's `opf:file-as` attribute or an
+/// EPUB 3 `file-as` refinement.
+fn author_sort(meta: &Node) -> String {
+    let Some(creator) = meta.all("creator").find(|n| !text(Some(n)).is_empty()) else { return String::new() };
+    let attribute = squash(creator.attr("file-as"));
+    if attribute.is_empty() { refinement(meta, creator.attr("id"), "file-as") } else { attribute }
 }
 
 /// Whether a description shows any text once its markup is left out.
@@ -339,6 +379,43 @@ pub(crate) mod tests {
         assert!(read(&path).is_err());
         std::fs::write(&path, b"not an EPUB")?;
         assert!(read(&path).is_err());
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+    #[test]
+    fn series_and_author_sort_names() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("verso-series-{}.epub", std::process::id()));
+        let read_opf = |metadata: &str| -> Result<Metadata> {
+            fixture(
+                &path,
+                &format!(
+                    r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf"><dc:title>T</dc:title>{metadata}</metadata></package>"#
+                ),
+                &[],
+            )?;
+            read(&path)
+        };
+        let fields = |m: Metadata| (m.series, m.series_index, m.author_sort);
+        // calibre, with EPUB 2's file-as attribute on the first creator.
+        let m = read_opf(
+            r#"<dc:creator opf:file-as="Sanderson, Brandon">Brandon Sanderson</dc:creator><dc:creator opf:file-as="Other">Other</dc:creator><meta name="calibre:series" content="Mistborn"/><meta name="calibre:series_index" content="3.0"/>"#,
+        )?;
+        assert_eq!(m.series_label().as_deref(), Some("Mistborn · Book 3"));
+        assert_eq!(fields(m), ("Mistborn".into(), "3.0".into(), "Sanderson, Brandon".into()));
+        // EPUB 3 refinements: a set is skipped, the series is found by its id,
+        // and file-as refines the creator.
+        let m = read_opf(
+            r##"<dc:creator id="a">Ryan Cahill</dc:creator><meta refines="#a" property="file-as">Cahill, Ryan</meta><meta property="belongs-to-collection" id="set">Modern Library 100</meta><meta refines="#set" property="collection-type">set</meta><meta property="belongs-to-collection" id="c">The Bound and the Broken</meta><meta refines="#c" property="collection-type">series</meta><meta refines="#c" property="group-position">1.5</meta>"##,
+        )?;
+        assert_eq!(m.series_label().as_deref(), Some("The Bound and the Broken · Book 1.5"));
+        assert_eq!(fields(m), ("The Bound and the Broken".into(), "1.5".into(), "Cahill, Ryan".into()));
+        // A set alone is no series; no number leaves just the name.
+        let m = read_opf(
+            r##"<meta property="belongs-to-collection" id="set">Modern Library 100</meta><meta refines="#set" property="collection-type">set</meta>"##,
+        )?;
+        assert_eq!((m.series_label(), fields(m)), (None, Default::default()));
+        let m = read_opf(r#"<meta name="calibre:series" content="Dune"/>"#)?;
+        assert_eq!(m.series_label().as_deref(), Some("Dune"));
         std::fs::remove_file(path)?;
         Ok(())
     }
