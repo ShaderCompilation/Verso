@@ -1,0 +1,7 @@
+Tenth closed beta of Verso.
+
+- Look up words on Wikipedia or translate them.
+- Optional DeepL translation.
+- Sort the library, with series numbers.
+- Faster KOReader import with progress.
+- Fix charger prompt on the Oasis 3.
