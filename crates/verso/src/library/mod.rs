@@ -53,8 +53,8 @@ pub struct Metadata {
     pub version: u32,
 }
 impl Metadata {
-    /// Bumped when `epub::read_metadata` learns a field.
-    pub const VERSION: u32 = 1;
+    /// Bumped when `epub::read_metadata` learns a field or changes parsing.
+    pub const VERSION: u32 = 2;
 
     /// `Mistborn · Book 3`, `Mistborn` without a number, `None` without a series.
     pub fn series_label(&self) -> Option<String> {

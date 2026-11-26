@@ -48,6 +48,9 @@ impl Entry {
         book.metadata.identifier.clear();
         book.metadata.language.clear();
         book.metadata.cover = None;
+        book.metadata.series.clear();
+        book.metadata.series_index.clear();
+        book.metadata.author_sort.clear();
         book.metadata.title = book.metadata.title.chars().take(512).collect();
         book.metadata.authors = book.metadata.authors.chars().take(512).collect();
         // Only whether there is one.
@@ -245,5 +248,20 @@ mod tests {
         let summary = Summary::select([Entry::new(&book(1), &state), Entry::new(&book(2), &state)]);
         assert_eq!(summary.resume().unwrap().book.id, "2");
         assert_eq!(summary.recents(4)[0].book.id, "1");
+    }
+
+    #[test]
+    fn entry_strips_series_and_author_sort_fields() {
+        let mut b = book(1);
+        b.metadata.authors = "Brandon Sanderson".into();
+        b.metadata.series = "Mistborn".into();
+        b.metadata.series_index = "3.0".into();
+        b.metadata.author_sort = "Sanderson, Brandon".into();
+        let entry = Entry::new(&b, &BookState::default());
+        assert_eq!(entry.book.metadata.title, "Title 1");
+        assert_eq!(entry.book.metadata.authors, "Brandon Sanderson");
+        assert!(entry.book.metadata.series.is_empty());
+        assert!(entry.book.metadata.series_index.is_empty());
+        assert!(entry.book.metadata.author_sort.is_empty());
     }
 }

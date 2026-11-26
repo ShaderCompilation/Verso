@@ -1552,8 +1552,8 @@ pub fn scan_roots(
     empty_folders.dedup();
     let mut index = LibraryIndex { books, empty_folders, ..LibraryIndex::default() };
     // New books appear with filename titles before their metadata is read. An
-    // unchanged or edit-only scan has nothing to show early.
-    if !dirty.is_empty() {
+    // unchanged, edit-only, or version-only scan has nothing to show early.
+    if index.books.iter().any(|b| b.metadata_pending) {
         checkpoint(&index);
     }
     for i in 0..index.books.len() {
@@ -1650,7 +1650,21 @@ mod tests {
             &[],
         )?;
         std::fs::write(root.join("bad.epub"), b"broken")?;
-        let initial = run(&root, &LibraryIndex::default(), false);
+        let mut initial_checkpoints = Vec::new();
+        let mut initial =
+            scan(&root, &LibraryIndex::default(), false, &|| false, |index| initial_checkpoints.push(index.clone()))
+                .unwrap();
+        for book in &mut initial.index.books {
+            if book.available && book.fingerprint.is_empty() {
+                book.fingerprint = fingerprint(&book.path, &|| false).unwrap_or_default();
+            }
+        }
+        assert_eq!(
+            initial_checkpoints.len(),
+            1,
+            "newly discovered books emit an initial checkpoint before reading EPUBs"
+        );
+        assert!(initial_checkpoints[0].books.iter().all(|b| b.metadata_pending));
         assert_eq!(initial.metadata_reads, 2);
         assert_eq!(initial.index.books.len(), 2);
         assert!(initial.index.books.iter().any(|b| b.error.is_some()));
@@ -1658,21 +1672,17 @@ mod tests {
         assert_eq!(unchanged.metadata_reads, 0);
         assert_eq!(run(&root, &unchanged.index, true).metadata_reads, 1);
         // A book read by an older metadata version is read once more in the
-        // background: its record stays shown meanwhile and keeps its identity
-        // and cover. The broken one isn't retried.
+        // background without an initial pre-read checkpoint, keeping its
+        // identity and cover. The broken one isn't retried.
         let mut older = unchanged.index.clone();
         for b in &mut older.books {
             b.metadata.version = Metadata::VERSION - 1;
             b.metadata.title = "Shown".into();
             b.cover = Cover::Ready("cover".into());
         }
-        let mut shown = Vec::new();
-        let refreshed = scan(&root, &older, false, &|| false, |index| {
-            let one = index.books.iter().find(|b| b.path == a).unwrap();
-            shown.push((one.metadata.title.clone(), one.metadata_pending));
-        })
-        .unwrap();
-        assert_eq!(shown, [("Shown".to_owned(), false)]);
+        let mut version_checkpoints = 0;
+        let refreshed = scan(&root, &older, false, &|| false, |_| version_checkpoints += 1).unwrap();
+        assert_eq!(version_checkpoints, 0, "version-only re-read must not emit a redundant initial checkpoint");
         assert_eq!(refreshed.metadata_reads, 1);
         let one = refreshed.index.books.iter().find(|b| b.path == a).unwrap();
         let before = unchanged.index.books.iter().find(|b| b.path == a).unwrap();
@@ -2005,11 +2015,24 @@ mod tests {
         for i in 0..70 {
             fixture(&root.join(format!("{i}.epub")), "<package/>", &[])?;
         }
-        let mut checkpoint = None;
+        let mut checkpoints = Vec::new();
         let full =
-            scan(&root, &LibraryIndex::default(), false, &|| false, |index| checkpoint = Some(index.clone())).unwrap();
+            scan(&root, &LibraryIndex::default(), false, &|| false, |index| checkpoints.push(index.clone())).unwrap();
         assert_eq!(full.metadata_reads, 70);
-        assert_eq!(run(&root, &checkpoint.unwrap(), false).metadata_reads, 6);
+        assert_eq!(checkpoints.len(), 2, "new books emit initial pre-read checkpoint plus 64-book checkpoint");
+        assert!(checkpoints[0].books.iter().all(|b| b.metadata_pending));
+        assert_eq!(run(&root, checkpoints.last().unwrap(), false).metadata_reads, 6);
+        // A version-only upgrade skips the pre-read checkpoint and checkpoints only after 64 reads.
+        let mut older = full.index.clone();
+        for b in &mut older.books {
+            b.metadata.version = Metadata::VERSION - 1;
+        }
+        let mut upgrade_checkpoints = Vec::new();
+        let upgraded = scan(&root, &older, false, &|| false, |index| upgrade_checkpoints.push(index.clone())).unwrap();
+        assert_eq!(upgraded.metadata_reads, 70);
+        assert_eq!(upgrade_checkpoints.len(), 1);
+        assert_eq!(upgrade_checkpoints[0].books.iter().filter(|b| b.metadata.version == Metadata::VERSION).count(), 64);
+        assert!(upgrade_checkpoints[0].books.iter().all(|b| !b.metadata_pending));
         let worker = Worker::new(Store::at(root.join("state")), vec![root.clone()], Waker::new(|| {}));
         worker.pause(true);
         for _ in 0..100 {

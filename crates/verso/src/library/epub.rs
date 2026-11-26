@@ -246,14 +246,19 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
 
 /// EPUB 3 `<meta refines="#id" property="…">` text for an element's id.
 fn refinement(meta: &Node, id: &str, property: &str) -> String {
+    let id = id.trim();
     if id.is_empty() {
         return String::new();
     }
-    text(meta.all("meta").find(|n| n.attr("refines").strip_prefix('#') == Some(id) && n.attr("property") == property))
+    text(
+        meta.all("meta")
+            .find(|n| n.attr("refines").trim().strip_prefix('#') == Some(id) && n.attr("property").trim() == property),
+    )
 }
 
 /// Series name and number: calibre's metas, else the first EPUB 3 collection
-/// whose `collection-type` is `series` (a `set` is no reading order).
+/// whose `collection-type` is `series` (case-insensitive) or absent with a
+/// `group-position` (a `set` is no reading order).
 fn series(meta: &Node) -> (String, String) {
     let calibre = |name| {
         meta.all("meta").find(|n| n.attr("name") == name).map_or_else(String::new, |n| squash(n.attr("content")))
@@ -263,10 +268,19 @@ fn series(meta: &Node) -> (String, String) {
         return (name, calibre("calibre:series_index"));
     }
     meta.all("meta")
-        .filter(|n| n.attr("property") == "belongs-to-collection")
-        .filter(|n| refinement(meta, n.attr("id"), "collection-type") == "series")
-        .map(|n| (text(Some(n)), refinement(meta, n.attr("id"), "group-position")))
-        .find(|(name, _)| !name.is_empty())
+        .filter(|n| n.attr("property").trim() == "belongs-to-collection")
+        .filter_map(|n| {
+            let name = text(Some(n));
+            if name.is_empty() {
+                return None;
+            }
+            let id = n.attr("id");
+            let kind = refinement(meta, id, "collection-type");
+            let position = refinement(meta, id, "group-position");
+            (kind.eq_ignore_ascii_case("series") || (kind.is_empty() && !position.is_empty()))
+                .then_some((name, position))
+        })
+        .next()
         .unwrap_or_default()
 }
 
@@ -409,11 +423,28 @@ pub(crate) mod tests {
         )?;
         assert_eq!(m.series_label().as_deref(), Some("The Bound and the Broken · Book 1.5"));
         assert_eq!(fields(m), ("The Bound and the Broken".into(), "1.5".into(), "Cahill, Ryan".into()));
-        // A set alone is no series; no number leaves just the name.
+        // A set (even with a group-position) and an untyped collection without
+        // a group-position are ignored; no number leaves just the name.
         let m = read_opf(
-            r##"<meta property="belongs-to-collection" id="set">Modern Library 100</meta><meta refines="#set" property="collection-type">set</meta>"##,
+            r##"<meta property="belongs-to-collection" id="set">Modern Library 100</meta><meta refines="#set" property="collection-type">set</meta><meta refines="#set" property="group-position">42</meta>"##,
         )?;
         assert_eq!((m.series_label(), fields(m)), (None, Default::default()));
+        let m = read_opf(r#"<meta property="belongs-to-collection" id="u">Anthology</meta>"#)?;
+        assert_eq!((m.series_label(), fields(m)), (None, Default::default()));
+        // Case-insensitive `Series` collection-type, absent collection-type
+        // with a non-empty group-position, and whitespace around refines/id/property.
+        let m = read_opf(
+            r##"<meta property="belongs-to-collection" id="s">Stormlight</meta><meta refines="#s" property="collection-type">Series</meta><meta refines="#s" property="group-position">4</meta>"##,
+        )?;
+        assert_eq!(fields(m), ("Stormlight".into(), "4".into(), String::new()));
+        let m = read_opf(
+            r##"<meta property="belongs-to-collection" id="v">First Law</meta><meta refines="#v" property="group-position">2</meta>"##,
+        )?;
+        assert_eq!(fields(m), ("First Law".into(), "2".into(), String::new()));
+        let m = read_opf(
+            r##"<dc:creator id=" a ">Ursula K. Le Guin</dc:creator><meta refines=" #a " property=" file-as ">Le Guin, Ursula K.</meta><meta property=" belongs-to-collection " id=" c ">Earthsea</meta><meta refines=" #c " property=" collection-type "> Series </meta><meta refines=" #c " property=" group-position "> 1 </meta>"##,
+        )?;
+        assert_eq!(fields(m), ("Earthsea".into(), "1".into(), "Le Guin, Ursula K.".into()));
         let m = read_opf(r#"<meta name="calibre:series" content="Dune"/>"#)?;
         assert_eq!(m.series_label().as_deref(), Some("Dune"));
         std::fs::remove_file(path)?;
