@@ -78,9 +78,15 @@ pub struct Display {
     flash_fence: FlashFence,
     /// Temporary Phase 1 dark-mode waveform variant (`VERSO_DARK_VARIANT`).
     dark_variant: DarkVariant,
+    /// Temporary Phase 1 Variant C cleanup: original `vInfo.grayscale` to restore on drop.
+    restore_grayscale: Option<u8>,
     /// Refreshes FBInk refused, for the exit line.
     pub failed_refreshes: u32,
 }
+
+const KEEP_CURRENT_ROTATE: u32 = 1 << 7;
+const KEEP_CURRENT_BITDEPTH: u8 = 1 << 7;
+const GRAYSCALE_8BIT_INVERTED: u8 = 2;
 
 impl Display {
     pub fn open() -> Result<Self> {
@@ -99,6 +105,34 @@ impl Display {
                 fb::fbink_close(fd);
                 bail!("FBInk failed to initialise");
             }
+            let dark_variant = DarkVariant::from_env();
+            if dark_variant != DarkVariant::A {
+                log::info!("dark mode waveform variant: {dark_variant:?}");
+            }
+            let mut restore_grayscale = None;
+            if dark_variant.uses_driver_night_mode() {
+                let mut vinfo: fb::fb_var_screeninfo = std::mem::zeroed();
+                let mut finfo: fb::fb_fix_screeninfo = std::mem::zeroed();
+                fb::fbink_get_fb_info(&mut vinfo, &mut finfo);
+                log::info!("Variant C: initial fb info bpp={}, grayscale={}", vinfo.bits_per_pixel, vinfo.grayscale);
+                if vinfo.bits_per_pixel == 8 && vinfo.grayscale != GRAYSCALE_8BIT_INVERTED as u32 {
+                    let orig = vinfo.grayscale as u8;
+                    let rc = fb::fbink_set_fb_info(
+                        fd,
+                        KEEP_CURRENT_ROTATE,
+                        KEEP_CURRENT_BITDEPTH,
+                        GRAYSCALE_8BIT_INVERTED,
+                        &cfg,
+                    );
+                    if rc < 0 {
+                        log::warn!("Variant C: fbink_set_fb_info(GRAYSCALE_8BIT_INVERTED) failed: {rc}");
+                    } else {
+                        log::info!("Variant C: switched fb grayscale {orig} -> {GRAYSCALE_8BIT_INVERTED} (rc={rc})");
+                        restore_grayscale = Some(orig);
+                    }
+                }
+            }
+
             let mut st: fb::FBInkState = std::mem::zeroed();
             fb::fbink_get_state(&cfg, &mut st);
 
@@ -153,6 +187,10 @@ impl Display {
                     session.inverted,
                 );
                 print_refusal(fd, &msg);
+                if let Some(orig) = restore_grayscale {
+                    let rc = fb::fbink_set_fb_info(fd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, orig, &cfg);
+                    log::info!("Variant C: restored fb grayscale to {orig} on open failure (rc={rc})");
+                }
                 fb::fbink_close(fd);
                 Err(Unsupported(msg).into())
             };
@@ -189,10 +227,6 @@ impl Display {
                 return fail(format!("framebuffer mapping is missing or too small ({fb_len} bytes)"));
             }
 
-            let dark_variant = DarkVariant::from_env();
-            if dark_variant != DarkVariant::A {
-                log::info!("dark mode waveform variant: {dark_variant:?}");
-            }
             Ok(Self {
                 fd,
                 cfg,
@@ -210,6 +244,7 @@ impl Display {
                 touch_mirror_y: st.touch_mirror_y,
                 flash_fence: FlashFence::default(),
                 dark_variant,
+                restore_grayscale,
                 failed_refreshes: 0,
             })
         }
@@ -338,6 +373,14 @@ impl Drop for Display {
     fn drop(&mut self) {
         // Don't hand the display back to the launcher mid-flash on an error exit.
         self.wait_for_pending_flash();
+        if let Some(orig) = self.restore_grayscale.take() {
+            // Wait for any in-flight night-mode update before switching grayscale back.
+            self.wait_for_complete();
+            // SAFETY: restores the original grayscale flag recorded in `open`.
+            let rc =
+                unsafe { fb::fbink_set_fb_info(self.fd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, orig, &self.cfg) };
+            log::info!("Variant C: restored fb grayscale to {orig} (rc={rc})");
+        }
         // SAFETY: closes the session opened in `open`; the mapping isn't used after this.
         unsafe { fb::fbink_close(self.fd) };
     }

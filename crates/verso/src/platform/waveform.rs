@@ -51,7 +51,7 @@ impl Waveform {
 }
 
 /// Temporary Phase 1 dark-mode waveform variant (`VERSO_DARK_VARIANT`),
-/// removed before committing once the Kindle comparison settles A vs B.
+/// removed before committing once the Kindle comparison settles A vs B vs C.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DarkVariant {
     /// Eclipse waveforms; `GLKW16` uses `UPDATE_MODE_PARTIAL`.
@@ -59,6 +59,10 @@ pub enum DarkVariant {
     A,
     /// Eclipse waveforms; `GLKW16` uses `UPDATE_MODE_FULL` (`is_flashing = true`).
     B,
+    /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`); `GLKW16` uses `UPDATE_MODE_FULL`.
+    C,
+    /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`); `GLKW16` uses `UPDATE_MODE_PARTIAL`.
+    CPartial,
     /// Light waveforms (`REAGL` etc.) on flipped pixels, as a baseline.
     Reagl,
 }
@@ -67,9 +71,15 @@ impl DarkVariant {
     pub fn from_env() -> Self {
         match std::env::var("VERSO_DARK_VARIANT").ok().as_deref().map(str::to_ascii_lowercase).as_deref() {
             Some("b") => Self::B,
+            Some("c") => Self::C,
+            Some("c-partial") => Self::CPartial,
             Some("reagl") => Self::Reagl,
             _ => Self::A,
         }
+    }
+
+    pub fn uses_driver_night_mode(self) -> bool {
+        matches!(self, Self::C | Self::CPartial)
     }
 }
 
@@ -146,7 +156,8 @@ pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: Dar
             }
         }
     };
-    let is_flashing = mode == RefreshMode::Full || (variant == DarkVariant::B && waveform == Waveform::Glkw16);
+    let is_flashing = mode == RefreshMode::Full
+        || (matches!(variant, DarkVariant::B | DarkVariant::C) && waveform == Waveform::Glkw16);
     RefreshPlan { waveform, is_flashing, mark_flash_fence }
 }
 
@@ -160,7 +171,9 @@ mod tests {
     fn light_waveforms_match_panel_color_and_only_full_flashes() {
         for has_eclipse_wfm in [false, true] {
             for is_mtk in [false, true] {
-                for variant in [DarkVariant::A, DarkVariant::B, DarkVariant::Reagl] {
+                for variant in
+                    [DarkVariant::A, DarkVariant::B, DarkVariant::C, DarkVariant::CPartial, DarkVariant::Reagl]
+                {
                     let mono = PanelCaps { has_color_panel: false, has_eclipse_wfm, is_mtk };
                     let got: Vec<_> = ALL_MODES.map(|m| plan_refresh(m, false, mono, variant)).into();
                     let ui = if is_mtk { Waveform::Gl16 } else { Waveform::Gc16 };
@@ -252,6 +265,11 @@ mod tests {
     fn only_full_marks_the_flash_fence_even_when_glkw16_uses_full_update_mode() {
         let pw6 = PanelCaps { has_color_panel: false, has_eclipse_wfm: true, is_mtk: true };
         let plans = ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::B));
+        assert_eq!(plans, ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::C)));
+        assert_eq!(
+            ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::CPartial)),
+            ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::A))
+        );
         assert_eq!(
             plans,
             [
