@@ -123,6 +123,9 @@ void verso_cre_free(VersoCreDoc *doc);
 /* Settings. Apply before verso_cre_load where possible: changing them after
  * loading re-lays out the book on the next render/draw. */
 int verso_cre_set_stylesheet_file(VersoCreDoc *doc, const char *path);
+/* Appends CSS to the base stylesheet so format defaults sit beneath
+ * verso_cre_typography overrides. Returns 0 on success. */
+int verso_cre_append_stylesheet(VersoCreDoc *doc, const char *css);
 void verso_cre_set_font_face(VersoCreDoc *doc, const char *face);
 /* After loading, this re-lays out the book and keeps the reading position. */
 void verso_cre_set_font_size(VersoCreDoc *doc, int px);
@@ -136,6 +139,12 @@ void verso_cre_set_hanging_punctuation(VersoCreDoc *doc, int on);
 /* Opens a book and picks the hyphenation language from its metadata.
  * Returns 0 on success. */
 int verso_cre_load(VersoCreDoc *doc, const char *path);
+/* Opens an in-memory UTF-8 HTML document (such as converted Markdown),
+ * using `base_dir` to resolve relative resources, `file_name` for document
+ * cache identity, and `lang` (falling back to "en") for hyphenation.
+ * Returns 0 on success. */
+int verso_cre_load_html(VersoCreDoc *doc, const char *html, int html_len,
+                        const char *base_dir, const char *file_name, const char *lang);
 
 /* Lays out the book (if anything changed since the last call). */
 void verso_cre_render(VersoCreDoc *doc);

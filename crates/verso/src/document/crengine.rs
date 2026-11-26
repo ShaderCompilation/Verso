@@ -5,9 +5,12 @@ use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::library::format::BookFormat;
 use crate::page_layout::PageLayout;
 use anyhow::{Context, Result, bail};
 use crengine_sys as sys;
+
+const MARKDOWN_CSS: &str = include_str!("markdown.css");
 
 use super::{
     Document, FontFace, Layout, Link, Metadata, Note, Opening, PageInfo, Paragraphs, Paths, Position, SearchBatch,
@@ -202,6 +205,9 @@ impl CreEngine {
         layout: &Layout,
         typography: Option<(&Typography, &PageLayout)>,
     ) -> Result<CreDocument> {
+        let format = BookFormat::from_path(path);
+        let markdown =
+            if format == Some(BookFormat::Markdown) { Some(crate::markdown::render_file(path)?) } else { None };
         let raw = unsafe { sys::verso_cre_new(layout.width as c_int, layout.height as c_int, self.dpi as c_int) };
         if raw.is_null() {
             bail!("crengine could not create a document view");
@@ -222,6 +228,12 @@ impl CreEngine {
             if sys::verso_cre_set_stylesheet_file(raw, css.as_ptr()) != 0 {
                 log::warn!("could not load {}", self.paths.engine_data.join("epub.css").display());
             }
+            if markdown.is_some() {
+                let md_css = CString::new(MARKDOWN_CSS)?;
+                if sys::verso_cre_append_stylesheet(raw, md_css.as_ptr()) != 0 {
+                    log::warn!("could not append Markdown stylesheet");
+                }
+            }
             sys::verso_cre_set_shaping(
                 raw,
                 match layout.shaping {
@@ -240,7 +252,27 @@ impl CreEngine {
             doc.set_typography(t, self.dpi, page)?;
         }
         let (t, cpu) = (Instant::now(), crate::perf::thread_cpu());
-        if unsafe { sys::verso_cre_load(raw, cstr(path)?.as_ptr()) } != 0 {
+        let loaded = if let Some(ref rendered) = markdown {
+            let base_dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+            let file_name = path.file_name().context("Markdown file has no filename")?;
+            let html_len = c_int::try_from(rendered.xhtml.len()).context("Markdown XHTML too large")?;
+            let c_dir = cstr(base_dir)?;
+            let c_name = CString::new(file_name.as_encoded_bytes())?;
+            let c_lang = CString::new(rendered.language.as_str())?;
+            unsafe {
+                sys::verso_cre_load_html(
+                    raw,
+                    rendered.xhtml.as_ptr().cast(),
+                    html_len,
+                    c_dir.as_ptr(),
+                    c_name.as_ptr(),
+                    c_lang.as_ptr(),
+                )
+            }
+        } else {
+            unsafe { sys::verso_cre_load(raw, cstr(path)?.as_ptr()) }
+        };
+        if loaded != 0 {
             bail!("could not open {}", path.display());
         }
         doc.stats.load_ms = t.elapsed().as_millis() as u32;

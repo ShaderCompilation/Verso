@@ -1,0 +1,65 @@
+/* Document-style defaults for Markdown (layered over epub.css, under Reader overrides). */
+p {
+  text-indent: 0;
+  margin-top: 0;
+  margin-bottom: 0.6em;
+}
+
+li > p {
+  margin-bottom: 0.2em;
+}
+
+blockquote {
+  margin: 0.6em 0 0.6em 0.8em;
+  padding-left: 0.8em;
+  border-left: 3px solid #888;
+}
+
+code {
+  font-family: monospace;
+  font-size: 0.9em;
+  hyphens: none;
+}
+
+pre {
+  font-family: monospace;
+  white-space: pre-wrap;
+  hyphens: none;
+  border: 1px solid #bbb;
+  padding: 0.5em;
+  margin: 0.6em 0;
+  font-size: 0.85em;
+}
+
+pre code {
+  font-size: 100%;
+}
+
+table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 0.9em;
+}
+
+th, td {
+  border: 1px solid #bbb;
+  padding: 0.3em 0.5em;
+}
+
+th {
+  background-color: #eee;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #bbb;
+  margin: 0.8em 0;
+}
+
+li.task-item {
+  list-style: none;
+}
+
+img {
+  max-width: 100%;
+}

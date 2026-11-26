@@ -1546,6 +1546,33 @@ impl Books {
             None => log::warn!("book {id} to reopen after turning the screen is gone"),
         }
     }
+    #[cfg(feature = "desktop")]
+    pub fn open_path(&mut self, path: PathBuf, t: &Theme) -> anyhow::Result<()> {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let id = crate::store::book_id(&path)?;
+        let metadata = match crate::library::format::BookFormat::from_path(&path) {
+            Some(crate::library::format::BookFormat::Markdown) => crate::markdown::read(&path).unwrap_or_default(),
+            _ => crate::library::Metadata::default(),
+        };
+        self.open_book(
+            Book {
+                path,
+                id: id.clone(),
+                annotation_id: id.clone(),
+                legacy_id: id,
+                fingerprint: String::new(),
+                fingerprint_attempted: false,
+                stamp: crate::library::Stamp::default(),
+                metadata,
+                error: None,
+                cover: Cover::Pending,
+                available: true,
+                metadata_pending: false,
+            },
+            t,
+        );
+        Ok(())
+    }
     fn open_book(&mut self, book: Book, t: &Theme) {
         let id = book.id.clone();
         let path = book.path.clone();

@@ -93,6 +93,8 @@ struct Options {
     screenshot: Option<std::path::PathBuf>,
     script: Vec<ScriptStep>,
     device: Option<String>,
+    #[cfg(feature = "desktop")]
+    book: Option<std::path::PathBuf>,
 }
 
 fn parse_args() -> Result<Options> {
@@ -115,6 +117,8 @@ fn parse_args() -> Result<Options> {
             "--screen" => opts.screen = Some(args.next().context("--screen needs a name")?),
             "--screenshot" => opts.screenshot = Some(args.next().context("--screenshot needs a file name")?.into()),
             "--device" => opts.device = Some(args.next().context("--device needs a name, e.g. pw6")?),
+            #[cfg(feature = "desktop")]
+            "--book" => opts.book = Some(args.next().context("--book needs a file path")?.into()),
             "--text" => {
                 opts.script.push(ScriptStep::Text(TextInput::Insert(args.next().context("--text needs text")?)))
             }
@@ -297,6 +301,15 @@ fn run() -> Result<i32> {
         platform.waker(),
     ));
     let t_screen = Instant::now();
+    #[cfg(feature = "desktop")]
+    let screen = if let Some(path) = opts.book.clone() {
+        let mut books = screens::books::Books::with_store(&theme, bounds, worker.clone(), store.clone());
+        books.open_path(path, &theme)?;
+        Box::new(books)
+    } else {
+        start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone(), store.clone())?
+    };
+    #[cfg(not(feature = "desktop"))]
     let screen = start_screen(opts.screen.as_deref(), &theme, bounds, worker.clone(), store.clone())?;
     let screen_us = t_screen.elapsed().as_micros();
     let t_app = Instant::now();

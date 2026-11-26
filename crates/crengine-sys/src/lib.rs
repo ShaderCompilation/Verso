@@ -105,6 +105,7 @@ unsafe extern "C" {
     pub fn verso_cre_free(doc: *mut VersoCreDoc);
 
     pub fn verso_cre_set_stylesheet_file(doc: *mut VersoCreDoc, path: *const c_char) -> c_int;
+    pub fn verso_cre_append_stylesheet(doc: *mut VersoCreDoc, css: *const c_char) -> c_int;
     pub fn verso_cre_set_font_face(doc: *mut VersoCreDoc, face: *const c_char);
     pub fn verso_cre_set_font_size(doc: *mut VersoCreDoc, px: c_int);
     pub fn verso_cre_get_font_size(doc: *mut VersoCreDoc) -> c_int;
@@ -114,6 +115,14 @@ unsafe extern "C" {
     pub fn verso_cre_set_hanging_punctuation(doc: *mut VersoCreDoc, on: c_int);
 
     pub fn verso_cre_load(doc: *mut VersoCreDoc, path: *const c_char) -> c_int;
+    pub fn verso_cre_load_html(
+        doc: *mut VersoCreDoc,
+        html: *const c_char,
+        html_len: c_int,
+        base_dir: *const c_char,
+        file_name: *const c_char,
+        lang: *const c_char,
+    ) -> c_int;
     pub fn verso_cre_render(doc: *mut VersoCreDoc);
 
     pub fn verso_cre_page_count(doc: *mut VersoCreDoc) -> c_int;

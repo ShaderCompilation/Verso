@@ -1097,6 +1097,22 @@ unsigned int verso_cre_font_list_hash(void) {
     GUARD(0, { return fontMan->GetFontListHash(-1); })
 }
 
+static lString8 first_monospace_face() {
+    lString32Collection faces;
+    fontMan->getFaceList(faces);
+    for (int i = 0; i < faces.length(); ++i) {
+        lString8 file;
+        int face_index = 0, family = 0;
+        bool math = false, emojis = false;
+        if (fontMan->getFontFileNameAndFaceIndex(
+                faces[i], false, false, file, face_index, family, math, emojis)
+            && family == css_ff_monospace) {
+            return UnicodeToUtf8(faces[i]);
+        }
+    }
+    return lString8();
+}
+
 VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
     GUARD(nullptr, {
         LVDocView *v = new LVDocView(-1, true);
@@ -1108,6 +1124,9 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         props->setInt(PROP_FONT_HINTING, 2);      // autohinter (as KOReader)
         props->setInt(PROP_EMBEDDED_STYLES, 1);
         props->setInt(PROP_EMBEDDED_FONTS, 1);
+        lString8 mono = first_monospace_face();
+        if (!mono.empty())
+            props->setString(PROP_FONT_FAMILY_FACES, (lString8("|||||") + mono).c_str());
         // Justified spaces shrink to 75% at most (as KOReader); at crengine's
         // default of 50% the words of a tight line run together.
         props->setInt(PROP_FORMAT_MIN_SPACE_CONDENSING_PERCENT, 75);
@@ -1139,6 +1158,20 @@ int verso_cre_set_stylesheet_file(VersoCreDoc *doc, const char *path) {
             return -1;
         doc->css = css;
         doc->view->setStyleSheet(css, false);
+        return 0;
+    })
+}
+
+int verso_cre_append_stylesheet(VersoCreDoc *doc, const char *css) {
+    GUARD(-1, {
+        if (!doc || !css)
+            return -1;
+        if (*css) {
+            if (!doc->css.empty())
+                doc->css << "\n";
+            doc->css << css;
+        }
+        doc->view->setStyleSheet(doc->css, false);
         return 0;
     })
 }
@@ -1220,6 +1253,39 @@ int verso_cre_load(VersoCreDoc *doc, const char *path) {
             lang = U"en";
         TextLangMan::setMainLang(lang);
         set_str(doc->view, PROP_TEXTLANG_MAIN_LANG, UnicodeToUtf8(lang).c_str());
+        return 0;
+    })
+}
+
+int verso_cre_load_html(VersoCreDoc *doc, const char *html, int html_len,
+                        const char *base_dir, const char *file_name, const char *lang) {
+    GUARD(-1, {
+        if (!doc || !html || html_len <= 0 || !base_dir || !file_name || !*file_name)
+            return -1;
+        LVStreamRef stream = LVCreateMemoryStream((void *)html, html_len, true, LVOM_READ);
+        if (stream.isNull())
+            return -1;
+        doc->view->Clear();
+        lString32 dir = Utf8ToUnicode(base_dir);
+        lString32 fn = Utf8ToUnicode(file_name);
+        CRPropRef props = doc->view->getDocProps();
+        props->setString(DOC_PROP_FILE_PATH, dir);
+        props->setString(DOC_PROP_FILE_NAME, fn);
+        props->setString(DOC_PROP_FILE_SIZE, lString32::itoa((int)stream->GetSize()));
+        props->setHex(DOC_PROP_FILE_CRC32, stream->getcrc32());
+        if (!doc->view->LoadDocument(stream, false) || !doc->view->getDocument())
+            return -1;
+        // LVDocView::m_container is private, so attach the folder container on
+        // the parsed ldomDocument (checked first by image and file lookups).
+        LVContainerRef container = LVOpenDirectory(dir.c_str());
+        if (!container.isNull())
+            doc->view->getDocument()->setContainer(container);
+        lString32 doc_lang = (lang && *lang) ? Utf8ToUnicode(lang) : doc->view->getLanguage();
+        if (doc_lang.empty())
+            doc_lang = U"en";
+        doc->view->getDocProps()->setString(DOC_PROP_LANGUAGE, doc_lang);
+        TextLangMan::setMainLang(doc_lang);
+        set_str(doc->view, PROP_TEXTLANG_MAIN_LANG, UnicodeToUtf8(doc_lang).c_str());
         return 0;
     })
 }
@@ -1414,6 +1480,9 @@ int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
         props->setInt(PROP_FONT_BASE_WEIGHT, t->weight);
         props->setInt(PROP_TEXTLANG_HYPHENATION_ENABLED, t->hyphenate);
         props->setInt(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, t->word_spacing);
+        lString8 mono = first_monospace_face();
+        if (!mono.empty())
+            props->setString(PROP_FONT_FAMILY_FACES, (lString8("|||||") + mono).c_str());
         v->propsApply(props);
         // propsApply() keeps the embedded-styles flag for the next document
         // only; an open one needs the command.
@@ -1432,6 +1501,7 @@ int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
                 escaped << lString8(p, 1);
             }
             css << "\n* { font-family: '" << escaped << "' !important; }\n";
+            css << "code, pre, kbd, samp, tt { font-family: monospace !important; }\n";
         }
         css << (t->justify ? "\np, li { text-align: justify !important; }" : "\np, li { text-align: left !important; }");
         if (t->paragraphs == 1)

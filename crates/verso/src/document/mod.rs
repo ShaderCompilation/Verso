@@ -330,7 +330,11 @@ impl Paths {
             Self {
                 engine_data: root.join("third_party/crengine/cr3gui/data"),
                 cache: Some(std::env::temp_dir().join("verso-cache")),
-                font_dirs: vec![root.join("assets/fonts"), "/usr/share/fonts/liberation-serif-fonts".into()],
+                font_dirs: vec![
+                    root.join("assets/fonts"),
+                    "/usr/share/fonts/liberation-serif-fonts".into(),
+                    "/usr/share/fonts/liberation-mono-fonts".into(),
+                ],
                 font_face: "Literata".into(),
             }
         };
@@ -358,6 +362,7 @@ mod tests {
             cache: Some(std::env::temp_dir().join(format!("verso-engine-test-{}", std::process::id()))),
             ..Paths::for_device()
         };
+        let cache_dir = paths.cache.clone().unwrap();
         let book = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reader.epub");
         let engine = CreEngine::new(paths, 300).expect("engine starts");
         let layout = Layout {
@@ -518,6 +523,7 @@ mod tests {
         color_draw_checks(&engine, &layout);
         bookmark_checks(&engine, &layout, &book);
         textless_bookmark_checks(&engine, &layout);
+        markdown_checks(&engine, &layout, &cache_dir).unwrap();
     }
 
     /// Page bookmarks: the opening words start where the page starts and end
@@ -1034,5 +1040,257 @@ mod tests {
         let jump = landscape.current_page();
         assert!(landscape.select(jump, &SelectionQuery::Geometry(all)).unwrap().unwrap().start_visible);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn markdown_checks(engine: &CreEngine, layout: &Layout, cache_dir: &std::path::Path) -> Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        // 1. Open both `.md` and `.markdown` fixtures through `CreEngine::open`.
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut rich = engine.open(&fixtures.join("rich.md"), layout, None)?;
+        assert!(rich.page_count() >= 1);
+        let rich_meta = rich.metadata();
+        assert_eq!(rich_meta.title, "Field Notes on E-Ink Typography");
+        assert_eq!(rich_meta.language, "en");
+        let mut buf = vec![255u8; 600 * 800];
+        rich.draw(&mut buf, 600)?;
+        assert!(buf.iter().filter(|&&v| v < 128).count() > 500, "rich.md rendered no ink");
+
+        let mut prose = engine.open(&fixtures.join("prose.markdown"), layout, None)?;
+        assert_eq!(prose.metadata().title, "Plain Prose Notes");
+        assert!(prose.page_count() >= 1);
+        drop(prose);
+
+        // Invalid Markdown (NUL byte) is rejected before crengine opens it.
+        let bad_md = dir.path().join("bad.md");
+        std::fs::write(&bad_md, b"bad\0markdown")?;
+        assert!(engine.open(&bad_md, layout, None).is_err());
+
+        // 2. TOC built from h1-h6 and relative image loading on rich.md.
+        let rich_toc = rich.toc()?;
+        let rich_titles: Vec<&str> = rich_toc.iter().map(|e| e.title.as_str()).collect();
+        assert!(rich_titles.contains(&"Field Notes on E-Ink Typography"), "{rich_titles:?}");
+        assert!(rich_titles.contains(&"Code and Wrapping"), "{rich_titles:?}");
+        assert!(rich_titles.contains(&"Figure"), "{rich_titles:?}");
+        let mut rich_notes = std::collections::BTreeMap::new();
+        for p in 0..rich.page_count() {
+            rich.go_to_page(p);
+            let info = rich.page_info()?;
+            let mut ids: Vec<usize> = info.links.iter().map(|(id, _)| *id).collect();
+            ids.dedup();
+            for id in ids {
+                if let Some(link) = rich.link(p, id)?
+                    && let Some(note) = link.note
+                {
+                    rich_notes.insert(note.label, note.html);
+                }
+            }
+        }
+        rich.go_to_page(2);
+        rich.draw(&mut buf, 600)?;
+        assert!(
+            buf[400 * 600..].iter().filter(|&&v| v < 128).count() > 200,
+            "rich.md relative checkerboard image must render"
+        );
+        assert!(rich_notes.get("1").is_some_and(|h| h.contains("First footnote explaining")), "{rich_notes:?}");
+        assert!(
+            rich_notes.get("2").is_some_and(|h| h.contains("Second footnote") && h.contains("<b>formatted</b>")),
+            "{rich_notes:?}"
+        );
+
+        // 3. Text sheet `paragraphs` override over Markdown defaults.
+        rich.go_to_page(0);
+        let base_typo = Typography { paragraphs: Paragraphs::Book, ..Typography::default() };
+        rich.set_typography(&base_typo, 150, &PageLayout::default())?;
+        rich.draw(&mut buf, 600)?;
+        let md_default_buf = buf.clone();
+        rich.set_typography(
+            &Typography { paragraphs: Paragraphs::Indented, ..base_typo.clone() },
+            150,
+            &PageLayout::default(),
+        )?;
+        rich.draw(&mut buf, 600)?;
+        let indented_buf = buf.clone();
+        assert_ne!(md_default_buf, indented_buf, "Paragraphs::Indented must override markdown.css");
+        rich.set_typography(
+            &Typography { paragraphs: Paragraphs::Spaced, ..base_typo.clone() },
+            150,
+            &PageLayout::default(),
+        )?;
+        rich.draw(&mut buf, 600)?;
+        assert_ne!(indented_buf, buf, "Paragraphs::Spaced overrides Paragraphs::Indented");
+        assert_eq!(md_default_buf, buf, "Markdown default matches spaced paragraphs");
+
+        // 4. Search, word selection, and annotation XPointer round-trip across reopen.
+        rich.set_typography(&base_typo, 150, &PageLayout::default())?;
+        let mut hits = Vec::new();
+        rich.search_start("restrained")?;
+        loop {
+            let batch = rich.search_step(std::time::Duration::from_secs(1))?;
+            hits.extend(batch.hits);
+            if batch.status != SearchStatus::Searching {
+                break;
+            }
+        }
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        let sel = rich.select(hit.page, &SelectionQuery::Range(hit.range.clone()))?.unwrap();
+        assert_eq!(sel.text, "restrained");
+        let word = rich
+            .select(hit.page, &SelectionQuery::Word(sel.rects[0].center()))?
+            .expect("word selection on Markdown page");
+        assert_eq!(word.text, "restrained");
+        rich.annotation_clear();
+        assert!(rich.annotation_check(&word.range, &word.text)?);
+        let (ann_page, _) = rich.annotation_keep(1, true)?;
+        assert_eq!(rich.annotation_finish(1), vec![1]);
+        assert_eq!(rich.annotation_page(ann_page), vec![1]);
+        drop(rich);
+
+        let mut reopened_rich =
+            engine.open(&fixtures.join("rich.md"), layout, Some((&base_typo, &PageLayout::default())))?;
+        assert!(reopened_rich.annotation_check(&word.range, &word.text)?);
+        reopened_rich.go_to_position(&word.range.start)?;
+        assert_eq!(reopened_rich.current_page(), ann_page);
+        drop(reopened_rich);
+
+        // 5. All h1-h6 levels, internal #anchor navigation, and actual green PNG decoding from relative path.
+        let book_dir = dir.path().join("md-book");
+        std::fs::create_dir_all(&book_dir)?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(120, 80, image::Rgb([20, 180, 40])).write_to(&mut png, image::ImageFormat::Png)?;
+        std::fs::write(book_dir.join("green.png"), png.get_ref())?;
+
+        let md_path = book_dir.join("doc.md");
+        let mut md_body = String::from(
+            "---\ntitle: Anchor & Image Doc\nlang: en\n---\n\n\
+             # One\n\nIntro with a note[^a].\n\n\
+             ## Two\n### Three\n#### Four\n##### Five\n###### Six\n\n\
+             ![Green sample](green.png)\n\n",
+        );
+        for i in 0..45 {
+            md_body.push_str(&format!("Filler paragraph {i} pushing the anchor link onto a later page.\n\n"));
+        }
+        md_body.push_str("Jump [back to marker](#fnref-1).\n\n[^a]: Note body.\n");
+        std::fs::write(&md_path, &md_body)?;
+
+        let mut doc = engine.open(&md_path, layout, None)?;
+        let toc = doc.toc()?;
+        let levels: Vec<(usize, &str)> = toc.iter().map(|e| (e.level, e.title.as_str())).collect();
+        for expected in [(1, "One"), (2, "Two"), (3, "Three"), (4, "Four"), (5, "Five"), (6, "Six")] {
+            assert!(levels.contains(&expected), "missing heading {expected:?} in {levels:?}");
+        }
+        // Verify green.png was opened via m_doc container and drawn onto its page.
+        let mut saw_green = false;
+        let mut rgba = vec![0u8; 600 * 800 * 4];
+        for p in 0..doc.page_count() {
+            doc.go_to_page(p);
+            if doc.page_info()?.has_images {
+                doc.draw_rgba(&mut rgba, 600 * 4)?;
+                let greens =
+                    rgba.as_chunks::<4>().0.iter().filter(|px| px[1] > 150 && px[0] < 60 && px[2] < 80).count();
+                if greens > 2000 {
+                    saw_green = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_green, "relative green.png image must decode and draw");
+
+        // Follow the internal `#fnref-1` jump link from the later page back to page 0.
+        let mut jumped = false;
+        for p in 1..doc.page_count() {
+            doc.go_to_page(p);
+            for (id, _) in doc.page_links(p) {
+                if let Some(link) = doc.link(p, id)?
+                    && link.note.is_none()
+                {
+                    doc.go_to_position(&link.target)?;
+                    assert_eq!(doc.current_page(), 0, "#fnref-1 should jump back to page 0");
+                    jumped = true;
+                    break;
+                }
+            }
+            if jumped {
+                break;
+            }
+        }
+        assert!(jumped, "expected internal #anchor jump link to resolve");
+        drop(doc);
+
+        // 6. .cr3 cache hit on reopen and invalidation after editing the .md file.
+        let cr3_count = || {
+            std::fs::read_dir(cache_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("cr3"))
+                .count()
+        };
+        assert!(cr3_count() >= 1, "expected .cr3 cache file after closing doc");
+        let mut cached = engine.open(&md_path, layout, None)?;
+        cached.search_start("FreshEditToken")?;
+        let mut found_before = 0usize;
+        while let Ok(b) = cached.search_step(std::time::Duration::from_secs(1)) {
+            found_before += b.hits.len();
+            if b.status != SearchStatus::Searching {
+                break;
+            }
+        }
+        assert_eq!(found_before, 0);
+        drop(cached);
+
+        md_body.push_str("\nFreshEditToken appended after caching.\n");
+        std::fs::write(&md_path, &md_body)?;
+        let mut invalidated = engine.open(&md_path, layout, None)?;
+        invalidated.search_start("FreshEditToken")?;
+        let mut found_after = 0usize;
+        while let Ok(b) = invalidated.search_step(std::time::Duration::from_secs(1)) {
+            found_after += b.hits.len();
+            if b.status != SearchStatus::Searching {
+                break;
+            }
+        }
+        assert_eq!(found_after, 1, "editing .md must invalidate .cr3 cache");
+        drop(invalidated);
+
+        // 7. Frontmatter `lang:` sets hyphenation language.
+        let ru_path = book_dir.join("ru.md");
+        std::fs::write(&ru_path, "---\nlang: ru\n---\n\nдостопримечательность\n")?;
+        let narrow = Layout { width: 240, height: 400, margins: [20; 4], ..layout.clone() };
+        let hyph_on = Typography { hyphenate: true, ..Typography::default() };
+        let hyph_off = Typography { hyphenate: false, ..Typography::default() };
+        let mut ru_doc = engine.open(&ru_path, &narrow, Some((&hyph_on, &PageLayout::default())))?;
+        assert_eq!(ru_doc.metadata().language, "ru");
+        let mut narrow_buf = vec![255u8; 240 * 400];
+        ru_doc.draw(&mut narrow_buf, 240)?;
+        let ru_with_hyph = narrow_buf.clone();
+        ru_doc.set_typography(&hyph_off, 150, &PageLayout::default())?;
+        ru_doc.draw(&mut narrow_buf, 240)?;
+        assert_ne!(ru_with_hyph, narrow_buf, "frontmatter lang: ru must drive Russian hyphenation");
+        drop(ru_doc);
+
+        // 8. Monospace preserved under a non-Publisher proportional body font.
+        let mono_path = book_dir.join("mono.md");
+        std::fs::write(&mono_path, "Proportional prose.\n\n```text\niiiiii\nMMMMMM\n```\n")?;
+        let mut mono_doc = engine.open(&mono_path, layout, Some((&base_typo, &PageLayout::default())))?;
+        let word_width = |d: &mut CreDocument, q: &str| -> Result<i32> {
+            d.search_start(q)?;
+            loop {
+                let b = d.search_step(std::time::Duration::from_secs(1))?;
+                if let Some(hit) = b.hits.first() {
+                    let s = d.select(hit.page, &SelectionQuery::Range(hit.range.clone()))?.unwrap();
+                    return Ok(s.rects[0].w);
+                }
+                if b.status != SearchStatus::Searching {
+                    anyhow::bail!("missing {q}");
+                }
+            }
+        };
+        let i_w = word_width(&mut mono_doc, "iiiiii")?;
+        let m_w = word_width(&mut mono_doc, "MMMMMM")?;
+        if std::path::Path::new("/usr/share/fonts/liberation-mono-fonts").is_dir() {
+            assert_eq!(i_w, m_w, "code block must keep monospace under Literata ({i_w} vs {m_w})");
+        }
+        Ok(())
     }
 }
