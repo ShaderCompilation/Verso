@@ -57,7 +57,6 @@ pub fn built_in() -> Vec<(Version, &'static str)> {
 }
 
 /// The built-in notes for one version, if this build has them.
-#[cfg_attr(not(test), allow(dead_code))] // For Settings → Updates, which doesn't open it yet.
 pub fn notes_for(version: &Version) -> Option<&'static str> {
     built_in().into_iter().find(|(v, _)| v == version).map(|(_, notes)| notes)
 }

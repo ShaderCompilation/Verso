@@ -80,7 +80,7 @@ on desktop; condvar in headless mode).
 
 `App` owns `stack: Vec<Box<dyn Screen>>` and draws app-wide layers in fixed
 z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
-`Notice` (`RollbackSheet`, `UntestedSheet`) → `UsbPrompt` → `ExitPrompt` →
+`Notice` (`RollbackSheet`, `WhatsNewSheet`, `UntestedSheet`) → `UsbPrompt` → `ExitPrompt` →
 `Toast`. Screens return `screens::Action` (`Push`, `Pop`, `Exit`,
 `ExitWith(i32)`, `Orientation`, `OpenTopDrawer`) instead of mutating `App`.
 
@@ -199,8 +199,21 @@ support are checked once per run).
 App-level files sit beside `data/` in `/mnt/us/verso/`: `installed.json`,
 `cache/` (crengine `.cr3` cache capped at 64 MiB, `fonts.list`, `prepared.json`),
 `running` (the launcher's session marker), `update/` (`state.json`, `staged/`,
-`previous/`, `trial`, `rollback.json`, `journal-*`), `reports/`, `ssh/`, `bin/`,
+`previous/`, `trial`, `rollback.json`, `seen-version`, `journal-*`), `reports/`, `ssh/`, `bin/`,
 `tools/`, `fonts/` and `wordforms/`.
+
+### Release notes (`verso-update`, `update/whats_new.rs`)
+
+The manifest's `details` holds the full notes (`MAX_DETAILS` 16 000 bytes, the
+format of `dist/release-notes/<VERSION>.txt`: `## ` headings, `- ` bullets,
+paragraphs); `Offer.notes` carries it, or `notes` from older manifests. `notes`
+stays for builds up to beta.10, which reject over `MAX_NOTES` (2000 bytes):
+`verso-release pack` derives it from the same text (`legacy_notes`: no
+headings, about 8 lines / 600 bytes, then a pointer to What’s new). `build.rs`
+embeds every `dist/release-notes/*.txt`, so What’s new works offline. At start
+`Updates::whats_new()` compares this version with `update/seen-version` (else
+the launcher’s previous version): a fresh, dev or older install remembers
+quietly; a newer one shows up to five versions’ notes until OK.
 
 ### Position-writer ordering rule (`store/position.rs`)
 

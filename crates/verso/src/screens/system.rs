@@ -16,7 +16,7 @@ use crate::screens::folders::{FolderPicker, display_folder};
 use crate::screens::koreader_import::{ImportSheet, Outcome};
 use crate::screens::setup::SetupScreen;
 use crate::screens::transfer::TransferScreen;
-use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
+use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen, WhatsNewSheet};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider};
 use crate::ui::gesture::Gesture;
@@ -26,7 +26,7 @@ use crate::ui::widgets::{
     Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, TextField,
     Toggle, TopBar,
 };
-use crate::update::{self, Updates};
+use crate::update::{self, Updates, whats_new};
 use verso_update::Version;
 use verso_update::check::CHECK_EVERY;
 
@@ -236,6 +236,9 @@ pub struct SystemSettings {
     go_back_button: Button,
     offer: Option<OfferSheet>,
     go_back_sheet: Option<GoBackSheet>,
+    /// "What’s new" beside "Go back", only when this build has this version's notes.
+    whats_new_button: Option<Button>,
+    whats_new_sheet: Option<WhatsNewSheet>,
     // Advanced: text shaping, translation provider/key, then (or on the right)
     // help and the SSH switch.
     translate_entry: List,
@@ -320,6 +323,8 @@ impl SystemSettings {
         let label = go_back.as_ref().map_or_else(String::new, |(_, previous)| format!("Go back to {previous}"));
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
         let shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
+        let whats_new_button =
+            whats_new::notes_for(&update::app_version()).map(|_| Button::new("What’s new", ButtonKind::Secondary));
         let translate_entry = List::new(vec![Row::new("Translate").value(translate_summary(&settings)).chevron()]);
         let ssh = ssh::status();
         let ssh_read_at = Instant::now();
@@ -382,6 +387,8 @@ impl SystemSettings {
             go_back_button: Button::new(label, ButtonKind::Secondary),
             offer: None,
             go_back_sheet: None,
+            whats_new_button,
+            whats_new_sheet: None,
             translate_entry,
             translate_sheet: None,
             setup_button: Button::new("Run setup again", ButtonKind::Secondary),
@@ -931,39 +938,36 @@ impl SystemSettings {
         self.check_button.draw(cx);
     }
 
-    /// The version and the check button, the check's note (with "Go back
-    /// to …" beside it, under the check button), and the automatic check.
-    /// When an update is available, the framed callout card heads the section.
+    /// The version and the check button, the check's note, "What’s new" and
+    /// "Go back to …", and the automatic check. When an update is available,
+    /// the framed callout card heads the section, with room for one of the
+    /// two buttons.
     fn draw_updates(&mut self, cx: &mut DrawCx, col: &mut Column) {
         let t = cx.theme;
+        if let Some(news) = &mut self.whats_new_button {
+            news.place(Rect::default(), t); // Out of reach unless drawn below.
+        }
         if let Some(offer) = self.update_status.update().cloned() {
             self.draw_update_card(cx, col, &offer);
             col.y += t.mm(2.0);
-            if self.go_back.is_some() {
-                let go_w = button_w(cx, &[&self.go_back_button.label], col.w);
-                let (go_rect, version) = col.control(t).split_right(go_w);
+            // One button beside the version: Go back, else What’s new.
+            let one =
+                if self.go_back.is_some() { Some(&mut self.go_back_button) } else { self.whats_new_button.as_mut() };
+            let label = format!("Installed: Verso {}", self.update_status.current);
+            if let Some(button) = one {
+                let w = button_w(cx, &[&button.label], col.w);
+                let (rect, version) = col.control(t).split_right(w);
                 self.version = Rect { w: version.w - t.mm(3.0), ..version };
-                cx.line(
-                    &format!("Installed: Verso {}", self.update_status.current),
-                    t.body,
-                    self.version,
-                    HAlign::Left,
-                );
-                self.go_back_button.place(go_rect, t);
-                self.go_back_button.draw(cx);
+                button.place(rect, t);
+                button.draw(cx);
             } else {
                 self.version = col.take(t.mm(5.5));
-                cx.line(
-                    &format!("Installed: Verso {}", self.update_status.current),
-                    t.body,
-                    self.version,
-                    HAlign::Left,
-                );
             }
+            cx.line(&label, t.body, self.version, HAlign::Left);
             col.y += t.mm(2.0);
         } else {
             col.label(cx, "Updates");
-            let check_w = button_w(cx, &["Check for updates", &self.go_back_button.label], col.w);
+            let check_w = button_w(cx, &["Check for updates"], col.w);
             let (check, version) = col.control(t).split_right(check_w);
             // The installed release, which a data-only release moves past the app's own version.
             self.version = Rect { w: version.w - t.mm(3.0), ..version };
@@ -975,13 +979,25 @@ impl SystemSettings {
                 (Some(at), Some(now)) => at.since(now),
                 _ => "earlier".into(),
             });
-            if self.go_back.is_some() {
+            // One button sits beside the note, two under it.
+            let one = match (&mut self.whats_new_button, self.go_back.is_some()) {
+                (Some(news), false) => Some(news),
+                (None, true) => Some(&mut self.go_back_button),
+                _ => None,
+            };
+            if let Some(button) = one {
                 col.y += t.mm(NOTE_GAP_MM);
-                note_beside(cx, col, &note, &mut self.go_back_button, check_w, 0);
+                note_beside(cx, col, &note, button, check_w, 0); // As wide as the check button above.
+                col.y += t.mm(3.0);
+            } else if self.whats_new_button.is_some() {
+                col.note(cx, &note, &[]);
+                col.y += t.mm(1.0);
+                self.draw_update_buttons(cx, col);
+                col.y += t.mm(2.0);
             } else {
                 col.note(cx, &note, &[]);
+                col.y += t.mm(3.0);
             }
-            col.y += t.mm(3.0);
         }
         let every = format!("Every {} hours, at start or wake with Wi-Fi on.", CHECK_EVERY / 3600);
         let auto = if !self.auto_check.on {
@@ -992,6 +1008,27 @@ impl SystemSettings {
             &every
         };
         col.y = switch_row(cx, &mut self.auto_check, ("Check automatically", auto), col.x, col.y, col.w);
+    }
+
+    /// "What’s new" (when this build has this version's notes) and "Go back
+    /// to …" (when there is a version to go back to), each half the width,
+    /// right-aligned with the check button. (Under a note, one alone sits
+    /// beside it instead.)
+    fn draw_update_buttons(&mut self, cx: &mut DrawCx, col: &mut Column) {
+        let t = cx.theme;
+        let mut buttons: Vec<&mut Button> = self.whats_new_button.iter_mut().collect();
+        if self.go_back.is_some() {
+            buttons.push(&mut self.go_back_button);
+        }
+        if buttons.is_empty() {
+            return;
+        }
+        let (row, gap) = (col.control(t), t.mm(3.0));
+        let w = (row.w - gap) / 2;
+        for (i, button) in buttons.into_iter().rev().enumerate() {
+            button.place(Rect::new(row.right() - w - i as i32 * (w + gap), row.y, w, row.h), t);
+            button.draw(cx);
+        }
     }
 
     fn updates_gesture(&mut self, g: &Gesture, cx: &mut EventCx) {
@@ -1019,6 +1056,9 @@ impl SystemSettings {
             && !self.save(cx, "update checks", |s| s.check_updates = on)
         {
             self.auto_check.on = self.store.settings().check_updates;
+        }
+        if self.whats_new_button.as_mut().is_some_and(|b| b.on_gesture(g)) {
+            self.whats_new_sheet = Some(WhatsNewSheet::for_version(cx.theme, self.screen, &update::app_version()));
         }
     }
 
@@ -1347,6 +1387,9 @@ impl Screen for SystemSettings {
         if let Some(sheet) = &self.go_back_sheet {
             sheet.draw(cx);
         }
+        if let Some(sheet) = &mut self.whats_new_sheet {
+            sheet.draw(cx);
+        }
         if let Some(sheet) = &self.report_sheet {
             sheet.draw(cx);
         }
@@ -1374,6 +1417,12 @@ impl Screen for SystemSettings {
         if let Some(sheet) = &mut self.report_sheet {
             if sheet.on_gesture(&g) {
                 self.report_sheet = None;
+            }
+            return Action::None;
+        }
+        if let Some(sheet) = &mut self.whats_new_sheet {
+            if sheet.on_gesture(&g) {
+                self.whats_new_sheet = None;
             }
             return Action::None;
         }
@@ -1513,6 +1562,7 @@ impl Screen for SystemSettings {
     }
     fn exit_refused(&mut self) {
         self.go_back_sheet = None;
+        self.whats_new_sheet = None;
     }
     fn has_pending_work(&self) -> bool {
         self.wifi_pending.is_some()
@@ -2093,9 +2143,23 @@ mod tests {
             assert!(s.offer.is_some(), "{w}x{h}: tapping update card opens offer sheet");
             s.offer = None;
             s.update_status.state.available = None;
+            s.sync_check_button();
+            // Without the card, What's new and Go back share a row.
+            let canvas = draw(&mut s, &t, w, h);
+            let margin = &canvas.gray_data()[(s.content.bottom() * w) as usize..];
+            assert!(margin.iter().all(|&g| g == PAPER), "{w}x{h}: Device with both buttons reaches the bottom margin");
+            let (news, back) = (s.whats_new_button.as_ref().unwrap().rect(), s.go_back_button.rect());
+            assert!(news.right() < back.x && news.y == back.y, "{w}x{h}: {news:?} {back:?}");
             s.go_back = None;
             s.sync_check_button();
             assert_eq!(s.tabs.dot, None);
+            // What's new: its button ends above the margin and opens the sheet.
+            draw(&mut s, &t, w, h);
+            let button = s.whats_new_button.as_ref().expect("this version's notes are built in").rect();
+            assert!(button.bottom() <= s.content.bottom(), "{w}x{h}: {button:?}");
+            tap(&mut s, &t, screen, button);
+            assert!(s.whats_new_sheet.is_some(), "{w}x{h}: the button opens What's new");
+            s.whats_new_sheet = None;
             s.tab = Tab::Reading;
             draw(&mut s, &t, w, h);
             let (corner, koreader) = (s.corner.rect(), s.koreader.rect());

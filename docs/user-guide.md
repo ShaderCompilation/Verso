@@ -24,11 +24,10 @@ are refused before touching the Kindle UI. The supported-devices list is at
 
 **Optional alternatives:**
 
-- **KPM** (useful on firmware 5.19.4+ if `.sh` items don't index in the library,
-  or if you prefer a package manager): copy `verso-<version>.kpkg` to `/mnt/us/`
-  over USB, eject, run `;kpm install file:///mnt/us/verso-<version>.kpkg` in the
-  Kindle search bar (or `kpm install file:///mnt/us/verso-<version>.kpkg` over
-  SSH / kterm), and launch with `;kpm launch verso`.
+- **KPM** (useful on firmware 5.19.4+ if `.sh` items don't index, or if you
+  prefer a package manager): copy `verso-<version>.kpkg` to `/mnt/us/` over USB,
+  eject, run `;kpm install file:///mnt/us/verso-<version>.kpkg` in the Kindle
+  search bar (or without `;` over SSH / kterm), and launch with `;kpm launch verso`.
 - **KUAL:** open **KUAL → Verso → Start Verso** (included in the same zip).
 
 While Verso runs, its launcher pauses Amazon's UI and USB drive daemon so your
@@ -47,8 +46,8 @@ asleep.
   layout, KOReader import when KOReader is installed, gestures) runs over Home.
   Every choice saves at once and can be skipped; **Settings → Advanced → Run
   setup again** reopens it. Folders holding EPUBs are found and ticked for you.
-- **Uninstall:** first copy `/mnt/us/verso/data/` to your computer if you want to
-  keep your progress, highlights, notes and exports. Then delete `/mnt/us/verso`,
+- **Uninstall:** first copy `/mnt/us/verso/data/` to your computer to keep your
+  progress, highlights, notes and exports. Then delete `/mnt/us/verso`,
   `/mnt/us/extensions/verso` and `/mnt/us/documents/Verso.sh` over USB (or run
   `;kpm uninstall verso`, which keeps `/mnt/us/verso/data/`). Verso never touches
   system files or your books.
@@ -155,13 +154,13 @@ Verso reads **EPUB** (`.epub`, EPUB 2 and EPUB 3).
 - **Page-turn buttons:** on an Oasis, the top button goes to the next page and the
   bottom one back; in landscape, right is next and left is back. **Settings →
   Reading → Swap page buttons** turns them round (remotes aren't affected).
-- **Remotes:** Verso doesn't pair remotes, but reads the ones the Kindle has.
-  Amazon's **Kindle Click** needs no setup. With **HID Passthrough**, a paired
-  remote's page, arrow, volume, Enter and Space keys turn pages. To choose what each
-  button does, bind it in **Button Mapper** to the **Auto** tab's *Next page* /
-  *Previous page* (1.6.0 or later): the same binding then works in the Kindle
-  reader, KOReader and Verso. The **Kindle** tab's *Next page* doesn't reach Verso,
-  and its *(tap)* actions follow your tap zones, so prefer **Auto**.
+- **Remotes:** Verso doesn't pair remotes, but reads the Kindle's. Amazon's
+  **Kindle Click** needs no setup; with **HID Passthrough**, a paired remote's
+  page, arrow, volume, Enter and Space keys turn pages. To remap buttons, bind
+  them in **Button Mapper** (1.6.0+) to the **Auto** tab's *Next page* /
+  *Previous page*, which works in the Kindle reader, KOReader and Verso too. The
+  **Kindle** tab's *Next page* doesn't reach Verso and its *(tap)* actions follow
+  your tap zones, so prefer **Auto**.
 - **Bookmark corner:** tapping the top-right corner toggles a page bookmark
   (configurable in **Settings → Reading**).
 - **Back pill:** after jumping via Contents, Notes, chapter arrows, the progress
@@ -212,12 +211,12 @@ instantly from cache.
   - **Spacing:** Tight, Normal or Loose.
   - **Justify:** justified or left-aligned.
 - **Layout** (Reader Menu → **Layout**, full-screen editor applied on close):
-  - **Top bar** (default Off) and **Bottom bar** (default On: chapter title, page / total, percent): three tappable
-    slots each (left, centre, right). Pick *Nothing* or any of 13 items:
-    *Chapter title*, *Chapter and pages left*, *Book title*, *Author*, *Pages
-    left in chapter*, *Page in chapter*, *Time left in chapter*, *Percent*,
-    *Page / total*, *Time left in book*, *Clock (24 h)*, *Clock (12 h)*,
-    *Battery*. Time-left estimates learn your reading pace automatically.
+  - **Top bar** (default Off) and **Bottom bar** (default On: chapter title,
+    page / total, percent): three tappable slots each (left, centre, right).
+    Pick *Nothing* or any of 13 items: *Chapter title*, *Chapter and pages
+    left*, *Book title*, *Author*, *Pages left in chapter*, *Page in chapter*,
+    *Time left in chapter*, *Percent*, *Page / total*, *Time left in book*,
+    *Clock (24 h)*, *Clock (12 h)*, *Battery*. Time-left estimates learn your reading pace automatically.
   - **Progress line:** Off, Top or Bottom (default), with optional **Chapter marks**.
   - **Margins:** Side (default 3 mm), Top (2 mm) and Bottom (2 mm), each
     2–20 mm. Landscape centres the text column to keep line length comfortable.
@@ -378,14 +377,16 @@ Verso checks GitHub Releases over HTTPS when it starts or the Kindle wakes, at
 most every 6 hours and only over Wi-Fi that is already on (**Settings → Device →
 Check automatically**), or on demand via **Check for updates**.
 
-- Every release manifest is verified with a built-in **minisign** key before
-  parsing, and every downloaded component is checked by SHA-256.
-- Downloads require at least 20% battery (or a charger) and free storage space,
-  keep the Kindle awake while transferring, and resume on retry.
+- Every manifest is verified with a built-in **minisign** key before parsing,
+  and every component by SHA-256. Downloads need at least 20% battery (or a
+  charger) and free space, keep the Kindle awake and resume on retry.
 - When ready, the launcher swaps only the changed components using a crash-safe
   journal, keeps the previous version in `/mnt/us/verso/update/previous/` and
   starts the new build on a 2-minute trial. If it crashes, hangs or fails twice
   across power loss, the launcher **automatically rolls back** and explains why.
+- The offer shows the release notes, paged when long (swipe or ‹ ›). After an
+  update, **What’s new** shows the notes of each version since yours (up to five)
+  once; **Settings → Device → What’s new** reopens this version’s.
 - To revert manually at any time, open **Settings → Device → Go back**.
 
 ---

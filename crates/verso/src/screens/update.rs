@@ -593,7 +593,6 @@ impl WhatsNewSheet {
 
     /// The built-in notes of one version (Settings: this version), or a
     /// line saying there are none.
-    #[allow(dead_code)] // For Settings → Updates, which doesn't open it yet.
     pub fn for_version(t: &Theme, screen: Rect, version: &Version) -> Self {
         let notes = whats_new::notes_for(version).unwrap_or_default();
         Self::new(t, screen, format!("What’s new in Verso {version}"), None, notes, None)
