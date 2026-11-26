@@ -198,6 +198,9 @@ details.group[open] summary::before { content: "▾"; }
 .settings-label { display: block; font-weight: 600; margin-bottom: .45rem; }
 .settings-hint { margin: .5rem 0 0; color: var(--ink2); font-size: .9rem; }
 .key-form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .55rem; }
+.key-saved { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .55rem; }
+.key-saved .key-desc { flex: 1 1 16rem; }
+.key-saved code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .95rem; }
 .key-form input { flex: 1 1 16rem; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .95rem; }
 </style>
 </head>
@@ -377,12 +380,16 @@ details.group[open] summary::before { content: "▾"; }
         </div>
         <div class="settings-group">
           <label class="settings-label" for="deepl-key">DeepL API key</label>
-          <p id="tr-key-status" class="settings-hint"></p>
+          <div id="deepl-saved" class="key-saved" hidden>
+            <span class="key-desc">✓ Saved · <code id="deepl-hint"></code> · <span id="deepl-tier"></span></span>
+            <button type="button" id="deepl-replace">Replace</button>
+            <button type="button" id="deepl-remove">Remove key</button>
+          </div>
           <form id="deepl-form" class="key-form">
             <input type="text" id="deepl-key" placeholder="Paste DeepL API key (Free keys end with :fx)"
                    autocomplete="off" spellcheck="false" autocapitalize="off">
             <button type="submit" class="primary" id="deepl-save">Save key</button>
-            <button type="button" id="deepl-remove" hidden>Remove key</button>
+            <button type="button" id="deepl-cancel" hidden>Cancel</button>
           </form>
           <p class="settings-hint">Free keys (up to 500,000 characters/month at deepl.com) end with :fx; Pro keys are detected automatically. Languages DeepL doesn’t support fall back to Google Translate. Your key is stored only on this Kindle and omitted from problem reports.</p>
         </div>
@@ -2038,7 +2045,9 @@ $("files-mkdir-form").addEventListener("submit", async (ev) => {
 
 // ---- Translate tab ----
 
-let translateData = { provider: "google", has_key: false, key_tier: null, restart: false };
+let translateData = { provider: "google", has_key: false, key_tier: null, key_hint: null, restart: false };
+// True while the reader is pasting a key to replace the saved one.
+let replacingKey = false;
 
 function addTranslateNotice(text, isError) {
   addNoticeTo("translate-notices", text, isError);
@@ -2069,7 +2078,11 @@ function renderTranslate() {
   $("deepl-key").disabled = locked;
   $("deepl-save").disabled = locked;
   $("deepl-remove").disabled = locked;
-  $("deepl-remove").hidden = !translateData.has_key;
+  $("deepl-replace").disabled = locked;
+  if (!translateData.has_key) replacingKey = false;
+  $("deepl-saved").hidden = !translateData.has_key || replacingKey;
+  $("deepl-form").hidden = translateData.has_key && !replacingKey;
+  $("deepl-cancel").hidden = !translateData.has_key;
 
   if (!isDeepl) {
     $("tr-provider-hint").textContent = "Google Translate is active. Works out of the box with no API key.";
@@ -2081,10 +2094,8 @@ function renderTranslate() {
   }
 
   if (translateData.has_key) {
-    const tier = translateData.key_tier === "pro" ? "Pro" : "Free";
-    $("tr-key-status").textContent = tier + " API key saved on this Kindle. Paste a new key below to replace it.";
-  } else {
-    $("tr-key-status").textContent = "No API key saved.";
+    $("deepl-hint").textContent = "••••••••" + (translateData.key_hint || "");
+    $("deepl-tier").textContent = translateData.key_tier === "pro" ? "Pro" : "Free";
   }
 }
 
@@ -2130,10 +2141,24 @@ $("deepl-form").addEventListener("submit", async (ev) => {
   $("deepl-save").disabled = true;
   try {
     const ok = await saveTranslate({ api_key: key, provider: "deepl" }, "Saved DeepL API key and switched to DeepL.");
-    if (ok) $("deepl-key").value = "";
+    if (ok) {
+      $("deepl-key").value = "";
+      replacingKey = false;
+      renderTranslate();
+    }
   } finally {
     $("deepl-save").disabled = !!translateData.restart;
   }
+});
+$("deepl-replace").addEventListener("click", () => {
+  replacingKey = true;
+  renderTranslate();
+  $("deepl-key").focus();
+});
+$("deepl-cancel").addEventListener("click", () => {
+  replacingKey = false;
+  $("deepl-key").value = "";
+  renderTranslate();
 });
 $("deepl-remove").addEventListener("click", async () => {
   $("deepl-remove").disabled = true;

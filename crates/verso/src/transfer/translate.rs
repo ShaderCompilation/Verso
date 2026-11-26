@@ -1,7 +1,8 @@
 //! The Translate tab API: read and update the translation provider and DeepL
 //! API key over Wi-Fi so readers can paste a 39-character key from a phone or
-//! computer instead of typing it on e-ink. The stored key is never sent back
-//! in GET responses or written to logs.
+//! computer instead of typing it on e-ink. The stored key is never written to
+//! logs, and responses carry only its last four characters (`key_hint`) so the
+//! page can show which key is saved.
 
 use std::sync::Arc;
 
@@ -91,9 +92,22 @@ impl Translate {
             "provider": settings.translate_provider,
             "has_key": settings.deepl_api_key.is_some(),
             "key_tier": key_tier,
+            "key_hint": settings.deepl_api_key.as_deref().map(key_hint),
             "restart": self.store.live_data_edited(),
         })
     }
+}
+
+/// The last four characters of a key, keeping a Free key's `:fx` suffix, so
+/// readers can recognize the saved key. Too short a key reveals nothing.
+fn key_hint(key: &str) -> String {
+    let (body, suffix) = key.strip_suffix(":fx").map_or((key, ""), |b| (b, ":fx"));
+    let chars: Vec<char> = body.chars().collect();
+    if chars.len() <= 8 {
+        return suffix.to_owned();
+    }
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{tail}{suffix}")
 }
 
 #[cfg(test)]
@@ -185,28 +199,37 @@ mod tests {
     }
 
     #[test]
-    fn saves_validates_clears_and_never_echoes_deepl_key() {
+    fn saves_validates_clears_and_echoes_only_a_hint_of_the_deepl_key() {
         let env = Env::new();
         let (code, body) = env.get();
         assert_eq!(code, 200);
-        assert_eq!(body, json!({"provider": "google", "has_key": false, "key_tier": null, "restart": false}));
+        assert_eq!(
+            body,
+            json!({"provider": "google", "has_key": false, "key_tier": null, "key_hint": null, "restart": false})
+        );
 
         // Save a Free key (with whitespace trimmed) and switch to DeepL.
         let key = "12345678-1234-1234-1234-1234567890ab:fx";
         let (code, body) = env.put(json!({"provider": "deepl", "api_key": format!("  {key}\n")}));
         assert_eq!(code, 200);
-        assert_eq!(body, json!({"provider": "deepl", "has_key": true, "key_tier": "free", "restart": false}));
+        assert_eq!(
+            body,
+            json!({"provider": "deepl", "has_key": true, "key_tier": "free", "key_hint": "90ab:fx", "restart": false})
+        );
         assert!(!body.to_string().contains("12345678"), "GET/PUT must never echo the raw key");
         assert_eq!(env.store.settings().deepl_api_key.as_deref(), Some(key));
         assert_eq!(env.store.settings().translate_provider, TranslateProvider::DeepL);
 
-        // GET reports Pro tier for a Pro key and still never echoes the key.
+        // GET reports Pro tier for a Pro key and echoes only its last four
+        // characters; a short key echoes none.
         let (code, body) = env.put(json!({"api_key": "pro-key-12345678"}));
         assert_eq!(code, 200);
         assert_eq!(body["key_tier"], "pro");
         let (code, body) = env.get();
         assert_eq!(code, 200);
+        assert_eq!(body["key_hint"], "5678");
         assert!(!body.to_string().contains("pro-key"));
+        assert_eq!(env.put(json!({"api_key": "short:fx"})).1["key_hint"], ":fx");
 
         // Rejects control chars / whitespace inside a key.
         assert_eq!(env.put(json!({"api_key": "bad key\r\nX: 1"})).0, 400);
