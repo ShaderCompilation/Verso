@@ -9,14 +9,24 @@ required), pausing Amazon's UI while you read and restoring it cleanly on exit.
 
 <table>
   <tr>
-    <td><img src="docs/images/home.png" alt="Verso Home screen" /></td>
-    <td><img src="docs/images/reader.png" alt="Verso Reader page" /></td>
-    <td><img src="docs/images/dictionary.png" alt="Verso offline dictionary lookup" /></td>
+    <td><img src="docs/images/home.png" alt="Verso Home screen with the current book and recent books" /></td>
+    <td><img src="docs/images/library.png" alt="Verso library with folder and book covers" /></td>
+    <td><img src="docs/images/highlights.png" alt="Verso reader page with yellow highlights" /></td>
   </tr>
   <tr>
     <td align="center">Home &amp; continue reading</td>
+    <td align="center">Folders &amp; covers</td>
+    <td align="center">Highlights in color</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/reader.png" alt="Verso reader page with a progress bar" /></td>
+    <td><img src="docs/images/dictionary.png" alt="Verso offline dictionary lookup" /></td>
+    <td><img src="docs/images/wikipedia.png" alt="Verso Wikipedia article on the lookup card" /></td>
+  </tr>
+  <tr>
     <td align="center">EPUB typography &amp; footer</td>
     <td align="center">Offline StarDict lookup</td>
+    <td align="center">Wikipedia &amp; Translate</td>
   </tr>
 </table>
 
@@ -57,8 +67,8 @@ with the **Universal Hotfix** (for direct library launch — no KUAL needed),
 
 | Status | Models |
 | --- | --- |
-| **Tested** | Kindle Paperwhite 6 (12th gen, 2024) |
-| **Untested (device profiles included)** | Paperwhite 4 (2018), Paperwhite 5 (2021), Basic 3 (2019), Basic 4 (2022), Basic 5 (2024), Oasis 3 (2019), Colorsoft (2024), Scribe (2022–2025) |
+| **Tested** | Kindle Paperwhite 6 (12th gen, 2024), Colorsoft (2024) |
+| **Untested (device profiles included)** | Paperwhite 4 (2018), Paperwhite 5 (2021), Basic 3 (2019), Basic 4 (2022), Basic 5 (2024), Oasis 3 (2019), Scribe (2022–2025) |
 | **Not supported** | Older soft-float Kindles (Paperwhite 2/3, Voyage, Oasis 1/2, Basic 1/2) and firmware older than 5.16.3 |
 
 On an untested model, Verso shows a one-time notice at launch. If you try it on
