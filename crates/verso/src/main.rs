@@ -278,7 +278,8 @@ fn run() -> Result<i32> {
     let platform_us = started.elapsed().as_micros();
     // One Store for every screen, so they share preferences and the dictionary service.
     let store = store::Store::new();
-    let orientation = store.settings().orientation;
+    let settings = store.settings();
+    let orientation = settings.orientation;
     if orientation != platform::Orientation::Portrait {
         platform.set_orientation(orientation)?;
     }
@@ -327,6 +328,7 @@ fn run() -> Result<i32> {
     let app_us = t_app.elapsed().as_micros();
     let t_setup = Instant::now();
     app.set_orientation(orientation);
+    app.set_dark(settings.dark_mode);
     app.set_services(app::Services::device(store.clone(), platform.waker()));
     // After a rollback, the restored version says why with its first frame.
     if let Some(rollback) = store.updates().rollback() {

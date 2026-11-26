@@ -95,6 +95,8 @@ pub struct Settings {
     /// First-time setup was finished or skipped; until then it shows over
     /// Home on every launch (`screens/setup.rs`).
     pub setup_done: bool,
+    /// Light text on black across the whole app. Toggled from the Top Drawer.
+    pub dark_mode: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -126,6 +128,7 @@ impl Default for Settings {
             translate_provider: TranslateProvider::default(),
             deepl_api_key: None,
             setup_done: false,
+            dark_mode: false,
         }
     }
 }

@@ -468,7 +468,7 @@ mod tests {
 
     fn ink(c: &Canvas) -> Vec<u8> {
         let mut gray = vec![0u8; (c.width() * c.height()) as usize];
-        c.copy_gray(c.bounds(), &mut gray, c.width() as usize);
+        c.copy_gray(c.bounds(), &mut gray, c.width() as usize, false);
         gray
     }
 

@@ -148,6 +148,9 @@ def main():
                         help='Pin Verso to CPU 0 (VERSO_BENCH_ONE_CPU, set by the probe before main)')
     parser.add_argument('--dictionary-cache', metavar='STATE',
                         help='Copy STATE/dictionary-cache (e.g. a dictionary.py cold state) into the run state')
+    parser.add_argument('--dark-mode', action='store_true', help='Enable Settings::dark_mode')
+    parser.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
+                        help='Extra environment variable exported by the wrapper')
     args = parser.parse_args()
     APP = '/mnt/us/verso/' + args.experiment + '-check'
     assert 0 < args.turn_delay_us <= 1000000
@@ -181,6 +184,8 @@ def main():
     typography = {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0, 'alignment': 'book'}
     settings = {'typography': typography, 'library_folders': [APP + '/books'], 'library_sort': 'title',
                 'orientation': args.orientation, 'page_flash': args.page_flash, 'setup_done': True}
+    if args.dark_mode:
+        settings['dark_mode'] = True
     if args.page_layout is not None:
         settings['page_layout'] = args.page_layout
     else:
@@ -195,6 +200,7 @@ def main():
         from annotation_fixture import fixture_tar
         remote(f'mkdir -p {state}/annotations')
         remote(f'tar -xf - -C {state}/annotations', fixture_tar(args.annotation_fixture, args.annotation_count, kind=args.annotation_kind))
+    extra_env = ''.join(f'export {item}\n' for item in args.env)
     # The crengine cache stays in the check folder (not the user's): cold on
     # the first run of a session, warm after.
     wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_CACHE={APP}/cache\n'
@@ -202,6 +208,7 @@ def main():
                f'export RUST_LOG=info,verso=debug,verso::app=trace\n'
                + (f'export LD_PRELOAD={APP}/bin/probe.so\n' if args.preload else '')
                + ('export VERSO_BENCH_ONE_CPU=1\n' if args.one_cpu else '')
+               + extra_env
                + f'exec {APP}/bin/{args.variant}/verso\n')
     upload(APP + '/verso', wrapper.encode())
     pid = None
@@ -268,7 +275,7 @@ def main():
                    'dictionary_cache_seeded': bool(args.dictionary_cache),
                    'binary_sha256': binary_sha256, 'identity_check_timing': 'before_launch',
                    'book_sha256': book_sha256,
-                   'orientation': args.orientation, 'page_flash': args.page_flash,
+                   'orientation': args.orientation, 'page_flash': args.page_flash, 'dark_mode': args.dark_mode,
                    'font_size_pt': args.font_size_pt, 'page_layout': args.page_layout,
                    'queued_input': args.queued_input, 'initial_position': initial_position,
                    'render_log': remote(f'grep "rendered in" {APP}/verso.log || true'),

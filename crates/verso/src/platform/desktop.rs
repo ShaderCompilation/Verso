@@ -180,10 +180,11 @@ impl Platform for Desktop {
     fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
         let sim = &mut self.sim;
         for u in updates {
+            let dark = canvas.is_dark();
             if sim.color {
-                canvas.copy_rgba(u.rect, &mut sim.panel, sim.width);
+                canvas.copy_rgba(u.rect, &mut sim.panel, sim.width, dark);
             } else {
-                canvas.copy_gray(u.rect, &mut sim.panel, sim.width);
+                canvas.copy_gray(u.rect, &mut sim.panel, sim.width, dark);
             }
             if u.mode == RefreshMode::Fast {
                 sim.threshold(u.rect);

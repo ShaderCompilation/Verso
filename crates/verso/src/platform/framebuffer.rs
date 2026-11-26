@@ -114,27 +114,21 @@ impl Writer {
     pub fn write(&mut self, canvas: &Canvas, rect: Rect, orientation: Orientation, fb: &mut [u8]) -> Option<Rect> {
         let l = self.layout;
         let panel = Rect::new(0, 0, l.width as i32, l.height as i32);
+        let flip = canvas.is_dark() ^ l.inverted;
         let r = match l.format {
             Format::Gray8 => {
                 let dst = &mut fb[l.offset()..];
-                let r = match orientation {
+                match orientation {
                     Orientation::Portrait => {
                         let r = rect.intersect(&panel)?;
-                        canvas.copy_gray(r, dst, l.stride);
+                        canvas.copy_gray(r, dst, l.stride, flip);
                         r
                     }
-                    Orientation::Landscape => canvas.copy_gray_rotated(rect, dst, l.stride, &mut self.scratch)?,
-                };
-                if l.inverted {
-                    for y in r.y..r.bottom() {
-                        let row = y as usize * l.stride;
-                        dst[row + r.x as usize..row + r.right() as usize].iter_mut().for_each(|v| *v = !*v);
-                    }
+                    Orientation::Landscape => canvas.copy_gray_rotated(rect, dst, l.stride, &mut self.scratch, flip)?,
                 }
-                r
             }
             Format::Rgba32 | Format::Bgra32 => {
-                let pixel = Pixel { swap_rb: l.format == Format::Bgra32, invert: if l.inverted { 0xff } else { 0 } };
+                let pixel = Pixel { swap_rb: l.format == Format::Bgra32, invert: if flip { 0xff } else { 0 } };
                 let dst = &mut fb[l.offset()..];
                 match orientation {
                     Orientation::Portrait => {
@@ -320,49 +314,54 @@ mod tests {
         for format in [Format::Gray8, Format::Rgba32, Format::Bgra32] {
             for origin in [(0, 0), (3, 2)] {
                 for inverted in [false, true] {
-                    for orientation in [Orientation::Portrait, Orientation::Landscape] {
-                        let l = layout(format, origin, inverted);
-                        let mut fb = vec![0x55u8; l.required_len().unwrap() + 7];
-                        let c = canvas(orientation);
-                        let mut writer = Writer::new(l);
-                        let changed = writer.write(&c, c.bounds(), orientation, &mut fb);
-                        let what = format!("{format:?} {origin:?} inverted={inverted} {orientation:?}");
-                        assert_eq!(
-                            changed,
-                            Some(Rect::new(origin.0 as i32, origin.1 as i32, W as i32, H as i32)),
-                            "{what}"
-                        );
-                        for y in 0..H {
-                            for x in 0..W {
-                                // Landscape: canvas (cx, cy) lands on panel
-                                // (cy, H - 1 - cx), the canvas being H wide.
-                                let (cx, cy) = match orientation {
-                                    Orientation::Portrait => (x, y),
-                                    Orientation::Landscape => (H - 1 - y, x),
-                                };
-                                let want = (10 * cy + cx) as u8;
-                                let want = if inverted { !want } else { want };
-                                assert_eq!(gray_at(&fb, &l, x, y), want, "{what} at ({x}, {y})");
+                    for dark in [false, true] {
+                        for orientation in [Orientation::Portrait, Orientation::Landscape] {
+                            let l = layout(format, origin, inverted);
+                            let mut fb = vec![0x55u8; l.required_len().unwrap() + 7];
+                            let mut c = canvas(orientation);
+                            c.set_dark(dark);
+                            let mut writer = Writer::new(l);
+                            let changed = writer.write(&c, c.bounds(), orientation, &mut fb);
+                            let what = format!("{format:?} {origin:?} inverted={inverted} dark={dark} {orientation:?}");
+                            assert_eq!(
+                                changed,
+                                Some(Rect::new(origin.0 as i32, origin.1 as i32, W as i32, H as i32)),
+                                "{what}"
+                            );
+                            let flip = dark ^ inverted;
+                            for y in 0..H {
+                                for x in 0..W {
+                                    // Landscape: canvas (cx, cy) lands on panel
+                                    // (cy, H - 1 - cx), the canvas being H wide.
+                                    let (cx, cy) = match orientation {
+                                        Orientation::Portrait => (x, y),
+                                        Orientation::Landscape => (H - 1 - y, x),
+                                    };
+                                    let want = (10 * cy + cx) as u8;
+                                    let want = if flip { !want } else { want };
+                                    assert_eq!(gray_at(&fb, &l, x, y), want, "{what} at ({x}, {y})");
+                                }
                             }
-                        }
-                        // A check finds exactly the rows something else drew over.
-                        assert_eq!(writer.check(&c, orientation, &fb).changed, 0, "{what}");
-                        let drawn_over = fb.clone();
-                        for y in 1..3 {
-                            let i = (origin.1 + y) as usize * l.stride + (origin.0 + W - 1) as usize * format.bytes();
-                            fb[i] ^= 0x40;
-                        }
-                        let check = writer.check(&c, orientation, &fb);
-                        assert_eq!((check.strips, check.changed, check.rows), (H, 2, (1, 2)), "{what}");
-                        fb = drawn_over;
-                        // Nothing outside the viewport is touched.
-                        let bytes = format.bytes();
-                        for (i, &v) in fb.iter().enumerate() {
-                            let (row, col) = (i / l.stride, i % l.stride);
-                            let inside = (origin.1 as usize..(origin.1 + H) as usize).contains(&row)
-                                && (origin.0 as usize * bytes..(origin.0 + W) as usize * bytes).contains(&col);
-                            if !inside {
-                                assert_eq!(v, 0x55, "{what}: byte {i} outside the viewport");
+                            // A check finds exactly the rows something else drew over.
+                            assert_eq!(writer.check(&c, orientation, &fb).changed, 0, "{what}");
+                            let drawn_over = fb.clone();
+                            for y in 1..3 {
+                                let i =
+                                    (origin.1 + y) as usize * l.stride + (origin.0 + W - 1) as usize * format.bytes();
+                                fb[i] ^= 0x40;
+                            }
+                            let check = writer.check(&c, orientation, &fb);
+                            assert_eq!((check.strips, check.changed, check.rows), (H, 2, (1, 2)), "{what}");
+                            fb = drawn_over;
+                            // Nothing outside the viewport is touched.
+                            let bytes = format.bytes();
+                            for (i, &v) in fb.iter().enumerate() {
+                                let (row, col) = (i / l.stride, i % l.stride);
+                                let inside = (origin.1 as usize..(origin.1 + H) as usize).contains(&row)
+                                    && (origin.0 as usize * bytes..(origin.0 + W) as usize * bytes).contains(&col);
+                                if !inside {
+                                    assert_eq!(v, 0x55, "{what}: byte {i} outside the viewport");
+                                }
                             }
                         }
                     }
@@ -398,44 +397,60 @@ mod tests {
 
     #[test]
     fn color_canvas_swizzles_channels_for_rgba32_and_bgra32() {
-        use crate::gfx::ColorMode;
-        for format in [Format::Rgba32, Format::Bgra32] {
+        use crate::gfx::{ColorMode, luma};
+        for format in [Format::Gray8, Format::Rgba32, Format::Bgra32] {
             for inverted in [false, true] {
-                for orientation in [Orientation::Portrait, Orientation::Landscape] {
-                    let (cw, ch) = orientation.screen_size(W, H);
-                    let mut c = Canvas::with_mode(cw, ch, ColorMode::Color32);
-                    let mut rgba = Vec::with_capacity((cw * ch * 4) as usize);
-                    for y in 0..ch {
-                        for x in 0..cw {
-                            rgba.extend_from_slice(&[(10 + x * 20) as u8, (100 + y * 15) as u8, 230, 255]);
+                for dark in [false, true] {
+                    for orientation in [Orientation::Portrait, Orientation::Landscape] {
+                        let (cw, ch) = orientation.screen_size(W, H);
+                        let mut c = Canvas::with_mode(cw, ch, ColorMode::Color32);
+                        c.set_dark(dark);
+                        let mut rgba = Vec::with_capacity((cw * ch * 4) as usize);
+                        for y in 0..ch {
+                            for x in 0..cw {
+                                rgba.extend_from_slice(&[(10 + x * 20) as u8, (100 + y * 15) as u8, 230, 255]);
+                            }
                         }
-                    }
-                    c.set_rgba(&rgba);
-                    let l = layout(format, (2, 1), inverted);
-                    let mut fb = vec![0x44u8; l.required_len().unwrap()];
-                    let mut writer = Writer::new(l);
-                    let changed = writer.write(&c, c.bounds(), orientation, &mut fb);
-                    assert_eq!(changed, Some(Rect::new(2, 1, W as i32, H as i32)));
-                    let inv = if inverted { 0xff } else { 0 };
-                    for y in 0..H {
-                        for x in 0..W {
-                            let (cx, cy) = match orientation {
-                                Orientation::Portrait => (x, y),
-                                Orientation::Landscape => (H - 1 - y, x),
-                            };
-                            let (r, g, b) = (((10 + cx * 20) as u8) ^ inv, ((100 + cy * 15) as u8) ^ inv, 230u8 ^ inv);
-                            let want = match format {
-                                Format::Rgba32 => [r, g, b, 0xff],
-                                Format::Bgra32 => [b, g, r, 0xff],
-                                Format::Gray8 => unreachable!(),
-                            };
-                            let i = (1 + y) as usize * l.stride + (2 + x) as usize * 4;
-                            assert_eq!(
-                                &fb[i..i + 4],
-                                &want,
-                                "{format:?} inverted={inverted} {orientation:?} at ({x}, {y})"
-                            );
+                        c.set_rgba(&rgba);
+                        let l = layout(format, (2, 1), inverted);
+                        let mut fb = vec![0x44u8; l.required_len().unwrap()];
+                        let mut writer = Writer::new(l);
+                        let changed = writer.write(&c, c.bounds(), orientation, &mut fb);
+                        assert_eq!(changed, Some(Rect::new(2, 1, W as i32, H as i32)));
+                        let inv = if dark ^ inverted { 0xff } else { 0 };
+                        for y in 0..H {
+                            for x in 0..W {
+                                let (cx, cy) = match orientation {
+                                    Orientation::Portrait => (x, y),
+                                    Orientation::Landscape => (H - 1 - y, x),
+                                };
+                                let (r0, g0, b0) = ((10 + cx * 20) as u8, (100 + cy * 15) as u8, 230u8);
+                                let i = (1 + y) as usize * l.stride + (2 + x) as usize * format.bytes();
+                                match format {
+                                    Format::Gray8 => {
+                                        assert_eq!(
+                                            fb[i],
+                                            luma(r0, g0, b0) ^ inv,
+                                            "{format:?} inverted={inverted} dark={dark} {orientation:?} at ({x}, {y})"
+                                        );
+                                    }
+                                    Format::Rgba32 | Format::Bgra32 => {
+                                        let (r, g, b) = (r0 ^ inv, g0 ^ inv, b0 ^ inv);
+                                        let want = match format {
+                                            Format::Rgba32 => [r, g, b, 0xff],
+                                            Format::Bgra32 => [b, g, r, 0xff],
+                                            Format::Gray8 => unreachable!(),
+                                        };
+                                        assert_eq!(
+                                            &fb[i..i + 4],
+                                            &want,
+                                            "{format:?} inverted={inverted} dark={dark} {orientation:?} at ({x}, {y})"
+                                        );
+                                    }
+                                }
+                            }
                         }
+                        assert_eq!(writer.check(&c, orientation, &fb).changed, 0);
                     }
                 }
             }

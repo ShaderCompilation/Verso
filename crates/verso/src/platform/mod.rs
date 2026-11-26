@@ -44,6 +44,9 @@ pub mod ssh;
 #[cfg(any(feature = "kindle", test))]
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod touch;
+#[cfg(any(feature = "kindle", test))]
+#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
+mod waveform;
 pub mod wifi;
 
 /// How an area of the e-ink screen should be refreshed. The app states its
@@ -59,47 +62,6 @@ pub enum RefreshMode {
     Page,
     /// Full flash that clears all ghosting. Images and after wake.
     Full,
-}
-
-/// The FBInk waveform chosen for a Kindle refresh, kept separate from
-/// `fbink-sys` constants so the mapping is unit-tested on desktop.
-#[cfg(any(feature = "kindle", test))]
-#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum KindleWaveform {
-    Du,
-    Gl16,
-    Gc16,
-    Reagl,
-    Glrc16,
-    Gcc16,
-}
-
-impl RefreshMode {
-    /// Selects the Kindle waveform and flashing flag for a panel.
-    ///
-    /// On i.MX (`!is_mtk`), `WFM_GL16` is strictly from-white-to-any and leaves
-    /// gray halos on antialiased text transitioning to dark UI fills, so `Ui`
-    /// uses non-flashing `WFM_GC16` (from-any-to-any 16-level grayscale).
-    #[cfg(any(feature = "kindle", test))]
-    #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
-    pub(crate) fn kindle_waveform(self, has_color_panel: bool, is_mtk: bool) -> (KindleWaveform, bool) {
-        if has_color_panel {
-            match self {
-                Self::Fast => (KindleWaveform::Du, false),
-                Self::Ui => (KindleWaveform::Gl16, false),
-                Self::Page => (KindleWaveform::Glrc16, false),
-                Self::Full => (KindleWaveform::Gcc16, true),
-            }
-        } else {
-            match self {
-                Self::Fast => (KindleWaveform::Du, false),
-                Self::Ui => (if is_mtk { KindleWaveform::Gl16 } else { KindleWaveform::Gc16 }, false),
-                Self::Page => (KindleWaveform::Reagl, false),
-                Self::Full => (KindleWaveform::Gc16, true),
-            }
-        }
-    }
 }
 
 /// A part of the screen to update, and how.
@@ -500,31 +462,5 @@ mod tests {
             assert_eq!(KeyAction::from_evdev(code, PageButtons::Named, Portrait), None);
         }
         assert_eq!((PageNext.step(), PagePrev.step()), (1, -1));
-    }
-
-    #[test]
-    fn kindle_waveforms_use_non_flashing_gc16_for_ui_on_imx() {
-        use KindleWaveform::*;
-        use RefreshMode::*;
-        let cases = [
-            // Monochrome MTK (PW5/PW6/Scribe/Basic 4+)
-            (false, true, Fast, (Du, false)),
-            (false, true, Ui, (Gl16, false)),
-            (false, true, Page, (Reagl, false)),
-            (false, true, Full, (Gc16, true)),
-            // Monochrome i.MX (PW4/Basic 3/Oasis 2-3)
-            (false, false, Fast, (Du, false)),
-            (false, false, Ui, (Gc16, false)),
-            (false, false, Page, (Reagl, false)),
-            (false, false, Full, (Gc16, true)),
-            // Colorsoft (Kaleido 3)
-            (true, true, Fast, (Du, false)),
-            (true, true, Ui, (Gl16, false)),
-            (true, true, Page, (Glrc16, false)),
-            (true, true, Full, (Gcc16, true)),
-        ];
-        for (color, mtk, mode, want) in cases {
-            assert_eq!(mode.kindle_waveform(color, mtk), want, "color={color} mtk={mtk} {mode:?}");
-        }
     }
 }

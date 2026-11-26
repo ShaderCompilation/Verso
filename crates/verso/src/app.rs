@@ -169,6 +169,11 @@ impl App {
         self.orientation = orientation;
     }
 
+    /// Sets whether the canvas copies out inverted for dark mode.
+    pub fn set_dark(&mut self, dark: bool) {
+        self.canvas.set_dark(dark);
+    }
+
     /// Saves the screens before handing the pending orientation to the
     /// platform, with what they showed so `relayout` can rebuild the same.
     /// A failed save leaves the request pending so a later event can retry it.
@@ -220,7 +225,9 @@ impl App {
         self.stack.clear();
         self.drawer = None;
         self.orientation = orientation;
+        let dark = self.canvas.is_dark();
         self.canvas = Canvas::with_mode(info.width, info.height, info.color);
+        self.canvas.set_dark(dark);
         self.diff = FrameDiff::new(&self.canvas);
         self.stack = build(&self.theme, self.canvas.bounds());
         assert!(!self.stack.is_empty(), "relayout needs at least one screen");
@@ -1432,7 +1439,13 @@ mod tests {
         assert!(app.draw_sleep_cover(crate::store::SleepScreen::Cover));
         // The panel's top-left pixel shows the canvas's top-right one.
         let mut panel = vec![255u8; 600 * 800];
-        app.canvas.copy_gray_rotated(app.canvas.bounds(), &mut panel, 600, &mut crate::gfx::RotateScratch::default());
+        app.canvas.copy_gray_rotated(
+            app.canvas.bounds(),
+            &mut panel,
+            600,
+            &mut crate::gfx::RotateScratch::default(),
+            false,
+        );
         assert_eq!(panel[0], 0);
         assert_eq!(panel[1], 119);
     }
@@ -1483,13 +1496,16 @@ mod tests {
         use crate::gfx::ColorMode::Color32;
         let info = DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: Color32 };
         let mut app = App::new(&info, Theme::for_dpi(150), Box::new(Square));
+        app.set_dark(true);
         assert_eq!(app.canvas.mode(), Color32);
+        assert!(app.canvas.is_dark());
         assert!(!app.frame().is_empty());
         assert_eq!(app.canvas.raw()[..4], [0, 0, 0, 255]);
         app.relayout(&DeviceInfo { width: 800, height: 600, ..info }, Orientation::Landscape, |_, _| {
             vec![Box::new(Square)]
         });
         assert_eq!((app.canvas.mode(), app.canvas.raw().len()), (Color32, 800 * 600 * 4));
+        assert!(app.canvas.is_dark(), "dark polarity carries across relayout");
         assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 800, 600), mode: RefreshMode::Full }]);
     }
 

@@ -11,7 +11,8 @@ use fbink_sys as fb;
 use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
 use crate::platform::framebuffer::{Format, Layout, Writer};
-use crate::platform::{FrameCheck, KindleWaveform, Orientation, Unsupported, Update};
+use crate::platform::waveform::{DarkVariant, PanelCaps, plan_refresh};
+use crate::platform::{FrameCheck, Orientation, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
 pub struct DisplaySession {
@@ -30,6 +31,7 @@ pub struct DisplaySession {
     pub bpp: u32,
     pub pixel_format: String,
     pub has_color_panel: bool,
+    pub has_eclipse_wfm: bool,
     pub dpi: u32,
     pub is_mtk: bool,
     pub inverted: bool,
@@ -74,6 +76,8 @@ pub struct Display {
     pub touch_mirror_y: bool,
     /// Tracks an unawaited flashing refresh so the next write or handoff waits for it.
     flash_fence: FlashFence,
+    /// Temporary Phase 1 dark-mode waveform variant (`VERSO_DARK_VARIANT`).
+    dark_variant: DarkVariant,
     /// Refreshes FBInk refused, for the exit line.
     pub failed_refreshes: u32,
 }
@@ -117,6 +121,7 @@ impl Display {
                 bpp: st.bpp,
                 pixel_format: pixel_format_name(st.pixel_format),
                 has_color_panel: st.has_color_panel,
+                has_eclipse_wfm: st.has_eclipse_wfm,
                 dpi: st.screen_dpi as u32,
                 is_mtk: st.is_mtk,
                 inverted: st.inverted_grayscale,
@@ -126,7 +131,7 @@ impl Display {
             // isn't where a user looks.
             let fail = |msg: String| -> Result<Self> {
                 log::error!(
-                    "FBInk {}: {} ({}, {}, id={:#06x}), view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, {} dpi, mtk={}, inverted={}",
+                    "FBInk {}: {} ({}, {}, id={:#06x}), view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, eclipse={}, {} dpi, mtk={}, inverted={}",
                     session.fbink_version,
                     session.device_name,
                     session.codename,
@@ -142,6 +147,7 @@ impl Display {
                     session.bpp,
                     session.pixel_format,
                     session.has_color_panel,
+                    session.has_eclipse_wfm,
                     session.dpi,
                     session.is_mtk,
                     session.inverted,
@@ -183,6 +189,10 @@ impl Display {
                 return fail(format!("framebuffer mapping is missing or too small ({fb_len} bytes)"));
             }
 
+            let dark_variant = DarkVariant::from_env();
+            if dark_variant != DarkVariant::A {
+                log::info!("dark mode waveform variant: {dark_variant:?}");
+            }
             Ok(Self {
                 fd,
                 cfg,
@@ -199,6 +209,7 @@ impl Display {
                 touch_mirror_x: st.touch_mirror_x,
                 touch_mirror_y: st.touch_mirror_y,
                 flash_fence: FlashFence::default(),
+                dark_variant,
                 failed_refreshes: 0,
             })
         }
@@ -230,22 +241,20 @@ impl Display {
             if self.session.has_color_panel {
                 self.cfg.cfa_mode = fb::CFA_MODE_INDEX_E_CFA_DEFAULT;
             }
-            let (wfm, flash) = u.mode.kindle_waveform(self.session.has_color_panel, self.session.is_mtk);
-            self.cfg.wfm_mode = match wfm {
-                KindleWaveform::Du => fb::WFM_MODE_INDEX_E_WFM_DU,
-                KindleWaveform::Gl16 => fb::WFM_MODE_INDEX_E_WFM_GL16,
-                KindleWaveform::Gc16 => fb::WFM_MODE_INDEX_E_WFM_GC16,
-                KindleWaveform::Reagl => fb::WFM_MODE_INDEX_E_WFM_REAGL,
-                KindleWaveform::Glrc16 => fb::WFM_MODE_INDEX_E_WFM_GLRC16,
-                KindleWaveform::Gcc16 => fb::WFM_MODE_INDEX_E_WFM_GCC16,
+            let caps = PanelCaps {
+                has_color_panel: self.session.has_color_panel,
+                has_eclipse_wfm: self.session.has_eclipse_wfm,
+                is_mtk: self.session.is_mtk,
             };
-            self.cfg.is_flashing = flash;
+            let plan = plan_refresh(u.mode, canvas.is_dark(), caps, self.dark_variant);
+            self.cfg.wfm_mode = plan.waveform.to_fbink();
+            self.cfg.is_flashing = plan.is_flashing;
             // SAFETY: FFI call with a valid fd and config.
             let rc = unsafe { fb::fbink_refresh(self.fd, r.y as u32, r.x as u32, r.w as u32, r.h as u32, &self.cfg) };
             if rc < 0 {
                 self.failed_refreshes += 1;
                 log::warn!("refresh of {r:?} ({:?}) failed: {rc}", u.mode);
-            } else if flash {
+            } else if plan.mark_flash_fence {
                 // SAFETY: reads FBInk's marker for the refresh just sent.
                 let marker = unsafe { fb::fbink_get_last_marker() };
                 self.flash_fence.mark_flash(marker);

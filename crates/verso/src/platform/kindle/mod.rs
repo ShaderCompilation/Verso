@@ -521,7 +521,7 @@ impl Platform for Kindle {
             format!("device: {} ({}, {}, id={:#06x})", s.device_name, s.codename, s.platform, s.device_id),
             self.profile_line.clone(),
             format!(
-                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, {} dpi, mtk={}, inverted={}",
+                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, eclipse={}, {} dpi, mtk={}, inverted={}",
                 s.view_width,
                 s.view_height,
                 s.view_hori_origin,
@@ -532,6 +532,7 @@ impl Platform for Kindle {
                 s.bpp,
                 s.pixel_format,
                 s.has_color_panel,
+                s.has_eclipse_wfm,
                 s.dpi,
                 s.is_mtk,
                 s.inverted,

@@ -65,6 +65,9 @@ pub struct Canvas {
     width: u32,
     height: u32,
     pixels: Pixels,
+    /// When set, copying the canvas to the panel flips every channel (keeping
+    /// RGBA alpha at `0xff`). Drawing, diffing and cached pages stay light.
+    dark: bool,
     /// Gray canvases only: shape-sized RGBA bands for tiny-skia.
     shape_rgba: Vec<u8>,
 }
@@ -84,7 +87,15 @@ impl Canvas {
             ColorMode::Gray8 => Pixels::Gray(vec![255; len]),
             ColorMode::Color32 => Pixels::Rgba(vec![255; len.checked_mul(4).expect("canvas size overflow")]),
         };
-        Self { width, height, pixels, shape_rgba: Vec::new() }
+        Self { width, height, pixels, dark: false, shape_rgba: Vec::new() }
+    }
+
+    pub fn is_dark(&self) -> bool {
+        self.dark
+    }
+
+    pub fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
     }
 
     pub fn width(&self) -> u32 {
@@ -674,24 +685,38 @@ impl Canvas {
     }
 
     /// Copies `rect` into a screen-layout grayscale buffer, preserving padding.
-    pub fn copy_gray(&self, rect: Rect, dst: &mut [u8], stride: usize) {
+    /// When `invert` is true, flips every copied byte (`v ^ 0xff`) on the way
+    /// out without reading back from `dst`.
+    pub fn copy_gray(&self, rect: Rect, dst: &mut [u8], stride: usize, invert: bool) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         if let Pixels::Gray(p) = &self.pixels
             && r == self.bounds()
             && stride == self.width as usize
         {
-            dst[..p.len()].copy_from_slice(p);
+            if invert {
+                copy_inverted(&mut dst[..p.len()], p);
+            } else {
+                dst[..p.len()].copy_from_slice(p);
+            }
             return;
         }
+        let flip = if invert { 0xff } else { 0 };
         for y in r.y..r.bottom() {
             let s = y as usize * self.width as usize + r.x as usize;
             let d = y as usize * stride + r.x as usize;
             let dst = &mut dst[d..d + r.w as usize];
             match &self.pixels {
-                Pixels::Gray(p) => dst.copy_from_slice(&p[s..s + r.w as usize]),
+                Pixels::Gray(p) => {
+                    let src = &p[s..s + r.w as usize];
+                    if invert {
+                        copy_inverted(dst, src);
+                    } else {
+                        dst.copy_from_slice(src);
+                    }
+                }
                 Pixels::Rgba(p) => {
                     for (out, px) in dst.iter_mut().zip(p[s * 4..(s + r.w as usize) * 4].as_chunks::<4>().0) {
-                        *out = luma(px[0], px[1], px[2]);
+                        *out = luma(px[0], px[1], px[2]) ^ flip;
                     }
                 }
             }
@@ -699,17 +724,25 @@ impl Canvas {
     }
 
     /// Copies `rect` into a screen-layout RGBA buffer (`stride` pixels per
-    /// row), preserving padding. Gray pixels become `[g, g, g, 255]`.
+    /// row), preserving padding. Gray pixels become `[g, g, g, 255]`. When
+    /// `invert` is true, flips RGB (`v ^ 0xff`) and keeps alpha at `0xff`.
     #[cfg_attr(feature = "kindle", allow(dead_code))] // the simulator's panels; the Kindle writes rows itself
-    pub fn copy_rgba(&self, rect: Rect, dst: &mut [u8], stride: usize) {
+    pub fn copy_rgba(&self, rect: Rect, dst: &mut [u8], stride: usize, invert: bool) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         if let Pixels::Rgba(p) = &self.pixels
             && r == self.bounds()
             && stride == self.width as usize
         {
-            dst[..p.len()].copy_from_slice(p);
+            if invert {
+                for (out, px) in dst[..p.len()].as_chunks_mut::<4>().0.iter_mut().zip(p.as_chunks::<4>().0) {
+                    *out = [px[0] ^ 0xff, px[1] ^ 0xff, px[2] ^ 0xff, 0xff];
+                }
+            } else {
+                dst[..p.len()].copy_from_slice(p);
+            }
             return;
         }
+        let flip = if invert { 0xff } else { 0 };
         for y in r.y..r.bottom() {
             let s = y as usize * self.width as usize + r.x as usize;
             let d = y as usize * stride + r.x as usize;
@@ -717,16 +750,26 @@ impl Canvas {
             match &self.pixels {
                 Pixels::Gray(p) => {
                     for (px, &g) in dst.as_chunks_mut::<4>().0.iter_mut().zip(&p[s..s + r.w as usize]) {
+                        let g = g ^ flip;
                         *px = [g, g, g, 255];
                     }
                 }
-                Pixels::Rgba(p) => dst.copy_from_slice(&p[s * 4..(s + r.w as usize) * 4]),
+                Pixels::Rgba(p) => {
+                    let src = &p[s * 4..(s + r.w as usize) * 4];
+                    if invert {
+                        for (out, px) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                            *out = [px[0] ^ 0xff, px[1] ^ 0xff, px[2] ^ 0xff, 0xff];
+                        }
+                    } else {
+                        dst.copy_from_slice(src);
+                    }
+                }
             }
         }
     }
 
     /// Copies `rect` as stored (gray or RGBA) into a buffer laid out like
-    /// this canvas, for keeping a copy of a frame.
+    /// this canvas, for keeping a copy of a frame. Never flips for dark mode.
     pub fn copy_raw(&self, rect: Rect, dst: &mut [u8]) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
         let bpp = self.bytes_per_pixel();
@@ -742,6 +785,8 @@ impl Canvas {
     /// quarter turn (see `Orientation::Landscape`): the panel is `height`
     /// wide and `width` tall, and canvas pixel (x, y) lands on panel pixel
     /// (y, width - 1 - x). Returns the panel rectangle that changed.
+    /// When `invert` is true, flips the `RotateScratch` band in cached RAM
+    /// before copying each finished panel row into `dst`.
     #[cfg_attr(not(feature = "kindle"), allow(dead_code))] // the simulator turns its window instead
     pub fn copy_gray_rotated(
         &self,
@@ -749,16 +794,18 @@ impl Canvas {
         dst: &mut [u8],
         stride: usize,
         scratch: &mut RotateScratch,
+        invert: bool,
     ) -> Option<Rect> {
         let r = rect.intersect(&self.bounds())?;
         let gray = match &self.pixels {
             Pixels::Gray(gray) => gray,
             Pixels::Rgba(rgba) => {
                 let cw = self.width as usize;
+                let flip = if invert { 0xff } else { 0 };
                 for y in r.y as usize..r.bottom() as usize {
                     for x in r.x as usize..r.right() as usize {
                         let p = &rgba[(y * cw + x) * 4..];
-                        dst[(cw - 1 - x) * stride + y] = luma(p[0], p[1], p[2]);
+                        dst[(cw - 1 - x) * stride + y] = luma(p[0], p[1], p[2]) ^ flip;
                     }
                 }
                 return Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w));
@@ -777,7 +824,11 @@ impl Canvas {
             transpose_gray_band(gray, cw, ch, bx, bw, y0, y1, band);
             for i in 0..bw {
                 let row = (cw - 1 - (bx + i)) * stride;
-                dst[row + y0..row + y1].copy_from_slice(&band[i * h..(i + 1) * h]);
+                let line = &mut band[i * h..(i + 1) * h];
+                if invert {
+                    invert_in_place(line);
+                }
+                dst[row + y0..row + y1].copy_from_slice(line);
             }
         }
         Some(Rect::new(r.y, self.width as i32 - r.right(), r.h, r.w))
@@ -1000,6 +1051,34 @@ pub fn save_rgba_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8
     let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
     image::save_buffer(path, &rgb, width, height, image::ColorType::Rgb8)?;
     Ok(())
+}
+
+/// Copies `src` into `dst` while flipping every byte (`v ^ 0xff`), writing
+/// `dst` once without reading it back.
+fn copy_inverted(dst: &mut [u8], src: &[u8]) {
+    let (dst_chunks, dst_tail) = dst.as_chunks_mut::<16>();
+    let (src_chunks, src_tail) = src.as_chunks::<16>();
+    for (out, inp) in dst_chunks.iter_mut().zip(src_chunks) {
+        for i in 0..16 {
+            out[i] = inp[i] ^ 0xff;
+        }
+    }
+    for (out, &inp) in dst_tail.iter_mut().zip(src_tail) {
+        *out = inp ^ 0xff;
+    }
+}
+
+/// Flips every byte of `buf` in place (used on a cached `RotateScratch` band).
+fn invert_in_place(buf: &mut [u8]) {
+    let (chunks, tail) = buf.as_chunks_mut::<16>();
+    for chunk in chunks {
+        for v in chunk {
+            *v ^= 0xff;
+        }
+    }
+    for v in tail {
+        *v ^= 0xff;
+    }
 }
 
 /// Perceptual brightness of an (opaque) RGB pixel. Grays map to themselves.
@@ -1301,7 +1380,7 @@ mod tests {
         assert_eq!(&canvas.gray_data()[257..260], &[51, 119, 119]);
         assert!(canvas.gray_data()[260..].iter().all(|&g| g == 119));
         let mut out = vec![77; 264 * 2];
-        canvas.copy_gray(Rect::new(-2, 0, 265, 2), &mut out, 264);
+        canvas.copy_gray(Rect::new(-2, 0, 265, 2), &mut out, 264, false);
         assert_eq!(&out[..260], &canvas.gray_data()[..260]);
         assert_eq!(&out[260..264], &[77; 4]);
     }
@@ -1318,7 +1397,7 @@ mod tests {
         let mut c = Canvas::new(8, 4);
         c.fill_rect(Rect::new(2, 1, 3, 2), 0);
         let mut out = vec![200u8; 8 * 4];
-        c.copy_gray(Rect::new(1, 1, 5, 1), &mut out, 8);
+        c.copy_gray(Rect::new(1, 1, 5, 1), &mut out, 8, false);
         assert_eq!(&out[8..16], &[200, 255, 0, 0, 0, 255, 200, 200]);
         assert!(out[..8].iter().all(|&v| v == 200));
     }
@@ -1330,14 +1409,14 @@ mod tests {
         c.blit_gray(c.bounds(), &[1, 2, 3, 4, 5, 6], 3);
         let mut out = vec![0u8; 6];
         assert_eq!(
-            c.copy_gray_rotated(c.bounds(), &mut out, 2, &mut RotateScratch::default()),
+            c.copy_gray_rotated(c.bounds(), &mut out, 2, &mut RotateScratch::default(), false),
             Some(Rect::new(0, 0, 2, 3))
         );
         // Panel rows, top to bottom, are the canvas columns from right to left.
         assert_eq!(out, [3, 6, 2, 5, 1, 4]);
         let mut out = vec![0u8; 6];
         assert_eq!(
-            c.copy_gray_rotated(Rect::new(2, 1, 5, 5), &mut out, 2, &mut RotateScratch::default()),
+            c.copy_gray_rotated(Rect::new(2, 1, 5, 5), &mut out, 2, &mut RotateScratch::default(), false),
             Some(Rect::new(1, 0, 1, 1))
         );
         assert_eq!(out, [0, 6, 0, 0, 0, 0]);
@@ -1363,14 +1442,17 @@ mod tests {
         ];
         // One scratch for every rectangle, as the framebuffer writer keeps it.
         let mut scratch = RotateScratch::default();
-        for rect in rects {
-            let mut out = vec![9u8; h * w];
-            c.copy_gray_rotated(rect, &mut out, h, &mut scratch);
-            for y in 0..h {
-                for x in 0..w {
-                    let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
-                    let want = if inside { pixels[y * w + x] } else { 9 };
-                    assert_eq!(out[(w - 1 - x) * h + y], want, "{rect:?}: canvas ({x}, {y})");
+        for invert in [false, true] {
+            let flip = if invert { 0xff } else { 0 };
+            for rect in rects {
+                let mut out = vec![9u8; h * w];
+                c.copy_gray_rotated(rect, &mut out, h, &mut scratch, invert);
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
+                        let want = if inside { pixels[y * w + x] ^ flip } else { 9 };
+                        assert_eq!(out[(w - 1 - x) * h + y], want, "invert={invert} {rect:?}: canvas ({x}, {y})");
+                    }
                 }
             }
         }
@@ -1390,7 +1472,7 @@ mod tests {
         let src = [10u8, 20, 30, 40, 50, 60];
         c.blit_gray(Rect::new(1, 1, 3, 2), &src, 3);
         let mut out = vec![0u8; 12];
-        c.copy_gray(c.bounds(), &mut out, 4);
+        c.copy_gray(c.bounds(), &mut out, 4, false);
         assert_eq!(out, [255, 255, 255, 255, 255, 10, 20, 30, 255, 40, 50, 60]);
     }
 
@@ -1399,12 +1481,12 @@ mod tests {
         let mut c = Canvas::new(40, 40);
         c.fill_circle(20.0, 20.0, 10.0, 0);
         let mut out = vec![0u8; 1600];
-        c.copy_gray(c.bounds(), &mut out, 40);
+        c.copy_gray(c.bounds(), &mut out, 40, false);
         assert_eq!(out[20 * 40 + 20], 0);
         assert_eq!(out[20 * 40 + 35], 255);
         c.fill(255);
         c.stroke_circle(20.0, 20.0, 10.0, 2.0, 0);
-        c.copy_gray(c.bounds(), &mut out, 40);
+        c.copy_gray(c.bounds(), &mut out, 40, false);
         assert_eq!(out[20 * 40 + 20], 255, "a stroked circle is hollow");
         assert!(out[20 * 40 + 29] < 128, "the ring is just inside the radius");
     }
@@ -1415,7 +1497,7 @@ mod tests {
         let mask = [255u8; 9];
         c.blend_mask(-1, -1, 3, 3, &mask, 0, Rect::new(0, 0, 1, 4));
         let mut out = vec![0u8; 16];
-        c.copy_gray(Rect::new(0, 0, 4, 4), &mut out, 4);
+        c.copy_gray(Rect::new(0, 0, 4, 4), &mut out, 4, false);
         assert_eq!(&out[0..4], &[0, 255, 255, 255]);
         assert_eq!(&out[4..8], &[0, 255, 255, 255]);
         assert_eq!(&out[8..12], &[255, 255, 255, 255]);
@@ -1484,7 +1566,7 @@ mod tests {
         assert!(mismatches.is_empty(), "{mismatches:?}");
         // copy_gray of a color canvas is what a gray screen shows.
         let mut out = vec![0u8; (w * h) as usize];
-        color.copy_gray(color.bounds(), &mut out, w as usize);
+        color.copy_gray(color.bounds(), &mut out, w as usize, false);
         assert_eq!(&out[..100 * w as usize], &gray.gray_data()[..100 * w as usize]);
     }
 
@@ -1530,14 +1612,14 @@ mod tests {
 
         // copy_rgba keeps padding, and a gray canvas comes out as gray RGBA.
         let mut out = vec![7u8; 5 * 3 * 4];
-        color.copy_rgba(Rect::new(1, 1, 3, 1), &mut out, 5);
+        color.copy_rgba(Rect::new(1, 1, 3, 1), &mut out, 5, false);
         assert_eq!(
             &out[(5 + 1) * 4..(5 + 4) * 4],
             &img[..12].iter().enumerate().map(|(i, &v)| if i % 4 == 3 { 255 } else { v }).collect::<Vec<_>>()[..]
         );
         assert!(out[..(5 + 1) * 4].iter().all(|&v| v == 7) && out[(5 + 4) * 4..].iter().all(|&v| v == 7));
         let mut out = vec![0u8; 4 * 3 * 4];
-        gray.copy_rgba(gray.bounds(), &mut out, 4);
+        gray.copy_rgba(gray.bounds(), &mut out, 4, false);
         assert_eq!(&out[5 * 4..6 * 4], &[luma(255, 0, 0), luma(255, 0, 0), luma(255, 0, 0), 255]);
 
         // A whole page, both ways.
@@ -1545,7 +1627,7 @@ mod tests {
         color.set_rgba(&page);
         assert_eq!(rgba_at(&color, 1, 2), [9 * 20, 255 - 9, 3, 255]);
         let mut out = vec![0u8; page.len()];
-        color.copy_rgba(color.bounds(), &mut out, 4);
+        color.copy_rgba(color.bounds(), &mut out, 4, false);
         assert_eq!(out, page.iter().enumerate().map(|(i, &v)| if i % 4 == 3 { 255 } else { v }).collect::<Vec<_>>());
         gray.set_rgba(&page);
         assert_eq!(gray.gray_data()[9], luma(180, 246, 3));
@@ -1562,16 +1644,19 @@ mod tests {
         for rect in [c.bounds(), Rect::new(3, 2, 20, 9), Rect::new(36, 22, 4, 4)] {
             let mut out = vec![9u8; w * h * 4];
             let changed = c.copy_rgba_rotated(rect, &mut out, h, &mut RotateScratch::default());
-            let mut gray = vec![9u8; w * h];
-            assert_eq!(c.copy_gray_rotated(rect, &mut gray, h, &mut RotateScratch::default()), changed);
-            for y in 0..h {
-                for x in 0..w {
-                    let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
-                    let at = (w - 1 - x) * h + y;
-                    let src = &page[(y * w + x) * 4..(y * w + x) * 4 + 4];
-                    let want: [u8; 4] = if inside { src.try_into().unwrap() } else { [9; 4] };
-                    assert_eq!(out[at * 4..at * 4 + 4], want, "{rect:?}: ({x}, {y})");
-                    assert_eq!(gray[at], if inside { luma(src[0], src[1], src[2]) } else { 9 });
+            for invert in [false, true] {
+                let flip = if invert { 0xff } else { 0 };
+                let mut gray = vec![9u8; w * h];
+                assert_eq!(c.copy_gray_rotated(rect, &mut gray, h, &mut RotateScratch::default(), invert), changed);
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = rect.contains(crate::geom::Point::new(x as i32, y as i32));
+                        let at = (w - 1 - x) * h + y;
+                        let src = &page[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                        let want: [u8; 4] = if inside { src.try_into().unwrap() } else { [9; 4] };
+                        assert_eq!(out[at * 4..at * 4 + 4], want, "{rect:?}: ({x}, {y})");
+                        assert_eq!(gray[at], if inside { luma(src[0], src[1], src[2]) ^ flip } else { 9 });
+                    }
                 }
             }
         }
@@ -1685,6 +1770,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn copy_gray_and_rgba_invert_exact_channels_and_keep_alpha_opaque() {
+        let (w, h) = (19usize, 5usize); // exercises 16-byte chunks + tail remainder
+        let gray_px: Vec<u8> = (0..w * h).map(|i| (i * 13 % 256) as u8).collect();
+        let rgba_px: Vec<u8> =
+            (0..w * h).flat_map(|i| [(i * 7 % 256) as u8, (i * 17 % 256) as u8, (i * 29 % 256) as u8, 255]).collect();
+        let mut gray = Canvas::new(w as u32, h as u32);
+        gray.set_gray(&gray_px);
+        gray.set_dark(true);
+        let mut color = Canvas::with_mode(w as u32, h as u32, ColorMode::Color32);
+        color.set_rgba_opaque(&rgba_px);
+        color.set_dark(true);
+
+        // Full-bounds fast paths (stride == width).
+        let mut g_full = vec![0u8; w * h];
+        gray.copy_gray(gray.bounds(), &mut g_full, w, true);
+        assert_eq!(g_full, gray_px.iter().map(|&v| v ^ 0xff).collect::<Vec<_>>());
+
+        let mut c_full = vec![0u8; w * h * 4];
+        color.copy_rgba(color.bounds(), &mut c_full, w, true);
+        for (got, src) in c_full.as_chunks::<4>().0.iter().zip(rgba_px.as_chunks::<4>().0) {
+            assert_eq!(*got, [src[0] ^ 0xff, src[1] ^ 0xff, src[2] ^ 0xff, 0xff]);
+        }
+
+        // Partial rect with padded stride, both canvas modes into both targets.
+        let stride = w + 3;
+        let rect = Rect::new(2, 1, 17, 3);
+        let mut g_part = vec![0x77u8; stride * h];
+        gray.copy_gray(rect, &mut g_part, stride, true);
+        let mut c_to_g = vec![0x77u8; stride * h];
+        color.copy_gray(rect, &mut c_to_g, stride, true);
+        let mut g_to_c = vec![0x77u8; stride * h * 4];
+        gray.copy_rgba(rect, &mut g_to_c, stride, true);
+        let mut c_part = vec![0x77u8; stride * h * 4];
+        color.copy_rgba(rect, &mut c_part, stride, true);
+
+        for y in 0..h {
+            for x in 0..stride {
+                let inside = x < w && rect.contains(crate::geom::Point::new(x as i32, y as i32));
+                let dst = y * stride + x;
+                if inside {
+                    let g = gray_px[y * w + x] ^ 0xff;
+                    let src = &rgba_px[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    assert_eq!(g_part[dst], g);
+                    assert_eq!(c_to_g[dst], luma(src[0], src[1], src[2]) ^ 0xff);
+                    assert_eq!(&g_to_c[dst * 4..dst * 4 + 4], &[g, g, g, 0xff]);
+                    assert_eq!(&c_part[dst * 4..dst * 4 + 4], &[src[0] ^ 0xff, src[1] ^ 0xff, src[2] ^ 0xff, 0xff]);
+                } else {
+                    assert_eq!(g_part[dst], 0x77);
+                    assert_eq!(c_to_g[dst], 0x77);
+                    assert_eq!(&g_to_c[dst * 4..dst * 4 + 4], &[0x77; 4]);
+                    assert_eq!(&c_part[dst * 4..dst * 4 + 4], &[0x77; 4]);
+                }
+            }
+        }
+
+        // copy_raw never flips even when canvas.is_dark() is true.
+        let mut raw = vec![0u8; w * h * 4];
+        color.copy_raw(color.bounds(), &mut raw);
+        assert_eq!(raw, rgba_px);
     }
 
     #[test]

@@ -174,9 +174,10 @@ impl Platform for Headless {
 
     fn present(&mut self, canvas: &Canvas, updates: &[Update]) -> Result<()> {
         let (w, h) = (self.info.width, self.info.height);
+        let dark = canvas.is_dark();
         if self.device.color {
             for u in updates {
-                canvas.copy_rgba(u.rect, &mut self.panel, w as usize);
+                canvas.copy_rgba(u.rect, &mut self.panel, w as usize, dark);
             }
             if self.device.kaleido {
                 let mut shown = self.panel.clone();
@@ -187,7 +188,7 @@ impl Platform for Headless {
             }
         } else {
             for u in updates {
-                canvas.copy_gray(u.rect, &mut self.panel, w as usize);
+                canvas.copy_gray(u.rect, &mut self.panel, w as usize, dark);
             }
             save_gray_png(&self.out, w, h, &self.panel)?;
         }
