@@ -10,10 +10,14 @@ use crate::{
     online::{
         Answer, Error, Reply, Request, Worker,
         translate::{
-            Fallback, Provider, Translation, check, deepl_fallback, effective_provider, languages, same_language,
+            Fallback, Provider, Translation, check, deepl_fallback, deepl_tier, effective_provider, languages,
+            same_language,
         },
     },
-    ui::theme::{INK2, Theme},
+    ui::{
+        theme::{INK2, Theme},
+        widgets::Row,
+    },
 };
 
 #[derive(Default)]
@@ -150,6 +154,33 @@ fn attribution(translation: &Translation, l: &Languages) -> String {
             format!("{service} · DeepL doesn’t translate from {}", language_name(language))
         }
     }
+}
+
+/// The services to translate with, in `Provider::ALL`'s order. Only shown
+/// with a DeepL key: DeepL's row says beforehand when Google answers instead.
+pub fn provider_rows(l: &Languages) -> Vec<Row> {
+    let chosen = |p: Provider| if l.provider == p { "Chosen" } else { "" };
+    Provider::ALL
+        .iter()
+        .map(|&provider| match provider {
+            Provider::Google => Row::new("Google Translate").sub("No setup needed").value(chosen(provider)),
+            Provider::DeepL => {
+                let key = l.deepl_api_key.as_deref();
+                let name = format!("DeepL {}", key.map_or("", |k| deepl_tier(k).label()));
+                let why = l.target.and_then(|target| deepl_fallback(key, l.source, target));
+                let sub = match why {
+                    Some(Fallback::Into(language)) => {
+                        format!("Doesn’t translate into {}, so Google answers", language_name(language))
+                    }
+                    Some(Fallback::From(language)) => {
+                        format!("Doesn’t translate from {}, so Google answers", language_name(language))
+                    }
+                    Some(Fallback::NoKey) | None => "With your API key".into(),
+                };
+                Row::new(name.trim_end()).sub(sub).value(chosen(provider))
+            }
+        })
+        .collect()
 }
 
 /// The languages to translate into, the likely ones first: the one in use,

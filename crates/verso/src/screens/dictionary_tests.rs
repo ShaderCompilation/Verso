@@ -525,10 +525,15 @@ fn a_late_wikipedia_reply_never_replaces_newer_words_or_languages() {
 
 /// A translator that finds everything to be French and answers with the text
 /// and the language asked for. "busy" is refused and "slow" never answered
-/// the first time; "long" gets pages.
+/// the first time; "long" gets pages. DeepL answers as itself.
 fn translator() -> Server {
     let failed = AtomicU64::new(0);
     Server::answering(move |request| {
+        if request.path.starts_with("/deepl/") {
+            let (text, target) = (request.param("text").unwrap(), request.param("target_lang").unwrap());
+            let reply = serde_json::json!({"translations": [{"detected_source_language": "FR", "text": format!("{text} in {target} by DeepL.")}]});
+            return Http::Ok(reply.to_string().into_bytes());
+        }
         let (text, target) = (request.param("q").unwrap(), request.param("tl").unwrap());
         let bit = match text.as_str() {
             "busy" => 1,
@@ -698,6 +703,43 @@ fn translate_pages_long_answers_and_retries_errors() {
             sent += 1;
             assert_eq!(hits(), sent);
         }
+    }
+}
+
+#[test]
+fn the_service_switches_on_the_card_once_a_deepl_key_is_saved() {
+    let t = Theme::for_dpi(300);
+    let (server, link) = (translator(), Arc::new(AtomicU64::new(2)));
+    // Without a key there is nothing to switch to.
+    for (screen, key) in [(Rect::new(0, 0, 1272, 1696), None), (Rect::new(0, 0, 1696, 1272), Some("k:fx"))] {
+        let mut lookup = translate_card("renard", &server, &link, Some("en"), &t, screen);
+        lookup.tabs.set_languages(Languages {
+            deepl_api_key: key.map(Into::into),
+            ..Languages::for_test(Some("fr"), Some("en"))
+        });
+        answered(&mut lookup, &t, screen);
+        draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
+        let Some(p) = lookup.service_point() else {
+            assert!(key.is_none());
+            continue;
+        };
+        tap(&mut lookup, p, &t, screen);
+        let row = |label: &str, note: &str| (label.to_string(), note.to_string());
+        assert_eq!(choices(&lookup), [row("Google Translate", "Chosen"), row("DeepL Free", "")]);
+        capture(&mut lookup, &t, screen, "translate-services");
+        // Chosen, it translates again at once and is saved for every book.
+        let p = lookup.choice_point(1);
+        assert!(matches!(tap(&mut lookup, p, &t, screen), Some(LookupEvent::Provider(Provider::DeepL))));
+        answered(&mut lookup, &t, screen);
+        assert_eq!(online_text(&lookup, &t), "renard in EN-US by DeepL.\nDeepL");
+        assert!(server.requests.lock().unwrap().last().unwrap().path.starts_with("/deepl/free"));
+        capture(&mut lookup, &t, screen, "translate-deepl");
+        // Its row says beforehand when Google answers instead.
+        lookup.tabs.set_target("hy");
+        let p = lookup.service_point().unwrap();
+        tap(&mut lookup, p, &t, screen);
+        let sub = lookup.chooser.as_ref().unwrap().1.rows()[1].sub.clone();
+        assert_eq!(sub.as_deref(), Some("Doesn’t translate into Armenian, so Google answers"));
     }
 }
 

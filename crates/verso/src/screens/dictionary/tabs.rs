@@ -236,6 +236,18 @@ impl Tabs {
         self.replies.forget_translation();
     }
 
+    /// Translates with another service; `ask` then asks.
+    pub fn set_provider(&mut self, provider: Provider) {
+        self.languages.provider = provider;
+        self.translate.cancel();
+        self.replies.forget_translation();
+    }
+
+    /// A DeepL key is saved, so there is a service to switch to.
+    pub fn can_switch_provider(&self) -> bool {
+        self.languages.deepl_api_key.is_some()
+    }
+
     /// Translate shows, and what to translate into isn't chosen yet.
     pub fn needs_target(&self) -> bool {
         self.current == Tab::Translate && self.languages.target.is_none()

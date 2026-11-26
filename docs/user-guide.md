@@ -313,7 +313,9 @@ Wikipedia or Google only when you open their tab; if that fails, tap **Retry**.
   optional **DeepL** Free/Pro API key (**Settings → Advanced → Translate**, or
   paste it in Wi-Fi transfer's **Translate** tab — `:fx` keys select Free
   automatically, and unsupported languages or an empty key fall back to Google;
-  the line under the translation then says why).
+  the line under the translation then says why). With a key saved, the
+  **Google ▾ / DeepL ▾** button beside the languages switches the service for
+  every book and translates again.
   It asks for a target language the first time and detects the source. Google
   may refuse some shared or VPN connections as busy.
 

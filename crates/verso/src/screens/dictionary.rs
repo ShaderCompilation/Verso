@@ -23,7 +23,7 @@ use crate::{
         HAlign, Icon, SpanStyle, StyledBlock, StyledPagination, StyledParagraph, StyledSpan, StyledWordHit,
         TextRenderer, TextStyle, Weight,
     },
-    online::{Error, QUERY_LIMIT, wikipedia::Edition},
+    online::{Error, QUERY_LIMIT, translate::Provider, wikipedia::Edition},
     platform::{RefreshMode, TextInput},
     screens::EventCx,
     ui::{
@@ -169,6 +169,8 @@ pub enum LookupEvent {
     Edition(Edition),
     /// A language to translate into was chosen, for every book.
     Target(&'static str),
+    /// Another translation service was chosen, for every book.
+    Provider(Provider),
     /// ⤢ expanded (true) or collapsed the card; the next lookup opens so.
     Resized(bool),
 }
@@ -230,6 +232,8 @@ enum Choosing {
     Source(Vec<Option<&'static str>>),
     /// A language to translate into, in the rows' order.
     Target(Vec<&'static str>),
+    /// A translation service, in `Provider::ALL`'s order.
+    Provider,
 }
 
 struct Picker {
@@ -306,9 +310,11 @@ pub struct Lookup {
     other_matches: DropDown,
     hit_count: Rect,
     edition: DropDown,
-    /// Translate's row: the languages it translates from and into.
+    /// Translate's row: the languages it translates from and into, and the
+    /// service, while a DeepL key is saved.
     source: DropDown,
     target: DropDown,
+    service: DropDown,
     translate_row: Rect,
     /// Below an online tab's error.
     retry: Button,
@@ -420,6 +426,7 @@ impl Lookup {
             edition: DropDown::default(),
             source: DropDown::default(),
             target: DropDown::default(),
+            service: DropDown::default(),
             translate_row: Rect::default(),
             retry: Button::new("Retry", ButtonKind::Primary),
             another_language: Button::new("Choose language", ButtonKind::Primary),
@@ -486,6 +493,11 @@ impl Lookup {
     #[cfg(test)]
     pub(crate) fn edition_point(&self) -> Point {
         self.edition.rect().center()
+    }
+    /// The middle of Translate's service button; None while it's hidden.
+    #[cfg(test)]
+    pub(crate) fn service_point(&self) -> Option<Point> {
+        (!self.service.rect().is_empty()).then(|| self.service.rect().center())
     }
     /// The middle of Translate's source and target buttons.
     #[cfg(test)]
@@ -638,7 +650,9 @@ impl Lookup {
             y = row.bottom();
         }
         // Wikipedia: Other matches · n ▾, language ▾
-        for hidden in [&mut self.other_matches, &mut self.edition, &mut self.source, &mut self.target] {
+        for hidden in
+            [&mut self.other_matches, &mut self.edition, &mut self.source, &mut self.target, &mut self.service]
+        {
             hidden.place(Rect::default());
         }
         if let Some(row) = row.filter(|_| self.on_wikipedia()) {
@@ -651,13 +665,20 @@ impl Lookup {
             }
             y = row.bottom();
         }
-        // Translate: from ▾ → into ▾
+        // Translate: from ▾ → into ▾, and Google ▾ / DeepL ▾ with a key
         if let Some(row) = row.filter(|_| self.tabs.current() == Tab::Translate) {
             self.translate_row = row;
             if !self.tabs.needs_target() {
+                let (mut row, mut share) = (row, 56);
+                if self.tabs.can_switch_provider() {
+                    let (service, rest) = row.split_right(t.mm(20.0).min(row.w * 3 / 10));
+                    self.service.place(service);
+                    // The source then shortens to "Auto" where it must.
+                    (row, share) = (Rect { w: rest.w - gap, ..rest }, 50);
+                }
                 let arrow = t.mm(4.4);
                 // "Auto (Language)" takes more room than the target.
-                let (source, rest) = row.split_left((row.w - arrow) * 56 / 100);
+                let (source, rest) = row.split_left((row.w - arrow) * share / 100);
                 self.source.place(source);
                 self.target.place(rest.split_right(rest.w - arrow).0);
             }
@@ -1124,6 +1145,10 @@ impl Lookup {
         let chooser = Chooser::new(target_rows(languages));
         self.chooser = Some((Choosing::Target(translate::targets(languages)), chooser));
     }
+    fn choose_provider(&mut self) {
+        let chooser = Chooser::new(translate::provider_rows(self.tabs.languages()));
+        self.chooser = Some((Choosing::Provider, chooser));
+    }
     fn chosen(&mut self, choosing: Choosing, row: usize) -> Option<LookupEvent> {
         match choosing {
             Choosing::Match => {
@@ -1158,6 +1183,15 @@ impl Lookup {
                 self.tabs.set_target(targets[row]);
                 self.forget_translations();
                 Some(LookupEvent::Target(targets[row]))
+            }
+            Choosing::Provider => {
+                let provider = Provider::ALL[row];
+                if self.tabs.languages().provider == provider {
+                    return None;
+                }
+                self.tabs.set_provider(provider);
+                self.forget_translations();
+                Some(LookupEvent::Provider(provider))
             }
         }
     }
@@ -1437,6 +1471,10 @@ impl Lookup {
             self.choose_target();
             return None;
         }
+        if self.service.on_gesture(g) {
+            self.choose_provider();
+            return None;
+        }
         if self.retry.on_gesture(g) {
             self.tabs.retry();
             self.show_new_reply();
@@ -1644,9 +1682,17 @@ impl Lookup {
             return cx.line("Translate into which language?", t.button, row, HAlign::Left);
         };
         let (from, into) = (self.source.rect(), self.target.rect());
-        self.source.draw(cx, &self.tabs.translate().source_label(languages), "");
+        let mut source = self.tabs.translate().source_label(languages);
+        // Beside the service button "Auto (Portuguese)" may not fit: the
+        // detected language is in the source list too.
+        let room = from.w - 2 * t.mm(2.2) - t.icon_small - t.mm(1.0);
+        if languages.source.is_none() && cx.text.width(&source, t.button) > room as f32 {
+            source = "Auto".into();
+        }
+        self.source.draw(cx, &source, "");
         cx.line("→", t.body, Rect::new(from.right(), row.y, into.x - from.right(), row.h), HAlign::Center);
         self.target.draw(cx, language_name(target), "");
+        self.service.draw(cx, languages.provider.short_name(), "");
     }
     /// Lays out the first page. A definition that fits one page uses the
     /// pager's row too; a longer one gives that row back to the pager,

@@ -1741,6 +1741,15 @@ impl Reader {
                         }
                         return Action::None;
                     }
+                    if let LookupEvent::Provider(provider) = event {
+                        if let Err(error) =
+                            self.store.update_settings(|settings| settings.translate_provider = provider)
+                        {
+                            log::error!("saving the translation service: {error:#}");
+                            cx.toast("Couldn’t save the translation service", None);
+                        }
+                        return Action::None;
+                    }
                     if let LookupEvent::Resized(expanded) = event {
                         if let Err(error) =
                             self.store.update_settings(|settings| settings.dictionary_expanded = expanded)

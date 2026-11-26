@@ -34,6 +34,14 @@ impl Provider {
             Provider::DeepL => "DeepL",
         }
     }
+
+    /// For the lookup card's narrow service button.
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Provider::Google => "Google",
+            Provider::DeepL => "DeepL",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
