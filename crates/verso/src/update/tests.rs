@@ -606,7 +606,10 @@ fn download_failures_have_a_heading_and_plain_words() {
 
 #[test]
 fn whats_new_shows_once_after_an_update() {
-    let b = bench(serve_release());
+    let mut b = bench(serve_release());
+    // A version with release notes: the notes of later releases are built in
+    // too, and must not count.
+    Arc::get_mut(&mut b.updates).unwrap().app = v("0.1.0-beta.10");
     let seen = b.root.path().join(whats_new::SEEN_PATH);
     let write = |path: &std::path::Path, text: &str| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -614,11 +617,10 @@ fn whats_new_shows_once_after_an_update() {
     };
     let shown = |b: &Bench| b.updates.whats_new().map(|n| (n.from.map(|v| v.to_string()), n.notes.len()));
     // A fresh install: nothing shown, this version remembered.
-    b.install("0.1.0", false, &[]);
+    b.install("0.1.0-beta.10", false, &[]);
     assert_eq!(shown(&b), None);
-    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "0.1.0\n");
-    // Updated from the ninth beta: the tenth beta's notes (the app is 0.1.0),
-    // until OK.
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "0.1.0-beta.10\n");
+    // Updated from the ninth beta: the tenth beta's notes, until OK.
     write(&seen, "0.1.0-beta.9\n");
     assert_eq!(shown(&b), Some((Some("0.1.0-beta.9".into()), 1)));
     assert_eq!(shown(&b), Some((Some("0.1.0-beta.9".into()), 1)));
@@ -626,11 +628,11 @@ fn whats_new_shows_once_after_an_update() {
     assert_eq!(shown(&b), None);
     // Nothing remembered, but the launcher says where the update came from.
     std::fs::remove_file(&seen).unwrap();
-    write(&b.root.path().join(launcher::PREVIOUS_PLAN), "verso-plan\t1\nversion\t0.1.0\nfrom\t0.1.0-beta.8\n");
+    write(&b.root.path().join(launcher::PREVIOUS_PLAN), "verso-plan\t1\nversion\t0.1.0-beta.10\nfrom\t0.1.0-beta.8\n");
     assert_eq!(shown(&b), Some((Some("0.1.0-beta.8".into()), 2)));
     // A development install remembers quietly.
-    b.install("0.1.0", true, &[]);
+    b.install("0.1.0-beta.10", true, &[]);
     b.updates.forget();
     assert_eq!(shown(&b), None);
-    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "0.1.0\n");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "0.1.0-beta.10\n");
 }
