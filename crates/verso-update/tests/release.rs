@@ -84,6 +84,7 @@ fn packs_a_release() {
     let m = pack(&stage, &out);
 
     assert_eq!(m.notes, "Faster page turns.");
+    assert_eq!(m.details, "Faster page turns.");
     let names: Vec<String> = files(&out).into_iter().map(|(n, _)| n).collect();
     assert_eq!(
         names,

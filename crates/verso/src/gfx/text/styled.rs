@@ -58,6 +58,9 @@ pub struct StyledParagraph {
     pub inert: bool,
     /// A heading, which starts a new page rather than end one.
     pub keep: bool,
+    /// A list item: a bullet stands in the indent beside the first line, so
+    /// wrapped lines hang under the text rather than the bullet.
+    pub bullet: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -386,6 +389,7 @@ impl StyledParagraph {
             indent: self.indent,
             inert: self.inert,
             keep: self.keep,
+            bullet: self.bullet,
         }
     }
 }
@@ -545,9 +549,20 @@ impl TextRenderer {
                 rect.w as f32,
             )?;
             let mut top = None;
+            // Only the paragraph's own first line has the bullet, not a piece's
+            // or a page's that continues it.
+            let mut bullet = paragraph.bullet && piece.source_bytes.start == 0 && part.lines.start == 0;
             for run in buffer.layout_runs().skip(part.lines.start).take(part.lines.len()) {
                 let offset = rect.y as f32 + part.y - *top.get_or_insert(run.line_top);
                 let x = rect.x as f32 + paragraph.indent;
+                if std::mem::take(&mut bullet) {
+                    // Centred in the indent, at about half the x-height.
+                    let size = paragraph.base.size;
+                    let (cx, cy, r) = (x - paragraph.indent / 2.0, offset + run.line_y - size * 0.25, size * 0.11);
+                    if clip.contains(Point::new(cx as i32, cy as i32)) {
+                        canvas.fill_circle(cx, cy, r, paragraph.base.gray);
+                    }
+                }
                 for glyph in run.glyphs {
                     if glyph.glyph_id == 0 {
                         missing.extend(
@@ -908,6 +923,7 @@ mod tests {
             indent: 0.0,
             inert: false,
             keep: false,
+            bullet: false,
         }
     }
 
@@ -1109,6 +1125,7 @@ mod tests {
             assert_eq!(run.glyphs.first().unwrap().x, 0.0);
             assert!(run.line_w <= 210.0 - p.indent);
         }
+        let bulleted = StyledParagraph { bullet: true, ..p.clone() };
         let mut pagination = renderer.paginate_styled(vec![StyledBlock::Paragraph(p)], 210, 150).unwrap();
         let mut canvas = Canvas::new(260, 200);
         let rect = Rect::new(10, 15, 210, 150);
@@ -1132,6 +1149,21 @@ mod tests {
                 if i % 260 < 47 || i % 260 >= 220 || i / 260 < 15 || i / 260 >= 165 {
                     assert_eq!(*pixel, PAPER);
                 }
+            }
+        }
+        // A bullet stands in the indent beside the paragraph's first line only.
+        let mut pagination = renderer.paginate_styled(vec![StyledBlock::Paragraph(bulleted)], 210, 150).unwrap();
+        assert!(pagination.pages().len() > 1);
+        for page in 0..pagination.pages().len() {
+            canvas.fill(PAPER);
+            renderer.draw_styled_page(&mut canvas, &mut pagination, page, rect, rect, 2).unwrap();
+            let rows: Vec<_> =
+                (0..200).filter(|&y| (10..47).any(|x| canvas.gray_data()[y * 260 + x] < PAPER)).collect();
+            if page == 0 {
+                let first = 15..15 + BODY.line_height() as usize;
+                assert!(!rows.is_empty() && rows.iter().all(|y| first.contains(y)), "{rows:?}");
+            } else {
+                assert!(rows.is_empty(), "page {page}: {rows:?}");
             }
         }
     }

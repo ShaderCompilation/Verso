@@ -482,6 +482,7 @@ mod tests {
             version: version.parse().unwrap(),
             released: "2026-12-01".into(),
             notes: String::new(),
+            details: String::new(),
             components,
         }
     }

@@ -1341,7 +1341,7 @@ impl Screen for SystemSettings {
             Tab::Device => self.draw_device(cx),
             Tab::Advanced => self.draw_advanced(cx),
         }
-        if let Some(offer) = &self.offer {
+        if let Some(offer) = &mut self.offer {
             offer.draw(cx);
         }
         if let Some(sheet) = &self.go_back_sheet {

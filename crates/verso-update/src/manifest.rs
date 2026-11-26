@@ -7,8 +7,11 @@ use std::collections::{BTreeSet, HashSet};
 
 /// The manifest and `installed.json` format this code reads and writes.
 pub const FORMAT: u32 = 1;
-/// The longest release note the update sheet shows, in bytes.
+/// The longest short release note (`notes`), in bytes. Builds up to
+/// 0.1.0-beta.10 refuse a manifest whose `notes` are longer.
 pub const MAX_NOTES: usize = 2000;
+/// The longest full release note (`details`), in bytes.
+pub const MAX_DETAILS: usize = 16_000;
 /// Upper bounds for the downloads of a check, so a broken server can't fill
 /// memory. Manifests are a few kilobytes.
 pub const MAX_MANIFEST_BYTES: usize = 1 << 20;
@@ -26,9 +29,14 @@ pub struct Manifest {
     pub version: Version,
     /// Release date, `YYYY-MM-DD`.
     pub released: String,
-    /// Short plain text for the update sheet.
+    /// Short plain text for builds that don't read `details`, derived from
+    /// it by `verso-release pack`.
     #[serde(default)]
     pub notes: String,
+    /// The full release notes: plain text, `## ` starts a heading and `- ` a
+    /// bullet. Builds after 0.1.0-beta.10 show these when present, else `notes`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub details: String,
     pub components: Vec<Component>,
 }
 
@@ -106,6 +114,11 @@ impl Manifest {
         self.components.iter().find(|c| c.id == id)
     }
 
+    /// The notes a build that reads `details` shows: those, else `notes`.
+    pub fn shown_notes(&self) -> &str {
+        if self.details.trim().is_empty() { &self.notes } else { &self.details }
+    }
+
     /// Checks everything that doesn't need the archives: the format, safe
     /// paths, that no two components claim the same file, and every
     /// component's hash.
@@ -119,6 +132,9 @@ impl Manifest {
         }
         if self.notes.len() > MAX_NOTES {
             return bad(format!("release notes are {} bytes, more than {MAX_NOTES}", self.notes.len()));
+        }
+        if self.details.len() > MAX_DETAILS {
+            return bad(format!("release details are {} bytes, more than {MAX_DETAILS}", self.details.len()));
         }
         if self.components.is_empty() {
             return bad("no components".into());
@@ -309,6 +325,7 @@ mod tests {
             version: "0.3.0".parse().unwrap(),
             released: "2026-12-01".into(),
             notes: "Faster page turns.".into(),
+            details: "## Reading\n- Faster page turns.".into(),
             components: vec![
                 component("app", "verso", vec![file("verso", b"binary", MODE_EXEC)]),
                 component("launcher", "verso", vec![file("verso.sh", b"#!/bin/sh", MODE_EXEC)]),
@@ -381,6 +398,7 @@ mod tests {
             ("format", Box::new(|m| m.format = 2)),
             ("date", Box::new(|m| m.released = "1 Dec 2026".into())),
             ("notes", Box::new(|m| m.notes = "x".repeat(MAX_NOTES + 1))),
+            ("details", Box::new(|m| m.details = "x".repeat(MAX_DETAILS + 1))),
             ("empty", Box::new(|m| m.components.clear())),
             ("id", Box::new(|m| m.components[0].id = "App".into())),
             ("duplicate id", Box::new(|m| m.components[1].id = "app".into())),

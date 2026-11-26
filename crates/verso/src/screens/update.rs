@@ -11,7 +11,8 @@ use verso_update::launcher::{EXIT_GO_BACK, EXIT_INSTALL, Reason, Rollback};
 use crate::geom::Rect;
 use crate::gfx::HAlign;
 use crate::platform::Waker;
-use crate::screens::{Action, EventCx, Screen};
+use crate::screens::paged_text::PagedText;
+use crate::screens::{Action, EventCx, Screen, release_notes};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{INK, INK2, LINE, Theme};
 use crate::ui::widget::DrawCx;
@@ -61,13 +62,18 @@ pub enum OfferEvent {
     Skip,
 }
 
-/// "Verso 0.3.0": what's new, the download size, and Update / Later /
-/// Skip this version.
+/// "Verso 0.3.0": the download size and date, what's new, and Update /
+/// Later / Skip this version. The notes (`release_notes`) fill the room
+/// between the date and the buttons; longer ones turn in pages with a pager
+/// above the buttons, or by swiping. Portrait gets a bottom sheet of a fixed
+/// height, or the tallest one for notes that need pages; landscape a side
+/// sheet.
 pub struct OfferSheet {
     sheet: Sheet,
+    screen: Rect,
     pub offer: Offer,
     meta: Rect,
-    notes: Rect,
+    notes: PagedText,
     /// Why Update is off: Verso wasn't started by a launcher that installs.
     blocked: Option<&'static str>,
     update: Button,
@@ -77,24 +83,52 @@ pub struct OfferSheet {
 
 impl OfferSheet {
     pub fn new(t: &Theme, screen: Rect, offer: Offer) -> Self {
-        let sheet = sheet(format!("Verso {}", offer.version), t.mm(100.0), screen, t);
-        let c = sheet.content(t);
+        let blocked = (!update::can_install()).then_some("Start Verso normally to install updates.");
+        let mut update = Button::new("Update", ButtonKind::Primary);
+        update.enabled = blocked.is_none();
+        let mut this = Self {
+            sheet: sheet(format!("Verso {}", offer.version), t.mm(100.0), screen, t),
+            screen,
+            notes: release_notes::paged(&offer.notes, Rect::default(), t),
+            offer,
+            meta: Rect::default(),
+            blocked,
+            update,
+            later: Button::new("Later", ButtonKind::Secondary),
+            skip: Button::new("Skip this version", ButtonKind::Secondary),
+        };
+        this.place(t);
+        this
+    }
+
+    /// Lays the sheet out at its size: the buttons along its bottom, the
+    /// notes above them.
+    fn place(&mut self, t: &Theme) {
+        let c = self.sheet.content(t);
         let bottom = c.bottom() - t.margin - t.button_h;
         let w = (c.w - t.mm(3.0)) / 2;
-        let mut later = Button::new("Later", ButtonKind::Secondary);
-        later.place(Rect::new(c.x, bottom, w, t.button_h), t);
-        let mut skip = Button::new("Skip this version", ButtonKind::Secondary);
-        skip.place(Rect::new(c.right() - w, bottom, w, t.button_h), t);
-        let mut update = Button::new("Update", ButtonKind::Primary);
-        update.place(Rect::new(c.x, bottom - t.mm(3.0) - t.button_h, c.w, t.button_h), t);
-        let blocked = (!update::can_install()).then_some("Start Verso normally to install updates.");
-        update.enabled = blocked.is_none();
+        self.later.place(Rect::new(c.x, bottom, w, t.button_h), t);
+        self.skip.place(Rect::new(c.right() - w, bottom, w, t.button_h), t);
+        self.update.place(Rect::new(c.x, bottom - t.mm(3.0) - t.button_h, c.w, t.button_h), t);
         // Room for two lines: the meta line splits on 800x600.
-        let meta = Rect { h: t.mm(7.0), ..c };
+        self.meta = Rect { h: t.mm(7.0), ..c };
         let notes_top = c.y + t.mm(6.0) + t.mm(12.0);
-        let notes_bottom = update.rect().y - t.mm(if blocked.is_some() { 12.0 } else { 4.0 });
-        let notes = Rect::new(c.x, notes_top, c.w, (notes_bottom - notes_top).max(0));
-        Self { sheet, offer, meta, notes, blocked, update, later, skip }
+        let notes_bottom = self.update.rect().y - t.mm(if self.blocked.is_some() { 12.0 } else { 4.0 });
+        self.notes.place(Rect::new(c.x, notes_top, c.w, (notes_bottom - notes_top).max(1)), t);
+    }
+
+    /// Lays the notes out. Notes that need pages get the tallest bottom
+    /// sheet, for fewer of them.
+    fn lay_out(&mut self, text: &mut crate::gfx::TextRenderer, t: &Theme) {
+        if self.notes.laid_out() {
+            return;
+        }
+        self.notes.lay_out(text);
+        if self.screen.w <= self.screen.h && self.notes.pager.pages > 1 {
+            self.sheet = sheet(self.sheet.title.clone(), self.screen.h, self.screen, t);
+            self.place(t);
+            self.notes.lay_out(text);
+        }
     }
 
     /// One line, or two split at the dot where one doesn't fit (800x600).
@@ -108,27 +142,33 @@ impl OfferSheet {
         }
     }
 
-    pub fn draw(&self, cx: &mut DrawCx) {
+    /// Where Update is off, the line that says why, above it.
+    fn blocked_rect(&self, t: &Theme) -> Rect {
+        let c = self.sheet.content(t);
+        Rect::new(c.x, self.update.rect().y - t.mm(9.0), c.w, t.mm(7.0))
+    }
+
+    pub fn draw(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
+        self.lay_out(cx.text, t);
         self.sheet.draw(cx);
-        let o = &self.offer;
         let meta = self.meta_line(cx.text, t);
         cx.paragraph(&meta, t.small.gray(INK2), self.meta, HAlign::Left);
-        cx.section_label("What’s new", Rect::new(self.notes.x, self.notes.y - t.mm(8.0), self.notes.w, t.mm(8.0)));
-        let notes = if o.notes.trim().is_empty() { "No notes for this release." } else { o.notes.trim() };
-        let height = cx.text.measure(notes, t.body, Some(self.notes.w as f32)).1.ceil() as i32;
-        cx.paragraph(notes, t.body, Rect { h: height.min(self.notes.h), ..self.notes }, HAlign::Left);
+        let notes = self.notes.body();
+        cx.section_label("What’s new", Rect::new(notes.x, notes.y - t.mm(8.0), notes.w, t.mm(8.0)));
+        self.notes.draw(cx);
         if let Some(why) = self.blocked {
-            let r = Rect::new(self.notes.x, self.update.rect().y - t.mm(9.0), self.notes.w, t.mm(7.0));
-            cx.paragraph(why, t.small.gray(INK2), r, HAlign::Left);
+            cx.paragraph(why, t.small.gray(INK2), self.blocked_rect(t), HAlign::Left);
         }
         self.update.draw(cx);
         self.later.draw(cx);
         self.skip.draw(cx);
     }
 
-    pub fn visual_state(&self) -> [bool; 4] {
-        [self.sheet.is_pressed(), self.update.is_pressed(), self.later.is_pressed(), self.skip.is_pressed()]
+    pub fn visual_state(&self) -> ([bool; 4], (usize, usize, bool, bool, bool)) {
+        let buttons =
+            [self.sheet.is_pressed(), self.update.is_pressed(), self.later.is_pressed(), self.skip.is_pressed()];
+        (buttons, self.notes.visual_state())
     }
 
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<OfferEvent> {
@@ -141,6 +181,7 @@ impl OfferSheet {
         } else if self.skip.on_gesture(g) {
             Some(OfferEvent::Skip)
         } else {
+            self.notes.on_gesture(g);
             None
         }
     }
@@ -523,33 +564,56 @@ impl RollbackSheet {
     }
 }
 
-/// The offer and go-back sheets, for `screens/fit_tests.rs`.
 #[cfg(test)]
-pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
-    use crate::ui::fit::{Parts, text_h};
-    let offer = Offer {
+fn sample_offer(notes: &str) -> Offer {
+    Offer {
         version: "10.12.3".parse().unwrap(),
         released: "2026-12-01".into(),
-        notes: "Faster page turns.\nDictionary fixes.".into(),
+        notes: notes.into(),
         components: vec!["app".into()],
         download: 12_300_000,
         unpacked: 15_000_000,
-    };
-    let o = OfferSheet::new(t, screen, offer);
-    let mut sheet = Parts::new("OfferSheet", o.sheet.rect(), [o.update.rect(), o.later.rect(), o.skip.rect()])
-        .body(o.notes, text_h(text, &o.offer.notes, t.body, o.notes.w));
-    let meta = o.meta_line(text, t);
-    sheet = sheet.body(o.meta, text_h(text, &meta, t.small, o.meta.w));
-    if let Some(why) = o.blocked {
-        let r = Rect::new(o.notes.x, o.update.rect().y - t.mm(9.0), o.notes.w, t.mm(7.0));
-        sheet = sheet.body(r, text_h(text, why, t.small, r.w));
+    }
+}
+
+/// Release notes too long for one page of the offer sheet on any screen.
+#[cfg(test)]
+fn long_notes() -> String {
+    let item = "- A change that takes a line or two to describe on a small screen.\n";
+    format!("The tenth beta.\n\n## Reading\n{}\n## Library\n{}", item.repeat(12), item.repeat(12))
+}
+
+/// The offer (with one page of notes, and with several) and go-back
+/// sheets, for `screens/fit_tests.rs`.
+#[cfg(test)]
+pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
+    use crate::ui::fit::{Parts, text_h};
+    let mut samples = Vec::new();
+    for (name, notes) in
+        [("OfferSheet", "Faster page turns.\n\n- Dictionary fixes.".into()), ("OfferSheet pages", long_notes())]
+    {
+        let mut o = OfferSheet::new(t, screen, sample_offer(&notes));
+        o.lay_out(text, t);
+        let mut buttons = vec![o.update.rect(), o.later.rect(), o.skip.rect()];
+        if o.notes.pager.visible() {
+            buttons.push(o.notes.pager.rect());
+        }
+        let needed = o.notes.one_page_height().unwrap_or(t.body.line_height().ceil() as i32);
+        let mut sheet = Parts::new(name, o.sheet.rect(), buttons).body(o.notes.body(), needed);
+        let meta = o.meta_line(text, t);
+        sheet = sheet.body(o.meta, text_h(text, &meta, t.small, o.meta.w));
+        if let Some(why) = o.blocked {
+            let r = o.blocked_rect(t);
+            sheet = sheet.body(r, text_h(text, why, t.small, r.w));
+        }
+        samples.push(sheet);
     }
     let back = GoBackSheet::new(t, screen, &"10.12.3".parse().unwrap(), &"10.11.0".parse().unwrap());
-    vec![
-        sheet,
+    samples.push(
         Parts::new("GoBackSheet", back.sheet.rect(), [back.cancel.rect(), back.go_back.rect()])
             .body(back.text, text_h(text, &back.message, t.body, back.text.w)),
-    ]
+    );
+    samples
 }
 
 #[cfg(test)]
@@ -562,6 +626,33 @@ mod tests {
         assert_eq!(release_date("2027-01-31"), "31 January 2027");
         assert_eq!(release_date("soon"), "soon");
         assert_eq!(release_date("2026-13-01"), "2026-13-01");
+    }
+
+    #[test]
+    fn long_notes_turn_in_pages_and_short_ones_keep_the_room() {
+        use crate::gfx::{Canvas, IconRenderer, TextRenderer};
+        use crate::ui::gesture::Direction;
+        let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
+        for (w, h, dpi) in [(1272, 1696, 300), (800, 600, 167)] {
+            let (t, screen) = (Theme::for_dpi(dpi), Rect::new(0, 0, w, h));
+            let mut canvas = Canvas::new(w as u32, h as u32);
+            let mut draw =
+                |o: &mut OfferSheet| o.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]));
+            let mut short = OfferSheet::new(&t, screen, sample_offer("Faster page turns."));
+            let before = short.notes.body();
+            draw(&mut short);
+            assert!(!short.notes.pager.visible(), "{w}x{h}");
+            assert!(short.notes.body().h > before.h, "{w}x{h}: one page takes the pager's room too");
+            let mut long = OfferSheet::new(&t, screen, sample_offer(&long_notes()));
+            draw(&mut long);
+            assert!(long.notes.pager.visible() && long.notes.pager.pages > 1, "{w}x{h}");
+            let (body, pager) = (long.notes.body(), long.notes.pager.rect());
+            assert!(body.bottom() < pager.y && pager.bottom() < long.update.rect().y, "{w}x{h}: pager between");
+            let at = body.center();
+            assert_eq!(long.on_gesture(&Gesture::Swipe { dir: Direction::Left, from: at, to: at }), None);
+            assert_eq!(long.notes.pager.page, 1, "{w}x{h}: a swipe turns the page");
+            draw(&mut long);
+        }
     }
 
     #[test]

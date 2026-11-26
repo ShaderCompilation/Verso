@@ -79,7 +79,10 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts>
     let f = Footnote::new(&note, Position::default(), t, screen, Rect::new(screen.w / 4, screen.h / 3, 20, 20));
     let v = &f.view;
     let line = t.body.line_height().ceil() as i32;
-    vec![crate::ui::fit::Parts::new("Footnote", v.sheet.rect(), [v.pager.rect(), f.go_rect()]).body(v.body, line)]
+    vec![
+        crate::ui::fit::Parts::new("Footnote", v.sheet.rect(), [v.text.pager.rect(), f.go_rect()])
+            .body(v.text.body(), line),
+    ]
 }
 
 #[cfg(test)]
@@ -98,12 +101,13 @@ mod tests {
         let f = Footnote::new(&note, Position("p".into()), &t, screen, Rect::new(100, 100, 20, 20));
         let texts: Vec<_> = f
             .view
-            .blocks
+            .text
+            .blocks()
             .iter()
             .filter_map(|b| if let StyledBlock::Paragraph(p) = b { Some(p.text.as_str()) } else { None })
             .collect();
         assert_eq!(texts, ["Second note, with italic words."]);
-        let StyledBlock::Paragraph(p) = &f.view.blocks[0] else { panic!() };
+        let StyledBlock::Paragraph(p) = &f.view.text.blocks()[0] else { panic!() };
         assert!(
             p.spans
                 .iter()
@@ -117,7 +121,9 @@ mod tests {
             screen,
             Rect::default(),
         );
-        assert!(matches!(&empty.view.blocks[0], StyledBlock::Paragraph(p) if p.text == "This note has no text."));
+        assert!(
+            matches!(&empty.view.text.blocks()[0], StyledBlock::Paragraph(p) if p.text == "This note has no text.")
+        );
     }
 
     #[test]
@@ -136,21 +142,21 @@ mod tests {
             "{:?}",
             f.view.sheet.rect()
         );
-        assert!(f.go_rect().bottom() <= screen.bottom() && f.view.body.bottom() <= f.go_rect().y);
+        assert!(f.go_rect().bottom() <= screen.bottom() && f.view.text.body().bottom() <= f.go_rect().y);
         let long = Note { label: "1".into(), html: "<p>A long note sentence goes on.</p>".repeat(300) };
         let mut f = Footnote::new(&long, Position("p".into()), &t, screen, Rect::default());
         f.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
         assert_eq!(f.view.sheet.rect(), full, "a long note keeps the tall sheet");
-        assert!(f.view.pager.pages > 1);
+        assert!(f.view.text.pager.pages > 1);
         assert!(
             f.on_gesture(&Gesture::Swipe {
                 dir: crate::ui::gesture::Direction::Left,
-                from: f.view.body.center(),
-                to: f.view.body.center()
+                from: f.view.text.body().center(),
+                to: f.view.text.body().center()
             })
             .is_none()
         );
-        assert_eq!(f.view.pager.page, 1);
+        assert_eq!(f.view.text.pager.page, 1);
         let wide = Rect::new(0, 0, 1696, 1272);
         let f = Footnote::new(&note, Position("p".into()), &t, wide, Rect::new(100, 100, 20, 20));
         assert_eq!(f.view.sheet.rect().right(), wide.right(), "away from a marker on the left");

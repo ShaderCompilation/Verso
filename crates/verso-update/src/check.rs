@@ -134,7 +134,7 @@ pub fn evaluate(
     Ok(Outcome::Available(Offer {
         version: manifest.version.clone(),
         released: manifest.released.clone(),
-        notes: manifest.notes.clone(),
+        notes: manifest.shown_notes().to_owned(),
         components: changed.iter().map(|c| c.id.clone()).collect(),
         download: changed.iter().map(|c| c.archive.size).sum(),
         unpacked: changed.iter().flat_map(|c| &c.files).map(|f| f.size).sum(),
@@ -244,6 +244,7 @@ mod tests {
             version: v(version),
             released: "2026-12-01".into(),
             notes: format!("Verso {version}"),
+            details: String::new(),
             components,
         };
         m.validate().unwrap();
@@ -295,6 +296,9 @@ mod tests {
         assert_eq!(o.download, 100 + 300 + 400);
         assert_eq!(o.unpacked, 4000 + 13000 + 10000);
         assert_eq!(o.notes, "Verso 0.3.0");
+        // The full notes, when the manifest has them, are what's shown.
+        let detailed = Manifest { details: "## Reading\n- Faster".into(), ..new.clone() };
+        assert_eq!(offer(evaluate(&detailed, Some(&installed), &v("0.2.0"), None)).notes, detailed.details);
         // No installed.json: every required component.
         let o = offer(evaluate(&new, None, &v("0.2.0"), None));
         assert_eq!(o.components, ["app", "fonts", "wordforms-ru", "scriptlet"]);

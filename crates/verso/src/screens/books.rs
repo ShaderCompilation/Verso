@@ -3270,7 +3270,7 @@ impl Screen for Books {
         if let Some(sheet) = &mut self.name_sheet {
             sheet.draw(cx);
         }
-        if let Some(offer) = &self.offer {
+        if let Some(offer) = &mut self.offer {
             offer.draw(cx);
         }
         if let Some(sheet) = &self.crash_sheet {
@@ -3403,11 +3403,11 @@ impl Screen for Books {
                 None => {}
             }
         } else if let Some(synopsis) = &mut self.synopsis {
-            let (before, page) = (synopsis.visual_state(), synopsis.pager.page);
+            let (before, page) = (synopsis.visual_state(), synopsis.text.pager.page);
             if synopsis.on_gesture(&g).is_some() {
                 self.synopsis = None;
                 cx.redraw();
-            } else if synopsis.pager.page != page {
+            } else if synopsis.text.pager.page != page {
                 cx.refresh(synopsis.sheet.rect(), RefreshMode::Full);
             } else if synopsis.visual_state() != before {
                 cx.redraw();
@@ -6954,7 +6954,7 @@ mod tests {
         with_cx(&t, screen, |cx| {
             tap(&mut books, cx, "Synopsis");
             let sheet = books.synopsis.as_ref().expect("the synopsis opens");
-            let crate::gfx::StyledBlock::Paragraph(p) = &sheet.blocks[0] else { panic!() };
+            let crate::gfx::StyledBlock::Paragraph(p) = &sheet.text.blocks()[0] else { panic!() };
             assert_eq!(p.text, "A sweeping saga.");
             assert!(
                 p.spans

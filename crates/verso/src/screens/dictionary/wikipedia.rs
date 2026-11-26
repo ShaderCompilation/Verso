@@ -188,7 +188,16 @@ impl Wikipedia {
 /// Text that stays with what follows it.
 fn kept(text: String, base: TextStyle) -> StyledBlock {
     let (spans, indent) = (Vec::new(), 0.0);
-    StyledBlock::Paragraph(StyledParagraph { text, spans, base, muted: INK2, indent, inert: true, keep: true })
+    StyledBlock::Paragraph(StyledParagraph {
+        text,
+        spans,
+        base,
+        muted: INK2,
+        indent,
+        inert: true,
+        keep: true,
+        bullet: false,
+    })
 }
 
 fn article_blocks(article: &Article, t: &Theme) -> Vec<StyledBlock> {

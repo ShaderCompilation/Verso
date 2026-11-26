@@ -77,6 +77,7 @@ fn plain(text: String, base: TextStyle, inert: bool) -> StyledBlock {
         indent: 0.0,
         inert,
         keep: false,
+        bullet: false,
     })
 }
 
@@ -97,6 +98,7 @@ fn styled(block: &Block, t: &Theme) -> StyledBlock {
         indent: (i32::from(block.depth.min(MAX_DEPTH)) * t.dictionary_indent) as f32,
         inert: false,
         keep: false,
+        bullet: false,
     })
 }
 

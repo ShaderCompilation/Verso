@@ -44,6 +44,52 @@ pub fn read_specs(path: &Path) -> Result<Vec<ComponentSpec>> {
     Ok(specs)
 }
 
+/// The last line of shortened legacy notes.
+pub const LEGACY_MORE: &str = "…and more. See What’s new after updating.";
+/// About what fits the update sheet of builds that don't read `details`.
+const LEGACY_LINES: usize = 8;
+const LEGACY_BYTES: usize = 600;
+
+/// A `## Heading` line of the release notes format. The format: plain text,
+/// `## ` starts a section heading, `- ` a bullet, and a blank line separates
+/// paragraphs.
+fn is_heading(line: &str) -> bool {
+    line.starts_with("## ") || line.trim_end() == "##"
+}
+
+/// The short `notes` for builds that don't read `details`, from the full
+/// notes: headings dropped, whole lines kept while they fit about
+/// `LEGACY_LINES` lines and `LEGACY_BYTES` bytes, then [`LEGACY_MORE`]
+/// when anything was cut.
+pub fn legacy_notes(full: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for line in full.trim().lines().map(str::trim_end) {
+        // Blank runs (and blanks a dropped heading leaves) become one.
+        if is_heading(line) || (line.is_empty() && lines.last().is_none_or(|l| l.is_empty())) {
+            continue;
+        }
+        lines.push(line);
+    }
+    let bytes = |lines: &[&str]| lines.iter().map(|l| l.len() + 1).sum::<usize>();
+    let trim = |lines: &mut Vec<&str>| {
+        while lines.last() == Some(&"") {
+            lines.pop();
+        }
+    };
+    trim(&mut lines);
+    if lines.len() <= LEGACY_LINES && bytes(&lines) <= LEGACY_BYTES {
+        return lines.join("\n");
+    }
+    let mut kept = 0;
+    while kept + 1 < LEGACY_LINES && bytes(&lines[..=kept]) + LEGACY_MORE.len() <= LEGACY_BYTES {
+        kept += 1;
+    }
+    lines.truncate(kept);
+    trim(&mut lines);
+    lines.push(LEGACY_MORE);
+    lines.join("\n")
+}
+
 /// The archive name of a component in a release.
 pub fn archive_name(id: &str, version: &Version) -> String {
     format!("{id}-{version}.tar.gz")
@@ -124,6 +170,8 @@ pub struct PackOptions<'a> {
     pub out: &'a Path,
     pub version: Version,
     pub released: String,
+    /// The full release notes (`dist/release-notes/<version>.txt`): they
+    /// become `details`, and the short `notes` are derived from them.
     pub notes: String,
     /// When set, holds the KPM hooks (`install.sh`, `launch.sh`, `uninstall.sh`)
     /// and `pack` also emits `verso-<version>.kpkg`.
@@ -157,7 +205,8 @@ pub fn pack(opts: &PackOptions) -> Result<Manifest> {
         format: FORMAT,
         version: opts.version.clone(),
         released: opts.released.clone(),
-        notes: opts.notes.trim().to_string(),
+        notes: legacy_notes(&opts.notes),
+        details: opts.notes.trim().to_string(),
         components,
     };
     manifest.validate()?;
@@ -420,5 +469,35 @@ impl Write for HashWriter<'_> {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MAX_NOTES;
+
+    #[test]
+    fn legacy_notes_drop_headings_and_cut_long_text_on_a_line() {
+        // Short notes pass through, minus headings and their blank lines.
+        let short = "Tenth beta.\n\n## Reading\n\n- Faster pages.\n- Fewer flashes.\n";
+        assert_eq!(legacy_notes(short), "Tenth beta.\n\n- Faster pages.\n- Fewer flashes.");
+        assert_eq!(legacy_notes("Just this."), "Just this.");
+        // Too many lines: whole lines, then the pointer to What's new.
+        let many: String = (1..=12).map(|i| format!("- Change {i}.\n")).collect();
+        let cut = legacy_notes(&many);
+        let lines: Vec<_> = cut.lines().collect();
+        assert_eq!(lines.len(), LEGACY_LINES);
+        assert_eq!(lines[..LEGACY_LINES - 1], (1..LEGACY_LINES).map(|i| format!("- Change {i}.")).collect::<Vec<_>>());
+        assert_eq!(lines.last(), Some(&LEGACY_MORE));
+        // Too many bytes: cut before the line that doesn't fit, and never
+        // past the limit old builds check, however long the text.
+        let long = format!("## New\n{}\n\n{}", "word ".repeat(80), "- An item. ".repeat(40));
+        let cut = legacy_notes(&long);
+        assert_eq!(cut, format!("{}\n{LEGACY_MORE}", "word ".repeat(80).trim_end()));
+        for text in [&long, &"x".repeat(20_000), &"- a\n".repeat(5000)] {
+            let cut = legacy_notes(text);
+            assert!(cut.len() <= LEGACY_BYTES && cut.len() <= MAX_NOTES && cut.ends_with(LEGACY_MORE), "{cut:?}");
+        }
     }
 }

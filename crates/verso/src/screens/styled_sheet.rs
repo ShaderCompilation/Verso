@@ -3,13 +3,13 @@
 //! fits on one page gets a bottom sheet just its height.
 use crate::{
     geom::Rect,
-    gfx::{HAlign, StyledBlock, StyledPagination, TextRenderer},
-    screens::dictionary::styled_blocks,
+    gfx::{StyledBlock, TextRenderer},
+    screens::{dictionary::styled_blocks, paged_text::PagedText},
     ui::{
         gesture::Gesture,
         theme::Theme,
         widget::DrawCx,
-        widgets::{Button, Pager, Sheet},
+        widgets::{Button, Sheet},
     },
 };
 
@@ -24,14 +24,8 @@ pub struct StyledSheet {
     screen: Rect,
     /// The sheet stands at a side (landscape) and keeps its full height.
     side: bool,
-    pub(crate) blocks: Vec<StyledBlock>,
-    pages: Option<StyledPagination>,
-    error: Option<String>,
-    pub(crate) body: Rect,
-    pub(crate) pager: Pager,
+    pub(crate) text: PagedText,
     pub(crate) button: Option<Button>,
-    /// Names the text in a layout error, e.g. "note".
-    what: &'static str,
 }
 
 impl StyledSheet {
@@ -42,18 +36,7 @@ impl StyledSheet {
         if blocks.iter().all(|b| !matches!(b, StyledBlock::Paragraph(p) if !p.text.trim().is_empty())) {
             blocks = styled_blocks(&[crate::dictionary::Block::plain(empty)], t).collect();
         }
-        let mut result = Self {
-            sheet,
-            screen,
-            side: false,
-            blocks,
-            pages: None,
-            error: None,
-            body: Rect::default(),
-            pager: Pager::new(1),
-            button: None,
-            what,
-        };
+        let mut result = Self { sheet, screen, side: false, text: PagedText::new(blocks, what), button: None };
         result.place(t, None);
         result
     }
@@ -83,46 +66,33 @@ impl StyledSheet {
             self.sheet = Sheet::open(title, height.min(self.sheet.rect().h), self.screen, t);
         }
         let content = self.sheet.content(t);
-        // The line the pager (or a one-page body) stands a gap above.
+        // The line the text (or the pager under it) stands a gap above.
         let mut floor = self.sheet.rect().bottom() - bottom + gap;
         if let Some(button) = &mut self.button {
             let rect = Rect::new(content.x, self.sheet.rect().bottom() - bottom - t.target, content.w, t.target);
             button.place(rect, t);
             floor = rect.y;
         }
-        let pager = Rect::new(content.x, floor - gap - t.target, content.w, t.target);
-        self.pager.place(pager, t);
-        let end = if fit.is_some() { floor } else { pager.y };
-        self.body = Rect::new(content.x, content.y, content.w, (end - gap - content.y).max(1));
+        self.text.place(Rect::new(content.x, content.y, content.w, (floor - gap - content.y).max(1)), t);
     }
 
+    /// A bottom sheet shrinks to a text that fits one page.
     fn lay_out(&mut self, text: &mut TextRenderer, t: &Theme) {
-        let paginate = |text: &mut TextRenderer, blocks: Vec<StyledBlock>, body: Rect| {
-            let mut pages = StyledPagination::new(blocks, body.w, body.h)?;
-            text.paginate_styled_until(&mut pages, usize::MAX)?;
-            anyhow::Ok(pages)
-        };
-        let result = paginate(text, self.blocks.clone(), self.body).and_then(|pages| {
-            if !self.side && pages.pages().len() == 1 {
-                let needed = pages.pages()[0].height.ceil() as i32 + 1;
-                if needed < self.body.h {
-                    self.place(t, Some(needed));
-                    return paginate(text, self.blocks.clone(), self.body);
-                }
-            }
-            Ok(pages)
-        });
-        match result {
-            Ok(pages) => {
-                self.pager.set(0, pages.pages().len());
-                self.pages = Some(pages);
-            }
-            Err(e) => self.error = Some(format!("Couldn't lay out this {}: {e}", self.what)),
+        if self.text.laid_out() {
+            return;
+        }
+        self.text.lay_out(text);
+        if !self.side
+            && let Some(needed) = self.text.one_page_height()
+            && needed < self.text.body().h
+        {
+            self.place(t, Some(needed));
+            self.text.lay_out(text);
         }
     }
 
     pub fn visual_state(&self) -> (bool, bool, (usize, usize, bool, bool, bool)) {
-        (self.sheet.is_pressed(), self.button.as_ref().is_some_and(Button::is_pressed), self.pager.visual_state())
+        (self.sheet.is_pressed(), self.button.as_ref().is_some_and(Button::is_pressed), self.text.visual_state())
     }
 
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<StyledSheetEvent> {
@@ -132,32 +102,14 @@ impl StyledSheet {
         if self.button.as_mut().is_some_and(|b| b.on_gesture(g)) {
             return Some(StyledSheetEvent::Button);
         }
-        self.pager.on_gesture(g);
-        if let Gesture::Swipe { dir, .. } = g {
-            self.pager.on_swipe(*dir);
-        }
+        self.text.on_gesture(g);
         None
     }
 
     pub fn draw(&mut self, cx: &mut DrawCx) {
-        let t = cx.theme;
-        if self.pages.is_none() && self.error.is_none() {
-            let started = std::time::Instant::now();
-            self.lay_out(cx.text, t);
-            log::debug!("{} laid out in {:?}", self.what, started.elapsed());
-        }
+        self.lay_out(cx.text, cx.theme);
         self.sheet.draw(cx);
-        if let Some(pages) = &mut self.pages {
-            // Keep accents, italic overhangs and descenders in the controls' gap.
-            let clip = self.body.inset(-t.mm(0.5).max(2));
-            if let Err(e) = cx.text.draw_styled_page(cx.canvas, pages, self.pager.page, self.body, clip, t.hairline) {
-                log::error!("{} page draw: {e:#}", self.what);
-            }
-        }
-        if let Some(error) = &self.error {
-            cx.text.draw(cx.canvas, error, t.body, self.body, HAlign::Left);
-        }
-        self.pager.draw(cx);
+        self.text.draw(cx);
         if let Some(button) = &self.button {
             button.draw(cx);
         }
