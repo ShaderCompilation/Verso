@@ -66,19 +66,18 @@ impl Metadata {
     }
 }
 
-/// A series number for display: a whole number without `.0` (`3.0` → `3`),
-/// anything else as written.
-pub fn series_number(index: &str) -> &str {
+/// A series number for display: parsed numbers are formatted with
+/// [`sort::format_number`] (`2.50` → `2.5`, `01.0` → `1`, `.5` → `0.5`),
+/// non-numeric values stay as trimmed text (`III`), and blank or bare `.`
+/// return empty.
+pub fn series_number(index: &str) -> String {
     let index = index.trim();
-    match index.split_once('.') {
-        Some((whole, fraction))
-            if !whole.is_empty()
-                && whole.bytes().all(|b| b.is_ascii_digit())
-                && fraction.bytes().all(|b| b == b'0') =>
-        {
-            whole
-        }
-        _ => index,
+    if index.is_empty() || index == "." {
+        String::new()
+    } else if let Some(position) = sort::parse_number(index) {
+        sort::format_number(position)
+    } else {
+        index.to_owned()
     }
 }
 

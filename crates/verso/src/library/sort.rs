@@ -5,12 +5,16 @@
 //! [`Natural`] lowercases the text and spells each digit run as its length
 //! and digits, so plain byte order is natural order.
 //!
-//! Every sort ends with the same tie-breakers: series order, then title, then
-//! path. Series order puts books with a series (from metadata) first, by series
-//! name and number; then the rest, numbered ones by the first number in the file
-//! name, or failing that in the title ([`guess_number`]); then by file name.
-//! So in a folder where only some books have series metadata, those lead even
-//! when the others' file names number them earlier.
+//! Every sort ends with the same tie-breakers: title (unless already leading),
+//! file name, then path. `Author` and `Title` group ties by metadata series
+//! (series name and number) without guessing numbers, so standalone books stay
+//! in title order. `Series` puts books with metadata series first, by series
+//! name and number; then ungrouped books, numbered ones by the first number in
+//! the file name or failing that in the title ([`guess_number`]); then the rest
+//! by title, file name and path. So in a folder where only some books have
+//! series metadata, those lead even when the others' file names number them
+//! earlier. `RecentlyRead` and `RecentlyAdded` break modified-time ties
+//! directly by title, file name and path.
 //!
 //! Series metadata is calibre's or an EPUB 3 `series` collection (`epub.rs`); a
 //! `set` collection is not a reading order. Recently added is the file's
@@ -72,18 +76,13 @@ impl Sort {
 
     /// The number badge on `book`'s cover: its series number from metadata,
     /// in Series sort only. Guessed numbers move a book but never label it.
-    /// A whole number shows without `.0`.
+    /// Formatted with [`format_number`].
     pub fn badge(self, book: &Book) -> Option<String> {
         let m = &book.metadata;
         if self != Sort::Series || m.series.trim().is_empty() {
             return None;
         }
-        let (whole, millionths) = parse_number(&m.series_index)?;
-        Some(if millionths == 0 {
-            whole.to_string()
-        } else {
-            format!("{whole}.{}", format!("{millionths:06}").trim_end_matches('0'))
-        })
+        parse_number(&m.series_index).map(format_number)
     }
 
     /// Builds `book`'s key; `scratch` is reused between keys. `ranks` (book
@@ -92,11 +91,16 @@ impl Sort {
     fn key(self, book: &Book, ranks: &Ranks, scratch: &mut Vec<u8>) -> Key {
         let m = &book.metadata;
         let name = book.path.file_name().unwrap_or_default().to_string_lossy();
-        let (group, position) = if m.series.trim().is_empty() {
+        let recent = matches!(self, Sort::RecentlyRead | Sort::RecentlyAdded);
+        let (group, position) = if recent {
+            (None, None)
+        } else if !m.series.trim().is_empty() {
+            (Some(Natural::build(&m.series, scratch)), parse_number(&m.series_index))
+        } else if self == Sort::Series {
             let stem = book.path.file_stem().unwrap_or_default().to_string_lossy();
             (None, guess_number(&stem).or_else(|| guess_number(&m.title)))
         } else {
-            (Some(Natural::build(&m.series, scratch)), parse_number(&m.series_index))
+            (None, None)
         };
         let title = Natural::build(&m.title, scratch);
         let (lead, title) = match self {
@@ -108,7 +112,6 @@ impl Sort {
             }
             _ => (Natural::default(), title),
         };
-        let recent = matches!(self, Sort::RecentlyRead | Sort::RecentlyAdded);
         Key {
             rank: if self == Sort::RecentlyRead { ranks.get(&book.id).copied().unwrap_or(u32::MAX) } else { 0 },
             newest: Reverse(if recent { (book.stamp.modified_secs, book.stamp.modified_nanos) } else { (0, 0) }),
@@ -119,8 +122,8 @@ impl Sort {
             group: group.unwrap_or_default(),
             unnumbered: position.is_none(),
             position: position.unwrap_or_default(),
-            name: Natural::build(&name, scratch),
             title,
+            name: Natural::build(&name, scratch),
         }
     }
 }
@@ -140,8 +143,8 @@ pub struct Key {
     group: Natural,
     unnumbered: bool,
     position: Position,
-    name: Natural,
     title: Natural,
+    name: Natural,
 }
 
 /// A series number in fixed point: the whole part and millionths.
@@ -204,9 +207,19 @@ pub fn parse_number(text: &str) -> Option<Position> {
     Some((whole, millionths))
 }
 
+/// Formats a parsed series number: whole numbers without `.0`, fractions
+/// without trailing zeros.
+pub fn format_number((whole, millionths): Position) -> String {
+    if millionths == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{}", format!("{millionths:06}").trim_end_matches('0'))
+    }
+}
+
 /// The first number in a file name or title: a run of 1–3 digits, with a
-/// fraction when `.` or `_` and one more digit follow (`Sun_Eater_1_5_` is
-/// 1.5). Longer runs are years and IDs and are skipped.
+/// fraction when `.` and 1–2 digits (`1.25`) or `_` and 1 digit
+/// (`Sun_Eater_1_5_`) follow. Longer runs are years and IDs and are skipped.
 pub fn guess_number(text: &str) -> Option<Position> {
     let b = text.as_bytes();
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
@@ -224,10 +237,12 @@ pub fn guess_number(text: &str) -> Option<Position> {
             continue;
         }
         let whole = text[start..i].parse().expect("1-3 digits");
-        let fraction = if matches!(b.get(i), Some(b'.' | b'_')) && digit(i + 1) && !digit(i + 2) {
-            (b[i + 1] - b'0') as u32 * 100_000
-        } else {
-            0
+        let fraction = match b.get(i) {
+            Some(b'.') if digit(i + 1) && digit(i + 2) && !digit(i + 3) => {
+                (b[i + 1] - b'0') as u32 * 100_000 + (b[i + 2] - b'0') as u32 * 10_000
+            }
+            Some(b'.' | b'_') if digit(i + 1) && !digit(i + 2) => (b[i + 1] - b'0') as u32 * 100_000,
+            _ => 0,
         };
         return Some((whole, fraction));
     }
@@ -426,6 +441,58 @@ mod tests {
     }
 
     #[test]
+    fn author_series_and_recent_break_ties_by_title_over_filename() {
+        // Author: standalone books (even with numbers in title/filename) follow
+        // title order after metadata series, never filename or guessed number.
+        let author_books = books(&[
+            Spec { path: "/a/01-catch.epub", title: "Catch-22", author_sort: "Heller, Joseph", ..NONE },
+            Spec { path: "/a/zzz-as.epub", title: "As Good As Gold", author_sort: "Heller, Joseph", ..NONE },
+            Spec { path: "/a/b.epub", title: "Something Happened", author_sort: "Heller, Joseph", ..NONE },
+            Spec {
+                path: "/a/z-series.epub",
+                title: "Zed",
+                author_sort: "Heller, Joseph",
+                series: ("Saga", "1"),
+                ..NONE
+            },
+        ]);
+        assert_eq!(ordered(&author_books, Sort::Author, &Ranks::new()), ["3", "1", "0", "2"]);
+
+        // Title: equal titles never guess numbers from filenames.
+        let title_books = books(&[
+            Spec { path: "/t/z-01.epub", title: "Same", ..NONE },
+            Spec { path: "/t/a.epub", title: "Same", ..NONE },
+        ]);
+        assert_eq!(ordered(&title_books, Sort::Title, &Ranks::new()), ["1", "0"]);
+
+        // Series: unnumbered metadata-series books and ungrouped unnumbered
+        // books sort by title (so page_label stays monotonic), not filename.
+        let series_books = books(&[
+            Spec { path: "/s/z1.epub", title: "Alpha", series: ("Mistborn", ""), ..NONE },
+            Spec { path: "/s/a1.epub", title: "Beta", series: ("Mistborn", ""), ..NONE },
+            Spec { path: "/s/z2.epub", title: "Apricot", ..NONE },
+            Spec { path: "/s/a2.epub", title: "Zebra", ..NONE },
+        ]);
+        let mut indices: Vec<usize> = (0..series_books.len()).collect();
+        order(&series_books, &mut indices, Sort::Series, &Ranks::new());
+        assert_eq!(ids(&series_books, &indices), ["0", "1", "2", "3"]);
+        let ungrouped_labels: Vec<_> =
+            indices[2..].iter().map(|&i| Natural::new(&Sort::Series.page_label(&series_books[i]))).collect();
+        assert!(ungrouped_labels.is_sorted(), "ungrouped Series page_labels must be monotonic");
+
+        // FAT32 2-second mtime ties break by title, skipping series and guessed numbers.
+        let recent_books = books(&[
+            Spec { path: "/r/z.epub", title: "Bravo", series: ("Saga", "1"), modified: 100, ..NONE },
+            Spec { path: "/r/01-x.epub", title: "Charlie", modified: 100, ..NONE },
+            Spec { path: "/r/m.epub", title: "Alpha", modified: 100, ..NONE },
+            Spec { path: "/r/old.epub", title: "Opened", modified: 10, ..NONE },
+        ]);
+        let ranks = Ranks::from([("3".into(), 0)]);
+        assert_eq!(ordered(&recent_books, Sort::RecentlyAdded, &ranks), ["2", "0", "1", "3"]);
+        assert_eq!(ordered(&recent_books, Sort::RecentlyRead, &ranks), ["3", "2", "0", "1"]);
+    }
+
+    #[test]
     fn numbers_guessed_from_names() {
         for (name, expected) in [
             ("01 - A Song of Dragons", Some((1, 0))),
@@ -433,19 +500,31 @@ mod tests {
             ("Roe_Jane_-_Ashsworn_2_-_The_Hollow", Some((2, 0))),
             ("Sun_Walker_1_5_-_Demon_in_Grey", Some((1, 500_000))),
             ("Moths 2.5 Interlude", Some((2, 500_000))),
+            ("Saga 1.25 - Prologue", Some((1, 250_000))),
+            ("0.25 - Prequel", Some((0, 250_000))),
+            ("Book 2.75 Interlude", Some((2, 750_000))),
+            ("Book 1.125", Some((1, 0))),
             ("Empire of the Moths 12 - Night", Some((12, 0))),
             // Four or more digits are years and IDs.
             ("RuLit_Me_739338", None),
             ("Atlas 2019 Edition 4", Some((4, 0))),
-            // A fraction is one digit.
+            // Underscore fractions stay one digit.
             ("Saga_1_50_Notes", Some((1, 0))),
             ("No number here", None),
         ] {
             assert_eq!(guess_number(name), expected, "{name}");
         }
-        for (index, expected) in
-            [("3", Some((3, 0))), ("3.0", Some((3, 0))), (" 1.5 ", Some((1, 500_000))), ("III", None), ("", None)]
-        {
+        for (index, expected) in [
+            ("3", Some((3, 0))),
+            ("3.0", Some((3, 0))),
+            ("01", Some((1, 0))),
+            ("01.0", Some((1, 0))),
+            (" 1.5 ", Some((1, 500_000))),
+            (".5", Some((0, 500_000))),
+            (".", None),
+            ("III", None),
+            ("", None),
+        ] {
             assert_eq!(parse_number(index), expected, "{index:?}");
         }
     }
@@ -461,14 +540,33 @@ mod tests {
                 ..NONE
             },
             Spec { title: "Interlude", series: ("Mistborn", "2.50"), ..NONE },
+            Spec { title: "First", series: ("Mistborn", "01"), ..NONE },
+            Spec { title: "First Zero", series: ("Mistborn", "01.0"), ..NONE },
+            Spec { title: "Half", series: ("Mistborn", ".5"), ..NONE },
+            Spec { title: "Dot", series: ("Mistborn", "."), ..NONE },
             Spec { title: "Unnumbered", series: ("Mistborn", "III"), ..NONE },
             // A number guessed from the file name orders the book but gets no badge.
             Spec { path: "/s/Saga 3.epub", title: "Catch-22", authors: "Joe Heller", ..NONE },
         ]);
         let badges = |sort: Sort| books.iter().map(|b| sort.badge(b)).collect::<Vec<_>>();
-        assert_eq!(badges(Sort::Series), [Some("2".into()), Some("2.5".into()), None, None]);
+        assert_eq!(
+            badges(Sort::Series),
+            [
+                Some("2".into()),
+                Some("2.5".into()),
+                Some("1".into()),
+                Some("1".into()),
+                Some("0.5".into()),
+                None,
+                None,
+                None,
+            ]
+        );
+        for (book, expected_number) in books.iter().zip(["2", "2.5", "1", "1", "0.5", "", "III", ""]) {
+            assert_eq!(crate::library::series_number(&book.metadata.series_index), expected_number);
+        }
         for sort in [Sort::Title, Sort::Author, Sort::RecentlyRead, Sort::RecentlyAdded] {
-            assert_eq!(badges(sort), [None, None, None, None], "{sort:?}");
+            assert_eq!(badges(sort), vec![None; books.len()], "{sort:?}");
         }
         for (sort, first, last) in [
             (Sort::Title, "The Well", "Catch-22"),
@@ -478,7 +576,7 @@ mod tests {
             (Sort::RecentlyAdded, "", ""),
         ] {
             assert_eq!(
-                (sort.page_label(&books[0]), sort.page_label(&books[3])),
+                (sort.page_label(&books[0]), sort.page_label(&books[7])),
                 (first.into(), last.into()),
                 "{sort:?}"
             );

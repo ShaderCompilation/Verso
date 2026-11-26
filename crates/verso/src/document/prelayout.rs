@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{CreEngine, Document, Layout, Paths, Typography};
 use crate::library::home::Summary;
+use crate::library::sort::{self, Ranks, Sort};
 use crate::library::{Book, LibraryIndex, Stamp};
 use crate::page_layout::PageLayout;
 
@@ -187,42 +188,26 @@ pub fn candidates(
         .collect()
 }
 
-/// The book after the one at `path` in its folder, by file name with numbers
-/// in order ("Book 2" before "Book 10"). Also the end-of-book sheet's *Next*.
+/// The book after the one at `path` in its folder, in [`Sort::Series`] order
+/// (series metadata first, then guessed numbers, then title and file name).
+/// Also the end-of-book sheet's *Next*.
 pub(crate) fn next_in_folder<'a>(index: &'a LibraryIndex, path: &Path) -> Option<&'a Book> {
     let folder = path.parent()?;
-    let mut siblings: Vec<&Book> =
-        index.books.iter().filter(|b| b.available && b.error.is_none() && b.path.parent() == Some(folder)).collect();
-    siblings.sort_by_cached_key(|b| natural_key(&b.path));
-    let at = siblings.iter().position(|b| b.path == path)?;
-    siblings.get(at + 1).copied()
+    let mut siblings: Vec<usize> = index
+        .books
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.available && b.error.is_none() && b.path.parent() == Some(folder))
+        .map(|(i, _)| i)
+        .collect();
+    sort::order(&index.books, &mut siblings, Sort::Series, &Ranks::new());
+    let at = siblings.iter().position(|&i| index.books[i].path == path)?;
+    siblings.get(at + 1).map(|&i| &index.books[i])
 }
 
 /// The file's size and modification time, as the library index records them.
 fn stamp_of(path: &Path) -> Option<Stamp> {
     std::fs::metadata(path).ok().and_then(|m| crate::library::worker::stamp(&m).ok())
-}
-
-/// File name chunks for ordering: digit runs compare as numbers.
-fn natural_key(path: &Path) -> Vec<(u8, String)> {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let mut chunks: Vec<(u8, String)> = Vec::new();
-    for c in name.chars() {
-        let digit = c.is_ascii_digit();
-        match chunks.last_mut() {
-            Some((1, run)) if digit => run.push(c),
-            Some((0, run)) if !digit => run.push(c),
-            _ => chunks.push((u8::from(digit), c.to_string())),
-        }
-    }
-    for (kind, run) in &mut chunks {
-        if *kind == 1 {
-            // Zero-padded to compare numerically as text.
-            let trimmed = run.trim_start_matches('0');
-            *run = format!("{:0>20}", trimmed);
-        }
-    }
-    chunks
 }
 
 /// What the child tells the book thread, one JSON line each.
@@ -632,6 +617,36 @@ mod tests {
             paths(&picks),
             ["/s/Book 2.epub", "/s/Book 10.epub", "/other/finished.epub", "/new/d.epub", "/new/c.epub", "/new/b.epub"]
         );
+    }
+
+    #[test]
+    fn next_in_folder_follows_metadata_series_and_natural_numbers() {
+        let mut first = at(1, "/mistborn/z-empire.epub");
+        first.metadata.series = "Mistborn".into();
+        first.metadata.series_index = "1".into();
+        let mut second = at(2, "/mistborn/a-well.epub");
+        second.metadata.series = "Mistborn".into();
+        second.metadata.series_index = "2".into();
+        let mut third = at(3, "/mistborn/m-hero.epub");
+        third.metadata.series = "Mistborn".into();
+        third.metadata.series_index = "3".into();
+
+        let books = vec![
+            first,
+            second,
+            third,
+            at(4, "/num/Book 10.epub"),
+            at(5, "/num/Book 2.epub"),
+            at(6, "/num/Book 1.epub"),
+        ];
+        let idx = index(books);
+        let next = |p: &str| next_in_folder(&idx, Path::new(p)).map(|b| b.path.to_str().unwrap());
+        assert_eq!(next("/mistborn/z-empire.epub"), Some("/mistborn/a-well.epub"));
+        assert_eq!(next("/mistborn/a-well.epub"), Some("/mistborn/m-hero.epub"));
+        assert_eq!(next("/mistborn/m-hero.epub"), None);
+        assert_eq!(next("/num/Book 1.epub"), Some("/num/Book 2.epub"));
+        assert_eq!(next("/num/Book 2.epub"), Some("/num/Book 10.epub"));
+        assert_eq!(next("/num/Book 10.epub"), None);
     }
 
     #[test]
