@@ -1,0 +1,20 @@
+Eleventh closed beta of Verso.
+
+## Reading
+
+- New text settings: weight, contrast, word spacing, paragraphs, hyphenation
+  and book styles.
+- Line spacing now goes from 90% to 200%. It starts at 120%, so set it again
+  if you used Tight or Loose.
+- Hyphenation now follows each language's rules.
+- Justified lines no longer squeeze words together.
+- Punctuation can hang in the margin. It is on by default, with a switch in
+  Settings under Advanced.
+- After extending a selection, tap Done for all the passage actions, not
+  just Highlight.
+- Status messages appear as a small pill instead of a strip across the page.
+
+## Updates
+
+- What's new shows after an update, and can be reopened from Settings.
+- Long release notes now split into pages.
