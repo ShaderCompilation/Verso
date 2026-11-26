@@ -13,6 +13,8 @@ pub mod covers;
 pub mod discovery;
 pub mod epub;
 pub mod files;
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod format;
 pub mod home;
 pub mod language;
 pub mod previews;

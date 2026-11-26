@@ -38,6 +38,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 unicode-segmentation = "1.13.3"
 # Book language detection from its text.
 whatlang = "0.18.0"
+pulldown-cmark = { version = "0.13", default-features = false }
 unicode-normalization = "0.1"
 caseless = "0.2.2"
 ureq = { version = "3.5.2", default-features = false, features = ["rustls", "gzip"] }
