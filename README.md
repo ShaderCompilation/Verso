@@ -80,7 +80,8 @@ Verso → Create problem report**) writes a redacted hardware and log report to
 
 ## Install and update
 
-1. Download `verso-<version>.zip` from [GitHub Releases](https://github.com/ShaderCompilation/Verso/releases).
+1. Download `verso-<version>.zip` from [verso-reader.app/install](https://verso-reader.app/install)
+   or [GitHub Releases](https://github.com/ShaderCompilation/Verso/releases).
 2. Connect the Kindle by USB and unpack the zip into the root of its storage so
    it adds `verso/`, `extensions/verso/` and `documents/Verso.sh`.
 3. Safely eject the Kindle and tap **Verso** in your Kindle library.
