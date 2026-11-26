@@ -2,6 +2,8 @@
 
 A calm, lightweight EPUB reader for jailbroken Kindles, written in Rust.
 
+**Website:** [verso-reader.app](https://verso-reader.app)
+
 Verso is an alternative to [KOReader](https://koreader.rocks/) for people who
 want good typography, fast page turns and simple controls instead of endless
 settings. It launches straight from your Kindle library like a book (no KUAL
