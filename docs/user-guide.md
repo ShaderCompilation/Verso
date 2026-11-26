@@ -13,7 +13,9 @@ the **Universal Hotfix** (for direct library launch — no KUAL needed), **KPM**
 (recommended on 5.19.4+ where KUAL is broken) or **KUAL**. Soft-float Kindles
 are refused before touching the Kindle UI.
 
-1. Unpack `verso-<version>.zip` into `/mnt/us/` over USB, adding `verso/`,
+1. Download `verso-<version>.zip` from
+   [verso-reader.app/install](https://verso-reader.app/install) and unpack it
+   into `/mnt/us/` over USB, adding `verso/`,
    `extensions/verso/` and `documents/Verso.sh`.
 2. Eject the Kindle and tap **Verso** in your Kindle library.
 

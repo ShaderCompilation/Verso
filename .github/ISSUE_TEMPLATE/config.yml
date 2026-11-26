@@ -1,1 +1,5 @@
 blank_issues_enabled: true
+contact_links:
+  - name: Install guide
+    url: https://verso-reader.app/install
+    about: How to install, launch and update Verso on your Kindle.

@@ -72,12 +72,16 @@ cmd_publish_local() {
     git rev-parse -q --verify "refs/tags/$tag" >/dev/null || git tag -a "$tag" -m "Verso $version"
     git push origin master
     echo "==> creating and publishing $tag from $out"
+    # The GitHub page also links the install guide; the notes file is shown on the Kindle.
+    local body; body="$(mktemp)"
+    { cat "$notes"; printf '\nInstall guide: https://verso-reader.app/install\n'; } > "$body"
     gh release create "$tag" "$out"/* \
         --target "$(git rev-parse "$tag^{commit}")" \
         --title "Verso $version" \
-        --notes-file "$notes" \
+        --notes-file "$body" \
         --prerelease=false \
         --latest
+    rm -f "$body"
     git fetch origin tag "$tag" >/dev/null 2>&1 || true
     echo "==> published $tag: $(gh release view "$tag" --json url -q .url)"
 }

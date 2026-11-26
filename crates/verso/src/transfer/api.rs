@@ -305,8 +305,10 @@ mod tests {
         let policy = page_policy();
         assert!(policy.starts_with("default-src 'none'; script-src 'sha256-"), "{policy}");
         assert!(policy.contains("connect-src 'self'") && policy.contains("frame-ancestors 'none'"));
+        // The footer's link to the website is navigation, not a request.
+        let page = PAGE.replace("href=\"https://verso-reader.app\"", "");
         for outside in ["http://", "https://", "//fonts", "src=\"/", "@import", "url("] {
-            assert!(!PAGE.contains(outside), "the page refers to {outside}");
+            assert!(!page.contains(outside), "the page refers to {outside}");
         }
         assert!(!PAGE.contains("innerHTML"), "lists are built with textContent");
     }

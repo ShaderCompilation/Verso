@@ -154,7 +154,10 @@ jobs:
 
       - name: Create or update draft GitHub Release
         run: |
-          NOTES="dist/release-notes/$VERSION.txt"
+          # The GitHub page also links the install guide; the notes file itself
+          # is shown on the Kindle and fit-checked, so it stays as written.
+          NOTES="$RUNNER_TEMP/release-body.md"
+          { cat "dist/release-notes/$VERSION.txt"; printf '\nInstall guide: https://verso-reader.app/install\n'; } > "$NOTES"
           if STATE="$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
             if [ "$STATE" != "true" ]; then
               echo "Release $TAG is already published; refusing to overwrite." >&2
