@@ -65,7 +65,8 @@ required), pausing Amazon's UI while you read and restoring it cleanly on exit.
 
 Verso requires a **jailbroken Kindle** on **hard-float firmware (5.16.3+)**
 with the **Universal Hotfix** (for direct library launch — no KUAL needed),
-**KPM** (recommended on 5.19.4+) or **KUAL**.
+**KPM** (recommended on 5.19.4+) or **KUAL**. The up-to-date supported-devices
+list is at [verso-reader.app/install#devices](https://verso-reader.app/install#devices).
 
 | Status | Models |
 | --- | --- |
@@ -126,6 +127,7 @@ device presets and verification rules.
 
 - [User guide](docs/user-guide.md) — installation, reading, library,
   dictionaries, Wi-Fi transfer, KOReader import, updates and problem reports.
+  Also online at [verso-reader.app/guide](https://verso-reader.app/guide).
 - [Architecture](docs/architecture.md) — crates, layers, threads, rendering,
   file formats and cross-module invariants.
 - [Kindle notes](docs/kindle-notes.md) — hardware, FBInk, evdev input,
@@ -136,7 +138,8 @@ device presets and verification rules.
 
 Verso is in early development (`v0.1`). It is used daily on a Kindle Paperwhite
 6 (2024), while multi-device support, overnight hibernation checks and final
-release polish are still underway. File issues with a redacted problem report
+release polish are still underway — see the
+[roadmap](https://verso-reader.app/roadmap) for what's planned. File issues with a redacted problem report
 from `verso/reports/` when something misbehaves on your device.
 
 ## License
