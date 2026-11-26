@@ -351,11 +351,38 @@ fn blocks(extract: &str) -> Vec<Block> {
                 drop_empty_sections(&mut blocks, level);
                 blocks.push(Block::Heading { level, text: text.to_owned() });
             }
-            None => blocks.push(Block::Paragraph(line.to_owned())),
+            None => blocks.push(Block::Paragraph(tidy_brackets(line))),
         }
     }
     drop_empty_sections(&mut blocks, 0);
     blocks
+}
+
+/// Extracts drop some templates (pronunciations) but keep the punctuation
+/// around them: "Mount Olympus (, Greek: …". After an opening bracket, leading
+/// commas, semicolons and spaces go, and a bracket left empty goes when it
+/// stands alone, so "f()" stays.
+fn tidy_brackets(text: &str) -> String {
+    let mut tidy = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('(') {
+        tidy.push_str(&rest[..i]);
+        let inside = rest[i + 1..].trim_start_matches([',', ';', ' ']);
+        match inside.strip_prefix(')') {
+            Some(after) if tidy.is_empty() || tidy.ends_with(' ') => {
+                if after.is_empty() || after.starts_with([' ', ',', '.', ';', ':']) {
+                    tidy.pop();
+                }
+                rest = after;
+            }
+            _ => {
+                tidy.push('(');
+                rest = inside;
+            }
+        }
+    }
+    tidy.push_str(rest);
+    tidy
 }
 
 /// Removes headings at the end that a heading of `level` leaves without text.
@@ -479,6 +506,20 @@ pub(super) mod tests {
             ]
         );
         assert_eq!(blocks(""), []);
+    }
+
+    #[test]
+    fn brackets_lose_what_dropped_templates_leave() {
+        for (text, tidy) in [
+            ("Mount Olympus (, Greek: Όλυμπος) is", "Mount Olympus (Greek: Όλυμπος) is"),
+            ("Paris (; French: [paʁi]) is", "Paris (French: [paʁi]) is"),
+            ("Thoreau ( ) was", "Thoreau was"),
+            ("Thoreau (, ; ).", "Thoreau."),
+            ("call f() or (a, b)", "call f() or (a, b)"),
+            ("(1817–1862)", "(1817–1862)"),
+        ] {
+            assert_eq!(tidy_brackets(text), tidy, "{text:?}");
+        }
     }
 
     #[test]
