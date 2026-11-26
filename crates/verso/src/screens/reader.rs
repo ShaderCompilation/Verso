@@ -29,7 +29,7 @@ use crate::store::{
     position::{Presented, Status, Writer},
 };
 use crate::ui::gesture::{Direction, Gesture};
-use crate::ui::theme::{INK, PAPER, Theme};
+use crate::ui::theme::{INK, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::Toast;
 use end::{EndEvent, EndSheet};
@@ -2312,10 +2312,9 @@ impl Screen for Reader {
                 .or(self.save_error.as_ref().map(|_| "Couldn't save your place"))
                 .or(self.settings_save_pending.then_some("Couldn't save text settings"))
                 .unwrap_or("Laying out…");
-            let width = self.screen.w - 2 * t.margin;
-            let r = Rect::new(t.margin, t.mm(16.0), width, t.mm(10.0));
-            cx.fill(r, PAPER);
-            cx.line(message, t.small, r, HAlign::Center);
+            // Styled like the back pill, its top where the plain line's was.
+            let pill = Toast { text: message.to_owned(), icon: None, until: Instant::now() };
+            pill.draw_above(cx, t.mm(26.0));
         }
     }
     /// Page buttons turn pages in plain reading, like a tap on a page-turn
@@ -5442,10 +5441,10 @@ mod tests {
         assert!(needs_redraw);
         assert_eq!(forced, vec![crate::platform::Update { rect: r.screen, mode: RefreshMode::Ui }]);
         // The notice appears once, in the middle: no status line above it.
-        canvas.fill(PAPER);
+        canvas.fill(crate::ui::theme::PAPER);
         r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
         let status = (theme.mm(16.0) * r.screen.w) as usize..(theme.mm(26.0) * r.screen.w) as usize;
-        assert!(canvas.gray_data()[status].iter().all(|&p| p == PAPER));
+        assert!(canvas.gray_data()[status].iter().all(|&p| p == crate::ui::theme::PAPER));
         // If page 0 arrives before the deadline, the timer is cleared cleanly.
         let (mut r2, _) = test_reader("opening-fast");
         assert!(r2.opening_notice_at.is_some());
