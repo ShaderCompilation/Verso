@@ -68,6 +68,8 @@ pub struct Settings {
     pub folder_preview: FolderPreview,
     /// The order of books in the library and search.
     pub library_sort: crate::library::sort::Sort,
+    /// Series numbers on library covers. Settings → Display.
+    pub series_badges: bool,
     /// Untested Kindle models whose notice was dismissed
     /// (`DeviceModel::key`), so it shows once per model.
     pub untested_seen: Vec<String>,
@@ -112,6 +114,7 @@ impl Default for Settings {
             check_updates: true,
             folder_preview: FolderPreview::default(),
             library_sort: Default::default(),
+            series_badges: true,
             untested_seen: Vec::new(),
             koreader_progress: true,
             dictionary_expanded: true,

@@ -66,6 +66,17 @@ impl Metadata {
     }
 }
 
+/// The number badge on `book`'s cover, in every sort: its series number
+/// from metadata. Guessed numbers move a book in Series sort but never label
+/// it. Formatted with [`sort::format_number`].
+pub fn series_badge(book: &Book) -> Option<String> {
+    let m = &book.metadata;
+    if m.series.trim().is_empty() {
+        return None;
+    }
+    sort::parse_number(&m.series_index).map(sort::format_number)
+}
+
 /// A series number for display: parsed numbers are formatted with
 /// [`sort::format_number`] (`2.50` → `2.5`, `01.0` → `1`, `.5` → `0.5`),
 /// non-numeric values stay as trimmed text (`III`), and blank or bare `.`

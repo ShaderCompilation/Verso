@@ -63,10 +63,10 @@ capture("full-path", root / "Fiction/Same", steps=["--tap", f"{path_tap[0]},{pat
 capture("landscape", root / "Fiction/Same", size=(1696, 1272), dpi=300)
 capture("small", root, size=(600, 800), dpi=167)
 capture("missing-folder", root / "Removed")
-# Series sort: badges for metadata numbers only, and the sort menu (one page, so
-# Sort sits a target left of New folder at the right margin).
+# Badges for metadata numbers only, in every sort (Title here), and the sort
+# menu (one page, so Sort sits a target left of New folder at the right margin).
 series = {"library_sort": "series"}
-capture("series-badges", root / "Series", settings=series)
+capture("series-badges", root / "Series")
 sort_button = (size[0] - mm(5.0, dpi) - mm(5.0, dpi) // 2 - mm(9.0, dpi), mm(13.0, dpi) + mm(2.2, dpi) + mm(5.7, dpi))
 capture("sort-menu", root / "Series", steps=sim.tap(sort_button), settings=series)
 print("captured", sorted(p.name for p in out.glob("*.png")))

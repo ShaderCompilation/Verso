@@ -180,6 +180,8 @@ pub struct SystemSettings {
     orientation: Segmented,
     flash: Segmented,
     previews: Segmented,
+    /// "Series numbers on covers", below the folder previews.
+    series_badges: Toggle,
     // Library: folders on the left; the dictionaries and KOReader entries
     // below them side by side, or (landscape) one above the other on the right.
     library: Rect,
@@ -342,6 +344,7 @@ impl SystemSettings {
             orientation,
             flash,
             previews,
+            series_badges: Toggle::new(settings.series_badges),
             library,
             dictionaries,
             dictionary_entry,
@@ -515,9 +518,9 @@ impl SystemSettings {
 
     // ---- Display ----
 
-    /// Portrait: one column. Landscape: orientation and folder previews side
-    /// by side, and the refresh choices across both below them, where all
-    /// four labels fit.
+    /// Portrait: one column. Landscape: orientation and the series numbers
+    /// switch beside the folder previews, and the refresh choices across both
+    /// below them, where all four labels fit.
     fn draw_display(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
         let mut col = Column::new(self.left, self.body);
@@ -530,7 +533,10 @@ impl SystemSettings {
             self.draw_refresh(cx, &mut col);
             col.gap(t);
             self.draw_previews(cx, &mut col);
+            self.draw_badges(cx, &mut col);
         } else {
+            self.draw_badges(cx, &mut col);
+            col.gap(t);
             let mut right = Column::new(self.right, self.body);
             self.draw_previews(cx, &mut right);
             right.gap(t);
@@ -562,6 +568,21 @@ impl SystemSettings {
         col.note(cx, note(FolderPreview::OFFERED[self.previews.selected]), &variants);
     }
 
+    /// The series numbers switch, ending without a gap. Its label's line has
+    /// room above the text, so a shorter gap before it looks like the others
+    /// and keeps 6" screens inside their margins.
+    fn draw_badges(&mut self, cx: &mut DrawCx, col: &mut Column) {
+        let t = cx.theme;
+        if self.left == self.right {
+            col.y += t.mm(SECTION_GAP_MM - 1.5);
+        } else {
+            // Beside the folder previews, 6" landscape has no height to spare.
+            col.y -= t.mm(3.0);
+        }
+        let badges = ("Series numbers on covers", "From each book’s series metadata.");
+        col.y = switch_row(cx, &mut self.series_badges, badges, col.x, col.y, col.w) - t.mm(SECTION_GAP_MM);
+    }
+
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
         // Collections shows the new previews when Settings closes.
         if let Some(i) = self.previews.on_gesture(g)
@@ -569,6 +590,11 @@ impl SystemSettings {
         {
             let current = self.store.settings().folder_preview;
             self.previews.selected = FolderPreview::OFFERED.iter().position(|&m| m == current).unwrap_or(0);
+        }
+        if let Some(on) = self.series_badges.on_gesture(g)
+            && !self.save(cx, "series numbers", |s| s.series_badges = on)
+        {
+            self.series_badges.on = !on;
         }
         if let Some(i) = self.flash.on_gesture(g)
             && !self.save(cx, "page refresh", |s| s.page_flash = FLASH_CHOICES[i])

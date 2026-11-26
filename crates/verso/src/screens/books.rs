@@ -51,6 +51,9 @@ const PRELAYOUT_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 const WARM_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// Below this charge, unless charging, nothing is laid out in the background.
 const PRELAYOUT_MIN_BATTERY: u8 = 20;
+/// Sort menu rows: tighter than the 9 mm touch target for a compact list; the
+/// rows touch, so every tap still lands on one.
+const SORT_ROW_MM: f32 = 6.0;
 
 struct SearchSession {
     field: TextField,
@@ -189,6 +192,8 @@ pub struct Books {
     folder_preview: FolderPreview,
     /// The order of books in the library and search.
     sort: Sort,
+    /// Series numbers on covers (Settings → Display).
+    series_badges: bool,
     /// Every book's key in `sort`; cleared with preview picks.
     sort_keys: sort::Keys,
     folders: Vec<PathBuf>,
@@ -405,6 +410,7 @@ impl Books {
             previews: Previews::default(),
             folder_preview: settings.folder_preview,
             sort: settings.library_sort,
+            series_badges: settings.series_badges,
             sort_keys: sort::Keys::default(),
             folders: Vec::new(),
             navigation,
@@ -1140,7 +1146,9 @@ impl Books {
         let items = Sort::ALL.iter().map(|s| (None, s.label().to_owned())).collect();
         let button = self.sort_button.rect();
         let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
-        let mut menu = PopupMenu::open(items, Point::new(button.center().x, button.bottom()), area, t);
+        // Compact rows: five short words don't need full-height rows.
+        let anchor = Point::new(button.center().x, button.bottom());
+        let mut menu = PopupMenu::open_with_row(items, anchor, area, t, t.mm(SORT_ROW_MM));
         menu.set_checked(Sort::ALL.iter().position(|&s| s == self.sort));
         self.sort_menu = Some(menu);
     }
@@ -1226,6 +1234,12 @@ impl Books {
             if !self.is_home() {
                 self.refresh(cx.theme);
                 cx.refresh(self.screen, RefreshMode::Full);
+            }
+        }
+        if settings.series_badges != self.series_badges {
+            self.series_badges = settings.series_badges;
+            if !self.is_home() {
+                self.refresh_grid(cx, self.grid.rect());
             }
         }
         if settings.library_sort != self.sort {
@@ -3121,9 +3135,8 @@ impl Screen for Books {
             if finished {
                 draw_finished_badge(cx, cover);
             }
-            if let Some(number) =
-                self.sort.badge(book).filter(|_| !self.is_home() && (self.selection.is_none() || self.carrying()))
-            {
+            let badge = self.series_badges && !self.is_home() && (self.selection.is_none() || self.carrying());
+            if let Some(number) = library::series_badge(book).filter(|_| badge) {
                 draw_number_badge(cx, cover, &number);
             }
             let title_style = if finished {
@@ -5395,7 +5408,7 @@ mod tests {
     }
 
     #[test]
-    fn number_badges_hide_in_multiselect_and_search_header_expands() -> anyhow::Result<()> {
+    fn number_badges_follow_the_setting_and_multiselect_and_search_header_expands() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("badge-and-search-header")?;
         std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
         let mut index = store.library();
@@ -5413,8 +5426,8 @@ mod tests {
         books.scanning = false;
         with_cx(&t, screen, |cx| {
             books.navigate(Some("/books/Fiction/Nested".into()), cx);
-            books.set_sort(Sort::Series, cx);
         });
+        assert_eq!(books.sort, Sort::Title);
         let cover0 = books.cover_rect(books.grid.cells()[0].1, &t);
         let inset = t.mm(1.0);
         let badge_h = t.mm(4.0);
@@ -5427,7 +5440,7 @@ mod tests {
             canvas.gray_data()[sample.1 as usize * 1272 + sample.0 as usize]
         };
 
-        assert_eq!(draw_px(&mut books), INK, "number badge draws in normal Series view");
+        assert_eq!(draw_px(&mut books), INK, "number badge draws in Title sort");
         let first_id = books.books[0].id.clone();
         let second_id = books.books[1].id.clone();
         with_cx(&t, screen, |cx| books.start_selection(Target::Book(first_id), cx));
@@ -5437,6 +5450,11 @@ mod tests {
         assert!(books.carrying());
         assert_eq!(draw_px(&mut books), INK, "number badge returns while carrying");
         with_cx(&t, screen, |cx| books.end_selection(cx));
+        let mut settings = store.settings();
+        settings.series_badges = false;
+        store.save_settings(&settings)?;
+        with_cx(&t, screen, |cx| books.apply_folder_changes(cx));
+        assert_eq!(draw_px(&mut books), 200, "the setting turns number badges off");
 
         // Search header expands into sort_button's space during multi-select (with and without pager).
         with_cx(&t, screen, |cx| {

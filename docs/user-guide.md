@@ -87,9 +87,12 @@ hides its books without deleting any files or reading progress.
   **Author**, **Series**, **Recently read** and **Recently added** (newest file);
   one choice applies to both and is remembered.
 - **Series order:** books whose metadata (calibre or EPUB 3) names a series come
-  first, by series and number, and show the number on their cover. The rest
-  follow by the first number in the file name or title, so in a folder where
-  only some books have metadata, check them if the order looks wrong.
+  first, by series and number. The rest follow by the first number in the file
+  name or title, so in a folder where only some books have metadata, check
+  them if the order looks wrong.
+- **Series numbers:** in every sort, books with a series number in their
+  metadata show it in a cover corner; turn this off in **Settings → Display →
+  Series numbers on covers**.
 - **Navigation:** tap a folder to enter it, tap the back arrow to go up, or tap
   the current path to see its full location. Swipe left/right or tap the pager
   arrows to turn pages; tap the page counter (`1 of N`) for a **Go to page**

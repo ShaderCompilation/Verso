@@ -74,17 +74,6 @@ impl Sort {
         }
     }
 
-    /// The number badge on `book`'s cover: its series number from metadata,
-    /// in Series sort only. Guessed numbers move a book but never label it.
-    /// Formatted with [`format_number`].
-    pub fn badge(self, book: &Book) -> Option<String> {
-        let m = &book.metadata;
-        if self != Sort::Series || m.series.trim().is_empty() {
-            return None;
-        }
-        parse_number(&m.series_index).map(format_number)
-    }
-
     /// Builds `book`'s key; `scratch` is reused between keys. `ranks` (book
     /// id → place in the opened order, `Opened::ranks`) matters only to
     /// Recently read.
@@ -530,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn badges_show_metadata_numbers_in_series_sort_and_page_labels_follow_the_sort() {
+    fn badges_show_metadata_numbers_and_page_labels_follow_the_sort() {
         let books = books(&[
             Spec {
                 title: "The Well",
@@ -548,9 +537,9 @@ mod tests {
             // A number guessed from the file name orders the book but gets no badge.
             Spec { path: "/s/Saga 3.epub", title: "Catch-22", authors: "Joe Heller", ..NONE },
         ]);
-        let badges = |sort: Sort| books.iter().map(|b| sort.badge(b)).collect::<Vec<_>>();
+        let badges = books.iter().map(crate::library::series_badge).collect::<Vec<_>>();
         assert_eq!(
-            badges(Sort::Series),
+            badges,
             [
                 Some("2".into()),
                 Some("2.5".into()),
@@ -564,9 +553,6 @@ mod tests {
         );
         for (book, expected_number) in books.iter().zip(["2", "2.5", "1", "1", "0.5", "", "III", ""]) {
             assert_eq!(crate::library::series_number(&book.metadata.series_index), expected_number);
-        }
-        for sort in [Sort::Title, Sort::Author, Sort::RecentlyRead, Sort::RecentlyAdded] {
-            assert_eq!(badges(sort), vec![None; books.len()], "{sort:?}");
         }
         for (sort, first, last) in [
             (Sort::Title, "The Well", "Catch-22"),

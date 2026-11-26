@@ -33,13 +33,24 @@ impl PopupMenu {
     /// If it fits neither (a short landscape screen), it opens beside the
     /// anchor instead. Always kept inside the screen margins.
     pub fn open(items: Vec<(Option<Icon>, String)>, anchor: Point, screen: Rect, theme: &Theme) -> Self {
+        Self::open_with_row(items, anchor, screen, theme, theme.row)
+    }
+
+    /// [`open`](Self::open) with rows at most `row` tall.
+    pub fn open_with_row(
+        items: Vec<(Option<Icon>, String)>,
+        anchor: Point,
+        screen: Rect,
+        theme: &Theme,
+        row: i32,
+    ) -> Self {
         let m = theme.margin;
         let gap = theme.mm(2.0);
         let available_h = screen.h - 2 * m - 2 * theme.mm(1.0);
         let columns = if available_h / (items.len().max(1) as i32) < theme.target { 2 } else { 1 };
         let rows = items.len().max(1).div_ceil(columns);
         let w = theme.mm(70.0 * columns as f32).min(screen.w - 2 * m);
-        let row_h = theme.row.min(available_h / rows as i32);
+        let row_h = row.min(available_h / rows as i32);
         let h = row_h * rows as i32 + 2 * theme.mm(1.0);
         let centered = (anchor.x - w / 2).clamp(screen.x + m, screen.right() - m - w);
         let (below, above) = (anchor.y + gap, anchor.y - gap - h);
