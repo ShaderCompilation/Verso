@@ -1023,8 +1023,14 @@ int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_by
         }
         if (!InitFontManager(lString8()))
             return -1;
-        if (hyph_dir)
-            HyphMan::initDictionaries(Utf8ToUnicode(hyph_dir));
+        if (hyph_dir) {
+            // crengine lists the folder only when its path ends in '/'. Without
+            // one it finds no patterns and falls back to guessing breaks
+            // ("kee-per") in every language.
+            lString32 dir = Utf8ToUnicode(hyph_dir);
+            LVAppendPathDelimiter(dir);
+            HyphMan::initDictionaries(dir);
+        }
         // Hyphenate with the patterns of each book's (and each element's) language.
         TextLangMan::setEmbeddedLangsEnabled(true);
         TextLangMan::setHyphenationEnabled(true);
@@ -1034,6 +1040,26 @@ int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_by
             ldomDocCache::init(cache_dir_saved, cache_max_saved);
         }
         return 0;
+    })
+}
+
+int verso_cre_hyphenate(const char *lang, const char *word, char *buf, int len) {
+    GUARD(-1, {
+        lString32 w = Utf8ToUnicode(word);
+        int n = w.length();
+        std::vector<lUInt16> widths(n);
+        for (int i = 0; i < n; i++)
+            widths[i] = (lUInt16)(i + 1);
+        std::vector<lUInt8> flags(n, 0);
+        HyphMethod *method = TextLangMan::getTextLangCfg(Utf8ToUnicode(lang), true)->getHyphMethod();
+        method->hyphenate(w.c_str(), n, widths.data(), flags.data(), 0, 0xFFFF, 1);
+        lString32 out;
+        for (int i = 0; i < n; i++) {
+            out << w[i];
+            if (flags[i] & LCHAR_ALLOW_HYPH_WRAP_AFTER)
+                out << U"-";
+        }
+        return copy_utf8(out, buf, len);
     })
 }
 

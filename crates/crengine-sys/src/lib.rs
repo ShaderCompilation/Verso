@@ -93,6 +93,7 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn verso_cre_set_logger(logger: extern "C" fn(*const c_char));
     pub fn verso_cre_init(hyph_dir: *const c_char, cache_dir: *const c_char, cache_max_bytes: c_int) -> c_int;
+    pub fn verso_cre_hyphenate(lang: *const c_char, word: *const c_char, buf: *mut c_char, len: c_int) -> c_int;
     pub fn verso_cre_cache_reload() -> c_int;
     pub fn verso_cre_register_font(path: *const c_char) -> c_int;
     pub fn verso_cre_describe_font(path: *const c_char, buf: *mut c_char, len: c_int) -> c_int;
@@ -172,7 +173,11 @@ mod tests {
 
     fn init_cre() {
         INIT.call_once(|| unsafe {
-            assert_eq!(verso_cre_init(std::ptr::null(), std::ptr::null(), 0), 0);
+            // The patterns folder as the app passes it: no trailing slash.
+            let hyph =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/crengine/cr3gui/data/hyph");
+            let hyph = CString::new(hyph.to_str().unwrap()).unwrap();
+            assert_eq!(verso_cre_init(hyph.as_ptr(), std::ptr::null(), 0), 0);
             let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/Literata-Regular.ttf");
             let cfont = CString::new(font.to_str().unwrap()).unwrap();
             assert_eq!(verso_cre_register_font(cfont.as_ptr()), 0);
@@ -255,6 +260,22 @@ mod tests {
             0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, // SOS (missing DHT -> longjmp)
             0x00, 0xff, 0xd9,
         ]
+    }
+
+    #[test]
+    fn hyphenation_uses_each_languages_patterns() {
+        let _guard = CRE_LOCK.lock().unwrap();
+        init_cre();
+        let hyphenate = |lang: &str, word: &str| {
+            let (lang, word) = (CString::new(lang).unwrap(), CString::new(word).unwrap());
+            let mut buf = [0u8; 64];
+            let n = unsafe { verso_cre_hyphenate(lang.as_ptr(), word.as_ptr(), buf.as_mut_ptr().cast(), 64) };
+            String::from_utf8(buf[..n as usize].to_vec()).unwrap()
+        };
+        // Guessed (algorithmic) breaks give "lig-htho-u-se".
+        assert_eq!(hyphenate("en", "lighthouse"), "light-house");
+        assert_eq!(hyphenate("en", "responsibilities"), "re-spon-si-bil-i-ties");
+        assert_eq!(hyphenate("ru", "достопримечательность"), "до-сто-при-ме-ча-тель-ность");
     }
 
     #[test]

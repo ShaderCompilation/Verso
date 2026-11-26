@@ -92,6 +92,10 @@ void verso_cre_set_logger(void (*logger)(const char *message));
  * on-disk document cache (may be NULL). Returns 0 on success. */
 int verso_cre_init(const char *hyph_dir, const char *cache_dir, int cache_max_bytes);
 
+/* `word` with a '-' at each break layout may use for `lang` (e.g. "en"),
+ * into `buf`. Returns the full length, or -1. */
+int verso_cre_hyphenate(const char *lang, const char *word, char *buf, int len);
+
 /* Reads the document cache index again from disk, after another process
  * (Verso's background pre-layout) changed it. Call with no document open
  * that was opened before the other process ran. Returns 0 on success. */

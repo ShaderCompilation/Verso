@@ -896,7 +896,7 @@ mod tests {
         assert!(doc.select(0, &SelectionQuery::Word(Point::new(1, 1))).unwrap().is_none());
         // Reopening at a narrow width splits the soft-hyphen word visually,
         // while its stable range and extracted text remain unchanged.
-        let mut narrow = engine.open(&path, &Layout { width: 200, margins: [20; 4], ..layout.clone() }, None).unwrap();
+        let mut narrow = engine.open(&path, &Layout { width: 240, margins: [20; 4], ..layout.clone() }, None).unwrap();
         let hyphenated =
             narrow.select(0, &SelectionQuery::Range(words["extraordinary"].1.range.clone())).unwrap().unwrap();
         assert_eq!(hyphenated.text, "extraordinary");
