@@ -287,7 +287,7 @@ fn save_annotations(store: &Store, books: &[(String, Vec<Annotation>)]) -> (usiz
                     c.add(a.clone());
                 }
             }
-            if c.records.len() > before { c.commit(store, book) } else { Ok(()) }
+            if c.records.len() > before { c.commit_from(store, book, before) } else { Ok(()) }
         });
         if let Err(e) = result {
             return (written, Some(e.context(format!("saving highlights for book {book}"))));
@@ -663,6 +663,12 @@ mod tests {
         assert!(imported.error.is_some());
         assert_eq!(store.book("0").position.0, "/k0");
         assert!(store.book("2").position.0.is_empty(), "the pass stopped");
+        assert!(
+            std::fs::read_dir(dir.path().join("data/books"))?
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")),
+            "unrenamed .tmp files cleaned up"
+        );
         assert_eq!(store.home_summary().unwrap().resume().unwrap().book.id, "0", "Home has what was written");
 
         std::fs::remove_dir_all(&blocked)?;

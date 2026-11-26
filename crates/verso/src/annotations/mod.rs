@@ -7,12 +7,15 @@ pub mod lua;
 pub mod worker;
 use crate::{
     document::TextRange,
-    store::{Store, atomic},
+    store::{Store, atomic, atomic_batch},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Annotation {
@@ -174,30 +177,39 @@ pub fn sources(store: &Store, book: &str) -> Result<BTreeSet<String>> {
 }
 impl Collection {
     pub fn load(store: &Store, book: &str) -> Result<Self> {
+        Self::load_with_bytes(store, book).map(|(c, _)| c)
+    }
+    fn load_with_bytes(store: &Store, book: &str) -> Result<(Self, HashMap<String, Vec<u8>>)> {
         let path = manifest_path(store, book)?;
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self { manifest: Manifest { version: 1, ..Default::default() }, records: vec![] });
+                return Ok((
+                    Self { manifest: Manifest { version: 1, ..Default::default() }, records: vec![] },
+                    HashMap::new(),
+                ));
             }
             Err(e) => return Err(e.into()),
         };
         let manifest: Manifest =
             serde_json::from_slice(&bytes).context("invalid annotation manifest (left untouched)")?;
         ensure!(manifest.version == 1, "unsupported annotation manifest version (left untouched)");
-        let mut records = Vec::new();
+        let dir = store.annotation_dir();
+        let mut records = Vec::with_capacity(manifest.records.len());
+        let mut raw = HashMap::with_capacity(manifest.records.len());
         for id in &manifest.records {
             ensure!(valid_id(id), "invalid annotation ID");
+            let file_bytes = std::fs::read(dir.join(format!("{id}.json")))?;
             let a: Annotation =
-                serde_json::from_slice(&std::fs::read(store.annotation_dir().join(format!("{id}.json")))?)
-                    .context("invalid annotation record (left untouched)")?;
+                serde_json::from_slice(&file_bytes).context("invalid annotation record (left untouched)")?;
             ensure!(
                 a.version == 1 && a.id == *id && a.book == book,
                 "unsupported or inconsistent annotation record (left untouched)"
             );
+            raw.insert(id.clone(), file_bytes);
             records.push(a);
         }
-        Ok(Self { manifest, records })
+        Ok((Self { manifest, records }, raw))
     }
     pub fn add(&mut self, annotation: Annotation) {
         if let Some(p) = &annotation.provenance {
@@ -228,20 +240,53 @@ impl Collection {
     pub fn commit(&self, store: &Store, book: &str) -> Result<()> {
         // Validate the existing committed set before any mutation. Incompatible
         // records are recoverable errors, never silently replaced.
-        Self::load(store, book)?;
-        for a in &self.records {
+        let (_, disk_bytes) = Self::load_with_bytes(store, book)?;
+        self.commit_records(store, book, &self.records, &disk_bytes)
+    }
+    /// Commits only `self.records[start..]` and swaps the manifest. Used by
+    /// bulk import right after `Collection::load` already validated the
+    /// existing on-disk set and no reader has the book open.
+    pub(crate) fn commit_from(&self, store: &Store, book: &str, start: usize) -> Result<()> {
+        self.commit_records(store, book, &self.records[start..], &HashMap::new())
+    }
+    fn commit_records(
+        &self,
+        store: &Store,
+        book: &str,
+        records: &[Annotation],
+        disk_bytes: &HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        let manifest = manifest_path(store, book)?;
+        let dir = store.annotation_dir();
+        let mut to_write: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut queued: HashMap<&str, usize> = HashMap::new();
+        for a in records {
             ensure!(valid_id(&a.id), "invalid annotation ID");
-            let path = store.annotation_dir().join(format!("{}.json", a.id));
-            if path.exists() {
-                ensure!(
-                    std::fs::read(&path)? == serde_json::to_vec(a)?,
-                    "annotation ID collision; existing record preserved"
-                );
-            } else {
-                atomic(&path, a)?;
+            let bytes = serde_json::to_vec(a)?;
+            if let Some(existing) = disk_bytes.get(&a.id) {
+                ensure!(existing == &bytes, "annotation ID collision; existing record preserved");
+                continue;
+            }
+            if let Some(&idx) = queued.get(a.id.as_str()) {
+                ensure!(to_write[idx].1 == bytes, "annotation ID collision; existing record preserved");
+                continue;
+            }
+            let name = format!("{}.json", a.id);
+            match std::fs::read(dir.join(&name)) {
+                Ok(existing) => {
+                    ensure!(existing == bytes, "annotation ID collision; existing record preserved");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    queued.insert(a.id.as_str(), to_write.len());
+                    to_write.push((name, bytes));
+                }
+                Err(e) => return Err(e.into()),
             }
         }
-        atomic(&manifest_path(store, book)?, &self.manifest)
+        if let (_, Some((_, err))) = atomic_batch(&dir, &to_write) {
+            return Err(err);
+        }
+        atomic(&manifest, &self.manifest)
     }
 }
 
@@ -356,6 +401,86 @@ mod tests {
         assert!(Collection::load(&store, "book").is_err());
         assert!(Collection::load(&store, "../escape").is_err());
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn commit_batches_new_records_rejects_byte_mismatches_and_keeps_single_record_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        let tmp_files = || -> Vec<String> {
+            std::fs::read_dir(store.annotation_dir())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| name.ends_with(".tmp"))
+                .collect()
+        };
+
+        // Single new record uses the single-file sync_all() path, not a batch sync.
+        let before = crate::store::batch_sync_count();
+        let mut c = Collection::load(&store, "book")?;
+        c.add(record("one"));
+        c.commit(&store, "book")?;
+        assert_eq!(crate::store::batch_sync_count(), before, "single record avoids batch sync");
+
+        // Multiple new records commit in one batch; retry after failed manifest swap
+        // accepts identical on-disk records without re-running a batch sync.
+        std::fs::create_dir(store.annotation_dir().join("book-book.json.tmp"))?;
+        c.add(record("two"));
+        c.add(record("three"));
+        assert!(c.commit(&store, "book").is_err());
+        assert_eq!(crate::store::batch_sync_count(), before + 1);
+        assert!(tmp_files().iter().all(|name| name == "book-book.json.tmp"));
+        std::fs::remove_dir(store.annotation_dir().join("book-book.json.tmp"))?;
+        c.commit(&store, "book")?;
+        assert_eq!(crate::store::batch_sync_count(), before + 1, "retry found identical files already on disk");
+        assert_eq!(Collection::load(&store, "book")?.records.len(), 3);
+
+        // Existing committed record mutated in memory is rejected by byte comparison
+        // before any sibling new record is written.
+        let mut mutated = Collection::load(&store, "book")?;
+        mutated.records[0].quotation = "altered".into();
+        mutated.add(record("never-written"));
+        let err = mutated.commit(&store, "book").unwrap_err();
+        assert!(err.to_string().contains("annotation ID collision; existing record preserved"), "{err:#}");
+        assert!(!store.annotation_dir().join("never-written.json").exists());
+
+        // Bulk path (`commit_from`) also rejects colliding unreferenced on-disk records
+        // without touching the existing file or writing sibling records, and batches >1 new records.
+        let mut loaded = Collection::load(&store, "book")?;
+        let start = loaded.records.len();
+        let orphan_path = store.annotation_dir().join("orphan.json");
+        std::fs::write(&orphan_path, b"{\"existing\":true}")?;
+        loaded.add(record("sibling"));
+        loaded.add(record("orphan"));
+        let err = loaded.commit_from(&store, "book", start).unwrap_err();
+        assert!(err.to_string().contains("annotation ID collision; existing record preserved"), "{err:#}");
+        assert_eq!(std::fs::read(&orphan_path)?, b"{\"existing\":true}");
+        assert!(!store.annotation_dir().join("sibling.json").exists());
+
+        // After removing the conflicting orphan, commit_from batches both new records.
+        std::fs::remove_file(&orphan_path)?;
+        let before = crate::store::batch_sync_count();
+        loaded.commit_from(&store, "book", start)?;
+        assert_eq!(crate::store::batch_sync_count(), before + 1);
+        assert_eq!(Collection::load(&store, "book")?.records.len(), 5);
+
+        // A mid-batch .tmp failure cleans up earlier staged .tmp files and retries cleanly.
+        let mut loaded = Collection::load(&store, "book")?;
+        let start = loaded.records.len();
+        loaded.add(record("four"));
+        loaded.add(record("five"));
+        let blocked = store.annotation_dir().join("five.json.tmp");
+        std::fs::create_dir(&blocked)?;
+        assert!(loaded.commit_from(&store, "book", start).is_err());
+        assert!(!store.annotation_dir().join("four.json.tmp").exists());
+        assert!(!store.annotation_dir().join("four.json").exists());
+        assert_eq!(Collection::load(&store, "book")?.records.len(), 5);
+        std::fs::remove_dir(&blocked)?;
+        loaded.commit_from(&store, "book", start)?;
+        assert_eq!(Collection::load(&store, "book")?.records.len(), 7);
+        assert!(tmp_files().is_empty());
         Ok(())
     }
     #[test]

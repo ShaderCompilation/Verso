@@ -454,15 +454,23 @@ impl Store {
     /// book: the caller rebuilds them once. Returns how many were written,
     /// and the error that stopped the rest.
     pub fn save_books(&self, states: &[(String, BookState)]) -> (usize, Option<anyhow::Error>) {
-        let mut written = 0;
-        let mut error = None;
-        for (id, state) in states {
-            if let Err(e) = atomic(&self.book_path(id), state) {
-                error = Some(e.context(format!("saving the reading state of {id}")));
-                break;
-            }
-            written += 1;
+        if states.is_empty() {
+            return (0, None);
         }
+        let mut files = Vec::with_capacity(states.len());
+        for (id, state) in states {
+            match serde_json::to_vec(state) {
+                Ok(bytes) => files.push((format!("{id}.json"), bytes)),
+                Err(e) => {
+                    return (0, Some(anyhow::Error::from(e).context(format!("saving the reading state of {id}"))));
+                }
+            }
+        }
+        let (written, error) = atomic_batch(&self.root.join("books"), &files);
+        let error = error.map(|(index, e)| match index.and_then(|i| states.get(i)) {
+            Some((id, _)) => e.context(format!("saving the reading state of {id}")),
+            None => e.context("saving reading states"),
+        });
         if written > 0 {
             self.book_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
             self.bulk_saves.fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -750,21 +758,84 @@ fn frozen(path: &Path) -> bool {
 static FOLDERS: std::sync::Mutex<std::collections::BTreeMap<PathBuf, bool>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-/// Every record under the data folder is written here (or by `atomic`), so
-/// `Store::freeze` stops all of them at once.
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+
+/// Syncs `parent` so renames inside it are durable, caching whether `parent`
+/// accepts directory fsync (FAT/FUSE on the Kindle may return `EINVAL`/`ENOSYS`).
+fn sync_dir(parent: &Path, known: Option<bool>) -> Result<()> {
+    let syncs = known.unwrap_or(true)
+        && match std::fs::File::open(parent)?.sync_all() {
+            Ok(()) => true,
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) => false,
+            Err(e) => return Err(e.into()),
+        };
+    if known != Some(syncs) {
+        FOLDERS.lock().unwrap_or_else(|e| e.into_inner()).insert(parent.to_owned(), syncs);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static BATCH_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn batch_sync_count() -> usize {
+    BATCH_SYNCS.with(std::cell::Cell::get)
+}
+
+/// Flushes dirty data written to `dir` before a multi-file batch rename.
+/// On Kindle, `syncfs(fd)` on FUSE is a no-op on Linux < 5.13 (PW4 4.1, Oasis 3 /
+/// PW5 4.9) and whenever Amazon's FUSE daemon omits `FUSE_SYNCFS`, so `sync(2)`
+/// flushes the backing filesystem. On Linux desktop, `syncfs(dir)` avoids syncing
+/// unrelated host disks.
+fn sync_batch_data(dir: &Path) -> Result<()> {
+    #[cfg(test)]
+    BATCH_SYNCS.with(|n| n.set(n.get() + 1));
+
+    #[cfg(feature = "kindle")]
+    {
+        let _ = dir;
+        // SAFETY: sync(2) takes no arguments and cannot fail.
+        unsafe { libc::sync() };
+        Ok(())
+    }
+    #[cfg(all(feature = "desktop", target_os = "linux"))]
+    {
+        use std::os::fd::AsRawFd;
+        let folder = std::fs::File::open(dir)?;
+        // SAFETY: folder is a valid open file descriptor for the duration of the call.
+        if unsafe { libc::syncfs(folder.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
+    {
+        let _ = dir;
+        // SAFETY: sync(2) takes no arguments and cannot fail.
+        unsafe { libc::sync() };
+        Ok(())
+    }
+}
+
+/// Every record under the data folder is written here (or by `atomic` /
+/// `atomic_batch`), so `Store::freeze` stops all of them at once.
 pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     if frozen(path) {
         return Ok(());
     }
     let parent = path.parent().context("record has no parent directory")?;
-    let folders = || FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut known = folders().get(parent).copied();
+    let mut known = FOLDERS.lock().unwrap_or_else(|e| e.into_inner()).get(parent).copied();
     if known.is_none() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
+    let tmp = tmp_path(path);
     let mut f = match std::fs::File::create(&tmp) {
         // Removed since it was last written to.
         Err(e) if known.is_some() && e.kind() == std::io::ErrorKind::NotFound => {
@@ -774,20 +845,120 @@ pub(crate) fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         }
         f => f?,
     };
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    // The FAT/FUSE filesystem on the Kindle may not support directory fsync.
-    let syncs = known.unwrap_or(true)
-        && match std::fs::File::open(parent)?.sync_all() {
-            Ok(()) => true,
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) => false,
-            Err(e) => return Err(e.into()),
-        };
-    if known != Some(syncs) {
-        folders().insert(parent.to_owned(), syncs);
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
     }
-    Ok(())
+    drop(f);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    sync_dir(parent, known)
+}
+
+/// Writes `files` (unique `(filename, bytes)` pairs inside `dir`) with one data
+/// durability barrier before any rename:
+/// 1. Write every `<name>.tmp` without per-file fsync.
+/// 2. Flush data once (`f.sync_all()` for a single file, or `sync_batch_data`
+///    for multiple files) so no crash can expose a partial final file.
+/// 3. Rename `<name>.tmp` → `<name>` in order, stopping at the first error and
+///    removing all unrenamed `.tmp` files.
+/// 4. Sync `dir` once (respecting the cached `FOLDERS` dir-sync check).
+///
+/// Returns `(written, error)` where `written` is how many files were renamed
+/// into place and `error` carries the failing file index (`None` for a batch or
+/// directory sync failure).
+pub(crate) fn atomic_batch(dir: &Path, files: &[(String, Vec<u8>)]) -> (usize, Option<(Option<usize>, anyhow::Error)>) {
+    if files.is_empty() {
+        return (0, None);
+    }
+    if frozen(dir) {
+        return (files.len(), None);
+    }
+    if let [(name, bytes)] = files {
+        return match atomic_bytes(&dir.join(name), bytes) {
+            Ok(()) => (1, None),
+            Err(e) => (0, Some((Some(0), e))),
+        };
+    }
+
+    let mut known = FOLDERS.lock().unwrap_or_else(|e| e.into_inner()).get(dir).copied();
+    let mut dir_created = false;
+    if known.is_none() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return (0, Some((Some(0), e.into())));
+        }
+        dir_created = true;
+    }
+
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(files.len());
+    for (i, (name, bytes)) in files.iter().enumerate() {
+        let path = dir.join(name);
+        let tmp = tmp_path(&path);
+        let mut f = match std::fs::File::create(&tmp) {
+            Err(e) if !dir_created && e.kind() == std::io::ErrorKind::NotFound => {
+                known = None;
+                dir_created = true;
+                match std::fs::create_dir_all(dir).and_then(|()| std::fs::File::create(&tmp)) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        for (t, _) in &staged {
+                            let _ = std::fs::remove_file(t);
+                        }
+                        return (0, Some((Some(i), e.into())));
+                    }
+                }
+            }
+            Ok(f) => f,
+            Err(e) => {
+                for (t, _) in &staged {
+                    let _ = std::fs::remove_file(t);
+                }
+                return (0, Some((Some(i), e.into())));
+            }
+        };
+        if let Err(e) = f.write_all(bytes) {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            for (t, _) in &staged {
+                let _ = std::fs::remove_file(t);
+            }
+            return (0, Some((Some(i), e.into())));
+        }
+        staged.push((tmp, path));
+    }
+
+    if let Err(e) = sync_batch_data(dir) {
+        for (t, _) in &staged {
+            let _ = std::fs::remove_file(t);
+        }
+        return (0, Some((None, e)));
+    }
+
+    let mut written = 0;
+    let mut rename_error = None;
+    for (i, (tmp, path)) in staged.iter().enumerate() {
+        if let Err(e) = std::fs::rename(tmp, path) {
+            for (leftover, _) in &staged[i..] {
+                let _ = std::fs::remove_file(leftover);
+            }
+            rename_error = Some((Some(i), e.into()));
+            break;
+        }
+        written += 1;
+    }
+
+    if written > 0 {
+        let dir_sync = sync_dir(dir, known);
+        if rename_error.is_none()
+            && let Err(e) = dir_sync
+        {
+            return (written, Some((None, e)));
+        }
+    }
+    (written, rename_error)
 }
 /// The Kindle's user storage, `/mnt/us`. On the desktop
 /// `$VERSO_STORAGE` stands in for it when set (setup walks it for books and
@@ -1011,11 +1182,20 @@ mod tests {
         store.save_library(&LibraryIndex::default())?;
         store.save_navigation(&Navigation::default())?;
         store.save_book("new", &BookState::default())?;
+        let (written, err) =
+            store.save_books(&[("b1".into(), BookState::default()), ("b2".into(), BookState::default())]);
+        assert_eq!((written, err.is_none()), (2, true));
         store.remove_book("kept")?;
         store.save_dictionary_folders(&[])?;
-        for name in
-            ["settings.json", "library.json", "library-navigation.json", "books/new.json", "dictionary-folders.json"]
-        {
+        for name in [
+            "settings.json",
+            "library.json",
+            "library-navigation.json",
+            "books/new.json",
+            "books/b1.json",
+            "books/b2.json",
+            "dictionary-folders.json",
+        ] {
             assert!(!frozen.path().join(name).exists(), "{name} was written");
         }
         assert!(frozen.path().join("books/kept.json").exists(), "nor removed");
@@ -1175,6 +1355,73 @@ mod tests {
         std::fs::write(&b, b"different edition")?;
         assert_ne!(id, book_id(&b)?);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn save_books_batches_cleans_up_tmp_files_and_uses_single_file_path_for_one() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = Store::at(dir.path().to_path_buf());
+        let books_dir = dir.path().join("books");
+        let tmp_files = || -> Vec<String> {
+            std::fs::read_dir(&books_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| name.ends_with(".tmp"))
+                .collect()
+        };
+        let state = |pos: &str| BookState { position: Position(pos.into()), ..Default::default() };
+
+        // Empty batch does nothing.
+        let before_syncs = batch_sync_count();
+        assert_eq!(store.save_books(&[]).0, 0);
+        assert_eq!((batch_sync_count(), store.book_saves(), store.bulk_saves()), (before_syncs, 0, 0));
+
+        // Single-file batch uses f.sync_all() rather than sync_batch_data().
+        let (written, err) = store.save_books(&[("solo".into(), state("/solo"))]);
+        assert_eq!((written, err.is_none()), (1, true));
+        assert_eq!(batch_sync_count(), before_syncs, "single file must not trigger a batch sync");
+        assert_eq!(store.book("solo").position.0, "/solo");
+        assert!(tmp_files().is_empty());
+
+        // Multi-file batch uses one batch sync and recovers if the cached folder was removed.
+        std::fs::remove_dir_all(&books_dir)?;
+        let (written, err) =
+            store.save_books(&[("a".into(), state("/a")), ("b".into(), state("/b")), ("c".into(), state("/c"))]);
+        assert_eq!((written, err.is_none()), (3, true));
+        assert_eq!(batch_sync_count(), before_syncs + 1);
+        assert_eq!((store.book("a").position.0.as_str(), store.book("c").position.0.as_str()), ("/a", "/c"));
+        assert!(tmp_files().is_empty());
+
+        // Phase 1 (.tmp create) failure writes nothing and cleans up earlier .tmp files.
+        let blocked_tmp = books_dir.join("p1.json.tmp");
+        std::fs::create_dir(&blocked_tmp)?;
+        let (written, err) =
+            store.save_books(&[("p0".into(), state("/p0")), ("p1".into(), state("/p1")), ("p2".into(), state("/p2"))]);
+        assert_eq!(written, 0);
+        assert!(err.unwrap().to_string().contains("p1"));
+        assert!(store.book("p0").position.0.is_empty());
+        assert!(!books_dir.join("p0.json.tmp").exists(), "staged .tmp removed");
+        std::fs::remove_dir(&blocked_tmp)?;
+
+        // Phase 3 (mid-batch rename) failure stops at first error and removes all unrenamed .tmp files.
+        let blocked_dst = books_dir.join("m1.json");
+        std::fs::create_dir_all(blocked_dst.join("in-the-way"))?;
+        let (written, err) =
+            store.save_books(&[("m0".into(), state("/m0")), ("m1".into(), state("/m1")), ("m2".into(), state("/m2"))]);
+        assert_eq!(written, 1);
+        assert!(err.unwrap().to_string().contains("m1"));
+        assert_eq!(store.book("m0").position.0, "/m0");
+        assert!(store.book("m2").position.0.is_empty(), "stopped on first rename failure");
+        assert!(tmp_files().is_empty(), "unrenamed .tmp files removed");
+        std::fs::remove_dir_all(&blocked_dst)?;
+
+        // Retrying the remaining entries succeeds.
+        let (written, err) = store.save_books(&[("m1".into(), state("/m1")), ("m2".into(), state("/m2"))]);
+        assert_eq!((written, err.is_none()), (2, true));
+        assert_eq!((store.book("m1").position.0.as_str(), store.book("m2").position.0.as_str()), ("/m1", "/m2"));
+        assert!(tmp_files().is_empty());
         Ok(())
     }
 }
