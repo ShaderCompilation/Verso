@@ -1452,6 +1452,12 @@ int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
         return 0;
     })
 }
+int verso_cre_gamma(int gamma_index) {
+    GUARD(-1, {
+        fontMan->SetGammaIndex(gamma_index);
+        return 0;
+    })
+}
 int verso_cre_toc_count(VersoCreDoc *doc) {
     GUARD(-1, {
         doc->toc.clear(); collect_toc(doc->view->getToc(), doc->toc);

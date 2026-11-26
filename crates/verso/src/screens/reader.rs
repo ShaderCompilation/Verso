@@ -7,7 +7,7 @@ pub(crate) mod layout;
 mod search;
 mod selection;
 use crate::document::{
-    FontFace, Link, Metadata, Position, SelectionQuery, TocEntry,
+    FontFace, Link, Metadata, Position, SelectionQuery, TocEntry, Typography,
     thread::{Command, LinkRequest, LocateRequest, Page, Reply, SelectionRequest, Worker},
 };
 use crate::geom::Rect;
@@ -436,9 +436,15 @@ impl Reader {
                     self.jump_destination = None;
                     self.target = page.number;
                 }
-                self.cache.insert(page.clone(), self.target);
+                let current = page.contrast == self.contrast();
+                if current {
+                    self.cache.insert(page.clone(), self.target);
+                }
                 if page.number == self.target {
                     self.display(page, cx);
+                    if !current && self.cache.request(self.target) {
+                        self.worker.send(Command::Page { generation: self.cache.generation, number: self.target });
+                    }
                 }
             }
             Reply::Link { request, result } => self.link_arrived(request, result, cx),
@@ -509,6 +515,12 @@ impl Reader {
                 let time_left = self.bars.speed.value().is_some() && (uses(&layout.top) || uses(&layout.bottom));
                 if self.shown.is_some() && (time_left || layout.progress != crate::page_layout::ProgressLine::Off) {
                     cx.redraw();
+                }
+            }
+            // Drawn before a contrast change: only the page wanted now is drawn again.
+            Reply::Page(page) if page.generation == self.cache.generation && page.contrast != self.contrast() => {
+                if page.number == self.target && self.cache.request(page.number) {
+                    self.worker.send(Command::Page { generation: page.generation, number: page.number });
                 }
             }
             Reply::Page(page)
@@ -656,12 +668,12 @@ impl Reader {
         let different = self.shown.as_ref().is_none_or(|p| p.generation != page.generation || p.number != page.number);
         if !different {
             if let Some(shown) = &self.shown
-                && shown.annotation_revision != page.annotation_revision
+                && (shown.annotation_revision != page.annotation_revision || shown.contrast != page.contrast)
             {
                 // Rendered again after a resolution: without highlights on
                 // either version, the pixels are the same.
                 let unmarked = |p: &Page| p.annotations.is_empty() && p.painted.is_empty();
-                let same = unmarked(shown) && unmarked(&page);
+                let same = shown.contrast == page.contrast && unmarked(shown) && unmarked(&page);
                 self.shown = Some(page);
                 if !same {
                     cx.redraw();
@@ -1396,6 +1408,30 @@ impl Reader {
         self.relayout();
         self.save_text_settings();
     }
+    /// The text sheet changed the text settings from `before`.
+    fn text_changed(&mut self, before: &Typography) {
+        let rest = Typography { contrast: before.contrast, ..self.settings.typography.clone() };
+        if rest == *before {
+            self.contrast_changed();
+        } else {
+            self.changed();
+        }
+    }
+    /// Contrast only changes how pages draw: the page on screen is drawn
+    /// again in the same layout, and its neighbours once it shows.
+    fn contrast_changed(&mut self) {
+        self.save_text_settings();
+        self.worker.send(Command::Contrast(self.contrast()));
+        // Every page cached or on its way has the old contrast.
+        self.cache.reset(self.cache.generation);
+        // A layout under way draws its first page again when it arrives.
+        if !self.laying_out && self.layout_at.is_none() && self.pages > 0 && self.cache.request(self.target) {
+            self.worker.send(Command::Page { generation: self.cache.generation, number: self.target });
+        }
+    }
+    fn contrast(&self) -> i32 {
+        Typography::CONTRAST.clamp(self.settings.typography.contrast)
+    }
     /// Lays the book out again (debounced) for new text settings.
     fn relayout(&mut self) {
         self.koreader_answer(koreader::Answer::Stay, None);
@@ -1916,6 +1952,7 @@ impl Reader {
             }
             Overlay::Text(sheet) => {
                 let before = sheet.visual_state();
+                let typography = self.settings.typography.clone();
                 let event = sheet.on_gesture(&g, &mut self.settings.typography);
                 if event.is_some() || sheet.visual_state() != before {
                     cx.redraw();
@@ -1931,7 +1968,7 @@ impl Reader {
                             &self.settings.typography.font,
                         )))
                     }
-                    Some(TextEvent::Changed) => self.changed(),
+                    Some(TextEvent::Changed) => self.text_changed(&typography),
                     None => {}
                 }
             }
@@ -2361,10 +2398,11 @@ impl Screen for Reader {
         if let Overlay::Lookup(lookup) = &mut self.overlay { lookup.on_idle(text) } else { false }
     }
     fn on_tick(&mut self, cx: &mut EventCx) -> Action {
+        let typography = self.settings.typography.clone();
         if let Overlay::Text(s) = &mut self.overlay
             && s.on_tick(cx.now, &mut self.settings.typography)
         {
-            self.changed();
+            self.text_changed(&typography);
             cx.redraw();
         }
         if let Overlay::Layout(view) = &mut self.overlay
@@ -2619,6 +2657,7 @@ mod tests {
             offset: None,
             images: false,
             annotation_revision: 0,
+            contrast: 0,
             annotations: vec![],
             painted: vec![],
             links: vec![],
@@ -4172,6 +4211,7 @@ mod tests {
                 offset: None,
                 images: false,
                 annotation_revision: 0,
+                contrast: 0,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -4251,6 +4291,7 @@ mod tests {
                 offset: None,
                 images: false,
                 annotation_revision: 0,
+                contrast: 0,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -4395,6 +4436,7 @@ mod tests {
                     offset: None,
                     images: false,
                     annotation_revision: 0,
+                    contrast: 0,
                     annotations: vec![],
                     painted: vec![],
                     links: vec![],
@@ -4488,6 +4530,7 @@ mod tests {
                 offset: None,
                 images: false,
                 annotation_revision: 0,
+                contrast: 0,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -4653,6 +4696,7 @@ mod tests {
                 offset: None,
                 images: false,
                 annotation_revision: 0,
+                contrast: 0,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -5535,6 +5579,40 @@ mod tests {
         };
         r.on_tick(&mut cx);
         assert!(needs_redraw, "held stepper tick updates visible font size");
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn contrast_draws_the_page_again_in_the_same_layout() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("contrast-redraw");
+        r.pages = 20;
+        r.laying_out = false;
+        r.target = 3;
+        r.shown = Some(test_page(1, 3));
+        r.cache.insert(test_page(1, 4), 3);
+        r.text(&theme);
+        let more = crate::geom::Point::new(
+            r.screen.w - theme.margin - 4,
+            r.screen.bottom() - theme.mm(TextSheet::HEIGHT_MM) + theme.mm(13.0) + 3 * theme.mm(11.5) + theme.mm(5.5),
+        );
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(more), cx);
+            r.on_gesture(Gesture::Tap(more), cx);
+        });
+        assert_eq!(r.settings.typography.contrast, Typography::CONTRAST.step);
+        assert!(r.layout_at.is_none() && !r.laying_out, "no layout");
+        assert_eq!(r.cache.generation, 1);
+        assert!(r.cache.get(4).is_none(), "pages drawn at the old contrast are dropped");
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(matches!(sent.as_slice(), [Command::Contrast(1), Command::Page { generation: 1, number: 3 }]));
+        // A page drawn before the change is asked for again, not shown.
+        test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 3)), cx));
+        assert_eq!(r.shown.as_ref().unwrap().contrast, 0);
+        let mut page = (*test_page(1, 3)).clone();
+        page.contrast = 1;
+        test_cx(&theme, |cx| r.receive(Reply::Page(Arc::new(page)), cx));
+        assert_eq!(r.shown.as_ref().unwrap().contrast, 1);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
     }
 }

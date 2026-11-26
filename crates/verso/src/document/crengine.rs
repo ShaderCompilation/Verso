@@ -213,6 +213,7 @@ impl CreEngine {
             height: layout.height,
             known_progress: None,
             counted: false,
+            contrast: 0,
         };
         let css = cstr(&self.paths.engine_data.join("epub.css"))?;
         let face = CString::new(self.paths.font_face.as_str())?;
@@ -283,6 +284,8 @@ pub struct CreDocument {
     /// The engine has its table of text offsets (built on first use, about
     /// 45–70 ms for a 1200-page book, dropped by a re-layout).
     counted: bool,
+    /// The `Typography::contrast` pages are drawn with.
+    contrast: i32,
 }
 
 impl CreDocument {
@@ -533,8 +536,20 @@ impl Document for CreDocument {
         let rc = unsafe { sys::verso_cre_typography(self.raw, &settings) };
         anyhow::ensure!(rc == 0, "couldn't apply text settings");
         self.counted = false;
+        self.contrast = t.contrast;
         log::info!("typography applied in {:?}", started.elapsed());
         Ok(())
+    }
+
+    fn set_contrast(&mut self, contrast: i32) {
+        let contrast = Typography::CONTRAST.clamp(contrast);
+        if unsafe { sys::verso_cre_gamma(GAMMA_NONE + contrast) } == 0 {
+            self.contrast = contrast;
+        }
+    }
+
+    fn contrast(&self) -> i32 {
+        self.contrast
     }
 
     fn page_count(&mut self) -> usize {

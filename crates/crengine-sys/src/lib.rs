@@ -146,6 +146,7 @@ unsafe extern "C" {
     pub fn verso_cre_text_offset(doc: *mut VersoCreDoc, position: *const c_char) -> std::os::raw::c_longlong;
     pub fn verso_cre_text_length(doc: *mut VersoCreDoc) -> std::os::raw::c_longlong;
     pub fn verso_cre_typography(doc: *mut VersoCreDoc, t: *const VersoCreTypography) -> c_int;
+    pub fn verso_cre_gamma(gamma_index: c_int) -> c_int;
     pub fn verso_cre_toc_count(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_toc_entry(
         doc: *mut VersoCreDoc,

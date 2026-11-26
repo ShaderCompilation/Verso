@@ -178,6 +178,9 @@ long long verso_cre_text_length(VersoCreDoc *doc);
 /* Applies text settings; after loading, lays the book out again (when they
  * change it) and keeps the reading position. Returns 0 on success. */
 int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t);
+/* Sets only the glyph gamma (see VersoCreTypography::gamma_index): the next
+ * draw shows it, with no new layout. Global, like the gamma in typography. */
+int verso_cre_gamma(int gamma_index);
 int verso_cre_toc_count(VersoCreDoc *doc);
 int verso_cre_toc_entry(VersoCreDoc *doc, int index, int field, char *buf, int len);
 int verso_cre_images(VersoCreDoc *doc);

@@ -202,6 +202,8 @@ pub struct Page {
     pub offset: Option<u64>,
     pub images: bool,
     pub annotation_revision: u64,
+    /// The `Typography::contrast` it was drawn with.
+    pub contrast: i32,
     /// Highlights on the page as (highlight number, rectangles). The number
     /// counts highlights only, in saved order (`annotations::State::highlight`),
     /// so adding or removing a page bookmark leaves cached pages valid.
@@ -346,6 +348,9 @@ pub enum Command {
         generation: u64,
         number: usize,
     },
+    /// Draws the following pages at this `Typography::contrast`, in the
+    /// same layout and generation.
+    Contrast(i32),
     /// Replies with `Jumped` carrying `jump`, whatever page holds the position.
     Position {
         generation: u64,
@@ -697,6 +702,12 @@ impl Worker {
                                         Ok(()) => search = Some((request, Instant::now(), Instant::now(), 0)),
                                         Err(e) => send(Reply::Search { request, result: Err(format!("{e:#}")) }),
                                     }
+                                }
+                                return Ok(());
+                            }
+                            Command::Contrast(contrast) => {
+                                if let Some(d) = &mut doc {
+                                    d.set_contrast(contrast);
                                 }
                                 return Ok(());
                             }
@@ -1077,6 +1088,7 @@ fn render(
         offset: info.offset,
         images: info.has_images,
         annotation_revision: revision,
+        contrast: d.contrast(),
         painted,
         annotations: geometry,
         links: info.links,

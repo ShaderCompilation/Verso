@@ -284,6 +284,11 @@ pub trait Document {
     fn toc(&mut self) -> Result<Vec<TocEntry>>;
     fn metadata(&mut self) -> Metadata;
     fn set_typography(&mut self, t: &Typography, dpi: u32, layout: &PageLayout) -> Result<()>;
+    /// Sets only `Typography::contrast`: pages draw lighter or darker in the
+    /// same layout.
+    fn set_contrast(&mut self, contrast: i32);
+    /// The contrast pages are drawn with now.
+    fn contrast(&self) -> i32;
 
     fn page_count(&mut self) -> usize;
     /// 0-based.
@@ -415,7 +420,8 @@ mod tests {
         doc.set_typography(&base, 150, &PageLayout::default()).unwrap();
         doc.draw(&mut buf, 600).unwrap();
         assert_ne!(left, buf, "justification changes rendering");
-        // Every other text setting reaches the engine; contrast only redraws.
+        // Every other text setting reaches the engine; contrast only redraws,
+        // set on its own.
         let justified = buf.clone();
         let page_count = doc.page_count();
         for changed in [
@@ -426,7 +432,11 @@ mod tests {
             Typography { paragraphs: Paragraphs::Spaced, ..base.clone() },
             Typography { hyphenate: false, ..base.clone() },
         ] {
-            doc.set_typography(&changed, 150, &PageLayout::default()).unwrap();
+            if changed.contrast != 0 {
+                doc.set_contrast(changed.contrast);
+            } else {
+                doc.set_typography(&changed, 150, &PageLayout::default()).unwrap();
+            }
             doc.go_to_position(&position).unwrap();
             doc.draw(&mut buf, 600).unwrap();
             assert_ne!(justified, buf, "{changed:?} changes the page");
