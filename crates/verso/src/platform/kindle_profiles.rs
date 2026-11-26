@@ -72,12 +72,15 @@ pub const PROFILES: &[Profile] = &[
         WhiteWarm,
         Mtk,
     ),
-    profile(
-        &[0xE29, 0xE24, 0xE2B, 0xE26, 0xE22, 0xC9F, 0xE27, 0xE5B, 0xE46, 0x10A6, 0x10A5, 0x11D7],
-        "Kindle Colorsoft (2024)",
-        WhiteWarm,
-        Mtk,
-    ),
+    Profile {
+        tested: true,
+        ..profile(
+            &[0xE29, 0xE24, 0xE2B, 0xE26, 0xE22, 0xC9F, 0xE27, 0xE5B, 0xE46, 0x10A6, 0x10A5, 0x11D7],
+            "Kindle Colorsoft (2024)",
+            WhiteWarm,
+            Mtk,
+        )
+    },
     profile(&[0x84D, 0x8BB, 0x86A, 0x958, 0x957, 0x7F1, 0x84C], "Kindle Basic 4 (2022)", White, Mtk),
     profile(&[0xE85, 0xE86, 0xE84, 0xE83, 0x2909, 0xE82, 0xE75], "Kindle Basic 5 (2024)", White, Mtk),
     profile(&[0x8F2, 0x974, 0x8C3, 0x847, 0x975, 0x874, 0x875, 0x8E0], "Kindle Scribe (2022)", WhiteWarm, Mtk),
@@ -229,9 +232,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_paperwhite_6_is_tested() {
+    fn only_the_paperwhite_6_and_colorsoft_are_tested() {
         let tested: Vec<_> = PROFILES.iter().filter(|p| p.tested).map(|p| p.model).collect();
-        assert_eq!(tested, ["Kindle Paperwhite 6 (2024)"]);
+        assert_eq!(tested, ["Kindle Paperwhite 6 (2024)", "Kindle Colorsoft (2024)"]);
         let pw6 = model(lookup(0xC89), 0xC89, "PaperWhite 6");
         assert!(!pw6.untested);
         assert_eq!(pw6.light_range, LightRange { brightness: 24, warmth: 24 });
