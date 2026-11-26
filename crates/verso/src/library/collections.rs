@@ -135,7 +135,7 @@ impl Collections {
             None => Some(&self.roots),
         };
         let mut paths: Vec<_> = paths.into_iter().flatten().cloned().collect();
-        paths.sort_by_cached_key(|p| (name(p).to_lowercase(), p.clone()));
+        paths.sort_by_cached_key(|p| (super::sort::Natural::new(&name(p)), p.clone()));
         paths
     }
 
@@ -290,6 +290,17 @@ mod tests {
         let moved = Collections::from_index(&index, &roots);
         assert_eq!(moved.folders[Path::new("/b")].count, 2);
         assert!(!moved.folders.contains_key(Path::new("/a/Fiction")));
+        // Folder names compare naturally, ignoring case.
+        let numbered = LibraryIndex {
+            books: ["/n/Vol 10/a.epub", "/n/vol 2/b.epub", "/n/Vol 1/c.epub"]
+                .iter()
+                .enumerate()
+                .map(|(i, p)| crate::library::Book { path: p.into(), ..book(i) })
+                .collect(),
+            ..Default::default()
+        };
+        let tree = Collections::from_index(&numbered, &["/n".into()]);
+        assert_eq!(tree.children(Some(Path::new("/n"))), ["/n/Vol 1", "/n/vol 2", "/n/Vol 10"].map(PathBuf::from));
     }
 
     #[test]

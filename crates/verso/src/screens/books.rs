@@ -12,6 +12,7 @@ use crate::library::{
     home::Summary,
     previews::Previews,
     search::{self, Scope, SearchCache},
+    sort::{self, Ranks, Sort},
     worker::{LISTED_STATES, Snapshot, WarmRequest, WarmResult, WarmTile, Worker as LibraryWorker},
 };
 use crate::page_layout::PageLayout;
@@ -186,6 +187,10 @@ pub struct Books {
     previews: Previews,
     /// What folder tiles show; changes when Settings closes.
     folder_preview: FolderPreview,
+    /// The order of books in the library and search.
+    sort: Sort,
+    /// Every book's key in `sort`; cleared with preview picks.
+    sort_keys: sort::Keys,
     folders: Vec<PathBuf>,
     navigation: Navigation,
     /// Navigation changed since it was last sent to the writer; see `persist_navigation`.
@@ -392,6 +397,8 @@ impl Books {
             collections: Arc::default(),
             previews: Previews::default(),
             folder_preview: settings.folder_preview,
+            sort: settings.library_sort,
+            sort_keys: sort::Keys::default(),
             folders: Vec::new(),
             navigation,
             navigation_unsaved: false,
@@ -622,12 +629,12 @@ impl Books {
         self.new_folder.enabled = self.navigation.folder.as_deref().is_some_and(|p| self.folder_creatable(p));
         self.folders =
             if in_library { self.collections.children(self.navigation.folder.as_deref()) } else { Vec::new() };
+        let ranks = self.sort_ranks();
         let folder = self.navigation.folder.as_ref().and_then(|p| self.collections.folders.get(p));
-        self.books = self
-            .index
-            .books
-            .iter()
-            .filter(|b| {
+        let books = &self.index.books;
+        let mut shown: Vec<usize> = (0..books.len())
+            .filter(|&i| {
+                let b = &books[i];
                 b.available
                     && if let Some(search) = &self.search {
                         search.cache.matches(b, &search.folded, &search.scope)
@@ -635,8 +642,9 @@ impl Books {
                         folder.is_some_and(|f| f.books.contains(collections::normalize_cow(&b.path).as_ref()))
                     }
             })
-            .cloned()
             .collect();
+        sort::order_by_keys(books, self.sort_keys.get(books, self.sort, &ranks), &mut shown);
+        self.books = shown.into_iter().map(|i| books[i].clone()).collect();
         // Only shown books need a state, for their reading status.
         // Folder-only views read none.
         let states_started = std::time::Instant::now();
@@ -645,7 +653,6 @@ impl Books {
             "startup stage: cached states reads={reads} listed={listed} elapsed_us={}",
             states_started.elapsed().as_micros()
         );
-        library::sort_books(&mut self.books);
         // The resume card lives on Home only; Library and Search are plain grids.
         self.continue_id = None;
         self.continue_rect = Rect::default();
@@ -867,11 +874,24 @@ impl Books {
         self.previews.update(&self.index, &self.collections, &folders);
         log::debug!("folder previews: {} folders in {:?}", folders.len(), started.elapsed());
     }
-    /// Every new index or folder list goes through here, so preview picks,
-    /// which hold index positions, never outlive their index.
+    /// The opened order when the sort needs it (Recently read), read on first
+    /// need as folder previews read it.
+    fn sort_ranks(&mut self) -> Arc<Ranks> {
+        if self.sort != Sort::RecentlyRead {
+            return Arc::default();
+        }
+        if !self.previews.has_order() {
+            let opened = self.store.opened().unwrap_or_default();
+            self.previews.set_order(&opened);
+        }
+        self.previews.ranks().unwrap_or_default()
+    }
+    /// Every new index or folder list goes through here, so preview picks and
+    /// sort keys, which hold index positions, never outlive their index.
     fn rebuild_collections(&mut self) {
         self.collections = Arc::new(Collections::from_index(&self.index, &self.roots));
         self.previews.index_changed();
+        self.sort_keys.clear();
     }
     /// Takes a hierarchy the worker built for the index just applied, unless
     /// the folder list changed since or edits were replayed over that index.
@@ -881,6 +901,7 @@ impl Books {
             Some((roots, collections)) if roots == self.roots && !replayed => {
                 self.collections = collections;
                 self.previews.index_changed();
+                self.sort_keys.clear();
                 true
             }
             _ => {
@@ -1116,6 +1137,17 @@ impl Books {
             // Picks don't depend on the mode; each mode shows a prefix.
             self.thumbnails.clear();
             if !self.is_home() {
+                self.refresh(cx.theme);
+                cx.refresh(self.screen, RefreshMode::Full);
+            }
+        }
+        if settings.library_sort != self.sort {
+            log::info!("library sort: {:?}", settings.library_sort);
+            self.sort = settings.library_sort;
+            self.warm_seq = self.warm_seq.wrapping_add(1);
+            if self.is_home() {
+                self.warm_due = true;
+            } else {
                 self.refresh(cx.theme);
                 cx.refresh(self.screen, RefreshMode::Full);
             }
@@ -1486,6 +1518,7 @@ impl Books {
             folder_preview: self.folder_preview,
             need_states: !self.states_loaded,
             known_ranks: self.previews.ranks(),
+            sort: self.sort,
         });
     }
     /// Absorbs the worker's off-thread warm-up result on the UI thread without
@@ -6784,7 +6817,7 @@ mod tests {
                         "{w}x{h}: cover {cover:?} half above the keyboard ({keyboard})"
                     );
                 }
-                let titles: Vec<_> = books.books.iter().map(|b| b.metadata.title.to_lowercase()).collect();
+                let titles: Vec<_> = books.books.iter().map(|b| sort::Natural::new(&b.metadata.title)).collect();
                 assert!(titles.is_sorted(), "{w}x{h}: fixed Title order");
             });
             books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));

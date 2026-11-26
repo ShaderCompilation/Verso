@@ -5,7 +5,8 @@
 //! thumbnails (`covers`), builds the folder hierarchy (`collections`) and runs
 //! off-thread Home/Library warm-up (`home`, `previews`). Each book keeps a
 //! stable `id` (preserved across moves), an `annotation_id` (content-based),
-//! and `legacy_id` for state lookup; `search` filters cached metadata in memory.
+//! and `legacy_id` for state lookup; `search` filters cached metadata in memory
+//! and `sort` orders books.
 
 pub mod collections;
 pub mod covers;
@@ -16,6 +17,7 @@ pub mod home;
 pub mod language;
 pub mod previews;
 pub mod search;
+pub mod sort;
 pub mod worker;
 
 use serde::{Deserialize, Serialize};
@@ -360,44 +362,6 @@ fn assign_ids(books: &mut [Book], previous: &[Book]) {
     }
 }
 
-fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering {
-    if a.is_ascii() && b.is_ascii() {
-        a.bytes().map(|c| c.to_ascii_lowercase()).cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
-    } else {
-        a.to_lowercase().cmp(&b.to_lowercase())
-    }
-}
-
-/// Total order for books: title (case-insensitive), then author, then path.
-pub fn compare_books(a: &Book, b: &Book) -> std::cmp::Ordering {
-    cmp_ci(&a.metadata.title, &b.metadata.title)
-        .then_with(|| cmp_ci(&a.metadata.authors, &b.metadata.authors))
-        .then_with(|| a.path.cmp(&b.path))
-}
-
-/// The slice `start..end` of `indices` once ordered by title, without cloning
-/// books or sorting items outside the page.
-pub fn select_page_indices(books: &[Book], mut indices: Vec<usize>, start: usize, end: usize) -> Vec<usize> {
-    if start >= indices.len() || start >= end {
-        return Vec::new();
-    }
-    let end = end.min(indices.len());
-    let cmp = |&a: &usize, &b: &usize| compare_books(&books[a], &books[b]);
-    if end < indices.len() {
-        indices.select_nth_unstable_by(end - 1, cmp);
-        indices.truncate(end);
-    }
-    if start > 0 {
-        indices.select_nth_unstable_by(start, cmp);
-    }
-    indices[start..end].sort_by(cmp);
-    indices[start..end].to_vec()
-}
-
-pub fn sort_books(books: &mut [Book]) {
-    books.sort_by_cached_key(|b| (b.metadata.title.to_lowercase(), b.metadata.authors.to_lowercase(), b.path.clone()));
-}
-
 #[cfg(test)]
 pub(crate) mod selection_tests {
     use super::*;
@@ -415,40 +379,6 @@ pub(crate) mod selection_tests {
             cover: Cover::Pending,
             available: true,
             metadata_pending: false,
-        }
-    }
-    #[test]
-    fn deterministic_sorting() {
-        let mut books: Vec<_> = (0..4).map(book).collect();
-        books[0].metadata.title = "beta".into();
-        books[1].metadata.title = "Alpha".into();
-        books[2].metadata.title = "alpha".into();
-        books[1].metadata.authors = "Zed".into();
-        books[2].metadata.authors = "ann".into();
-        sort_books(&mut books);
-        assert_eq!(books.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["2", "1", "0", "3"]);
-    }
-    #[test]
-    fn select_page_indices_matches_full_sort() {
-        let mut books: Vec<_> = (0..25).map(book).collect();
-        books[0].metadata.title = "beta".into();
-        books[1].metadata.title = "Alpha".into();
-        books[2].metadata.title = "alpha".into();
-        books[3].metadata.title = "Война и мир".into();
-        books[4].metadata.title = "война и мир".into();
-        books[1].metadata.authors = "Zed".into();
-        books[2].metadata.authors = "ann".into();
-        books[3].metadata.authors = "Толстой".into();
-        books[5].stamp = books[6].stamp.clone();
-        books[5].metadata.title = books[6].metadata.title.clone();
-        let mut full = books.clone();
-        sort_books(&mut full);
-        let full_ids: Vec<&str> = full.iter().map(|b| b.id.as_str()).collect();
-        for (start, end) in [(0, 8), (8, 16), (16, 24), (24, 32), (3, 11), (0, 25), (30, 38)] {
-            let picked = select_page_indices(&books, (0..books.len()).collect(), start, end);
-            let picked_ids: Vec<&str> = picked.iter().map(|&i| books[i].id.as_str()).collect();
-            let expected = &full_ids[start.min(full_ids.len())..end.min(full_ids.len())];
-            assert_eq!(picked_ids, expected, "{start}..{end}");
         }
     }
 }

@@ -4,6 +4,7 @@
 use super::collections::{self, Collections, Navigation};
 use super::home::Summary;
 use super::previews;
+use super::sort::{self, Sort};
 use super::{Book, Cover, LibraryIndex, Metadata, PathChange, Stamp, assign_ids, covers, epub};
 use crate::platform::Waker;
 use crate::store::{BookState, FolderPreview, Store, book_id};
@@ -60,6 +61,8 @@ pub struct WarmRequest {
     pub need_states: bool,
     /// Already-loaded `opened.json` preview ranks, if any.
     pub known_ranks: Option<Arc<HashMap<String, u32>>>,
+    /// The order of the folder's books.
+    pub sort: Sort,
 }
 
 /// One tile on the prepared browsing page: only what the UI needs to compute
@@ -845,8 +848,12 @@ impl Background {
 
         let page_folders_end = end.min(folders.len());
         let page_folders = if start < page_folders_end { &folders[start..page_folders_end] } else { &[] };
+        let b_start = start.saturating_sub(folders.len());
+        let b_end = end.saturating_sub(folders.len());
+        let previews = request.folder_preview != FolderPreview::Icon && !page_folders.is_empty();
         let mut opened_ranks = None;
-        let ranks_for_picks = if request.folder_preview != FolderPreview::Icon && !page_folders.is_empty() {
+        // Recently read needs the opened order even when folders show icons.
+        let ranks = if previews || (request.sort == Sort::RecentlyRead && b_start < b_end) {
             if let Some(known) = request.known_ranks {
                 Some(known)
             } else {
@@ -861,6 +868,7 @@ impl Background {
         } else {
             None
         };
+        let ranks_for_picks = ranks.as_ref().filter(|_| previews);
 
         let shared_names: HashSet<String> = if navigation.folder.is_none() && !page_folders.is_empty() {
             let mut seen = HashSet::new();
@@ -884,10 +892,9 @@ impl Background {
             tiles.push(WarmTile::Folder { parent_line, picks });
         }
 
-        let b_start = start.saturating_sub(folders.len());
-        let b_end = end.saturating_sub(folders.len());
         if b_start < b_end {
-            let selected = super::select_page_indices(&self.index.books, book_indices, b_start, b_end);
+            let ranks = ranks.unwrap_or_default();
+            let selected = sort::select_page(&self.index.books, book_indices, b_start, b_end, request.sort, &ranks);
             for i in selected {
                 let book = &self.index.books[i];
                 tiles.push(WarmTile::Book { id: book.id.clone(), cover: book.cover.clone() });

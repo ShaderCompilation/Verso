@@ -7,6 +7,7 @@ use caseless::Caseless;
 use unicode_normalization::UnicodeNormalization;
 
 use super::collections::normalize;
+use super::sort::{self, Ranks, Sort};
 use super::{Book, LibraryIndex};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -90,7 +91,8 @@ impl SearchCache {
 
 /// Explicit opt-in diagnostic: runs before opening a platform or book engine.
 /// Emits aggregate timings only; never emits paths, metadata or query text.
-pub fn benchmark(index: &LibraryIndex) -> serde_json::Value {
+/// `ranks` is the opened order, for Recently read.
+pub fn benchmark(index: &LibraryIndex, ranks: &Ranks) -> serde_json::Value {
     use std::time::Instant;
     fn rss() -> Option<u64> {
         std::fs::read_to_string("/proc/self/status")
@@ -122,10 +124,42 @@ pub fn benchmark(index: &LibraryIndex) -> serde_json::Value {
             let selected: Vec<_> = index.books.iter().filter(|b| cache.matches(b, &query, &Scope::All)).collect();
             matching.push(started.elapsed().as_secs_f64() * 1000.0);
             let mut books: Vec<_> = selected.into_iter().cloned().collect();
-            super::sort_books(&mut books);
+            sort::sort_books(&mut books, Sort::Title, ranks);
             std::hint::black_box(books);
             preparation.push(started.elapsed().as_secs_f64() * 1000.0);
         }
+    }
+    // Each sort over every book: building the kept keys, as a new index or
+    // sort does; the whole order from them, as opening a folder does; and one
+    // 12-book page, as the warm-up picks it.
+    let all: Vec<usize> = (0..index.books.len()).filter(|&i| index.books[i].available).collect();
+    let ranks = std::sync::Arc::new(ranks.clone());
+    let mut sorts = serde_json::Map::new();
+    for sort in Sort::ALL {
+        let (mut building, mut ordering, mut paging) = (Vec::new(), Vec::new(), Vec::new());
+        for round in 0..16 {
+            let mut keys = sort::Keys::default();
+            let started = Instant::now();
+            keys.get(&index.books, sort, &ranks);
+            building.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            let mut order = all.clone();
+            sort::order_by_keys(&index.books, keys.get(&index.books, sort, &ranks), &mut order);
+            std::hint::black_box(order);
+            ordering.push(started.elapsed().as_secs_f64() * 1000.0);
+            let start = (round * 12 * 37) % all.len().max(1);
+            let started = Instant::now();
+            std::hint::black_box(sort::select_page(&index.books, all.clone(), start, start + 12, sort, &ranks));
+            paging.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        sorts.insert(
+            format!("{sort:?}"),
+            serde_json::json!({
+                "keys_p50_ms": percentile(&mut building, 50), "keys_p95_ms": percentile(&mut building, 95),
+                "order_p50_ms": percentile(&mut ordering, 50), "order_p95_ms": percentile(&mut ordering, 95),
+                "page_p50_ms": percentile(&mut paging, 50), "page_p95_ms": percentile(&mut paging, 95),
+            }),
+        );
     }
     serde_json::json!({
         "books": cache.entries.len(), "cache_ms": cache_ms, "folded_text_bytes": bytes,
@@ -134,6 +168,7 @@ pub fn benchmark(index: &LibraryIndex) -> serde_json::Value {
         "matching_p95_ms": percentile(&mut matching,95),
         "preparation_p50_ms": percentile(&mut preparation,50),
         "preparation_p95_ms": percentile(&mut preparation,95),
+        "sorts": sorts,
     })
 }
 

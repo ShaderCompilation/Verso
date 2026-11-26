@@ -66,6 +66,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// How folder tiles in Collections look. Older files read as Covers.
     pub folder_preview: FolderPreview,
+    /// The order of books in the library and search.
+    pub library_sort: crate::library::sort::Sort,
     /// Untested Kindle models whose notice was dismissed
     /// (`DeviceModel::key`), so it shows once per model.
     pub untested_seen: Vec<String>,
@@ -109,6 +111,7 @@ impl Default for Settings {
             text_shaping: TextShaping::default(),
             check_updates: true,
             folder_preview: FolderPreview::default(),
+            library_sort: Default::default(),
             untested_seen: Vec::new(),
             koreader_progress: true,
             dictionary_expanded: true,

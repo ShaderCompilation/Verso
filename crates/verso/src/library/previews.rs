@@ -71,8 +71,9 @@ impl Opened {
     }
 }
 
-/// Same order as the Title sort: title, then author, then path, ignoring
-/// case. Compared without allocating, because most candidates lose early.
+/// Previews' own order for books never opened: title, then author, then
+/// path, ignoring case, whatever the library's sort. Compared without
+/// allocating, because most candidates lose early.
 pub fn title_order(a: &Book, b: &Book) -> Ordering {
     fn folded(a: &str, b: &str) -> Ordering {
         a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
@@ -267,7 +268,8 @@ pub fn benchmark(store: &crate::store::Store, index: &LibraryIndex, roots: &[Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::{selection_tests::book, sort_books};
+    use crate::library::selection_tests::book;
+    use crate::library::sort::{Sort, sort_books};
 
     fn ids(index: &LibraryIndex, picks: &[usize]) -> Vec<String> {
         picks.iter().map(|&i| index.books[i].id.clone()).collect()
@@ -307,7 +309,7 @@ mod tests {
         assert_eq!(ids(&index, &pick(&index, &tree, folder, &ranks)), ["3", "1", "4", "2"]);
         // Title order is case-insensitive.
         let mut direct: Vec<_> = index.books[1..=4].iter().filter(|b| b.id != "3").cloned().collect();
-        sort_books(&mut direct);
+        sort_books(&mut direct, Sort::Title, &HashMap::new());
         assert_eq!(direct.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["4", "2", "1"]);
         // Only books inside the folder count.
         let sub = pick(&index, &tree, Path::new("/b/F/Sub"), &ranks);

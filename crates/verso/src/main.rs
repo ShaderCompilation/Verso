@@ -216,7 +216,9 @@ fn unsupported(e: anyhow::Error) -> Result<i32> {
 /// Runs Verso; the exit code for the launcher (0, or one a screen asked for).
 fn run() -> Result<i32> {
     if std::env::var("VERSO_SEARCH_BENCH").as_deref() == Ok("1") {
-        println!("{}", library::search::benchmark(&store::Store::new().library()));
+        let store = store::Store::new();
+        let ranks = store.opened().unwrap_or_default().ranks();
+        println!("{}", library::search::benchmark(&store.library(), &ranks));
         return Ok(0);
     }
     if std::env::var("VERSO_PREVIEW_BENCH").as_deref() == Ok("1") {
