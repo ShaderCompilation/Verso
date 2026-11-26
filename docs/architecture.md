@@ -98,7 +98,7 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
 | `verso-dictionary` | `Store::dictionary_service` (`OnceLock`, lazy) | **Sole owner** of StarDict indexes/definitions, `dictionaries.json` writes, `.vwf` mmaps and Hunspell handles (with `malloc_trim(0)` on release). |
 | `verso-annotations` | Per open `Reader` | Checks KOReader `.sdr` mtime before hashing, computes SHA-256 book fingerprint, loads/commits immutable annotation records + manifest, KOReader highlight import and Markdown export. |
 | `verso-position` | Per open `Reader` | Single ordered FIFO writing `books/<id>.json` (`Presented`, `Status`, `Language`, `Seen`), `reading-speed.json` and syncing `home.json`/`opened.json`. |
-| `verso-navigation` | `Books` | Coalescing async writer for `library-navigation.json` so FUSE fsyncs never stall UI turns. |
+| `verso-navigation` | `Books` | Coalescing async writer for `library-navigation.json` and the library sort choice (`library_sort` in `settings.json`, serialized with other settings writers through `Store::update_settings`), queued after the frame presents, so FUSE fsyncs never stall UI turns. |
 | `verso-net` | `App` (`DrawerWorker`, lazy) | Runs `lipc` Wi-Fi toggles and SSH start/stop off the UI thread. |
 | `transfer` / `web-*` | `transfer::Session` | Active only while Wi-Fi transfer is open: HTTP server (≤8 connection threads), firewall port 80, `verso-mdns`, 10-minute idle stop, 60 s sleep-timeout refresh. |
 | `update-check` / `update-wake` / `update-download` | `update::Updates` | One-shot HTTPS manifest check (`ureq` + `rustls`; after a wake, a due one waits up to 2 min for Wi-Fi), archive download, hash/signature check and staging. |
