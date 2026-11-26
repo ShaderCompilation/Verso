@@ -239,10 +239,11 @@ footer a { color: inherit; }
       <p id="books-readonly" class="readonly-note" hidden></p>
       <div id="book-drop" class="drop">
         <div class="drop-main">
-          <span>Drop EPUBs here, or</span>
+          <span>Drop books here, or</span>
           <button type="button" class="primary" id="book-pick">Choose files</button>
-          <input type="file" id="book-input" multiple hidden>
+          <input type="file" id="book-input" accept=".epub,.md,.markdown" multiple hidden>
         </div>
+        <p class="drop-hint">Accepts .epub, .md, and .markdown files.</p>
         <div class="drop-dest">
           <label for="book-folder">Save to:</label>
           <select id="book-folder"></select>
@@ -903,6 +904,13 @@ $("mkdir-form").addEventListener("submit", async (event) => {
 });
 
 // Upload queue (XMLHttpRequest for progress; raw body PUT)
+function bookFormat(name) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".epub")) return "epub";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  return null;
+}
+
 function queueFiles(fileList) {
   if (booksLocked) return;
   const folder = $("book-folder").value;
@@ -911,8 +919,8 @@ function queueFiles(fileList) {
     return;
   }
   for (const file of fileList) {
-    if (!file.name.toLowerCase().endsWith(".epub")) {
-      addNotice(file.name + ": only EPUB books can be added here. Use the Files tab for other files.", true);
+    if (!bookFormat(file.name)) {
+      addNotice(file.name + ": only EPUB and Markdown books can be added here. Use the Files tab for other files.", true);
       continue;
     }
     uploadQueue.push({ file, folder });
@@ -1002,7 +1010,7 @@ async function runNextUpload() {
     return;
   }
   if (result.status === 200) {
-    if (!(await hasZipHeader(item.file))) {
+    if (bookFormat(item.file.name) === "epub" && !(await hasZipHeader(item.file))) {
       addNotice(item.file.name + ": This file isn't a valid EPUB. Use the Files tab for other files.", true);
       runNextUpload();
       return;
@@ -1075,7 +1083,7 @@ drop.addEventListener("drop", (ev) => {
 function askDelete(book) {
   pendingDelete = { kind: "book", item: book };
   $("confirm-title").textContent = "Delete \"" + (book.title || book.filename) + "\"?";
-  $("confirm-text").textContent = "This removes the EPUB file and your reading progress from the Kindle.";
+  $("confirm-text").textContent = "This removes the book file and your reading progress from the Kindle.";
   $("confirm-backdrop").hidden = false;
   $("confirm-cancel").focus();
 }

@@ -1,8 +1,10 @@
 //! The Books tab API: list, search, upload,
-//! download, delete and New folder. Uploads check `.epub` and the zip header
-//! early, stream into a `.part` file while hashing SHA-256 in 64 KB chunks,
-//! validate with `library::epub`, resolve name clashes as `Name (2).epub`, and
-//! insert into the library worker via `PathChange::Add` without a scan pass.
+//! download, delete and New folder. Uploads accept `.epub`, `.md` and
+//! `.markdown`, check the zip header (EPUB) or NUL/UTF-8/size (Markdown) early,
+//! stream into a `.part` file while hashing SHA-256 in 64 KB chunks, validate
+//! with `library::epub` or `markdown`, resolve name clashes as
+//! `Name (2).<ext>`, and insert into the library worker via `PathChange::Add`
+//! without a scan pass.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -19,7 +21,9 @@ use super::http::{BUFFER, Body, Request, Response};
 use super::server::PartFile;
 use crate::annotations::{self, Collection, Manifest, export};
 use crate::library::collections::{self, Collections};
+use crate::library::format::BookFormat;
 use crate::library::{self, Book, Cover, LibraryIndex, PathChange, epub, files, search};
+use crate::markdown;
 use crate::store::{BookState, Store, book_id};
 
 /// Free space kept in reserve before writing an uploaded book (50 MiB).
@@ -143,7 +147,7 @@ impl Books {
         folder_param: Option<String>,
         name_param: Option<String>,
         size: u64,
-    ) -> Result<(Vec<PathBuf>, PathBuf, String), Response> {
+    ) -> Result<(Vec<PathBuf>, PathBuf, String, BookFormat), Response> {
         if let Some(locked) = self.locked() {
             return Err(locked);
         }
@@ -158,10 +162,14 @@ impl Books {
             Ok(dir) => dir,
             Err((status, msg)) => return Err(err(status, &msg)),
         };
-        let name = match sanitize_epub_name(&name_param) {
+        let name = match sanitize_book_name(&name_param) {
             Ok(name) => name,
             Err(msg) => return Err(err(400, msg)),
         };
+        let format = BookFormat::from_path(Path::new(&name)).expect("validated by sanitize_book_name");
+        if format == BookFormat::Markdown && size > markdown::MAX_BYTES as u64 {
+            return Err(err(413, "Markdown files can be at most 16 MB."));
+        }
         match (self.free_space)(&dest_dir) {
             Ok(free) if free < size.saturating_add(FREE_SPACE_RESERVE) => {
                 return Err(err(507, "Not enough free space on the Kindle (50 MB is kept in reserve)."));
@@ -172,7 +180,7 @@ impl Books {
                 return Err(err(500, "Couldn't check free space on the Kindle."));
             }
         }
-        Ok((roots, dest_dir, name))
+        Ok((roots, dest_dir, name, format))
     }
 
     /// `GET /api/books/check?folder=…&name=…&size=…`: `200` if a `PUT` with
@@ -189,20 +197,31 @@ impl Books {
 
     /// `PUT /api/books?folder=…&name=…`
     pub fn upload(&self, request: &Request, body: &mut Body<'_>) -> Response {
-        let (roots, dest_dir, name) =
+        let (roots, dest_dir, name, format) =
             match self.plan_upload(request.param("folder"), request.param("name"), request.content_length) {
                 Ok(plan) => plan,
                 Err(response) => return response,
             };
 
-        // Check the zip header before touching storage or showing a Receiving row.
+        // Check format-specific headers before touching storage or showing a Receiving row.
         let mut buf = vec![0u8; BUFFER];
-        let first_len = match read_first_chunk(body, &mut buf) {
+        let first_len = match read_first_chunk(body, &mut buf, format) {
             Ok(n) => n,
             Err(e) => return read_error(e),
         };
-        if first_len < ZIP_HEADER.len() || &buf[..ZIP_HEADER.len()] != ZIP_HEADER {
-            return err(400, "This file isn't a valid EPUB. Use the Files tab for other files.");
+        match format {
+            BookFormat::Epub => {
+                if first_len < ZIP_HEADER.len() || &buf[..ZIP_HEADER.len()] != ZIP_HEADER {
+                    return err(400, "This file isn't a valid EPUB. Use the Files tab for other files.");
+                }
+            }
+            BookFormat::Markdown => {
+                let first = &buf[..first_len];
+                let invalid_utf8 = std::str::from_utf8(first).err().is_some_and(|e| e.error_len().is_some());
+                if first.contains(&0) || invalid_utf8 {
+                    return err(400, "This file isn't valid UTF-8 Markdown. Use the Files tab for other files.");
+                }
+            }
         }
 
         let display_stem = Path::new(&name).file_stem().unwrap_or_default().to_string_lossy().into_owned();
@@ -236,13 +255,21 @@ impl Books {
             return write_error("Couldn't finish writing the book", e);
         }
 
-        // Validate the EPUB the exact same way the library scanner does.
-        let mut metadata = match epub::read_metadata(part.path()) {
+        // Validate the book the exact same way the library scanner does.
+        let metadata = match format {
+            BookFormat::Epub => {
+                epub::read_metadata(part.path()).map_err(|e| err(400, &format!("Not a valid EPUB: {e:#}")))
+            }
+            BookFormat::Markdown => {
+                markdown::read_metadata(part.path()).map_err(|e| err(400, &format!("Not a valid Markdown file: {e:#}")))
+            }
+        };
+        let mut metadata = match metadata {
             Ok(metadata) => metadata,
-            Err(e) => return err(400, &format!("Not a valid EPUB: {e:#}")),
+            Err(response) => return response,
         };
 
-        // Pick a free name (Name (2).epub on clash) and rename without overwriting.
+        // Pick a free name (Name (2).<ext> on clash) and rename without overwriting.
         let target = match finish_book_part(&mut part, &dest_dir, &name) {
             Ok(target) => target,
             Err(e) => return write_error("Couldn't save the book", e),
@@ -342,8 +369,10 @@ impl Books {
                 return err(500, "Couldn't open the book.");
             }
         };
-        let name =
-            book.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| format!("{id}.epub"));
+        let name = book.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
+            let ext = BookFormat::from_path(&book.path).map_or("epub", BookFormat::extension);
+            format!("{id}.{ext}")
+        });
         Response::file(file, len, &name)
     }
 
@@ -502,11 +531,15 @@ pub(super) fn write_error(context: &str, e: io::Error) -> Response {
     err(500, &format!("{context}: {e}"))
 }
 
-/// Reads the first chunk from `body`, looping until at least 4 bytes arrive or
-/// EOF so a split TCP write can't fail the zip header check.
-fn read_first_chunk(body: &mut Body<'_>, buf: &mut [u8]) -> io::Result<usize> {
+/// Reads the first chunk from `body`. For EPUBs, loops until at least 4 bytes
+/// arrive or EOF so a split TCP write can't fail the zip header check.
+fn read_first_chunk(body: &mut Body<'_>, buf: &mut [u8], format: BookFormat) -> io::Result<usize> {
+    let min_bytes = match format {
+        BookFormat::Epub => ZIP_HEADER.len(),
+        BookFormat::Markdown => 1,
+    };
     let mut filled = 0;
-    while filled < ZIP_HEADER.len() {
+    while filled < min_bytes {
         let n = body.read(&mut buf[filled..])?;
         if n == 0 {
             break;
@@ -534,7 +567,7 @@ pub(super) fn create_part(dir: &Path, name: &str) -> io::Result<PartFile> {
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "too many simultaneous uploads with the same name"))
 }
 
-/// Renames `part` to `name` in `dir`, or `Name (2).epub`, `Name (3).epub`, …
+/// Renames `part` to `name` in `dir`, or `Name (2).<ext>`, `Name (3).<ext>`, …
 /// on a clash (including an orphan `.sdr` sidecar), never overwriting.
 fn finish_book_part(part: &mut PartFile, dir: &Path, name: &str) -> io::Result<PathBuf> {
     let plain = dir.join(name);
@@ -599,10 +632,10 @@ fn has_hidden_or_sidecar(rel: &Path) -> bool {
     })
 }
 
-/// Checks that an uploaded book name is a safe `.epub` filename (no path
-/// separators, dotfiles or control chars; Windows-reserved punctuation is
-/// replaced so the Kindle stays readable over USB).
-pub(crate) fn sanitize_epub_name(raw: &str) -> Result<String, &'static str> {
+/// Checks that an uploaded book name is a safe `.epub`, `.md`, or `.markdown`
+/// filename (no path separators, dotfiles or control chars; Windows-reserved
+/// punctuation is replaced so the Kindle stays readable over USB).
+pub(crate) fn sanitize_book_name(raw: &str) -> Result<String, &'static str> {
     let trimmed = raw.trim();
     if trimmed.is_empty()
         || trimmed == "."
@@ -613,9 +646,8 @@ pub(crate) fn sanitize_epub_name(raw: &str) -> Result<String, &'static str> {
     {
         return Err("Invalid file name.");
     }
-    let ext_ok = Path::new(trimmed).extension().is_some_and(|e| e.eq_ignore_ascii_case("epub"));
-    if !ext_ok {
-        return Err("Only EPUB books can be added here. Use the Files tab for other files.");
+    if BookFormat::from_path(Path::new(trimmed)).is_none() {
+        return Err("Only EPUB and Markdown books can be added here. Use the Files tab for other files.");
     }
     let cleaned: String = trimmed.chars().map(|c| if WINDOWS_UNSAFE.contains(&c) { '_' } else { c }).collect();
     let stem = Path::new(&cleaned).file_stem().and_then(OsStr::to_str).unwrap_or_default().trim();
@@ -1595,24 +1627,30 @@ mod tests {
     }
 
     #[test]
-    fn validates_epub_names() {
+    fn validates_book_names() {
         for bad in [
             "",
             " ",
             ".",
             "..",
             ".hidden.epub",
+            ".hidden.md",
             "a/b.epub",
-            "a\\b.epub",
-            "a\x01b.epub",
+            "a\\b.md",
+            "a\x01b.markdown",
             "book.pdf",
             ".epub",
+            ".md",
+            ".markdown",
             "x.sdr.epub",
+            "x.sdr.md",
         ] {
-            assert!(sanitize_epub_name(bad).is_err(), "{bad:?}");
+            assert!(sanitize_book_name(bad).is_err(), "{bad:?}");
         }
-        assert_eq!(sanitize_epub_name("Dune: Messiah?.epub").unwrap(), "Dune_ Messiah_.epub");
-        assert_eq!(sanitize_epub_name("Граф Монте-Кристо.EPUB").unwrap(), "Граф Монте-Кристо.EPUB");
+        assert_eq!(sanitize_book_name("Dune: Messiah?.epub").unwrap(), "Dune_ Messiah_.epub");
+        assert_eq!(sanitize_book_name("Граф Монте-Кристо.EPUB").unwrap(), "Граф Монте-Кристо.EPUB");
+        assert_eq!(sanitize_book_name("Notes: Draft?.md").unwrap(), "Notes_ Draft_.md");
+        assert_eq!(sanitize_book_name("Заметки.MARKDOWN").unwrap(), "Заметки.MARKDOWN");
         let _ = auth::COOKIE;
     }
 
@@ -1623,11 +1661,113 @@ mod tests {
         let folder = env.library_dir.to_str().unwrap();
         let query = |name: &str, size: u64| format!("/api/books/check?folder={folder}&name={name}&size={size}");
         assert_eq!(env.json("GET", &query("Book.epub", 512), b"").0, 200);
+        assert_eq!(env.json("GET", &query("Notes.md", 512), b"").0, 200);
+        assert_eq!(env.json("GET", &query("Essay.markdown", 512), b"").0, 200);
         assert_eq!(env.json("GET", &query("Book.epub", 2048), b"").0, 507);
+        assert_eq!(env.json("GET", &query("Notes.md", 2048), b"").0, 507);
+        assert_eq!(env.json("GET", &query("Huge.md", markdown::MAX_BYTES as u64 + 1), b"").0, 413);
         assert_eq!(env.json("GET", &query("Book.pdf", 512), b"").0, 400);
         assert_eq!(env.json("GET", "/api/books/check?name=Book.epub", b"").0, 400);
         env.store.note_live_data_edit();
         let (status, body) = env.json("GET", &query("Book.epub", 512), b"");
         assert_eq!((status, body["restart"].clone()), (409, json!(true)));
+    }
+
+    #[test]
+    fn markdown_upload_validation_metadata_clash_and_download() {
+        let env = Env::new();
+        let folder = encode(env.library_dir.to_str().unwrap());
+
+        // Reject binary (NUL bytes) and invalid UTF-8 .md/.markdown uploads with 400.
+        let (status, body) = env.upload(&env.library_dir, "binary.md", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
+        assert_eq!(status, 400, "{body}");
+        assert!(!env.library_dir.join("binary.md").exists());
+        assert!(!env.library_dir.join(".verso-upload.part").exists());
+
+        let (status, body) = env.upload(&env.library_dir, "bad-utf8.markdown", b"hello \xff\xfe world");
+        assert_eq!(status, 400, "{body}");
+        assert!(!env.library_dir.join("bad-utf8.markdown").exists());
+        assert!(!env.library_dir.join(".verso-upload.part").exists());
+
+        // Invalid UTF-8 split past the first 64 KB chunk is still caught on validation and cleaned up.
+        let mut late_bad = vec![b'a'; BUFFER + 16];
+        late_bad[BUFFER + 8] = 0xff;
+        let (status, body) = env.upload(&env.library_dir, "late-bad.md", &late_bad);
+        assert_eq!(status, 400, "{body}");
+        assert!(!env.library_dir.join("late-bad.md").exists());
+        assert!(!env.library_dir.join(".verso-upload.part").exists());
+
+        // Reject oversize Markdown on both check and PUT without creating a file.
+        let oversize = markdown::MAX_BYTES + 1;
+        assert_eq!(
+            env.json("GET", &format!("/api/books/check?folder={folder}&name=Big.md&size={oversize}"), b"").0,
+            413
+        );
+        let head = format!(
+            "PUT /api/books?folder={folder}&name=Big.md HTTP/1.1\r\nHost: verso.local\r\nCookie: {}\r\nX-Verso-Request: 1\r\n",
+            env.cookie
+        );
+        let (status, _, _) = env.raw(&format!("{head}Content-Length: {oversize}\r\nConnection: close\r\n\r\n"), b"");
+        // Check response status directly via plan_upload via check_upload above; raw with mismatched body is closed cleanly.
+        assert_eq!(status, 413);
+
+        // Accept .md with frontmatter metadata extraction.
+        let md_bytes = b"---\ntitle: Field Notes\nauthor: Ada Lovelace\nlang: en\n---\n\n# Ignored\n\nBody.\n";
+        assert_eq!(
+            env.json("GET", &format!("/api/books/check?folder={folder}&name=Notes.md&size={}", md_bytes.len()), b"").0,
+            200
+        );
+        let (status, first) = env.upload(&env.library_dir, "Notes.md", md_bytes);
+        assert_eq!(status, 201, "{first}");
+        assert_eq!(first["title"], "Field Notes");
+        assert_eq!(first["author"], "Ada Lovelace");
+        assert_eq!(first["filename"], "Notes.md");
+
+        // Clash rename preserves .md extension (Notes (2).md) and respects orphan sidecars.
+        let second_bytes = b"# Second Heading\n\nSome prose.\n";
+        let (status, second) = env.upload(&env.library_dir, "Notes.md", second_bytes);
+        assert_eq!(status, 201, "{second}");
+        assert_eq!(second["filename"], "Notes (2).md");
+        assert_eq!(second["title"], "Second Heading");
+
+        std::fs::create_dir(env.library_dir.join("Notes (3).sdr")).unwrap();
+        let untitled_bytes = b"Plain prose without a heading.\n";
+        let (status, fourth) = env.upload(&env.library_dir, "Notes.md", untitled_bytes);
+        assert_eq!(status, 201, "{fourth}");
+        assert_eq!(fourth["filename"], "Notes (4).md");
+        assert_eq!(fourth["title"], "Notes (4)");
+
+        // Accept .markdown with filename-stem title fallback and preserve extension on clash + download.
+        let essay_bytes = b"Just prose in a .markdown file.\n";
+        assert_eq!(
+            env.json(
+                "GET",
+                &format!("/api/books/check?folder={folder}&name=Essay.markdown&size={}", essay_bytes.len()),
+                b""
+            )
+            .0,
+            200
+        );
+        let (status, essay1) = env.upload(&env.library_dir, "Essay.markdown", essay_bytes);
+        assert_eq!(status, 201, "{essay1}");
+        assert_eq!(essay1["title"], "Essay");
+        assert_eq!(essay1["filename"], "Essay.markdown");
+
+        let (status, essay2) = env.upload(&env.library_dir, "Essay.markdown", essay_bytes);
+        assert_eq!(status, 201, "{essay2}");
+        assert_eq!(essay2["filename"], "Essay (2).markdown");
+
+        // Download preserves filename and exact bytes for .md and .markdown.
+        let id_notes2 = second["id"].as_str().unwrap();
+        let (status, resp_head, downloaded) = env.req("GET", &format!("/api/books/{id_notes2}"), b"");
+        assert_eq!(status, 200);
+        assert_eq!(downloaded, second_bytes);
+        assert!(resp_head.contains("filename=\"Notes (2).md\""), "{resp_head}");
+
+        let id_essay = essay1["id"].as_str().unwrap();
+        let (status, resp_head, downloaded) = env.req("GET", &format!("/api/books/{id_essay}"), b"");
+        assert_eq!(status, 200);
+        assert_eq!(downloaded, essay_bytes);
+        assert!(resp_head.contains("filename=\"Essay.markdown\""), "{resp_head}");
     }
 }
