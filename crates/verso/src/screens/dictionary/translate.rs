@@ -9,7 +9,9 @@ use crate::{
     gfx::StyledBlock,
     online::{
         Answer, Error, Reply, Request, Worker,
-        translate::{Provider, Translation, check, effective_provider, languages, same_language},
+        translate::{
+            Fallback, Provider, Translation, check, deepl_fallback, effective_provider, languages, same_language,
+        },
     },
     ui::theme::{INK2, Theme},
 };
@@ -107,7 +109,7 @@ impl Translate {
                     blocks.push(plain(text.into(), t.dictionary_body, true));
                     blocks.push(StyledBlock::Gap(t.dictionary_body.line_height() / 2.0));
                 }
-                blocks.push(plain(translation.provider.service_name().into(), t.small.gray(INK2), true));
+                blocks.push(plain(attribution(translation, languages), t.small.gray(INK2), true));
                 blocks
             }
             Slot::Done(Err(e)) => {
@@ -124,6 +126,28 @@ impl Translate {
                     .service_name();
                 message(&e.title(service), &e.plain(), t)
             }
+        }
+    }
+}
+
+/// The service that answered and, when DeepL is chosen but Google answered,
+/// why: otherwise the switch goes unnoticed.
+fn attribution(translation: &Translation, l: &Languages) -> String {
+    let service = translation.provider.service_name();
+    let why = match (l.provider, translation.provider, l.target) {
+        (Provider::DeepL, Provider::Google, Some(target)) => {
+            deepl_fallback(l.deepl_api_key.as_deref(), l.source, target)
+        }
+        _ => None,
+    };
+    match why {
+        None => service.into(),
+        Some(Fallback::NoKey) => format!("{service} · No DeepL key saved"),
+        Some(Fallback::Into(language)) => {
+            format!("{service} · DeepL doesn’t translate into {}", language_name(language))
+        }
+        Some(Fallback::From(language)) => {
+            format!("{service} · DeepL doesn’t translate from {}", language_name(language))
         }
     }
 }

@@ -236,19 +236,32 @@ fn deepl_target_code(tag: &str) -> Result<&'static str, Error> {
     }
 }
 
-/// Whether DeepL supports translating into `target` (and from `source`, if
-/// chosen by hand).
-pub fn deepl_supports(source: Option<&str>, target: &str) -> bool {
-    deepl_target_code(target).is_ok() && source.is_none_or(|s| deepl_source_code(s).is_ok())
+/// Why a lookup set to DeepL goes to Google instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback<'a> {
+    NoKey,
+    /// DeepL can't translate into this language.
+    Into(&'a str),
+    /// DeepL can't translate from this language, chosen by hand.
+    From(&'a str),
+}
+
+/// What sends a DeepL lookup to Google, if anything.
+pub fn deepl_fallback<'a>(api_key: Option<&str>, source: Option<&'a str>, target: &'a str) -> Option<Fallback<'a>> {
+    if !api_key.is_some_and(|k| !k.trim().is_empty()) {
+        Some(Fallback::NoKey)
+    } else if deepl_target_code(target).is_err() {
+        Some(Fallback::Into(target))
+    } else {
+        source.filter(|s| deepl_source_code(s).is_err()).map(Fallback::From)
+    }
 }
 
 /// Which backend actually handles a request: DeepL falls back to Google when
 /// no key is stored or when DeepL doesn't support a chosen language.
 pub fn effective_provider(provider: Provider, api_key: Option<&str>, source: Option<&str>, target: &str) -> Provider {
     match provider {
-        Provider::DeepL if api_key.is_some_and(|k| !k.trim().is_empty()) && deepl_supports(source, target) => {
-            Provider::DeepL
-        }
+        Provider::DeepL if deepl_fallback(api_key, source, target).is_none() => Provider::DeepL,
         _ => Provider::Google,
     }
 }
@@ -332,11 +345,8 @@ mod tests {
         }
         for unsupported in ["af", "ka", "hi", "la", "und", "x-klingon"] {
             assert!(matches!(deepl_target_code(unsupported), Err(Error::Language(_))), "{unsupported}");
-            assert!(!deepl_supports(None, unsupported));
+            assert_eq!(deepl_fallback(Some("k"), None, unsupported), Some(Fallback::Into(unsupported)));
         }
-        assert!(deepl_supports(None, "de"));
-        assert!(deepl_supports(Some("fr"), "en"));
-        assert!(!deepl_supports(Some("la"), "en"));
 
         assert_eq!(effective_provider(Provider::Google, Some("k:fx"), None, "de"), Provider::Google);
         assert_eq!(effective_provider(Provider::DeepL, None, None, "de"), Provider::Google);
@@ -344,6 +354,12 @@ mod tests {
         assert_eq!(effective_provider(Provider::DeepL, Some("k:fx"), None, "de"), Provider::DeepL);
         assert_eq!(effective_provider(Provider::DeepL, Some("k:fx"), None, "ka"), Provider::Google);
         assert_eq!(effective_provider(Provider::DeepL, Some("k:fx"), Some("la"), "en"), Provider::Google);
+        // The reason names the language DeepL lacks, the target first.
+        assert_eq!(deepl_fallback(None, Some("hy"), "gd"), Some(Fallback::NoKey));
+        assert_eq!(deepl_fallback(Some("k:fx"), Some("la"), "hy"), Some(Fallback::Into("hy")));
+        assert_eq!(deepl_fallback(Some("k:fx"), Some("gd"), "en"), Some(Fallback::From("gd")));
+        assert_eq!(deepl_fallback(Some("k:fx"), None, "en"), None);
+        assert_eq!(deepl_fallback(Some("k:fx"), Some("fr"), "en"), None);
     }
 
     #[test]
