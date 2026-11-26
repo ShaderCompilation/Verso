@@ -95,8 +95,8 @@ hides its books without deleting any files or reading progress.
   Series numbers on covers**.
 - **Navigation:** tap a folder to enter it, tap the back arrow to go up, or tap
   the current path to see its full location. Swipe left/right or tap the pager
-  arrows to turn pages; tap the page counter (`1 of N`) for a **Go to page**
-  slider.
+  arrows to turn pages; the arrows wrap around, so ‹ on the first page goes to
+  the last. Tap the outlined page counter (`1 / N`) for a **Go to page** slider.
 - **Folder previews** (**Settings → Display → Folder previews**): **Stack**
   (default, three stacked covers with the most recently read in front),
   **Latest** (most recent cover under a folder tab), or **Icon** (folder icon

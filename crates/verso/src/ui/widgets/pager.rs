@@ -1,9 +1,12 @@
 //! ‹ "1 of 6" › — moves between pages of content. Swiping left or right on
-//! the content does the same; screens pass swipes to `on_swipe`. Screens that
-//! set `jump` also get a `Jump` event when the "1 of 6" counter is tapped.
+//! the content does the same; screens pass swipes to `on_swipe`. The arrows
+//! wrap around (‹ on the first page goes to the last) once the page count is
+//! final; swipes stop at the ends. Screens that set `jump` also get a `Jump`
+//! event when the "1 of 6" counter is tapped, and the counter is outlined as a
+//! pill so it reads as a button.
 
 use crate::geom::{Point, Rect};
-use crate::gfx::{HAlign, Icon};
+use crate::gfx::{HAlign, Icon, TextStyle};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::{Direction, Gesture};
 use crate::ui::theme::{INK, INK2, PAPER, Theme};
@@ -108,11 +111,12 @@ impl Pager {
     /// Reports a page change from the arrows, or a tap on the counter.
     pub fn on_gesture(&mut self, g: &Gesture) -> Option<PagerEvent> {
         self.sync();
+        let wrap = !self.incomplete;
         if self.prev.on_gesture(g) {
-            return self.go(-1).map(PagerEvent::Changed);
+            return self.go(-1, wrap).map(PagerEvent::Changed);
         }
         if self.next.on_gesture(g) {
-            return self.go(1).map(PagerEvent::Changed);
+            return self.go(1, wrap).map(PagerEvent::Changed);
         }
         if !(self.jump && self.pages > 1) {
             // Not tappable now: don't keep a press from when it was.
@@ -128,22 +132,47 @@ impl Pager {
     /// Swipe left for the next page, right for the previous one.
     pub fn on_swipe(&mut self, dir: Direction) -> Option<usize> {
         match dir {
-            Direction::Left => self.go(1),
-            Direction::Right => self.go(-1),
+            Direction::Left => self.go(1, false),
+            Direction::Right => self.go(-1, false),
             _ => None,
         }
     }
 
-    fn go(&mut self, delta: isize) -> Option<usize> {
-        let new = self.page.checked_add_signed(delta).filter(|&p| p < self.pages)?;
+    /// Moves one page; `wrap` steps past either end to the other one.
+    fn go(&mut self, delta: isize, wrap: bool) -> Option<usize> {
+        let new = match self.page.checked_add_signed(delta).filter(|&p| p < self.pages) {
+            Some(p) => p,
+            None if wrap && self.pages > 1 => (self.page as isize + delta).rem_euclid(self.pages as isize) as usize,
+            None => return None,
+        };
         self.page = new;
         self.sync();
         Some(new)
     }
 
     fn sync(&mut self) {
-        self.prev.enabled = self.page > 0;
-        self.next.enabled = self.page + 1 < self.pages;
+        // While pages are still being counted, "the last page" isn't known yet.
+        let wrap = !self.incomplete && self.pages > 1;
+        self.prev.enabled = wrap || self.page > 0;
+        self.next.enabled = wrap || self.page + 1 < self.pages;
+    }
+
+    /// The outline around a tappable counter, sized for the widest label so it
+    /// doesn't change size (and grow the refreshed area) as pages turn.
+    fn pill(&self, cx: &mut DrawCx, style: TextStyle, sep: &str) -> Rect {
+        let t = cx.theme;
+        let widest = format!("{} {sep} {}", self.pages, self.pages);
+        // The arrows' hit areas have room around their chevrons: the pill may use it.
+        let room = if self.compact {
+            let chevron = self.prev.size.unwrap_or(t.icon);
+            self.next.rect().center().x - self.prev.rect().center().x - chevron - t.mm(1.5)
+        } else {
+            self.counter.w
+        };
+        let w = (cx.text.width(&widest, style).ceil() as i32 + 2 * t.mm(2.2)).min(room);
+        let h = t.mm(6.5).min(self.rect.h).min(self.counter.h);
+        let c = self.counter.center();
+        Rect::new(c.x - w / 2, c.y - h / 2, w, h)
     }
 
     pub fn draw(&mut self, cx: &mut DrawCx) {
@@ -165,11 +194,18 @@ impl Pager {
         } else {
             (t.small.gray(INK2), self.rect)
         };
-        if self.jump && self.counter_press.is_down() {
-            cx.canvas.fill_rounded_rect(self.counter, t.radius, INK);
+        if !(self.jump && self.pages > 1) {
+            cx.line(&label, style, text_rect, HAlign::Center);
+            return;
+        }
+        let pill = self.pill(cx, style, if self.compact { "/" } else { "of" });
+        let radius = pill.h as f32 / 2.0;
+        if self.counter_press.is_down() {
+            cx.canvas.fill_rounded_rect(pill, radius, INK);
             cx.line(&label, style.gray(PAPER), text_rect, HAlign::Center);
-            cx.hint(self.counter, RefreshMode::Fast);
+            cx.hint(pill, RefreshMode::Fast);
         } else {
+            cx.canvas.stroke_rounded_rect(pill, radius, t.hairline as f32, INK2);
             cx.line(&label, style, text_rect, HAlign::Center);
         }
     }
@@ -216,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_swipes_stay_in_range() {
+    fn arrows_wrap_around_and_swipes_stop_at_the_ends() {
         let theme = Theme::for_dpi(300);
         let mut p = Pager::new(3);
         p.place(Rect::new(0, 1500, 1272, 120), &theme);
@@ -230,8 +266,18 @@ mod tests {
         let prev = Point::new(20, 1560);
         p.on_gesture(&Gesture::Down(prev));
         assert_eq!(p.on_gesture(&Gesture::Tap(prev)), Some(PagerEvent::Changed(0)));
+        assert_eq!(p.on_swipe(Direction::Right), None, "swipes stop on the first page");
         p.on_gesture(&Gesture::Down(prev));
-        assert_eq!(p.on_gesture(&Gesture::Tap(prev)), None, "disabled on the first page");
+        assert_eq!(p.on_gesture(&Gesture::Tap(prev)), Some(PagerEvent::Changed(2)), "wraps to the last");
+        p.on_gesture(&Gesture::Down(next));
+        assert_eq!(p.on_gesture(&Gesture::Tap(next)), Some(PagerEvent::Changed(0)), "wraps to the first");
+        p.incomplete = true;
+        p.on_gesture(&Gesture::Down(prev));
+        assert_eq!(p.on_gesture(&Gesture::Tap(prev)), None, "no last page to wrap to yet");
+        p.incomplete = false;
+        p.set(0, 1);
+        p.on_gesture(&Gesture::Down(next));
+        assert_eq!(p.on_gesture(&Gesture::Tap(next)), None, "one page doesn't wrap onto itself");
     }
 
     #[test]
