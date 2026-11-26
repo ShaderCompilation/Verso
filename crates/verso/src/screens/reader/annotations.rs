@@ -1211,7 +1211,7 @@ impl ExtendBar {
         let rect = screen.split_bottom(t.mm(13.0)).0;
         let gap = t.mm(2.0);
         let w = (rect.w - 2 * t.margin - 3 * gap) / 4;
-        let buttons = ["Previous", "Next", "Highlight", "Cancel"]
+        let buttons = ["Previous", "Next", "Done", "Cancel"]
             .into_iter()
             .enumerate()
             .map(|(i, label)| {
@@ -1226,6 +1226,7 @@ impl ExtendBar {
         cx.fill(self.rect, PAPER);
         self.buttons[0].enabled = page > 0 && !busy;
         self.buttons[1].enabled = page + 1 < pages && !busy;
+        // Done waits for the passage's text, which the passage bar acts on.
         self.buttons[2].enabled = !busy;
         for b in &self.buttons {
             b.draw(cx);

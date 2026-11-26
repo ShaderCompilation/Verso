@@ -240,8 +240,8 @@ instantly from cache.
 - **Passage:** long-press and drag — or adjust the start/end handles after
   lifting — to open the floating bar: **Highlight**, **Note**, **Search**,
   **Dict**, **Wiki**, **Translate**, **Extend**.
-- **Cross-page highlight:** tap **Extend** to turn pages forward or back and
-  tap where the passage ends.
+- **Cross-page passage:** tap **Extend** to turn pages forward or back and
+  tap where the passage ends, then **Done** for the passage bar.
 - **Editing:** tap any highlight on the page to view, add/edit/delete its note
   or remove the highlight. Toggle page bookmarks with the top-right corner or
   the Reader Menu ribbon.

@@ -1562,7 +1562,13 @@ impl Reader {
                         match e {
                             0 => self.go(self.target.saturating_sub(1), cx),
                             1 => self.go(self.target + 1, cx),
-                            2 => self.save_highlight(cx),
+                            2 => {
+                                // Back to a plain passage selection, with the
+                                // usual actions; their Extend returns here.
+                                self.selection.extending = false;
+                                self.extension = None;
+                                self.open_passage_actions(cx);
+                            }
                             _ => {
                                 self.selection.clear();
                                 self.extension = None;
@@ -3947,7 +3953,7 @@ mod tests {
     }
 
     #[test]
-    fn extending_hides_search_controls_and_restores_them_on_cancel() {
+    fn extending_hides_search_controls_offers_passage_actions_on_done_and_restores_them_on_cancel() {
         use crate::{
             document::{Selection, TextRange},
             gfx::{Canvas, IconRenderer, TextRenderer},
@@ -3982,6 +3988,21 @@ mod tests {
         let search_bar = r.search_bar.take();
         assert_eq!(extending, draw(&mut r), "search controls cannot cover the active extension controls");
         r.search_bar = search_bar;
+        // Done, the third button, ends extending with the passage still
+        // selected and opens the usual passage actions for it.
+        let gap = theme.mm(2.0);
+        let w = (r.screen.w - 2 * theme.margin - 3 * gap) / 4;
+        let done = crate::geom::Point::new(theme.margin + 2 * (w + gap) + w / 2, r.screen.h - theme.mm(10.0));
+        test_cx(&theme, |cx| {
+            r.on_gesture(Gesture::Down(done), cx);
+            r.on_gesture(Gesture::Tap(done), cx);
+        });
+        assert!(matches!(r.overlay, Overlay::SelectionActions(_)));
+        assert!(!r.selection.extending && r.extension.is_none());
+        assert_eq!(r.selection.selected.as_ref().map(|s| s.text.as_str()), Some("two words"));
+        r.overlay = Overlay::None;
+        r.selection.extend();
+        r.extension = Some(annotations::ExtendBar::new(&theme, r.screen));
         // Cancel is the fourth extension button, at the right end of the strip.
         let p = crate::geom::Point::new(530, r.screen.h - theme.mm(10.0));
         test_cx(&theme, |cx| {
