@@ -330,6 +330,12 @@ impl Store {
         *slot = worker.weak();
         worker
     }
+    /// Pauses background cover and fingerprint work on the shared library
+    /// worker, if one is running. Does not start a worker when none exists.
+    pub fn pause_library_covers(&self) -> Option<crate::library::worker::CoverPause> {
+        let inner = self.library_worker.lock().unwrap_or_else(|e| e.into_inner()).upgrade()?;
+        Some(crate::library::worker::Worker::from_inner(inner).pause_covers())
+    }
     pub fn settings(&self) -> Settings {
         let mut slot = self.settings_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = slot.as_ref() {

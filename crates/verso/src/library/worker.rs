@@ -104,7 +104,7 @@ struct Shared {
     requested: bool,
     retry: bool,
     paused: bool,
-    /// Number of active [`CoverPause`] guards (e.g. Wi-Fi transfer open).
+    /// Number of active [`CoverPause`] guards (e.g. Wi-Fi transfer or KOReader import).
     covers_paused: usize,
     priority: Vec<String>,
     latest: Option<Snapshot>,
@@ -1173,6 +1173,10 @@ impl Worker {
     /// Paused behind an open book: a scan waits until it closes.
     pub fn paused(&self) -> bool {
         self.state().paused
+    }
+    #[cfg(test)]
+    pub fn covers_paused(&self) -> bool {
+        self.state().covers_paused > 0
     }
     /// Recompute resume selection after finished/hidden flags change without a
     /// filesystem rescan. Authoritative book records stay on the save path.

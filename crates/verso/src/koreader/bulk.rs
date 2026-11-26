@@ -306,9 +306,11 @@ pub enum Event {
     Imported(Imported),
 }
 
-/// The scan or the import on its own thread. Dropping it cancels a scan
-/// and waits for the thread, so nothing runs on after the sheet closes (an
-/// import, which can't be cancelled, finishes first).
+/// The scan or the import on its own thread. Holds a `CoverPause` on the
+/// shared library worker (if one is running) while it runs so background cover
+/// and fingerprint work does not contend with the scan or import. Dropping it
+/// cancels a scan and waits for the thread, so nothing runs on after the sheet
+/// closes (an import, which can't be cancelled, finishes first).
 pub struct Job {
     events: Receiver<Event>,
     cancel: Arc<AtomicBool>,
@@ -317,7 +319,7 @@ pub struct Job {
 impl Job {
     /// Scans the library as `library.json` has it.
     pub fn scan(store: Store, open: Option<String>, waker: Waker) -> Self {
-        Self::spawn(waker, move |tx, cancel| {
+        Self::spawn(store, waker, move |store, tx, cancel| {
             let index = store.library();
             let mut last = None::<Instant>;
             let mut report = |done: usize, total: usize| {
@@ -327,26 +329,29 @@ impl Job {
                 }
             };
             let cancelled = || cancel.load(Ordering::Relaxed);
-            if let Some(scan) = scan(&store, &index, &history_path(), open.as_deref(), &cancelled, &mut report) {
+            if let Some(scan) = scan(store, &index, &history_path(), open.as_deref(), &cancelled, &mut report) {
                 tx.send(Event::Scanned(Box::new(scan)));
             }
         })
     }
     pub fn import(store: Store, scan: Scan, waker: Waker) -> Self {
-        Self::spawn(waker, move |tx, _| {
+        Self::spawn(store, waker, move |store, tx, _| {
             let index = store.library();
-            tx.send(Event::Imported(import(&store, &scan, &index)));
+            tx.send(Event::Imported(import(store, &scan, &index)));
         })
     }
-    fn spawn(waker: Waker, work: impl FnOnce(&Reporter, &AtomicBool) + Send + 'static) -> Self {
+    fn spawn(store: Store, waker: Waker, work: impl FnOnce(&Store, &Reporter, &AtomicBool) + Send + 'static) -> Self {
+        let pause = store.pause_library_covers();
         let (tx, events) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let thread = std::thread::Builder::new()
             .name("verso-koreader".into())
             .spawn(move || {
+                let _pause = pause;
                 let reporter = Reporter { tx, waker };
-                work(&reporter, &flag);
+                work(&store, &reporter, &flag);
+                drop(_pause);
                 // The end of the thread: the screen notices it finished.
                 reporter.waker.wake();
             })
@@ -718,6 +723,89 @@ mod tests {
         let Some(Event::Imported(imported)) = wait(&job).into_iter().last() else { panic!("no result") };
         assert_eq!((imported.written, imported.total), (1, 1));
         assert_eq!(store.book("1").position.0, "/k");
+        Ok(())
+    }
+
+    #[test]
+    fn job_pauses_library_covers_while_running_and_releases_on_finish_or_drop() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (store, index) = library(dir.path(), 2);
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty)?;
+        store.save_library_folders(vec![empty])?;
+
+        // Non-spawning: returns None without starting a library worker.
+        assert!(store.pause_library_covers().is_none());
+        assert!(store.pause_library_covers().is_none());
+
+        let worker = store.library_worker(Waker::new(|| {}));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while worker.scanned().is_none() {
+            assert!(Instant::now() < deadline, "initial library scan did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!worker.covers_paused());
+
+        store.save_library(&index)?;
+        sidecar(&index.books[1].path, &koreader("/k", "reading"), 2000);
+
+        let recording_waker = |worker: &crate::library::worker::Worker| {
+            let states = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = states.clone();
+            let worker = worker.clone();
+            let waker = Waker::new(move || observed.lock().unwrap().push(worker.covers_paused()));
+            (waker, states)
+        };
+        let wait = |job: &Job| {
+            let mut events = Vec::new();
+            while !job.finished() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            events.extend(job.events());
+            events
+        };
+
+        // Scan pauses covers while running and releases them as soon as it finishes.
+        let (waker, states) = recording_waker(&worker);
+        let scan_job = Job::scan(store.clone(), None, waker);
+        let events = wait(&scan_job);
+        assert!(!worker.covers_paused(), "released when scan completes, even before Job is dropped");
+        {
+            let states = states.lock().unwrap();
+            assert_eq!(states.first(), Some(&true), "paused during scan wakes: {states:?}");
+            assert_eq!(states.last(), Some(&false), "released before final wake: {states:?}");
+        }
+        drop(scan_job);
+        let Some(Event::Scanned(scan)) = events.into_iter().last() else { panic!("no preview") };
+
+        // Import pauses covers while running and releases them when it completes.
+        let (waker, states) = recording_waker(&worker);
+        let import_job = Job::import(store.clone(), *scan, waker);
+        let events = wait(&import_job);
+        assert!(!worker.covers_paused(), "released when import completes, even before Job is dropped");
+        {
+            let states = states.lock().unwrap();
+            assert_eq!(states.first(), Some(&true), "paused during import wake: {states:?}");
+            assert_eq!(states.last(), Some(&false), "released before final wake: {states:?}");
+        }
+        drop(import_job);
+        assert!(matches!(events.into_iter().last(), Some(Event::Imported(_))));
+
+        // Dropping a running job cancels and joins it, releasing the pause.
+        let (started_tx, started_rx) = mpsc::channel();
+        let job = Job::spawn(store.clone(), Waker::new(|| {}), move |_, _, cancel| {
+            let _ = started_tx.send(());
+            while !cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).expect("job started");
+        assert!(worker.covers_paused(), "paused while job is running");
+        drop(job);
+        assert!(!worker.covers_paused(), "released when job is dropped");
+
+        drop(worker);
+        assert!(store.pause_library_covers().is_none(), "no active worker after last handle drops");
         Ok(())
     }
 
