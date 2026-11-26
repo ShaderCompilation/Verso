@@ -166,7 +166,7 @@ rather than stopping it:
 - **Power events:** child `lipc-wait-event -m com.lab126.powerd`
   (`PR_SET_PDEATHSIG(SIGTERM)`) streams `goingToScreenSaver`,
   `outOfScreenSaver`, `exitingScreenSaver`, `wakeupFromSuspend`, `charging`,
-  `notCharging` and `battLevelChanged`.
+  `notCharging` and `battLevelChanged`; a second, `com.lab126.hal` USB events.
 - **Late wake banner cleanup:** every wake schedules a forced `Ui` rewrite of
   the panel's bottom 10% after **1.5 s** (rescheduled by `exitingScreenSaver` /
   `wakeupFromSuspend`) to clear Amazon's post-hibernation banner. Short wake
@@ -183,8 +183,11 @@ rather than stopping it:
   capacity/charging, first `Mains`/`USB`/`USB_DCP`/`USB_CDP` supply
   (`bd71827_ac`) for cable presence. Ignores `Wireless` and `USB_WET`
   (`max20342_moisture`). `USB_DCP` (wall charger) never triggers the computer
-  prompt; `Mains` may be either (Oasis 3 `max77796-charger` **(to verify)**), so
-  powerd's `usb` decides, asked only after cable events and wake. Battery `status` turns `Charging` ~0.2 s *after* powerd's `charging`,
+  prompt. `Mains` may be either; on an Oasis 3 wall charger powerd's `usb` is true
+  too **(measured)**. If `/lib/udev/bin/notifyusb` sends `usbConfigured` (a host
+  configured the gadget), only that makes `Mains` a computer; on MTP firmware
+  (PW6) it needs the stopped `volumd`, so powerd's `usb` decides, asked only after
+  cable events and wake. Battery `status` turns `Charging` ~0.2 s *after* powerd's `charging`,
   and unplugging reads `Mains` online for 0.1–0.2 s **(measured)**, so reads repeat
   after each cable event. Without sysfs: `battStateInfo`, `battLevel`, `isCharging`.
 

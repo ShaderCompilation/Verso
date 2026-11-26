@@ -327,7 +327,7 @@ report() {
         [ -d "$supply" ] || continue
         found=yes
         printf '\n%s\n' "$supply"
-        for attribute in type status capacity online present charging temp voltage_now; do
+        for attribute in type status capacity online present charging pluggedin temp voltage_now; do
             field "$attribute" "$supply/$attribute"
         done
         # Names only: whatever else could tell a wall charger from a computer.

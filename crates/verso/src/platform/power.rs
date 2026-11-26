@@ -1,5 +1,12 @@
 //! Battery and cable state, from sysfs or powerd. lipc-wait-event emits one
 //! event name followed by optional arguments.
+//!
+//! Whether a cable leads to a computer: the supply's type when it says so
+//! (`USB_DCP` is a charger), else `com.lab126.hal usbConfigured` on firmware
+//! whose udev sends it (the host configured the USB gadget; the Oasis 3's
+//! charger and powerd both say USB on a wall charger), else powerd's `usb`.
+//! On MTP firmware (PW6) `usbConfigured` comes from MTP, which needs the
+//! `volumd` our launcher stops, so it never arrives while Verso runs.
 use super::{Battery, Event};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -12,13 +19,15 @@ use std::time::{Duration, Instant};
 pub struct PowerFiles {
     battery: PathBuf,
     cable: Option<PathBuf>,
+    /// The USB device controller (`/sys/class/udc/*`), for the log only.
+    udc: Option<PathBuf>,
 }
 impl PowerFiles {
     /// The first supply of type `Battery` with a `capacity`, and the first
     /// `Mains` or `USB` (`USB`, `USB_DCP`, `USB_CDP`) supply with `online` as
     /// the cable. On the Paperwhite these are `bd71827_bat` and `bd71827_ac`;
     /// the `USB_WET` moisture sensor and the `Wireless` supply are not cables.
-    pub fn find(root: &Path) -> Option<Self> {
+    pub fn find(root: &Path, udc: &Path) -> Option<Self> {
         let mut entries: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| Some(e.ok()?.path())).collect();
         entries.sort();
         let kind = |dir: &Path| std::fs::read_to_string(dir.join("type")).map(|t| t.trim().to_owned()).ok();
@@ -30,7 +39,8 @@ impl PowerFiles {
                 matches!(kind(d).as_deref(), Some("Mains" | "USB" | "USB_DCP" | "USB_CDP")) && d.join("online").exists()
             })
             .cloned();
-        let files = Self { battery, cable };
+        let udc = std::fs::read_dir(udc).ok().and_then(|mut e| Some(e.next()?.ok()?.path()));
+        let files = Self { battery, cable, udc };
         files.battery().is_some().then_some(files)
     }
     pub fn battery(&self) -> Option<Battery> {
@@ -55,16 +65,27 @@ impl PowerFiles {
             _ => Link::Unsure,
         })
     }
-    /// The raw files, for the log.
+    /// The raw files, for the log. `pluggedin` (the Oasis 3's charger) and the
+    /// controller's `state` only where they exist.
     pub fn describe(&self) -> String {
         let read = |dir: &Path, name| {
             std::fs::read_to_string(dir.join(name)).map_or_else(|_| "?".to_owned(), |s| s.trim().to_owned())
         };
         let cable = self.cable.as_ref().map_or_else(
             || "no cable supply".to_owned(),
-            |c| format!("cable online={} type={}", read(c, "online"), read(c, "type")),
+            |c| {
+                let mut s = format!("cable online={} type={}", read(c, "online"), read(c, "type"));
+                if c.join("pluggedin").exists() {
+                    s += &format!(" pluggedin={}", read(c, "pluggedin"));
+                }
+                s
+            },
         );
-        format!("battery {}% {}, {cable}", read(&self.battery, "capacity"), read(&self.battery, "status"))
+        let udc = self.udc.as_ref().map_or_else(String::new, |u| {
+            let name = u.file_name().map_or_else(Default::default, |n| n.to_string_lossy());
+            format!(", udc {name} state={}", read(u, "state"))
+        });
+        format!("battery {}% {}, {cable}{udc}", read(&self.battery, "capacity"), read(&self.battery, "status"))
     }
 }
 
@@ -97,6 +118,9 @@ pub struct Cable {
     /// powerd's answer for this plug-in, until the next read that's due. The
     /// minute poll reuses it: asking takes about 29 ms on the UI thread.
     powerd: Option<bool>,
+    /// Whether a host configured the gadget, on firmware that says so
+    /// (`use_hal`); `None` asks powerd instead.
+    configured: Option<bool>,
 }
 impl Cable {
     /// Schedules the reads that follow a cable event, replacing earlier ones.
@@ -117,21 +141,51 @@ impl Cable {
         }
         due
     }
+    /// Decide by `com.lab126.hal` events rather than powerd.
+    pub fn use_hal(&mut self) {
+        self.configured.get_or_insert(false);
+    }
+    /// Stop using them: their listener stopped.
+    pub fn drop_hal(&mut self) {
+        self.configured = None;
+    }
+    pub fn uses_hal(&self) -> bool {
+        self.configured.is_some()
+    }
+    /// Notes a `com.lab126.hal` event; whether the answer may have changed.
+    /// `usbUnconfigured` also comes when the computer suspends the bus, and
+    /// then there's no transfer to offer either.
+    pub fn hal(&mut self, event: Hal) -> bool {
+        let Some(configured) = &mut self.configured else { return false };
+        let now = match event {
+            Hal::Configured => true,
+            Hal::Unconfigured | Hal::PlugOut => false,
+            Hal::PlugIn => return false,
+        };
+        std::mem::replace(configured, now) != now
+    }
     /// The Kindle slept: the cable may have changed unnoticed.
     pub fn forget(&mut self) {
         self.powerd = None;
     }
     /// Whether `link` leads to a computer. `ask` is powerd's `usb`, false on
-    /// a wall charger (measured, PW6); without an answer, assume a computer.
+    /// a wall charger (measured, PW6) but true on the Oasis 3's (measured);
+    /// without an answer, assume a computer.
     pub fn computer(&mut self, link: Link, ask: impl FnOnce() -> Option<bool>) -> bool {
         match link {
             Link::Unplugged => {
                 self.powerd = None;
+                if let Some(configured) = &mut self.configured {
+                    *configured = false;
+                }
                 false
             }
             Link::Charger => false,
             Link::Computer => true,
-            Link::Unsure => *self.powerd.get_or_insert_with(|| ask().unwrap_or(true)),
+            Link::Unsure => match self.configured {
+                Some(configured) => configured,
+                None => *self.powerd.get_or_insert_with(|| ask().unwrap_or(true)),
+            },
         }
     }
     /// The settled state after reading `usb`.
@@ -175,6 +229,35 @@ impl Status {
     }
 }
 
+/// A `com.lab126.hal` USB event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hal {
+    PlugIn,
+    PlugOut,
+    Configured,
+    Unconfigured,
+}
+impl Hal {
+    pub const EVENTS: &str = "usbPlugIn,usbPlugOut,usbConfigured,usbUnconfigured";
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PlugIn => "usbPlugIn",
+            Self::PlugOut => "usbPlugOut",
+            Self::Configured => "usbConfigured",
+            Self::Unconfigured => "usbUnconfigured",
+        }
+    }
+    pub fn parse(line: &str) -> Option<Self> {
+        match line.split_whitespace().next()? {
+            "usbPlugIn" => Some(Self::PlugIn),
+            "usbPlugOut" => Some(Self::PlugOut),
+            "usbConfigured" => Some(Self::Configured),
+            "usbUnconfigured" => Some(Self::Unconfigured),
+            _ => None,
+        }
+    }
+}
+
 pub fn parse(line: &str) -> Option<Event> {
     match line.split_whitespace().next()? {
         "goingToScreenSaver" => Some(Event::Sleep),
@@ -211,8 +294,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("verso-power-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         paperwhite(&root);
-        let files = PowerFiles::find(&root).unwrap();
-        assert_eq!(files, PowerFiles { battery: root.join("bd71827_bat"), cable: Some(root.join("bd71827_ac")) });
+        let udc = root.join("udc");
+        let files = PowerFiles::find(&root, &udc).unwrap();
+        assert_eq!(
+            files,
+            PowerFiles { battery: root.join("bd71827_bat"), cable: Some(root.join("bd71827_ac")), udc: None }
+        );
         assert_eq!(files.battery(), Some(Battery { percent: 38, charging: false }));
         assert_eq!(files.link(), Some(Link::Unplugged), "the moisture sensor isn't a cable");
         // Plugged in, as measured: Charging, and the Mains supply online.
@@ -222,22 +309,32 @@ mod tests {
         assert_eq!(files.battery(), Some(Battery { percent: 41, charging: true }));
         assert_eq!(files.link(), Some(Link::Unsure));
         assert_eq!(files.describe(), "battery 41% Charging, cable online=1 type=Mains");
+        // The Oasis 3's extra charger file and a controller go in the log too.
+        std::fs::write(root.join("bd71827_ac/pluggedin"), "1\n").unwrap();
+        std::fs::create_dir_all(udc.join("ci_hdrc.0")).unwrap();
+        std::fs::write(udc.join("ci_hdrc.0/state"), "0\n").unwrap();
+        let files = PowerFiles::find(&root, &udc).unwrap();
+        assert_eq!(
+            files.describe(),
+            "battery 41% Charging, cable online=1 type=Mains pluggedin=1, udc ci_hdrc.0 state=0"
+        );
+        std::fs::remove_file(root.join("bd71827_ac/pluggedin")).unwrap();
         // Full on a cable: connected but not charging.
         std::fs::write(root.join("bd71827_bat/status"), "Full\n").unwrap();
         assert_eq!(files.battery(), Some(Battery { percent: 41, charging: false }));
         // Wall charger (USB_DCP): found by `find()`, online=1, not a USB data host.
         std::fs::write(root.join("bd71827_ac/type"), "USB_DCP\n").unwrap();
-        let files = PowerFiles::find(&root).unwrap();
+        let files = PowerFiles::find(&root, &udc).unwrap();
         assert_eq!(files.cable, Some(root.join("bd71827_ac")));
         assert_eq!(files.link(), Some(Link::Charger), "wall charger is not a USB data connection");
         // No cable supply: the cable state comes from powerd instead.
         std::fs::remove_dir_all(root.join("bd71827_ac")).unwrap();
-        let files = PowerFiles::find(&root).unwrap();
+        let files = PowerFiles::find(&root, &udc).unwrap();
         assert_eq!(files.link(), None);
         // No battery at all: powerd it is.
         std::fs::remove_dir_all(root.join("bd71827_bat")).unwrap();
-        assert_eq!(PowerFiles::find(&root), None);
-        assert_eq!(PowerFiles::find(&root.join("missing")), None);
+        assert_eq!(PowerFiles::find(&root, &udc), None);
+        assert_eq!(PowerFiles::find(&root.join("missing"), &udc), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
     #[test]
@@ -289,6 +386,32 @@ mod tests {
         assert!(cable.computer(Link::Unsure, || None));
     }
     #[test]
+    fn hal_tells_a_charger_from_a_computer_where_udev_reports_the_host() {
+        let silent = || panic!("hal decides, not powerd");
+        let mut cable = Cable::default();
+        assert!(!cable.hal(Hal::Configured), "ignored unless the firmware sends it");
+        cable.use_hal();
+        assert!(cable.uses_hal());
+        // The Oasis 3's wall charger: Mains, and nothing configures it.
+        assert!(!cable.hal(Hal::PlugIn));
+        assert!(!cable.computer(Link::Unsure, silent));
+        // A computer configures the gadget a second or two after plug-in.
+        assert!(cable.hal(Hal::Configured));
+        assert!(cable.computer(Link::Unsure, silent));
+        cable.forget();
+        assert!(cable.computer(Link::Unsure, silent), "a sleep doesn't unconfigure it");
+        assert!(cable.hal(Hal::Unconfigured));
+        assert!(!cable.computer(Link::Unsure, silent));
+        // Unplugging forgets it even if usbPlugOut is missed.
+        cable.hal(Hal::Configured);
+        assert!(!cable.computer(Link::Unplugged, silent));
+        assert!(!cable.computer(Link::Unsure, silent));
+        // Its listener stopped: powerd again.
+        cable.drop_hal();
+        assert!(!cable.uses_hal());
+        assert!(cable.computer(Link::Unsure, || Some(true)));
+    }
+    #[test]
     fn a_full_usb_battery_is_connected_even_when_it_is_not_charging() {
         let full = br#"{"battInfo":[{"type":"PRIMARY","cap":100,"charging":false}],"aggr_batt":100,"usb":true}"#;
         assert_eq!(
@@ -315,5 +438,12 @@ mod tests {
         for unknown in ["", "readyToSuspend 3", "unknown goingToScreenSaver"] {
             assert_eq!(parse(unknown), None);
         }
+        assert_eq!(Hal::parse("usbUnconfigured 1"), Some(Hal::Unconfigured));
+        // The listener subscribes to every event it parses.
+        for hal in [Hal::PlugIn, Hal::PlugOut, Hal::Configured, Hal::Unconfigured] {
+            assert_eq!(Hal::parse(hal.name()), Some(hal));
+            assert!(Hal::EVENTS.split(',').any(|e| e == hal.name()));
+        }
+        assert_eq!(Hal::parse("usbConfiguredX"), None);
     }
 }

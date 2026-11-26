@@ -3,7 +3,8 @@
 //! `poll` waits on the touchscreen fd, the page-key fds (Oasis/Voyage buttons,
 //! remotes) and an `eventfd` `Waker` shared with background workers, the remote
 //! threads (`verso-remotes`, `verso-remote-port`), the `lipc-wait-event`
-//! `powerd` listener (`PowerEvents`, thread `verso-power`) and the one-shot
+//! listeners for `powerd` (thread `verso-power`) and `hal`'s USB events
+//! (`verso-hal`, see `power`), and the one-shot
 //! startup frontlight thread (`verso-frontlight`). Opening the touchscreen
 //! takes ~80 ms in the kernel, so `verso-input-init` does it while the first
 //! frame draws; `finish_startup` (or the first call needing input) joins it.
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::kindle_profiles::{self, Lights};
-use super::power::Link;
+use super::power::{Hal, Link};
 use super::remote::{self, Gate};
 use super::touch::Mapping;
 use super::{
@@ -54,8 +55,12 @@ pub struct Kindle {
     opening: Option<std::thread::JoinHandle<Result<Inputs>>>,
     queue: VecDeque<Event>,
     wake_fd: std::sync::Arc<std::os::fd::OwnedFd>,
-    power: PowerEvents,
+    power: Listener,
     power_rx: std::sync::mpsc::Receiver<Event>,
+    /// `None` from the channel: the hal listener stopped. Logged on every
+    /// firmware, used only where `Cable::use_hal`.
+    _hal: Option<Listener>,
+    hal_rx: std::sync::mpsc::Receiver<Option<Hal>>,
     frontlight_rx: Option<std::sync::mpsc::Receiver<Option<Frontlight>>>,
     battery_due: Instant,
     sleeping: bool,
@@ -240,11 +245,43 @@ impl Kindle {
         };
         let t_pw = Instant::now();
         let (tx, power_rx) = std::sync::mpsc::channel();
-        let power = PowerEvents::start(tx, fd_waker(wake_fd.clone()))?;
+        let power = Listener::start(
+            "verso-power",
+            "com.lab126.powerd",
+            "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,notCharging,battLevelChanged",
+            super::power::parse,
+            // Without power events we cannot safely own the display. Exit via
+            // the launcher rather than leave an unresponsive reader running.
+            (Event::Quit, "power event listener stopped; returning to Kindle UI"),
+            tx,
+            fd_waker(wake_fd.clone()),
+        )?;
+        let (hal_tx, hal_rx) = std::sync::mpsc::channel();
+        let hal = Listener::start(
+            "verso-hal",
+            "com.lab126.hal",
+            Hal::EVENTS,
+            |line| Hal::parse(line).map(Some),
+            (None, "hal listener stopped; asking powerd about cables"),
+            hal_tx,
+            fd_waker(wake_fd.clone()),
+        )
+        .inspect_err(|e| log::warn!("couldn't start the hal listener: {e}"))
+        .ok();
+        let mut cable = super::power::Cable::default();
+        // Mass-storage firmware: udev sends usbConfigured itself.
+        if hal.is_some()
+            && std::fs::read_to_string("/lib/udev/bin/notifyusb").is_ok_and(|s| s.contains("usbConfigured"))
+        {
+            cable.use_hal();
+        }
         let power_events_us = t_pw.elapsed().as_micros();
         let frontlight_rx = spawn_frontlight_read(fd_waker(wake_fd.clone()), lights);
         let t_pf = Instant::now();
-        let power_files = super::power::PowerFiles::find(std::path::Path::new("/sys/class/power_supply"));
+        let power_files = super::power::PowerFiles::find(
+            std::path::Path::new("/sys/class/power_supply"),
+            std::path::Path::new("/sys/class/udc"),
+        );
         let power_files_us = t_pf.elapsed().as_micros();
         log::debug!(
             "startup stage: kindle open display_us={display_us} power_events_us={power_events_us} power_files_us={power_files_us} total_us={} (input opening in the background)",
@@ -262,13 +299,15 @@ impl Kindle {
             wake_fd,
             power,
             power_rx,
+            _hal: hal,
+            hal_rx,
             frontlight_rx,
             battery_due: Instant::now() + Duration::from_secs(60),
             sleeping: false,
             native_sleep: false,
             status: None,
             power_files,
-            cable: Default::default(),
+            cable,
         })
     }
 
@@ -299,6 +338,16 @@ impl Kindle {
             self.log_power(if connected { "charging event" } else { "notCharging event" });
         }
         event
+    }
+
+    /// A hal event that may change the answer becomes a cable read.
+    fn hal_event(&mut self, event: Option<Hal>) -> Option<Event> {
+        let Some(event) = event else {
+            self.cable.drop_hal();
+            return Some(Event::PowerChanged);
+        };
+        self.log_power(&format!("hal {}", event.name()));
+        self.cable.hal(event).then_some(Event::PowerChanged)
     }
 
     fn log_power(&self, when: &str) {
@@ -488,7 +537,11 @@ impl Platform for Kindle {
                 s.inverted,
             ),
             // Touch and page buttons are logged by `finish_startup`.
-            format!("battery: {}", if self.power_files.is_some() { "sysfs" } else { "powerd" }),
+            format!(
+                "battery: {}, computer: {}",
+                if self.power_files.is_some() { "sysfs" } else { "powerd" },
+                if self.cable.uses_hal() { "hal usbConfigured" } else { "powerd usb" },
+            ),
         ]
     }
 
@@ -520,6 +573,12 @@ impl Platform for Kindle {
             }
             if let Ok(e) = self.power_rx.try_recv() {
                 return Ok(Some(self.system_event(e)));
+            }
+            if let Ok(e) = self.hal_rx.try_recv() {
+                match self.hal_event(e) {
+                    Some(e) => return Ok(Some(e)),
+                    None => continue,
+                }
             }
             let inputs = self.inputs.as_mut().expect("finish_startup opened the inputs");
             inputs.take_remotes(&mut self.queue);
@@ -673,58 +732,66 @@ fn set_property(name: &str, value: u8) -> Result<()> {
     anyhow::ensure!(status.success(), "couldn't change front light");
     Ok(())
 }
-struct PowerEvents {
-    /// The `lipc-wait-event` child, once `verso-power` has started it.
+/// A `lipc-wait-event -m` child and the thread reading it.
+struct Listener {
+    /// The child, once its thread has started it.
     child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
     join: Option<std::thread::JoinHandle<()>>,
     shutdown: std::sync::Arc<AtomicBool>,
     /// Whether the child started; taken by `wait_started`.
     started: Option<std::sync::mpsc::Receiver<io::Result<()>>>,
 }
-impl PowerEvents {
-    /// Starts the listener thread, which spawns `lipc-wait-event` itself:
-    /// the fork (~5 ms) stays off the UI thread, and `PR_SET_PDEATHSIG`
-    /// fires when the *thread* that forked the child exits, so that must be
-    /// the thread that lives as long as the listener (never a short-lived one).
-    fn start(tx: std::sync::mpsc::Sender<Event>, waker: Waker) -> Result<Self> {
+impl Listener {
+    /// Starts the thread, which spawns `lipc-wait-event` itself: the fork
+    /// (~5 ms) stays off the UI thread, and `PR_SET_PDEATHSIG` fires when the
+    /// *thread* that forked the child exits, so that must be the thread that
+    /// lives as long as the listener (never a short-lived one). `stopped` is
+    /// sent, and its note logged, if the child ends or can't start.
+    fn start<T: Send + 'static>(
+        thread: &str,
+        publisher: &'static str,
+        events: &'static str,
+        parse: fn(&str) -> Option<T>,
+        stopped: (T, &'static str),
+        tx: std::sync::mpsc::Sender<T>,
+        waker: Waker,
+    ) -> Result<Self> {
         use std::io::BufRead;
         let child = std::sync::Arc::new(std::sync::Mutex::new(None));
         let shutdown = std::sync::Arc::new(AtomicBool::new(false));
         let (started_tx, started) = std::sync::mpsc::channel();
         let (slot, stopping) = (child.clone(), shutdown.clone());
-        let join = std::thread::Builder::new().name("verso-power".into()).spawn(move || {
-            let stdout = {
+        let join = std::thread::Builder::new().name(thread.into()).spawn(move || {
+            let spawned = {
                 // Under the lock, so `drop` either sees the child or stops it starting.
                 let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if stopping.load(Ordering::Relaxed) {
                     return;
                 }
-                match listener_command().spawn() {
+                match listener_command(publisher, events).spawn() {
                     Ok(mut child) => {
-                        let stdout = child.stdout.take().expect("piped power events");
+                        let stdout = child.stdout.take().expect("piped events");
                         *slot = Some(child);
                         let _ = started_tx.send(Ok(()));
-                        stdout
+                        Some(stdout)
                     }
                     Err(e) => {
                         let _ = started_tx.send(Err(e));
-                        return;
+                        None
                     }
                 }
             };
-            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                log::debug!("powerd: {line}");
-                let Some(e) = super::power::parse(&line) else { continue };
+            for line in spawned.into_iter().flat_map(|out| std::io::BufReader::new(out).lines().map_while(Result::ok)) {
+                log::debug!("{publisher}: {line}");
+                let Some(e) = parse(&line) else { continue };
                 if tx.send(e).is_err() {
-                    break;
+                    return;
                 }
                 waker.wake();
             }
-            // Without power events we cannot safely own the display. Exit via
-            // the launcher rather than leave an unresponsive reader running.
             if !stopping.load(Ordering::Relaxed) {
-                log::warn!("power event listener stopped; returning to Kindle UI");
-                let _ = tx.send(Event::Quit);
+                log::warn!("{}", stopped.1);
+                let _ = tx.send(stopped.0);
                 waker.wake();
             }
         })?;
@@ -734,19 +801,16 @@ impl PowerEvents {
     /// Waits until the listener runs; failing to start it ends startup.
     fn wait_started(&mut self) -> Result<()> {
         if let Some(started) = self.started.take() {
-            started.recv().context("the power event thread stopped")?.context("couldn't start lipc-wait-event")?;
+            started.recv().context("the listener thread stopped")?.context("couldn't start lipc-wait-event")?;
         }
         Ok(())
     }
 }
 
-fn listener_command() -> std::process::Command {
+fn listener_command(publisher: &str, events: &str) -> std::process::Command {
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new("lipc-wait-event");
-    command
-        .args(["-m", "com.lab126.powerd", "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,notCharging,battLevelChanged"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    command.args(["-m", publisher, events]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     let parent = std::process::id() as libc::pid_t;
     // SAFETY: only async-signal-safe syscalls run between fork and exec.
     // The listener must also exit when Verso is killed without running Drop.
@@ -787,7 +851,7 @@ fn launcher_handoff(native: bool) -> Result<()> {
     }
     bail!("launcher did not acknowledge {expected} display ownership")
 }
-impl Drop for PowerEvents {
+impl Drop for Listener {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(mut child) = self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
