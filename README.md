@@ -67,8 +67,8 @@ with the **Universal Hotfix** (for direct library launch — no KUAL needed),
 
 | Status | Models |
 | --- | --- |
-| **Tested** | Kindle Paperwhite 6 (12th gen, 2024), Colorsoft (2024) |
-| **Untested (device profiles included)** | Paperwhite 4 (2018), Paperwhite 5 (2021), Basic 3 (2019), Basic 4 (2022), Basic 5 (2024), Oasis 3 (2019), Scribe (2022–2025) |
+| **Tested** | Kindle Paperwhite 4 (2018), Paperwhite 5 (2021), Paperwhite 6 (12th gen, 2024), Basic 3 (2019), Basic 4 (2022), Basic 5 (2024), Oasis 3 (2019), Colorsoft (2024) |
+| **Untested (device profiles included)** | Scribe (2022–2025) |
 | **Not supported** | Older soft-float Kindles (Paperwhite 2/3, Voyage, Oasis 1/2, Basic 1/2) and firmware older than 5.16.3 |
 
 On an untested model, Verso shows a one-time notice at launch. If you try it on
