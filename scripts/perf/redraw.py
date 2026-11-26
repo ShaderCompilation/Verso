@@ -162,7 +162,7 @@ def main():
         copy_dictionary_cache(args.dictionary_cache, state)
     typography = {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0, 'justify': True}
     settings = {'typography': typography, 'library_folders': [APP + '/books'], 'library_sort': 'title',
-                'orientation': args.orientation, 'page_flash': args.page_flash}
+                'orientation': args.orientation, 'page_flash': args.page_flash, 'setup_done': True}
     if args.page_layout is not None:
         settings['page_layout'] = args.page_layout
     else:
