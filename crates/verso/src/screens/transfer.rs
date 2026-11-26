@@ -311,12 +311,10 @@ impl TransferScreen {
         if self.store.live_data_edited() {
             return; // It would save over a hand-edited settings.json.
         }
-        let mut settings = self.store.settings();
-        if &settings.hostname == name {
+        if &self.store.settings().hostname == name {
             return;
         }
-        settings.hostname = name.clone();
-        if let Err(e) = self.store.save_settings(&settings) {
+        if let Err(e) = self.store.update_settings(|settings| settings.hostname = name.clone()) {
             log::error!("saving the device name: {e:#}");
         }
     }

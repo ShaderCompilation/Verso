@@ -1409,17 +1409,20 @@ impl Reader {
         if !self.settings_save_pending {
             return Ok(());
         }
-        // Other settings screens may have saved while this reader was retained.
-        let mut settings = self.store.settings();
-        settings.typography = self.settings.typography.clone();
-        settings.page_layout = self.settings.page_layout.clone();
-        self.store.save_settings(&settings).map_err(|e| {
-            log::error!("saving typography: {e:#}");
-            anyhow::anyhow!("Couldn't save text settings: {e:#}")
-        })?;
+        // Other screens or background writers may have saved while this reader was retained.
+        self.store
+            .update_settings(|settings| {
+                settings.typography = self.settings.typography.clone();
+                settings.page_layout = self.settings.page_layout.clone();
+            })
+            .map_err(|e| {
+                log::error!("saving typography: {e:#}");
+                anyhow::anyhow!("Couldn't save text settings: {e:#}")
+            })?;
         self.settings_save_pending = false;
         // Includes any other screen's saves read above.
-        self.sync_settings(&settings);
+        let saved = self.store.settings();
+        self.sync_settings(&saved);
         Ok(())
     }
     /// Takes the settings the reader doesn't own (Settings may change them
@@ -1721,18 +1724,18 @@ impl Reader {
                         return Action::None;
                     }
                     if let LookupEvent::Target(code) = event {
-                        let mut settings = self.store.settings();
-                        settings.translate_language = Some(code.to_owned());
-                        if let Err(error) = self.store.save_settings(&settings) {
+                        if let Err(error) =
+                            self.store.update_settings(|settings| settings.translate_language = Some(code.to_owned()))
+                        {
                             log::error!("saving the translation language: {error:#}");
                             cx.toast("Couldn’t save the translation language", None);
                         }
                         return Action::None;
                     }
                     if let LookupEvent::Resized(expanded) = event {
-                        let mut settings = self.store.settings();
-                        settings.dictionary_expanded = expanded;
-                        if let Err(error) = self.store.save_settings(&settings) {
+                        if let Err(error) =
+                            self.store.update_settings(|settings| settings.dictionary_expanded = expanded)
+                        {
                             log::error!("saving the lookup card size: {error:#}");
                             cx.toast("Couldn’t save the card size", None);
                         }

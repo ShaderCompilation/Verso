@@ -549,9 +549,10 @@ impl Dictionaries {
             }
             View::Set(set) => self.open(View::Dictionary(set, self.dictionaries[index].id().into()), cx.theme),
             View::Card => {
-                let mut settings = self.store.settings();
-                settings.dictionary_at_bottom = !settings.dictionary_at_bottom;
-                if let Err(e) = self.store.save_settings(&settings) {
+                if let Err(e) = self
+                    .store
+                    .update_settings(|settings| settings.dictionary_at_bottom = !settings.dictionary_at_bottom)
+                {
                     log::error!("saving the lookup card placement: {e:#}");
                     cx.toast("Couldn’t save the setting", None);
                 }
