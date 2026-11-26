@@ -3,6 +3,8 @@
 Verso is a calm EPUB reader for jailbroken Kindles. This guide covers installing
 it, reading, organising your library, looking words up, transferring
 books over Wi-Fi, importing from KOReader, updating and reporting problems.
+The latest version lives online at [verso-reader.app/guide](https://verso-reader.app/guide),
+alongside the [roadmap](https://verso-reader.app/roadmap).
 
 ---
 
@@ -11,7 +13,8 @@ books over Wi-Fi, importing from KOReader, updating and reporting problems.
 **Requirements:** a jailbroken Kindle on **hard-float firmware (5.16.3+)** with
 the **Universal Hotfix** (for direct library launch — no KUAL needed), **KPM**
 (recommended on 5.19.4+ where KUAL is broken) or **KUAL**. Soft-float Kindles
-are refused before touching the Kindle UI.
+are refused before touching the Kindle UI. The supported-devices list is at
+[verso-reader.app/install#devices](https://verso-reader.app/install#devices).
 
 1. Download `verso-<version>.zip` from
    [verso-reader.app/install](https://verso-reader.app/install) and unpack it
