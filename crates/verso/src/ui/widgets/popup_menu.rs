@@ -72,6 +72,11 @@ impl PopupMenu {
         self.checked = item;
     }
 
+    #[cfg(test)]
+    pub fn checked(&self) -> Option<usize> {
+        self.checked
+    }
+
     pub fn set_enabled(&mut self, item: usize, enabled: bool) {
         if let Some(value) = self.enabled.get_mut(item) {
             *value = enabled;

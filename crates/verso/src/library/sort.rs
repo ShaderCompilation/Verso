@@ -34,6 +34,48 @@ pub enum Sort {
 impl Sort {
     pub const ALL: [Sort; 5] = [Sort::Title, Sort::Author, Sort::Series, Sort::RecentlyRead, Sort::RecentlyAdded];
 
+    /// The name in the sort menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Title => "Title",
+            Sort::Author => "Author",
+            Sort::Series => "Series",
+            Sort::RecentlyRead => "Recently read",
+            Sort::RecentlyAdded => "Recently added",
+        }
+    }
+
+    /// What Go to page names a page starting with `book` by: the text this
+    /// sort orders it by. Ungrouped books in Series sort go by title, and the
+    /// two Recent sorts have no text to show.
+    pub fn page_label(self, book: &Book) -> String {
+        let m = &book.metadata;
+        match self {
+            Sort::Title => m.title.clone(),
+            Sort::Author if m.author_sort.trim().is_empty() => m.authors.clone(),
+            Sort::Author => m.author_sort.clone(),
+            Sort::Series if m.series.trim().is_empty() => m.title.clone(),
+            Sort::Series => m.series.clone(),
+            Sort::RecentlyRead | Sort::RecentlyAdded => String::new(),
+        }
+    }
+
+    /// The number badge on `book`'s cover: its series number from metadata,
+    /// in Series sort only. Guessed numbers move a book but never label it.
+    /// A whole number shows without `.0`.
+    pub fn badge(self, book: &Book) -> Option<String> {
+        let m = &book.metadata;
+        if self != Sort::Series || m.series.trim().is_empty() {
+            return None;
+        }
+        let (whole, millionths) = parse_number(&m.series_index)?;
+        Some(if millionths == 0 {
+            whole.to_string()
+        } else {
+            format!("{whole}.{}", format!("{millionths:06}").trim_end_matches('0'))
+        })
+    }
+
     /// Builds `book`'s key; `scratch` is reused between keys. `ranks` (book
     /// id → place in the opened order, `Opened::ranks`) matters only to
     /// Recently read.
@@ -395,6 +437,41 @@ mod tests {
             [("3", Some((3, 0))), ("3.0", Some((3, 0))), (" 1.5 ", Some((1, 500_000))), ("III", None), ("", None)]
         {
             assert_eq!(parse_number(index), expected, "{index:?}");
+        }
+    }
+
+    #[test]
+    fn badges_show_metadata_numbers_in_series_sort_and_page_labels_follow_the_sort() {
+        let books = books(&[
+            Spec {
+                title: "The Well",
+                authors: "B Sanderson",
+                author_sort: "Sanderson, B",
+                series: ("Mistborn", "2.0"),
+                ..NONE
+            },
+            Spec { title: "Interlude", series: ("Mistborn", "2.50"), ..NONE },
+            Spec { title: "Unnumbered", series: ("Mistborn", "III"), ..NONE },
+            // A number guessed from the file name orders the book but gets no badge.
+            Spec { path: "/s/Saga 3.epub", title: "Catch-22", authors: "Joe Heller", ..NONE },
+        ]);
+        let badges = |sort: Sort| books.iter().map(|b| sort.badge(b)).collect::<Vec<_>>();
+        assert_eq!(badges(Sort::Series), [Some("2".into()), Some("2.5".into()), None, None]);
+        for sort in [Sort::Title, Sort::Author, Sort::RecentlyRead, Sort::RecentlyAdded] {
+            assert_eq!(badges(sort), [None, None, None, None], "{sort:?}");
+        }
+        for (sort, first, last) in [
+            (Sort::Title, "The Well", "Catch-22"),
+            (Sort::Author, "Sanderson, B", "Joe Heller"),
+            (Sort::Series, "Mistborn", "Catch-22"),
+            (Sort::RecentlyRead, "", ""),
+            (Sort::RecentlyAdded, "", ""),
+        ] {
+            assert_eq!(
+                (sort.page_label(&books[0]), sort.page_label(&books[3])),
+                (first.into(), last.into()),
+                "{sort:?}"
+            );
         }
     }
 

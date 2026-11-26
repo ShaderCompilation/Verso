@@ -200,6 +200,9 @@ pub struct Books {
     home_action: IconButton,
     back: IconButton,
     new_folder: IconButton,
+    /// Opens `sort_menu`, in the Library folder header and the Search header.
+    sort_button: IconButton,
+    sort_menu: Option<PopupMenu>,
     path_rect: Rect,
     path_press: Press,
     states: HashMap<String, BookState>,
@@ -407,6 +410,8 @@ impl Books {
             home_action,
             back: IconButton::new(Icon::ArrowLeft),
             new_folder: IconButton::new(Icon::FolderPlus),
+            sort_button: IconButton::new(Icon::Sort),
+            sort_menu: None,
             path_rect: Rect::default(),
             path_press: Press::default(),
             states: HashMap::new(),
@@ -547,8 +552,15 @@ impl Books {
     pub(super) fn show_new_folder(&self) -> bool {
         self.navigation.folder.is_some() && (self.selection.is_none() || self.carrying())
     }
+    /// The sort button shows in Search and, like `New folder`, inside folders
+    /// outside multi-select (the multi-root list holds only folders).
+    pub(super) fn show_sort(&self) -> bool {
+        !self.is_home()
+            && (self.search.is_some() || self.navigation.folder.is_some())
+            && (self.selection.is_none() || self.carrying())
+    }
     /// Updates the Library folder header title/subtitle bounds when controls
-    /// (Back, `New folder`, compact pager) appear or hide.
+    /// (Back, Sort and `New folder`, compact pager) appear or hide.
     pub(super) fn update_library_header_rect(&mut self, t: &Theme) {
         if self.is_home() || self.search.is_some() {
             return;
@@ -560,7 +572,9 @@ impl Books {
         } else {
             (t.margin + t.icon + t.mm(2.0)).max(self.back.rect().right() + t.mm(0.5))
         };
-        let right = if self.show_new_folder() {
+        let right = if self.show_sort() {
+            self.sort_button.rect().x - t.mm(1.5)
+        } else if self.show_new_folder() {
             self.new_folder.rect().x - t.mm(1.5)
         } else if self.pager.visible() {
             self.pager.rect().x - t.mm(3.0)
@@ -698,8 +712,13 @@ impl Books {
             let pager_rect =
                 Rect::new(self.screen.right() - t.margin - pager_w, header_cy - pager_h / 2, pager_w, pager_h);
             self.pager.place(pager_rect, t);
-            let header_right =
-                if self.pager.visible() { pager_rect.x - t.mm(2.0) } else { self.screen.right() - t.margin };
+            let sort_cx = if self.pager.visible() {
+                pager_rect.x - t.mm(6.0) - t.icon / 2
+            } else {
+                self.screen.right() - t.margin - t.icon / 2
+            };
+            self.sort_button.place_at(Point::new(sort_cx, header_cy), t);
+            let header_right = self.sort_button.rect().x - t.mm(1.5);
             self.header = Rect::new(t.margin, header_y, (header_right - t.margin).max(0), header_h);
             self.path_rect = Rect::default();
         } else {
@@ -719,6 +738,7 @@ impl Books {
                 self.screen.right() - t.margin - t.icon / 2
             };
             self.new_folder.place_at(Point::new(new_folder_cx, controls_cy), t);
+            self.sort_button.place_at(Point::new(new_folder_cx - t.target, controls_cy), t);
             self.update_library_header_rect(t);
             self.header = Rect::default();
         }
@@ -1070,13 +1090,41 @@ impl Books {
         self.save_navigation();
         self.refresh_grid(cx, self.grid.rect());
     }
-    /// What the jump sheet shows for `page`: the first folder or book on it.
+    /// What the jump sheet shows for `page`: the first folder's name, or the
+    /// first book's text in the current sort.
     fn page_start(&self, page: usize) -> String {
         let i = page * self.grid.paging().per_page;
         if let Some(path) = self.folders.get(i) {
             return collections::name(path);
         }
-        self.grid_book(i).map_or_else(String::new, |b| b.metadata.title.clone())
+        self.grid_book(i).map_or_else(String::new, |b| self.sort.page_label(b))
+    }
+    fn open_sort_menu(&mut self, t: &Theme) {
+        let items = Sort::ALL.iter().map(|s| (None, s.label().to_owned())).collect();
+        let button = self.sort_button.rect();
+        let area = Rect { y: self.screen.y + t.top_bar, h: self.screen.h - t.top_bar, ..self.screen };
+        let mut menu = PopupMenu::open(items, Point::new(button.center().x, button.bottom()), area, t);
+        menu.set_checked(Sort::ALL.iter().position(|&s| s == self.sort));
+        self.sort_menu = Some(menu);
+    }
+    /// Saves `sort` and shows page 1 in it. Only the grid flashes, as in
+    /// paging; the pager and the menu's area take a `Ui` pass.
+    fn set_sort(&mut self, sort: Sort, cx: &mut EventCx) {
+        if sort == self.sort {
+            return;
+        }
+        log::info!("library sort: {sort:?}");
+        let settings = crate::store::Settings { library_sort: sort, ..self.store.settings() };
+        if let Err(e) = self.store.save_settings(&settings) {
+            cx.toast(format!("Couldn't save the sort: {e:#}"), None);
+        }
+        self.sort = sort;
+        self.warm_seq = self.warm_seq.wrapping_add(1);
+        let previous = self.grid.rect();
+        self.pager.page = 0;
+        self.refresh(cx.theme);
+        self.save_navigation();
+        self.refresh_grid(cx, previous);
     }
     fn open_library(&mut self, cx: &mut EventCx) {
         self.end_selection(cx);
@@ -1190,6 +1238,7 @@ impl Books {
     /// A menu, sheet or dialog is open over the screen.
     fn overlay_open(&self) -> bool {
         self.menu.is_some()
+            || self.sort_menu.is_some()
             || self.details.is_some()
             || self.synopsis.is_some()
             || self.confirm.is_some()
@@ -2168,6 +2217,26 @@ fn draw_finished_badge(cx: &mut DrawCx, cover: Rect) {
     cx.icon(Icon::Check, badge, t.mm(2.4), PAPER);
 }
 
+/// A series number in a rounded ink label at the cover's top-right, clear
+/// of the selection tick (top-left) and the finished badge (bottom-right).
+fn draw_number_badge(cx: &mut DrawCx, cover: Rect, number: &str) {
+    let t = cx.theme;
+    let style = t.caption.weight(Weight::SemiBold).gray(PAPER);
+    let h = t.mm(4.0);
+    let w = (cx.text.width(number, style).ceil() as i32 + t.mm(2.0)).max(h).min(cover.w - 2 * t.mm(1.0));
+    let inset = t.mm(1.0);
+    let badge = Rect::new(cover.right() - inset - w, cover.y + inset, w, h);
+    let ring = 2 * t.border;
+    let r = h as f32 / 2.0;
+    cx.canvas.fill_rounded_rect(
+        Rect::new(badge.x - ring, badge.y - ring, badge.w + 2 * ring, badge.h + 2 * ring),
+        r + ring as f32,
+        PAPER,
+    );
+    cx.canvas.fill_rounded_rect(badge, r, INK);
+    cx.line(number, style, badge, HAlign::Center);
+}
+
 fn cover_outline(t: &Theme) -> i32 {
     t.mm(0.17).max(1)
 }
@@ -2467,7 +2536,7 @@ impl Books {
     fn normal_visual_state(
         &self,
     ) -> (
-        [bool; 15],
+        [bool; 16],
         Option<(bool, usize, bool, bool, bool, bool, bool)>,
         Option<(bool, bool, bool, bool, bool)>,
         (usize, usize, bool, bool, bool),
@@ -2482,6 +2551,7 @@ impl Books {
                 self.rescan_action.is_pressed(),
                 self.home_action.is_pressed(),
                 self.new_folder.is_pressed(),
+                self.sort_button.is_pressed(),
                 self.back.is_pressed(),
                 self.notice_press.is_down(),
                 self.library_card_press.is_down(),
@@ -2623,6 +2693,10 @@ impl Books {
             let (store, waker) = (self.store.clone(), self.worker.waker());
             let settings = crate::screens::system::SystemSettings::new(cx.theme, self.screen, store, waker);
             return Action::Push(Box::new(settings.on_library_tab()));
+        }
+        if self.show_sort() && self.sort_button.on_gesture(g) {
+            self.open_sort_menu(cx.theme);
+            return Action::None;
         }
         if !self.is_home() && self.search.is_none() {
             if self.show_new_folder()
@@ -2791,6 +2865,9 @@ impl Screen for Books {
                 }
             };
             cx.line(&label, t.heading, self.header, HAlign::Left);
+            if self.show_sort() {
+                self.sort_button.draw(cx);
+            }
             self.pager.draw(cx);
         }
         if !self.is_home() && self.search.is_none() {
@@ -2819,6 +2896,9 @@ impl Screen for Books {
             );
             if self.show_new_folder() {
                 self.new_folder.draw(cx);
+            }
+            if self.show_sort() {
+                self.sort_button.draw(cx);
             }
             self.pager.draw(cx);
         }
@@ -2971,6 +3051,9 @@ impl Screen for Books {
             if finished {
                 draw_finished_badge(cx, cover);
             }
+            if let Some(number) = self.sort.badge(book).filter(|_| !self.is_home()) {
+                draw_number_badge(cx, cover, &number);
+            }
             let title_style = if finished {
                 t.small.weight(Weight::SemiBold).gray(FINISHED_TITLE)
             } else {
@@ -3078,6 +3161,9 @@ impl Screen for Books {
             search.keyboard.draw(cx);
         }
         if let Some((_, menu)) = &self.menu {
+            menu.draw(cx);
+        }
+        if let Some(menu) = &self.sort_menu {
             menu.draw(cx);
         }
         if let Some(jump) = &self.jump {
@@ -3249,6 +3335,18 @@ impl Screen for Books {
             } else if (details.sheet.is_pressed(), details.pager.visual_state()) != before {
                 cx.redraw();
             }
+        } else if let Some(menu) = &mut self.sort_menu {
+            let before = menu.is_pressed();
+            let event = menu.on_gesture(&g, cx.theme);
+            if let Some(event) = event {
+                self.sort_menu = None;
+                if let MenuEvent::Chosen(i) = event {
+                    self.set_sort(Sort::ALL[i], cx);
+                }
+                cx.redraw();
+            } else if menu.is_pressed() != before {
+                cx.redraw();
+            }
         } else if let Some((target, menu)) = &mut self.menu {
             let before = menu.is_pressed();
             let event = menu.on_gesture(&g, cx.theme);
@@ -3405,6 +3503,7 @@ impl Screen for Books {
         }
         // Entry overlays retain ownership until their touch is released.
         if self.menu.is_some()
+            || self.sort_menu.is_some()
             || self.details.is_some()
             || self.synopsis.is_some()
             || self.jump.is_some()
@@ -4868,6 +4967,51 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn sort_menu_checks_the_sort_and_a_choice_persists_on_page_one() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("sort-menu")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        with_cx(&t, screen, |cx| {
+            // The multi-root list holds only folders: no sort button.
+            assert!(!books.show_sort());
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            books.go_to_page(1, cx);
+            let button = books.sort_button.rect().center();
+            tap(&mut books, button, cx);
+            let menu = books.sort_menu.as_ref().unwrap();
+            assert_eq!(menu.checked(), Some(0), "Title is the default");
+            let author = menu.item_rects(&t)[1].center();
+            tap(&mut books, author, cx);
+            assert!(books.sort_menu.is_none());
+            assert_eq!(books.sort, Sort::Author);
+            assert_eq!(store.settings().library_sort, Sort::Author);
+            assert_eq!((books.pager.page, books.grid.page), (0, 0));
+            books.after_present();
+            books.navigation_writer.flush().unwrap();
+            assert_eq!(store.navigation().page(), 0);
+            tap(&mut books, button, cx);
+            assert_eq!(books.sort_menu.as_ref().unwrap().checked(), Some(1));
+            // Search has the button too, and shares the choice.
+            books.sort_menu = None;
+            books.toggle_search(cx);
+            assert!(books.show_sort());
+            let button = books.sort_button.rect().center();
+            assert!(books.header.right() <= books.sort_button.rect().x);
+            tap(&mut books, button, cx);
+            tap(&mut books, button, cx);
+            assert_eq!(books.sort_menu.as_ref().unwrap().checked(), Some(1));
+        });
+        drop(books);
+        // A new start takes the saved sort.
+        let books = browsing_books(&t, screen, Rc::new(Worker::stub()), store);
+        assert_eq!(books.sort, Sort::Author);
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn sleep_and_quit_wait_for_navigation_and_failed_writes_show_a_toast() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("navigation-writer")?;
         let t = Theme::for_dpi(300);
@@ -5415,7 +5559,7 @@ mod tests {
     }
 
     #[test]
-    fn paging_and_folder_navigation_flash_only_the_grid() -> anyhow::Result<()> {
+    fn paging_sorting_and_folder_navigation_flash_only_the_grid() -> anyhow::Result<()> {
         let (store, root) = collection_fixture("grid-only-refresh")?;
         let t = Theme::for_dpi(300);
         let screen = Rect::new(0, 0, 1272, 1696);
@@ -5425,6 +5569,9 @@ mod tests {
         let grid_rect = books.grid.rect();
         let next_pos = Point::new(books.pager.rect().right() - t.target / 2, books.pager.rect().center().y);
         let back_pos = books.back.rect().center();
+        let sort_pos = books.sort_button.rect().center();
+        books.open_sort_menu(&t);
+        let author_pos = books.sort_menu.take().unwrap().item_rects(&t)[1].center();
         let mut app = crate::app::App::new(&paperwhite(), t.clone(), Box::new(books));
         app.frame();
 
@@ -5441,6 +5588,20 @@ mod tests {
             "non-flashing updates must precede Full: {updates:?}"
         );
         assert!(updates.iter().all(|u| u.rect.y >= t.top_bar), "paging must not touch the top bar: {updates:?}");
+
+        // A sort change: the same grid-only Full; the header and the closing
+        // menu take non-flashing updates below the top bar.
+        app.on_gesture(Gesture::Down(sort_pos));
+        app.frame();
+        app.on_gesture(Gesture::Tap(sort_pos));
+        app.frame();
+        app.on_gesture(Gesture::Down(author_pos));
+        app.frame();
+        app.on_gesture(Gesture::Tap(author_pos));
+        let updates = app.frame();
+        assert_eq!(updates.last(), Some(&crate::platform::Update { rect: grid_rect, mode: RefreshMode::Full }));
+        assert!(updates[..updates.len() - 1].iter().all(|u| u.mode != RefreshMode::Full), "one Full: {updates:?}");
+        assert!(updates.iter().all(|u| u.rect.y >= t.top_bar), "sorting must not touch the top bar: {updates:?}");
 
         // Navigating Back to parent folder: top bar stays untouched, Full is confined to the grid.
         app.on_gesture(Gesture::Down(back_pos));
@@ -6887,7 +7048,8 @@ mod tests {
             assert!(books.back.enabled && books.new_folder.enabled && books.pager.visible());
             assert!(books.back.rect().y >= t.top_bar && books.back.rect().bottom() < books.grid.rect().y);
             assert!(books.back.rect().right() <= books.path_rect.x);
-            assert!(books.path_rect.right() <= books.new_folder.rect().x);
+            assert!(books.path_rect.right() <= books.sort_button.rect().x);
+            assert_eq!(books.sort_button.rect().right(), books.new_folder.rect().x, "Sort sits left of New folder");
             assert!(books.new_folder.rect().right() < books.pager.rect().x);
             let visual_gap = books.pager.rect().x - (books.new_folder.rect().center().x + t.icon / 2);
             assert!((visual_gap - t.mm(6.0)).abs() <= 2, "6 mm gap between New folder and pager: {visual_gap}");

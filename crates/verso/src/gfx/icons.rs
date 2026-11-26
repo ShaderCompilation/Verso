@@ -52,6 +52,8 @@ pub enum Icon {
     Extend,
     Bookmark,
     BookmarkFilled,
+    /// The library sort button (Lucide `arrow-down-up`).
+    Sort,
     /// The mark on a bookmarked page: a filled ribbon about 3.4 × 5.5 mm,
     /// flat at the top so it hangs from the screen edge.
     BookmarkRibbon,
@@ -59,7 +61,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 41] = [
+    pub const ALL: [Icon; 42] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -101,6 +103,7 @@ impl Icon {
         Icon::Bookmark,
         Icon::BookmarkFilled,
         Icon::BookmarkRibbon,
+        Icon::Sort,
     ];
 
     fn svg(self) -> &'static str {
@@ -146,6 +149,7 @@ impl Icon {
             Icon::Bookmark => include_str!("../../../../assets/icons/bookmark.svg"),
             Icon::BookmarkFilled => include_str!("../../../../assets/icons/bookmark-filled.svg"),
             Icon::BookmarkRibbon => include_str!("../../../../assets/icons/bookmark-ribbon.svg"),
+            Icon::Sort => include_str!("../../../../assets/icons/arrow-down-up.svg"),
         }
     }
 }
