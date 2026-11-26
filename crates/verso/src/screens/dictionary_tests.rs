@@ -1497,12 +1497,9 @@ fn a_button_hidden_under_the_finger_lets_go() {
     draw_hints(&mut lookup, &t, screen, &mut TextRenderer::new());
     let word = lookup.body.center();
     cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Down(word), cx));
-    worker.edit(crate::dictionary::sets::Edit::MoveDictionary {
-        set: crate::dictionary::sets::DEFAULT.into(),
-        dictionary: "13.ifo".into(),
-        position: 13,
-    });
-    cx(&t, screen, |cx| lookup.receive(cx));
+    // `receive` repeats the query on a new revision, but the worker can
+    // answer before it returns and bring the definition back, so repeat here.
+    lookup.repeat(false);
     assert!(lookup.manage_shown() && !lookup.manage.is_pressed());
     assert!(cx(&t, screen, |cx| lookup.on_gesture(&Gesture::Tap(word), cx)).is_none());
     worker.flush().unwrap();
