@@ -590,6 +590,8 @@ impl Reader {
             source: None,
             target: settings.translate_language.as_deref().and_then(translate::language),
             written: translate::language(&language),
+            provider: settings.translate_provider,
+            deepl_api_key: settings.deepl_api_key.clone(),
         }
     }
     pub(super) fn lookup(&mut self, query: &str, tab: Tab, cx: &mut EventCx) {

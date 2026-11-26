@@ -197,7 +197,22 @@ impl Client {
     /// Posts `form` (URL-encoded) and downloads the answer like `get`. For
     /// text too long for an address.
     pub fn post_form(&self, url: &str, form: &[(&str, &str)], limit: u64) -> Result<Vec<u8>, FetchError> {
-        read(self.agent.post(url).send_form(form.iter().copied()), limit)
+        self.post_form_headers(url, &[], form, limit)
+    }
+
+    /// Like `post_form`, with extra request headers (such as `Authorization`).
+    pub fn post_form_headers(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        form: &[(&str, &str)],
+        limit: u64,
+    ) -> Result<Vec<u8>, FetchError> {
+        let mut request = self.agent.post(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        read(request.send_form(form.iter().copied()), limit)
     }
 }
 
@@ -274,6 +289,7 @@ pub(crate) mod tests {
         /// With the query, as sent.
         pub path: String,
         pub user_agent: String,
+        pub authorization: String,
         pub accept_encoding: String,
         pub content_type: String,
         pub body: String,
@@ -361,6 +377,7 @@ pub(crate) mod tests {
                 let value = value.trim().to_string();
                 match name.to_ascii_lowercase().as_str() {
                     "user-agent" => request.user_agent = value,
+                    "authorization" => request.authorization = value,
                     "accept-encoding" => request.accept_encoding = value,
                     "content-type" => request.content_type = value,
                     "content-length" => length = value.parse().unwrap(),

@@ -14,6 +14,7 @@ use super::dictionaries::Dictionaries;
 use super::files::Files;
 use super::http::{Body, Method, Request, Response};
 use super::server::Handler;
+use super::translate::Translate;
 
 const PAGE: &str = include_str!("page.html");
 
@@ -34,6 +35,8 @@ pub struct Context {
     pub dictionaries: Option<Dictionaries>,
     /// Files tab handlers; None only in minimal unit tests.
     pub files: Option<Files>,
+    /// Translate tab handlers; None only in minimal unit tests.
+    pub translate: Option<Translate>,
 }
 
 pub struct Api {
@@ -149,6 +152,8 @@ impl Api {
             (Method::Post, "/api/files/mkdir") => self.files().map_or_else(not_found, |f| f.mkdir(body)),
             (Method::Post, "/api/files/rename") => self.files().map_or_else(not_found, |f| f.rename(body)),
             (Method::Post, "/api/files/move") => self.files().map_or_else(not_found, |f| f.move_to(body)),
+            (Method::Get, "/api/translate") => self.translate().map_or_else(not_found, |t| t.get()),
+            (Method::Put, "/api/translate") => self.translate().map_or_else(not_found, |t| t.update(body)),
             _ => not_found(),
         }
     }
@@ -163,6 +168,10 @@ impl Api {
 
     fn dictionaries(&self) -> Option<&Dictionaries> {
         self.cx.dictionaries.as_ref()
+    }
+
+    fn translate(&self) -> Option<&Translate> {
+        self.cx.translate.as_ref()
     }
 
     fn login(&self, body: &mut Body<'_>) -> Response {
@@ -325,6 +334,7 @@ mod tests {
                 books: None,
                 dictionaries: None,
                 files: None,
+                translate: None,
             },
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api.clone(), Timeouts::default()).unwrap();

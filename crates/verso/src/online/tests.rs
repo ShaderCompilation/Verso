@@ -88,7 +88,23 @@ fn lookup(query: &str) -> Request {
 }
 
 fn translate(text: &str, source: Option<&str>, target: &str) -> Request {
-    Request::Translate { text: text.into(), source: source.map(Into::into), target: target.into() }
+    Request::Translate {
+        text: text.into(),
+        source: source.map(Into::into),
+        target: target.into(),
+        provider: translate::Provider::Google,
+        api_key: None,
+    }
+}
+
+fn deepl_request(text: &str, source: Option<&str>, target: &str, api_key: Option<&str>) -> Request {
+    Request::Translate {
+        text: text.into(),
+        source: source.map(Into::into),
+        target: target.into(),
+        provider: translate::Provider::DeepL,
+        api_key: api_key.map(Into::into),
+    }
 }
 
 fn body(value: serde_json::Value) -> Http {
@@ -223,6 +239,72 @@ fn translations_are_posted() {
 }
 
 #[test]
+fn deepl_selects_free_or_pro_sends_auth_handles_errors_and_falls_back() {
+    let b = bench(|r| match r.path.as_str() {
+        "/deepl/free" => match r.authorization.as_str() {
+            "DeepL-Auth-Key bad-key:fx" => Http::Status(403),
+            "DeepL-Auth-Key quota-key:fx" => Http::Status(456),
+            _ => body(json!({"translations": [{"detected_source_language": "NB", "text": "The fox."}]})),
+        },
+        "/deepl/pro" => body(json!({"translations": [{"detected_source_language": "FR", "text": "Fox pro."}]})),
+        "/translate" => body(json!([[["Google fallback.", "orig"]], null, "fr"])),
+        _ => Http::Status(404),
+    });
+
+    // Free key (:fx) → /deepl/free with DeepL-Auth-Key header and mapped codes.
+    let free_key = "12345678-1234-1234-1234-1234567890ab:fx";
+    let req = deepl_request("Reven.", None, "en", Some(free_key));
+    assert!(!format!("{req:?}").contains("12345678"), "Debug must never leak the API key");
+    let Ok(Answer::Translation(tr)) = b.ask(req) else { panic!() };
+    assert_eq!(
+        (tr.text.as_str(), tr.detected.as_deref(), tr.provider),
+        ("The fox.", Some("no"), translate::Provider::DeepL)
+    );
+    let sent = b.server.request(0);
+    assert_eq!((sent.method.as_str(), sent.path.as_str()), ("POST", "/deepl/free"));
+    assert_eq!(sent.authorization, format!("DeepL-Auth-Key {free_key}"));
+    assert_eq!(
+        (sent.param("text").as_deref(), sent.param("source_lang"), sent.param("target_lang").as_deref()),
+        (Some("Reven."), None, Some("EN-US"),)
+    );
+
+    // Pro key (no :fx) → /deepl/pro with explicit source_lang.
+    let pro_key = "pro-key-without-suffix";
+    let Ok(Answer::Translation(tr)) = b.ask(deepl_request("Renard.", Some("fr"), "pt", Some(pro_key))) else {
+        panic!()
+    };
+    assert_eq!((tr.text.as_str(), tr.provider), ("Fox pro.", translate::Provider::DeepL));
+    let sent = b.server.request(1);
+    assert_eq!(sent.path, "/deepl/pro");
+    assert_eq!(sent.authorization, format!("DeepL-Auth-Key {pro_key}"));
+    assert_eq!(
+        (sent.param("source_lang").as_deref(), sent.param("target_lang").as_deref()),
+        (Some("FR"), Some("PT-BR"))
+    );
+
+    // 403 unauthorized and 456 quota exceeded map to dedicated non-retryable errors.
+    assert_eq!(b.ask(deepl_request("x", None, "en", Some("bad-key:fx"))), Err(Error::Unauthorized));
+    assert_eq!(b.ask(deepl_request("x", None, "en", Some("quota-key:fx"))), Err(Error::QuotaExceeded));
+
+    // Empty / missing DeepL key falls back cleanly to Google Translate.
+    for empty in [None, Some(""), Some("   ")] {
+        let Ok(Answer::Translation(tr)) = b.ask(deepl_request("Renard.", None, "en", empty)) else { panic!() };
+        assert_eq!((tr.text.as_str(), tr.provider), ("Google fallback.", translate::Provider::Google));
+    }
+
+    // Unsupported target or source language falls back cleanly to Google Translate.
+    let Ok(Answer::Translation(tr)) = b.ask(deepl_request("Renard.", None, "ka", Some(free_key))) else { panic!() };
+    assert_eq!((tr.text.as_str(), tr.provider), ("Google fallback.", translate::Provider::Google));
+    let Ok(Answer::Translation(tr)) = b.ask(deepl_request("Vulpes.", Some("la"), "en", Some(free_key))) else {
+        panic!()
+    };
+    assert_eq!((tr.text.as_str(), tr.provider), ("Google fallback.", translate::Provider::Google));
+    let last = b.server.request(b.hits() - 1);
+    assert_eq!(last.path, "/translate");
+    assert!(last.authorization.is_empty(), "DeepL key is never sent to Google");
+}
+
+#[test]
 fn failures_keep_their_reason() {
     use FetchError as F;
     let big = vec![b' '; MAX_REPLY_BYTES as usize + 1];
@@ -254,6 +336,8 @@ fn errors_say_what_to_do() {
         (Error::Fetch(F::Status(429)), "Wikipedia is busy", true),
         (Error::Fetch(F::Status(503)), "Wikipedia had a problem", true),
         (Error::Fetch(F::TooLarge(1)), "Wikipedia had a problem", false),
+        (Error::Unauthorized, "Wikipedia rejected the API key", false),
+        (Error::QuotaExceeded, "Wikipedia quota exceeded", false),
         (Error::TextTooLong, "Too long to translate", false),
     ] {
         assert_eq!((error.title("Wikipedia").as_str(), error.retryable()), (title, retry), "{error:?}");

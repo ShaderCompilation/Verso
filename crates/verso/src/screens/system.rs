@@ -8,7 +8,8 @@ use crate::clock::LocalDateTime;
 use crate::document::TextShaping;
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
-use crate::platform::{RefreshMode, Waker, ssh, wifi};
+use crate::online::translate::{deepl_tier, parse_deepl_key};
+use crate::platform::{RefreshMode, TextInput, Waker, ssh, wifi};
 use crate::reader::Zone;
 use crate::screens::dictionaries::Dictionaries;
 use crate::screens::folders::{FolderPicker, display_folder};
@@ -17,12 +18,13 @@ use crate::screens::setup::SetupScreen;
 use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
-use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones};
+use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{FILL, INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
-    Button, ButtonKind, IconButton, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, Toggle, TopBar,
+    Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, TextField,
+    Toggle, TopBar,
 };
 use crate::update::{self, Updates};
 use verso_update::Version;
@@ -232,8 +234,10 @@ pub struct SystemSettings {
     go_back_button: Button,
     offer: Option<OfferSheet>,
     go_back_sheet: Option<GoBackSheet>,
-    // Advanced: text shaping, then (or on the right) help and the SSH
-    // switch.
+    // Advanced: text shaping, translation provider/key, then (or on the right)
+    // help and the SSH switch.
+    translate_entry: List,
+    translate_sheet: Option<TranslateSheet>,
     setup_button: Button,
     report_button: Button,
     report_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
@@ -314,6 +318,7 @@ impl SystemSettings {
         let label = go_back.as_ref().map_or_else(String::new, |(_, previous)| format!("Go back to {previous}"));
         let selected = TextShaping::ALL.iter().position(|&m| m == settings.text_shaping).unwrap_or(1);
         let shaping = Segmented::texts(&["Full", "Light", "FreeType"], selected);
+        let translate_entry = List::new(vec![Row::new("Translate").value(translate_summary(&settings)).chevron()]);
         let ssh = ssh::status();
         let ssh_read_at = Instant::now();
         let ssh_toggle = Toggle::new(ssh.running);
@@ -374,6 +379,8 @@ impl SystemSettings {
             go_back_button: Button::new(label, ButtonKind::Secondary),
             offer: None,
             go_back_sheet: None,
+            translate_entry,
+            translate_sheet: None,
             setup_button: Button::new("Run setup again", ButtonKind::Secondary),
             report_button: Button::new("Create problem report", ButtonKind::Secondary),
             report_rx: None,
@@ -1034,8 +1041,16 @@ impl SystemSettings {
 impl SystemSettings {
     // ---- Advanced ----
 
+    fn refresh_translate(&mut self) {
+        let settings = self.store.settings();
+        if let Some(row) = self.translate_entry.rows.first_mut() {
+            row.value = Some(translate_summary(&settings));
+        }
+    }
+
     fn draw_advanced(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
+        let portrait = self.left == self.right;
         let mut col = Column::new(self.left, self.body);
         col.label(cx, "Text shaping");
         self.shaping.place(col.control(t));
@@ -1053,15 +1068,25 @@ impl SystemSettings {
         });
         col.note(cx, notes[self.shaping.selected], &notes);
         col.note(cx, "Applies from the next book you open. Each book is laid out again once.", &[]);
-        // Help and the SSH section below, or on the right in landscape.
-        let mut col = if self.left == self.right {
-            col.gap(t);
+        // Translate, Help and the SSH section below in portrait, or on the right in landscape.
+        let mut col = if portrait {
+            col.y += t.mm(3.5);
+            let row = col.take(t.row);
+            self.translate_entry.place(row, t.row, 0);
+            self.translate_entry.draw(cx);
+            col.y += t.mm(3.5);
             col
         } else {
             Column::new(self.right, self.body)
         };
         self.draw_help(cx, &mut col);
-        col.gap(t);
+        if !portrait {
+            col.y += t.mm(3.0);
+            let row = col.take(t.row);
+            self.translate_entry.place(row, t.row, 0);
+            self.translate_entry.draw(cx);
+        }
+        col.y += t.mm(3.5);
         let note = self.ssh_note();
         switch_row(cx, &mut self.ssh_toggle, ("SSH server", &note), col.x, col.y, col.w);
     }
@@ -1100,12 +1125,61 @@ impl SystemSettings {
             let current = self.store.settings().text_shaping;
             self.shaping.selected = TextShaping::ALL.iter().position(|&m| m == current).unwrap_or(1);
         }
+        if let Some(ListEvent::Tapped(_)) = self.translate_entry.on_gesture(g) {
+            self.translate_sheet = Some(TranslateSheet::new(cx.theme, self.screen, &self.store.settings()));
+            return Action::None;
+        }
         if self.setup_button.on_gesture(g) {
             let setup = SetupScreen::new(cx.theme, self.screen, self.store.clone(), self.waker.clone(), None);
             return Action::Push(Box::new(setup.with_open_book(self.open_book.clone())));
         }
         if self.report_rx.is_none() && self.report_button.on_gesture(g) {
             self.start_report();
+        }
+        Action::None
+    }
+
+    fn handle_translate_event(&mut self, event: TranslateEvent, cx: &mut EventCx) -> Action {
+        match event {
+            TranslateEvent::Close => self.translate_sheet = None,
+            TranslateEvent::Provider(provider) => {
+                if self.save(cx, "translation provider", |s| s.translate_provider = provider) {
+                    self.refresh_translate();
+                }
+                if let Some(sheet) = &mut self.translate_sheet {
+                    sheet.sync(cx.theme, &self.store.settings());
+                }
+            }
+            TranslateEvent::SaveKey(raw) => match parse_deepl_key(&raw) {
+                Ok(Some(key)) => {
+                    if self.save(cx, "DeepL API key", |s| {
+                        s.deepl_api_key = Some(key);
+                        s.translate_provider = TranslateProvider::DeepL;
+                    }) {
+                        self.refresh_translate();
+                        cx.toast("DeepL API key saved", None);
+                    }
+                    if let Some(sheet) = &mut self.translate_sheet {
+                        sheet.stop_editing(cx.theme, &self.store.settings());
+                    }
+                }
+                Ok(None) => cx.toast("Enter an API key", None),
+                Err(msg) => cx.toast(msg, None),
+            },
+            TranslateEvent::RemoveKey => {
+                if self.save(cx, "DeepL API key", |s| s.deepl_api_key = None) {
+                    self.refresh_translate();
+                    cx.toast("DeepL API key removed", None);
+                }
+                if let Some(sheet) = &mut self.translate_sheet {
+                    sheet.sync(cx.theme, &self.store.settings());
+                }
+            }
+            TranslateEvent::OpenTransfer => {
+                self.translate_sheet = None;
+                let screen = TransferScreen::new(cx.theme, self.screen, self.store.clone(), self.waker.clone());
+                return Action::Push(Box::new(screen));
+            }
         }
         Action::None
     }
@@ -1221,6 +1295,13 @@ impl SystemSettings {
 }
 
 impl Screen for SystemSettings {
+    fn on_return(&mut self, cx: &mut EventCx) {
+        self.refresh_translate();
+        if let Some(sheet) = &mut self.translate_sheet {
+            sheet.sync(cx.theme, &self.store.settings());
+        }
+        cx.redraw();
+    }
     fn relayout_state(&self, state: &mut RelayoutState) {
         state.in_settings = true;
     }
@@ -1246,9 +1327,18 @@ impl Screen for SystemSettings {
         if let Some(sheet) = &self.import_sheet {
             sheet.draw(cx);
         }
+        if let Some(sheet) = &self.translate_sheet {
+            sheet.draw(cx);
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
+        if let Some(sheet) = &mut self.translate_sheet {
+            if let Some(event) = sheet.on_gesture(&g, cx.theme) {
+                return self.handle_translate_event(event, cx);
+            }
+            return Action::None;
+        }
         if let Some(sheet) = &mut self.import_sheet {
             if let Some(outcome) = sheet.on_gesture(&g, cx.theme) {
                 self.import_closed(outcome, cx);
@@ -1351,12 +1441,25 @@ impl Screen for SystemSettings {
         let saves = self.store.settings_saves();
         if saves != self.settings_seen {
             self.settings_seen = saves;
+            self.refresh_translate();
+            if let Some(sheet) = &mut self.translate_sheet {
+                sheet.sync(cx.theme, &self.store.settings());
+            }
             let folders = self.store.library_folders();
             if folders != self.folders {
                 self.load_folders(cx.theme);
-                cx.redraw();
             }
+            cx.redraw();
         }
+    }
+    fn on_text_input(&mut self, input: &TextInput, cx: &mut EventCx) -> bool {
+        let Some(sheet) = &mut self.translate_sheet else { return false };
+        let Some(handled) = sheet.on_text_input(input) else { return false };
+        cx.redraw();
+        if let Some(event) = handled {
+            let _ = self.handle_translate_event(event, cx);
+        }
+        true
     }
     /// Re-reads the SSH status while Wi-Fi is still connecting, and once
     /// after a wake. Nothing otherwise.
@@ -1430,6 +1533,262 @@ impl Screen for SystemSettings {
             cx.redraw();
         }
         Action::None
+    }
+}
+
+/// Short value shown beside "Translate" in Settings → Advanced.
+fn translate_summary(settings: &Settings) -> String {
+    match settings.translate_provider {
+        TranslateProvider::Google => "Google".into(),
+        TranslateProvider::DeepL => match settings.deepl_api_key.as_deref() {
+            Some(key) => format!("DeepL ({})", deepl_tier(key).label()),
+            None => "DeepL (no key)".into(),
+        },
+    }
+}
+
+enum TranslateEvent {
+    Close,
+    Provider(TranslateProvider),
+    SaveKey(String),
+    RemoveKey,
+    OpenTransfer,
+}
+
+/// Sheet for selecting the translation provider (Google / DeepL) and managing
+/// the optional DeepL API key (opening Wi-Fi transfer to paste, typing on
+/// device, or removing a saved key).
+struct TranslateSheet {
+    screen: Rect,
+    sheet: Sheet,
+    label: Rect,
+    provider: Segmented,
+    note: Rect,
+    has_key: bool,
+    key_tier: Option<crate::online::translate::DeepLTier>,
+    /// Left and right bottom buttons; when `two_buttons` is false, `right`
+    /// spans the whole width ("Done").
+    left: Button,
+    right: Button,
+    two_buttons: bool,
+    // Optional on-device key entry (opened by "Type key").
+    editing: bool,
+    field: TextField,
+    field_rect: Rect,
+    keyboard: Keyboard,
+    cancel: Button,
+    save: Button,
+}
+
+impl TranslateSheet {
+    fn new(t: &Theme, screen: Rect, settings: &Settings) -> Self {
+        let sheet = Sheet::open("Translate", t.mm(68.0).min(screen.h - t.top_bar), screen, t);
+        let selected = TranslateProvider::ALL.iter().position(|&p| p == settings.translate_provider).unwrap_or(0);
+        let provider = Segmented::texts(&["Google", "DeepL"], selected);
+        let mut field = TextField::new("DeepL API key");
+        field.limit = Some(256);
+        let mut keyboard = Keyboard::default();
+        keyboard.set_submit("Save");
+        keyboard.place(screen, t);
+        let mut this = Self {
+            screen,
+            sheet,
+            label: Rect::default(),
+            provider,
+            note: Rect::default(),
+            has_key: false,
+            key_tier: None,
+            left: Button::new("Type key", ButtonKind::Secondary),
+            right: Button::new("Done", ButtonKind::Primary),
+            two_buttons: false,
+            editing: false,
+            field,
+            field_rect: Rect::default(),
+            keyboard,
+            cancel: Button::new("Cancel", ButtonKind::Secondary),
+            save: Button::new("Save", ButtonKind::Primary),
+        };
+        this.sync(t, settings);
+        this
+    }
+
+    fn sync(&mut self, t: &Theme, settings: &Settings) {
+        self.provider.selected =
+            TranslateProvider::ALL.iter().position(|&p| p == settings.translate_provider).unwrap_or(0);
+        self.has_key = settings.deepl_api_key.is_some();
+        self.key_tier = settings.deepl_api_key.as_deref().map(deepl_tier);
+        let deepl = settings.translate_provider == TranslateProvider::DeepL;
+        match (deepl, self.has_key) {
+            (true, false) => {
+                self.left = Button::new("Type key", ButtonKind::Secondary);
+                self.right = Button::new("Wi-Fi transfer", ButtonKind::Primary);
+                self.two_buttons = true;
+            }
+            (true, true) => {
+                self.left = Button::new("Remove key", ButtonKind::Secondary);
+                self.right = Button::new("Wi-Fi transfer", ButtonKind::Secondary);
+                self.two_buttons = true;
+            }
+            (false, true) => {
+                self.left = Button::new("Remove DeepL key", ButtonKind::Secondary);
+                self.right = Button::new("Done", ButtonKind::Primary);
+                self.two_buttons = true;
+            }
+            (false, false) => {
+                self.right = Button::new("Done", ButtonKind::Primary);
+                self.two_buttons = false;
+            }
+        }
+        self.place(t);
+    }
+
+    fn place(&mut self, t: &Theme) {
+        let c = self.sheet.content(t);
+        self.label = Rect::new(c.x, c.y, c.w, t.mm(LABEL_MM));
+        self.provider.place(Rect::new(c.x, self.label.bottom(), c.w, t.target));
+        let buttons_y = c.bottom() - t.margin - t.button_h;
+        let note_y = self.provider.rect().bottom() + t.mm(2.5);
+        self.note = Rect::new(c.x, note_y, c.w, (buttons_y - note_y - t.mm(2.5)).max(0));
+        if self.two_buttons {
+            let gap = t.mm(3.0);
+            let w = (c.w - gap) / 2;
+            self.left.place(Rect::new(c.x, buttons_y, w, t.button_h), t);
+            self.right.place(Rect::new(c.right() - w, buttons_y, w, t.button_h), t);
+        } else {
+            self.right.place(Rect::new(c.x, buttons_y, c.w, t.button_h), t);
+        }
+
+        // On-device key-entry panel sits above the keyboard.
+        let kb = self.keyboard.rect();
+        let edit_h = (t.mm(14.0) + t.target + t.mm(3.0) + t.button_h + t.margin).min(kb.y);
+        let edit_y = (kb.y - edit_h).max(0);
+        let inner = Rect::new(self.screen.x + t.margin, edit_y + t.mm(14.0), self.screen.w - 2 * t.margin, edit_h);
+        self.field_rect = Rect::new(inner.x, inner.y, inner.w, t.target);
+        self.field.place(self.field_rect);
+        let gap = t.mm(3.0);
+        let w = (inner.w - gap) / 2;
+        let row_y = self.field_rect.bottom() + t.mm(3.0);
+        self.cancel.place(Rect::new(inner.x, row_y, w, t.button_h), t);
+        self.save.place(Rect::new(inner.right() - w, row_y, w, t.button_h), t);
+    }
+
+    fn start_editing(&mut self, t: &Theme) {
+        self.editing = true;
+        self.field = TextField::new("DeepL API key");
+        self.field.limit = Some(256);
+        self.field.focused = true;
+        self.keyboard.visible = true;
+        self.place(t);
+    }
+
+    fn stop_editing(&mut self, t: &Theme, settings: &Settings) {
+        self.editing = false;
+        self.field.focused = false;
+        self.keyboard.visible = false;
+        self.sync(t, settings);
+    }
+
+    fn message(&self) -> String {
+        let deepl = TranslateProvider::ALL[self.provider.selected] == TranslateProvider::DeepL;
+        match (deepl, self.key_tier) {
+            (false, None) => "Google Translate works out of the box with no setup.".into(),
+            (false, Some(tier)) => format!(
+                "Google Translate is active. Your saved DeepL {} key is kept if you switch back.",
+                tier.label()
+            ),
+            (true, Some(tier)) => format!(
+                "Using your saved DeepL {} API key. Languages DeepL doesn’t support fall back to Google Translate.",
+                tier.label()
+            ),
+            (true, None) => "No DeepL API key saved — using Google Translate until you add one. Paste it in Wi-Fi transfer → Translate.".into(),
+        }
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        if self.editing {
+            let t = cx.theme;
+            let kb = self.keyboard.rect();
+            let top = (self.field_rect.y - t.mm(14.0)).max(0);
+            let panel = Rect::new(self.screen.x, top, self.screen.w, kb.y - top);
+            cx.fill(panel, PAPER);
+            cx.hline(panel.y, panel.x, panel.right(), t.border, INK);
+            cx.line(
+                "Enter DeepL API key",
+                t.heading,
+                Rect::new(panel.x + t.margin, panel.y + t.mm(3.0), panel.w - 2 * t.margin, t.mm(9.0)),
+                HAlign::Left,
+            );
+            self.field.draw(cx);
+            self.cancel.draw(cx);
+            self.save.draw(cx);
+            self.keyboard.draw(cx);
+            return;
+        }
+        self.sheet.draw(cx);
+        cx.section_label("Provider", self.label);
+        self.provider.draw(cx);
+        cx.paragraph(&self.message(), cx.theme.small.gray(INK2), self.note, HAlign::Left);
+        if self.two_buttons {
+            self.left.draw(cx);
+        }
+        self.right.draw(cx);
+    }
+
+    fn on_gesture(&mut self, g: &Gesture, t: &Theme) -> Option<TranslateEvent> {
+        if self.editing {
+            if let Some(input) = self.keyboard.on_gesture(g, t) {
+                return self.apply_input(&input);
+            }
+            if self.field.on_gesture(g) {
+                return None;
+            }
+            if self.cancel.on_gesture(g) {
+                self.editing = false;
+                self.field.focused = false;
+                self.keyboard.visible = false;
+                return None;
+            }
+            if self.save.on_gesture(g) {
+                return Some(TranslateEvent::SaveKey(self.field.value().to_owned()));
+            }
+            return None;
+        }
+        if self.sheet.on_gesture(g) {
+            return Some(TranslateEvent::Close);
+        }
+        if let Some(i) = self.provider.on_gesture(g) {
+            return Some(TranslateEvent::Provider(TranslateProvider::ALL[i]));
+        }
+        let deepl = TranslateProvider::ALL[self.provider.selected] == TranslateProvider::DeepL;
+        if self.two_buttons && self.left.on_gesture(g) {
+            return match (deepl, self.has_key) {
+                (true, false) => {
+                    self.start_editing(t);
+                    None
+                }
+                (_, true) => Some(TranslateEvent::RemoveKey),
+                (false, false) => None,
+            };
+        }
+        if self.right.on_gesture(g) {
+            return Some(if deepl { TranslateEvent::OpenTransfer } else { TranslateEvent::Close });
+        }
+        None
+    }
+
+    fn apply_input(&mut self, input: &TextInput) -> Option<TranslateEvent> {
+        if matches!(input, TextInput::Submit) {
+            return Some(TranslateEvent::SaveKey(self.field.value().to_owned()));
+        }
+        self.field.edit(input);
+        None
+    }
+
+    fn on_text_input(&mut self, input: &TextInput) -> Option<Option<TranslateEvent>> {
+        if !self.editing {
+            return None;
+        }
+        Some(self.apply_input(input))
     }
 }
 
@@ -1570,21 +1929,41 @@ impl Screen for UsbPrompt {
     }
 }
 
-/// The report, exit and USB sheets, for `screens/fit_tests.rs`.
+/// The report, translate, exit and USB sheets, for `screens/fit_tests.rs`.
 #[cfg(test)]
 pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRenderer) -> Vec<crate::ui::fit::Parts> {
     use crate::ui::fit::{Parts, text_h};
     let report = ReportSheet::new(t, screen, "report-20261122-123000.txt".into());
     let exit = ExitPrompt::new(t, screen);
     let usb = UsbPrompt::new(t, screen);
-    vec![
+    let mut samples = vec![
         Parts::new("ReportSheet", report.sheet.rect(), [report.ok.rect()])
             .body(report.body, text_h(text, &report.message(), t.small, report.body.w)),
         Parts::new("ExitPrompt", exit.sheet.rect(), [exit.stop.rect(), exit.exit.rect()])
             .body(exit.text, text_h(text, exit.message(), t.small, exit.text.w)),
         Parts::new("UsbPrompt", usb.sheet.rect(), [usb.exit.rect(), usb.stay.rect()])
             .body(usb.text, text_h(text, USB_MESSAGE, t.small, usb.text.w)),
-    ]
+    ];
+    for settings in [
+        Settings { translate_provider: TranslateProvider::DeepL, deepl_api_key: None, ..Settings::default() },
+        Settings {
+            translate_provider: TranslateProvider::DeepL,
+            deepl_api_key: Some("12345678-1234-1234-1234-1234567890ab:fx".into()),
+            ..Settings::default()
+        },
+        Settings { translate_provider: TranslateProvider::Google, deepl_api_key: None, ..Settings::default() },
+    ] {
+        let tr = TranslateSheet::new(t, screen, &settings);
+        let mut buttons = vec![tr.provider.rect(), tr.right.rect()];
+        if tr.two_buttons {
+            buttons.push(tr.left.rect());
+        }
+        samples.push(
+            Parts::new("TranslateSheet", tr.sheet.rect(), buttons)
+                .body(tr.note, text_h(text, &tr.message(), t.small, tr.note.w)),
+        );
+    }
+    samples
 }
 
 #[cfg(test)]
@@ -1799,5 +2178,50 @@ mod tests {
         let unnamed = ssh_note(None, &on(Some("192.168.1.42"), None), Some(true), true);
         assert!(unnamed.starts_with("ssh -p 2222 root@192.168.1.42\n"));
         assert_eq!(ssh_note(Some(true), &on(None, None), Some(true), true), "Starting…");
+    }
+
+    #[test]
+    fn translate_sheet_switches_provider_and_manages_deepl_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("data"));
+        let (t, screen) = (Theme::for_dpi(300), Rect::new(0, 0, 1272, 1696));
+        let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
+        s.tab = Tab::Advanced;
+        draw(&mut s, &t, 1272, 1696);
+        assert_eq!(s.translate_entry.rows[0].value.as_deref(), Some("Google"));
+
+        // Open Translate sheet and switch to DeepL.
+        let row = s.translate_entry.row_rect(0);
+        tap(&mut s, &t, screen, row);
+        let seg = s.translate_sheet.as_ref().unwrap().provider.rect();
+        let deepl_btn = seg.columns(2, 0)[1];
+        tap(&mut s, &t, screen, deepl_btn);
+        assert_eq!(store.settings().translate_provider, TranslateProvider::DeepL);
+        assert_eq!(s.translate_entry.rows[0].value.as_deref(), Some("DeepL (no key)"));
+
+        // Type and save a Free API key on-device.
+        let type_btn = s.translate_sheet.as_ref().unwrap().left.rect();
+        tap(&mut s, &t, screen, type_btn);
+        assert!(s.translate_sheet.as_ref().unwrap().editing);
+        let mut toast = None;
+        let mut cx = EventCx {
+            theme: &t,
+            screen,
+            now: Instant::now(),
+            toast: &mut toast,
+            forced: &mut vec![],
+            needs_redraw: &mut false,
+            battery: None,
+        };
+        assert!(s.on_text_input(&TextInput::Insert("abc-123:fx".into()), &mut cx));
+        assert!(s.on_text_input(&TextInput::Submit, &mut cx));
+        assert_eq!(store.settings().deepl_api_key.as_deref(), Some("abc-123:fx"));
+        assert_eq!(s.translate_entry.rows[0].value.as_deref(), Some("DeepL (Free)"));
+
+        // Remove key clears it and updates the summary.
+        let remove_btn = s.translate_sheet.as_ref().unwrap().left.rect();
+        tap(&mut s, &t, screen, remove_btn);
+        assert_eq!(store.settings().deepl_api_key, None);
+        assert_eq!(s.translate_entry.rows[0].value.as_deref(), Some("DeepL (no key)"));
     }
 }

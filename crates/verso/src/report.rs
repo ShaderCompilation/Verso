@@ -153,6 +153,8 @@ mod tests {
                 "library_folders": ["/mnt/us/documents", "/mnt/us/Secret Shelf"],
                 "page_flash": 6,
                 "hostname": "my-private-kindle",
+                "translate_provider": "deepl",
+                "deepl_api_key": "12345678-1234-1234-1234-1234567890ab:fx",
                 "orientation": "portrait"
             }"#,
         )
@@ -247,6 +249,12 @@ mod tests {
                 "Wi-Fi transfer: Ready at <redacted> as <redacted>",
             ),
             ("web app: preparing a connection from 192.168.1.23:5000: bad", "web app: preparing a connection: bad"),
+            // Stored API keys and DeepL authorization headers never leak.
+            (
+                "Authorization: DeepL-Auth-Key 99999999-aaaa-bbbb-cccc-ddddeeeeffff:fx",
+                "Authorization: DeepL-Auth-Key <redacted>",
+            ),
+            ("debug key 12345678-1234-1234-1234-1234567890ab:fx leaked", "debug key <redacted> leaked"),
         ];
         let lines: String = redacted.iter().map(|(line, _)| format!("{line}\n")).collect();
         fs::write(app.join("verso.log"), format!("{cur_log}\n{lines}")).unwrap();
@@ -291,11 +299,15 @@ mod tests {
             assert!(line.contains(part), "{line}");
         }
 
-        // 2. Version, commit, settings summary without library folders or hostname.
+        // 2. Version, commit, settings summary without library folders, hostname or API keys.
         assert!(text.contains("Installed version: 0.1.0"));
         assert!(text.contains("Last session version: 0.1.0 (abc1234)"));
         assert!(text.contains("sleep_screen: \"cover\""));
         assert!(text.contains("page_flash: 6"));
+        assert!(text.contains("translate_provider: \"deepl\""));
+        assert!(text.contains("deepl_api_key: <redacted>"));
+        assert!(!text.contains("12345678-1234-1234-1234-1234567890ab"), "DeepL API key leaked into report:\n{text}");
+        assert!(!text.contains("99999999-aaaa-bbbb"), "DeepL-Auth-Key header leaked into report:\n{text}");
         assert!(!text.contains("Secret Shelf"), "library folder leaked into report:\n{text}");
         assert!(!text.contains("my-private-kindle"), "hostname leaked into report");
 

@@ -43,6 +43,10 @@ pub enum Error {
     SameLanguage,
     /// The service doesn't know this language.
     Language(String),
+    /// The service rejected the configured API key (HTTP 403).
+    Unauthorized,
+    /// The API key's monthly character quota is used up (HTTP 456).
+    QuotaExceeded,
     /// Nobody waits for the answer any more. Never delivered.
     Obsolete,
 }
@@ -54,7 +58,7 @@ impl From<FetchError> for Error {
 }
 
 impl Error {
-    /// The card's heading; `service` is "Wikipedia" or "Google Translate".
+    /// The card's heading; `service` is "Wikipedia", "Google Translate" or "DeepL".
     pub fn title(&self, service: &str) -> String {
         use FetchError as F;
         match self {
@@ -64,6 +68,8 @@ impl Error {
             Error::Fetch(F::Timeout) => format!("{service} took too long to answer"),
             Error::Fetch(F::Unreachable(_)) => format!("Couldn’t reach {service}"),
             Error::Fetch(F::Status(429)) => format!("{service} is busy"),
+            Error::Unauthorized => format!("{service} rejected the API key"),
+            Error::QuotaExceeded => format!("{service} quota exceeded"),
             Error::NoArticle => "No article found".into(),
             Error::QueryTooLong => "Too long to look up".into(),
             Error::TextTooLong => "Too long to translate".into(),
@@ -85,6 +91,12 @@ impl Error {
             Error::Fetch(F::Timeout) => "The connection may be slow.".into(),
             Error::Fetch(F::Unreachable(_)) => "This network may have no internet access.".into(),
             Error::Fetch(F::Status(429)) => "Too many requests from this network. Wait a minute, then retry.".into(),
+            Error::Unauthorized => {
+                "Check your DeepL API key in Settings → Advanced → Translate, or paste it in Wi-Fi transfer.".into()
+            }
+            Error::QuotaExceeded => {
+                "You’ve reached your monthly character limit. Switch to Google in Settings, or try again later.".into()
+            }
             Error::Fetch(F::Status(code)) => format!("It answered with error {code}. Try again later."),
             Error::Fetch(F::TooLarge(_)) => "The answer is too large to show.".into(),
             Error::Refused(code) => format!("It answered “{code}”. Try again later."),
@@ -101,6 +113,7 @@ impl Error {
         match self {
             Error::WifiOff | Error::Connecting | Error::Refused(_) | Error::Unreadable => true,
             Error::Fetch(e) => !matches!(e, FetchError::TooLarge(_)),
+            Error::Unauthorized | Error::QuotaExceeded => false,
             Error::NoArticle | Error::QueryTooLong | Error::TextTooLong => false,
             Error::SameLanguage | Error::Language(_) | Error::Obsolete => false,
         }

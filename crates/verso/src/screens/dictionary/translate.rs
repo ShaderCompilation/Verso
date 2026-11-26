@@ -9,12 +9,10 @@ use crate::{
     gfx::StyledBlock,
     online::{
         Answer, Error, Reply, Request, Worker,
-        translate::{Translation, check, languages, same_language},
+        translate::{Provider, Translation, check, effective_provider, languages, same_language},
     },
     ui::theme::{INK2, Theme},
 };
-
-const SERVICE: &str = "Google Translate";
 
 #[derive(Default)]
 pub struct Translate(Slot<Translation>);
@@ -35,7 +33,13 @@ impl Translate {
         self.0 = match check(text, languages.source, target) {
             Ok(()) => {
                 let source = languages.source.map(Into::into);
-                Slot::Waiting(worker.request(Request::Translate { text: text.into(), source, target: target.into() }))
+                Slot::Waiting(worker.request(Request::Translate {
+                    text: text.into(),
+                    source,
+                    target: target.into(),
+                    provider: languages.provider,
+                    api_key: languages.deepl_api_key.clone(),
+                }))
             }
             Err(e) => Slot::Done(Err(e)),
         };
@@ -103,10 +107,23 @@ impl Translate {
                     blocks.push(plain(text.into(), t.dictionary_body, true));
                     blocks.push(StyledBlock::Gap(t.dictionary_body.line_height() / 2.0));
                 }
-                blocks.push(plain(SERVICE.into(), t.small.gray(INK2), true));
+                blocks.push(plain(translation.provider.service_name().into(), t.small.gray(INK2), true));
                 blocks
             }
-            Slot::Done(Err(e)) => message(&e.title(SERVICE), &e.plain(), t),
+            Slot::Done(Err(e)) => {
+                let service = languages
+                    .target
+                    .map_or(Provider::Google, |target| {
+                        effective_provider(
+                            languages.provider,
+                            languages.deepl_api_key.as_deref(),
+                            languages.source,
+                            target,
+                        )
+                    })
+                    .service_name();
+                message(&e.title(service), &e.plain(), t)
+            }
         }
     }
 }

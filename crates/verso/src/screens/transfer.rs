@@ -423,6 +423,7 @@ impl TransferScreen {
                 Activity::Received { name, folder } => (Some(Icon::Check), name.clone(), folder.clone()),
                 Activity::Deleted { name } => (None, format!("Deleted: {name}"), String::new()),
                 Activity::Dictionary { name } => (Some(Icon::Check), format!("Dictionary: {name}"), String::new()),
+                Activity::Setting { label } => (Some(Icon::Check), label.clone(), String::new()),
             };
             let icon_w = t.icon_small + t.mm(2.0);
             if let Some(icon) = icon {

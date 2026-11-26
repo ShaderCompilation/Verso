@@ -189,6 +189,16 @@ details.group[open] summary::before { content: "▾"; }
 .move-list button { width: 100%; justify-content: flex-start; border: 0; border-radius: 0; }
 .move-list svg { width: 1rem; height: 1rem; stroke: var(--ink2); fill: none; stroke-width: 1.7; }
 .move-list .none { padding: .5rem .75rem; color: var(--ink2); font-size: .9rem; }
+.settings-card {
+  background: #fff; border: 1px solid var(--line); border-radius: .65rem; padding: 1.15rem 1.25rem;
+}
+.settings-group + .settings-group {
+  margin-top: 1.15rem; padding-top: 1.15rem; border-top: 1px solid var(--line);
+}
+.settings-label { display: block; font-weight: 600; margin-bottom: .45rem; }
+.settings-hint { margin: .5rem 0 0; color: var(--ink2); font-size: .9rem; }
+.key-form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .55rem; }
+.key-form input { flex: 1 1 16rem; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .95rem; }
 </style>
 </head>
 <body>
@@ -217,6 +227,7 @@ details.group[open] summary::before { content: "▾"; }
     <button role="tab" id="tab-books" aria-controls="books">Books</button>
     <button role="tab" id="tab-dictionaries" aria-controls="dictionaries">Dictionaries</button>
     <button role="tab" id="tab-files" aria-controls="files">Files</button>
+    <button role="tab" id="tab-translate" aria-controls="translate">Translate</button>
   </nav>
   <main>
     <section role="tabpanel" id="books" aria-labelledby="tab-books">
@@ -351,6 +362,31 @@ details.group[open] summary::before { content: "▾"; }
       </div>
 
       <div id="files-list"></div>
+    </section>
+    <section role="tabpanel" id="translate" aria-labelledby="tab-translate" hidden>
+      <p id="translate-readonly" class="readonly-note" hidden></p>
+      <div id="translate-notices" class="notices" aria-live="polite"></div>
+      <div class="settings-card">
+        <div class="settings-group">
+          <span class="settings-label">Translation provider</span>
+          <div class="seg" role="group" aria-label="Translation provider">
+            <button type="button" id="tr-google" aria-pressed="true">Google Translate</button>
+            <button type="button" id="tr-deepl" aria-pressed="false">DeepL</button>
+          </div>
+          <p id="tr-provider-hint" class="settings-hint"></p>
+        </div>
+        <div class="settings-group">
+          <label class="settings-label" for="deepl-key">DeepL API key</label>
+          <p id="tr-key-status" class="settings-hint"></p>
+          <form id="deepl-form" class="key-form">
+            <input type="text" id="deepl-key" placeholder="Paste DeepL API key (Free keys end with :fx)"
+                   autocomplete="off" spellcheck="false" autocapitalize="off">
+            <button type="submit" class="primary" id="deepl-save">Save key</button>
+            <button type="button" id="deepl-remove" hidden>Remove key</button>
+          </form>
+          <p class="settings-hint">Free keys (up to 500,000 characters/month at deepl.com) end with :fx; Pro keys are detected automatically. Languages DeepL doesn’t support fall back to Google Translate. Your key is stored only on this Kindle and omitted from problem reports.</p>
+        </div>
+      </div>
     </section>
   </main>
 </div>
@@ -516,6 +552,9 @@ function select(name) {
   }
   if (!$("app").hidden && name === "files") {
     loadFiles().catch(() => {});
+  }
+  if (!$("app").hidden && name === "translate") {
+    loadTranslate().catch(() => {});
   }
 }
 select("books");
@@ -1997,6 +2036,114 @@ $("files-mkdir-form").addEventListener("submit", async (ev) => {
   }
 });
 
+// ---- Translate tab ----
+
+let translateData = { provider: "google", has_key: false, key_tier: null, restart: false };
+
+function addTranslateNotice(text, isError) {
+  addNoticeTo("translate-notices", text, isError);
+}
+
+async function loadTranslate() {
+  const response = await call("/api/translate");
+  if (response.status === 401) {
+    show("signin");
+    return;
+  }
+  if (!response.ok) return;
+  translateData = await response.json();
+  renderTranslate();
+}
+
+function renderTranslate() {
+  const locked = !!translateData.restart;
+  const note = $("translate-readonly");
+  note.hidden = !locked;
+  note.replaceChildren(svgIcon("icon-lock"),
+    document.createTextNode("Translation settings are read-only until Verso restarts, because you changed its data in Files. Tap Done on the Kindle, then Restart."));
+  const isDeepl = translateData.provider === "deepl";
+  $("tr-google").setAttribute("aria-pressed", String(!isDeepl));
+  $("tr-deepl").setAttribute("aria-pressed", String(isDeepl));
+  $("tr-google").disabled = locked;
+  $("tr-deepl").disabled = locked;
+  $("deepl-key").disabled = locked;
+  $("deepl-save").disabled = locked;
+  $("deepl-remove").disabled = locked;
+  $("deepl-remove").hidden = !translateData.has_key;
+
+  if (!isDeepl) {
+    $("tr-provider-hint").textContent = "Google Translate is active. Works out of the box with no API key.";
+  } else if (translateData.has_key) {
+    const tier = translateData.key_tier === "pro" ? "Pro" : "Free";
+    $("tr-provider-hint").textContent = "DeepL (" + tier + ") is active for supported languages; other languages fall back to Google Translate.";
+  } else {
+    $("tr-provider-hint").textContent = "DeepL is selected, but no API key is saved yet — using Google Translate until you paste one below.";
+  }
+
+  if (translateData.has_key) {
+    const tier = translateData.key_tier === "pro" ? "Pro" : "Free";
+    $("tr-key-status").textContent = tier + " API key saved on this Kindle. Paste a new key below to replace it.";
+  } else {
+    $("tr-key-status").textContent = "No API key saved.";
+  }
+}
+
+async function saveTranslate(payload, successText) {
+  const response = await call("/api/translate", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 401) {
+    show("signin");
+    return false;
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    addTranslateNotice(data.error || "Couldn't save translation settings.", true);
+    if (data.restart) loadStatus().catch(() => {});
+    return false;
+  }
+  translateData = data;
+  renderTranslate();
+  if (successText) addTranslateNotice(successText, false);
+  return true;
+}
+
+$("tr-google").addEventListener("click", () => {
+  if (translateData.provider !== "google") {
+    saveTranslate({ provider: "google" }, "Switched to Google Translate.").catch(() => {});
+  }
+});
+$("tr-deepl").addEventListener("click", () => {
+  if (translateData.provider !== "deepl") {
+    saveTranslate({ provider: "deepl" }, "Switched to DeepL.").catch(() => {});
+  }
+});
+$("deepl-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const key = $("deepl-key").value.trim();
+  if (!key) {
+    addTranslateNotice("Paste a DeepL API key first.", true);
+    return;
+  }
+  $("deepl-save").disabled = true;
+  try {
+    const ok = await saveTranslate({ api_key: key, provider: "deepl" }, "Saved DeepL API key and switched to DeepL.");
+    if (ok) $("deepl-key").value = "";
+  } finally {
+    $("deepl-save").disabled = !!translateData.restart;
+  }
+});
+$("deepl-remove").addEventListener("click", async () => {
+  $("deepl-remove").disabled = true;
+  try {
+    await saveTranslate({ api_key: "" }, "Removed DeepL API key.");
+  } finally {
+    $("deepl-remove").disabled = !!translateData.restart;
+  }
+});
+
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && !$("app").hidden) {
     loadStatus().then((ok) => {
@@ -2004,6 +2151,7 @@ document.addEventListener("visibilitychange", () => {
       loadBooks().catch(() => {});
       if (activeTab === "dictionaries") loadDictionaries().catch(() => {});
       if (activeTab === "files") loadFiles().catch(() => {});
+      if (activeTab === "translate") loadTranslate().catch(() => {});
     }).catch(() => {});
   }
 });

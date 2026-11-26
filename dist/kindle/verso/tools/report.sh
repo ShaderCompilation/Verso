@@ -155,9 +155,51 @@ library_roots() {
         "${ROOT}/documents"
 }
 
-# Redacts book paths and the device name on stdin -> stdout. A path is replaced
-# by <book N>, numbered per stream by its spelling. Where a path ends is a
-# guess, as names hold quotes, colons and arrows: when unsure, redact too much.
+# Extracts stored secrets (API keys) from settings.json so redact_stream scrubs
+# them if they ever appear in logs or crash reports.
+stored_secrets() {
+    if [ -r "${SETTINGS}" ]; then
+        awk '
+        function unescape(s,    out, i, c, n) {
+            out = ""
+            n = length(s)
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (c == "\\" && i < n) {
+                    i++
+                    c = substr(s, i, 1)
+                }
+                out = out c
+            }
+            return out
+        }
+        { content = content "\n" $0 }
+        END {
+            rest = content
+            if (match(rest, /"deepl_api_key"[ \t\r\n]*:[ \t\r\n]*"/)) {
+                rest = substr(rest, RSTART + RLENGTH)
+                esc = 0; cur = ""
+                n = length(rest)
+                for (i = 1; i <= n; i++) {
+                    c = substr(rest, i, 1)
+                    if (esc) { cur = cur "\\" c; esc = 0 }
+                    else if (c == "\\") { esc = 1 }
+                    else if (c == "\"") {
+                        v = unescape(cur)
+                        if (v != "") print v
+                        break
+                    } else { cur = cur c }
+                }
+            }
+        }
+        ' "${SETTINGS}" 2>/dev/null
+    fi
+}
+
+# Redacts book paths, stored secrets and the device name on stdin -> stdout. A
+# path is replaced by <book N>, numbered per stream by its spelling. Where a
+# path ends is a guess, as names hold quotes, colons and arrows: when unsure,
+# redact too much.
 redact_stream() {
     roots_data="$(library_roots | awk '
         {
@@ -165,7 +207,8 @@ redact_stream() {
             if ($0 != "" && !seen[$0]++) print $0
         }
     ')"
-    awk -v roots_raw="${roots_data}" -v storage_root="${ROOT}" '
+    secrets_data="$(stored_secrets)"
+    awk -v roots_raw="${roots_data}" -v secrets_raw="${secrets_data}" -v storage_root="${ROOT}" '
     BEGIN {
         n_roots = 0
         if (roots_raw != "") {
@@ -174,6 +217,16 @@ redact_stream() {
                 if (tmp[i] != "") {
                     n_roots++
                     roots[n_roots] = tmp[i]
+                }
+            }
+        }
+        n_secrets = 0
+        if (secrets_raw != "") {
+            m = split(secrets_raw, stmp, "\n")
+            for (i = 1; i <= m; i++) {
+                if (stmp[i] != "") {
+                    n_secrets++
+                    secrets[n_secrets] = stmp[i]
                 }
             }
         }
@@ -261,7 +314,14 @@ redact_stream() {
         if (match(s, / (→|to) $/)) return RSTART - 1
         return length(s)
     }
-    function redact_line(line,    out, wide, root, after, len, quoted) {
+    function redact_line(line,    out, wide, root, after, len, quoted, i, pos) {
+        # Never leak stored API keys or DeepL authorization headers.
+        gsub(/DeepL-Auth-Key [^ \t"'\''\r\n]+/, "DeepL-Auth-Key <redacted>", line)
+        for (i = 1; i <= n_secrets; i++) {
+            while ((pos = index(line, secrets[i])) > 0) {
+                line = substr(line, 1, pos - 1) "<redacted>" substr(line, pos + length(secrets[i]))
+            }
+        }
         # Never leak custom library folder lists in "library folders changed: [...]".
         if (index(line, "library folders changed:") > 0) {
             sub(/library folders changed: \[.*\]/, "library folders changed: [<redacted>]", line)
@@ -424,6 +484,13 @@ settings_summary() {
             val = substr(content, val_start, i - val_start)
             gsub(/[ \t\r\n]+/, " ", val)
             sub(/^ /, "", val); sub(/ $/, "", val)
+            if (key == "deepl_api_key") {
+                if (val != "null" && val != "\"\"") {
+                    printf "  %s: <redacted>\n", key
+                    printed++
+                }
+                continue
+            }
             if (key == "library_folders" || key == "library_folder" || key == "hostname") {
                 continue
             }

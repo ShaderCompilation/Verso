@@ -18,6 +18,7 @@ mod dictionaries;
 mod files;
 pub(crate) mod http;
 mod server;
+mod translate;
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -35,6 +36,7 @@ use books::{ActivitySink, Books};
 use dictionaries::Dictionaries;
 use files::Files;
 use server::{Server, Timeouts};
+use translate::Translate;
 
 pub use device::Device;
 #[cfg(test)]
@@ -91,6 +93,7 @@ pub enum Activity {
     Received { name: String, folder: String },
     Deleted { name: String },
     Dictionary { name: String },
+    Setting { label: String },
 }
 
 /// What the screen shows.
@@ -371,11 +374,12 @@ impl Session {
             self.device.files_root.clone(),
             self.store.clone(),
             self.device.free_space.clone(),
-            activity,
+            activity.clone(),
             self.developer,
             self.library_changed.clone(),
             self.dictionaries_changed.clone(),
         );
+        let translate = Translate::new(self.store.clone(), activity);
         Context {
             port: self.device.listen.port(),
             names: Box::new(names),
@@ -384,6 +388,7 @@ impl Session {
             books: Some(books),
             dictionaries: Some(dictionaries),
             files: Some(files),
+            translate: Some(translate),
         }
     }
 

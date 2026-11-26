@@ -898,6 +898,7 @@ mod tests {
                     books: Some(books),
                     dictionaries: None,
                     files: None,
+                    translate: None,
                 },
             ));
             let server = Server::start("127.0.0.1:0".parse().unwrap(), api, Timeouts::default()).unwrap();

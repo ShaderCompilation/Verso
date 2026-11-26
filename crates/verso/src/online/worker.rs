@@ -3,11 +3,12 @@
 //! its own short-lived thread instead, at most [`MAX_THREADS`] at a time. A
 //! request beyond that waits for one to end, unless it's obsolete by then.
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::Error;
-use super::translate::{self, GoogleGtx, Translation, Translator};
+use super::translate::{self, DeepL, GoogleGtx, Provider, Translation, Translator};
 use super::wikipedia::{Article, Edition, Found, Wikipedia};
 use crate::net::{self, Client, FetchError};
 use crate::platform::Waker;
@@ -19,14 +20,35 @@ const MAX_THREADS: usize = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Request {
     /// The best article for a query, or the hits to choose from.
     Wikipedia { edition: Edition, query: String },
     /// The article with a hit's title.
     Article { edition: Edition, title: String },
     /// `source`: None to detect it.
-    Translate { text: String, source: Option<String>, target: String },
+    Translate { text: String, source: Option<String>, target: String, provider: Provider, api_key: Option<String> },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Request::Wikipedia { edition, query } => {
+                f.debug_struct("Wikipedia").field("edition", edition).field("query", query).finish()
+            }
+            Request::Article { edition, title } => {
+                f.debug_struct("Article").field("edition", edition).field("title", title).finish()
+            }
+            Request::Translate { text, source, target, provider, api_key } => f
+                .debug_struct("Translate")
+                .field("text", text)
+                .field("source", source)
+                .field("target", target)
+                .field("provider", provider)
+                .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,18 +70,29 @@ struct Endpoints {
     /// `{lang}` becomes the edition's code.
     wikipedia: String,
     translate: String,
+    /// Optional local-server override for DeepL (`{tier}` → `free`/`pro`).
+    deepl: Option<String>,
 }
 
 impl Endpoints {
-    /// The public services, or `VERSO_WIKIPEDIA_URL` and
-    /// `VERSO_TRANSLATE_URL` for a local test server.
+    /// The public services, or `VERSO_WIKIPEDIA_URL`, `VERSO_TRANSLATE_URL` and
+    /// `VERSO_DEEPL_URL` (`{tier}` → `free`/`pro`) for a local test server.
     fn configured() -> Self {
         let or = |name: &str, default: &str| {
             std::env::var(name).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| default.to_owned())
         };
+        let deepl = std::env::var("VERSO_DEEPL_URL").ok().filter(|u| !u.trim().is_empty());
         Self {
             wikipedia: or("VERSO_WIKIPEDIA_URL", "https://{lang}.wikipedia.org/w/api.php"),
             translate: or("VERSO_TRANSLATE_URL", "https://translate.googleapis.com/translate_a/single"),
+            deepl,
+        }
+    }
+
+    fn deepl_url(&self, api_key: &str) -> String {
+        match &self.deepl {
+            Some(template) => template.replace("{tier}", translate::deepl_tier(api_key).as_str()),
+            None => translate::deepl_endpoint(api_key).to_owned(),
         }
     }
 }
@@ -187,7 +220,7 @@ impl Service {
     }
 
     fn answer(&self, job: &Job) -> Result<Answer, Error> {
-        if let Request::Translate { text, source, target } = &job.request {
+        if let Request::Translate { text, source, target, .. } = &job.request {
             translate::check(text, source.as_deref(), target)?;
         }
         match (self.link)() {
@@ -205,11 +238,22 @@ impl Service {
                 self.wikipedia(*edition, |w| w.lookup(query, &|| job.is_current())).map(Answer::Found)
             }
             Request::Article { edition, title } => self.wikipedia(*edition, |w| w.article(title)).map(Answer::Article),
-            Request::Translate { text, source, target } => {
-                let url = &self.endpoints.translate;
-                let client = self.client(url, &net::user_agent());
-                let translator = GoogleGtx { client: &client, url };
-                translator.translate(text, source.as_deref(), target).map(Answer::Translation)
+            Request::Translate { text, source, target, provider, api_key } => {
+                match translate::effective_provider(*provider, api_key.as_deref(), source.as_deref(), target) {
+                    Provider::DeepL => {
+                        let key = api_key.as_deref().unwrap_or("").trim();
+                        let url = self.endpoints.deepl_url(key);
+                        let client = self.client(&url, &net::user_agent());
+                        let translator = DeepL { client: &client, url: &url, api_key: key };
+                        translator.translate(text, source.as_deref(), target).map(Answer::Translation)
+                    }
+                    Provider::Google => {
+                        let url = &self.endpoints.translate;
+                        let client = self.client(url, &net::user_agent());
+                        let translator = GoogleGtx { client: &client, url };
+                        translator.translate(text, source.as_deref(), target).map(Answer::Translation)
+                    }
+                }
             }
         }
     }
@@ -278,9 +322,14 @@ impl Drop for Worker {
 
 #[cfg(test)]
 impl Service {
-    /// A service that talks to `base` (`/{lang}/api` and `/translate`).
+    /// A service that talks to `base` (`/{lang}/api`, `/translate` and
+    /// `/deepl/{free|pro}`).
     pub(crate) fn for_test(base: &str, total: Duration, link: Box<ReadLink>) -> Arc<Self> {
-        let endpoints = Endpoints { wikipedia: format!("{base}/{{lang}}/api"), translate: format!("{base}/translate") };
+        let endpoints = Endpoints {
+            wikipedia: format!("{base}/{{lang}}/api"),
+            translate: format!("{base}/translate"),
+            deepl: Some(format!("{base}/deepl/{{tier}}")),
+        };
         Self::with(endpoints, Duration::from_millis(500), total, link)
     }
 

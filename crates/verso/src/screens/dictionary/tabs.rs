@@ -5,7 +5,7 @@ use super::{plain, translate::Translate, wikipedia::Wikipedia};
 use crate::{
     geom::Rect,
     gfx::StyledBlock,
-    online::{Error, QUERY_LIMIT, Service, Worker, wikipedia::Edition},
+    online::{Error, QUERY_LIMIT, Service, Worker, translate::Provider, wikipedia::Edition},
     platform::Waker,
     ui::{
         gesture::Gesture,
@@ -48,6 +48,9 @@ pub struct Languages {
     pub target: Option<&'static str>,
     /// The book's language, if it can be translated.
     pub written: Option<&'static str>,
+    /// Translation backend and optional DeepL API key (from Settings).
+    pub provider: Provider,
+    pub deepl_api_key: Option<String>,
 }
 
 /// One request and what came of it.
@@ -302,7 +305,15 @@ impl Languages {
     /// The English Wikipedia, in a book written in `book`.
     pub fn for_test(book: Option<&str>, target: Option<&'static str>) -> Self {
         let written = book.and_then(crate::online::translate::language);
-        Self { wikipedia: Edition::ENGLISH, book: book.and_then(Edition::for_language), source: None, target, written }
+        Self {
+            wikipedia: Edition::ENGLISH,
+            book: book.and_then(Edition::for_language),
+            source: None,
+            target,
+            written,
+            provider: Provider::Google,
+            deepl_api_key: None,
+        }
     }
 }
 

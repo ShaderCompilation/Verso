@@ -16,6 +16,7 @@ pub mod position;
 use crate::document::{Position, TextShaping, Typography};
 use crate::library::LibraryIndex;
 use crate::library::collections::{Navigation, distinct_roots, normalize};
+pub use crate::online::translate::Provider as TranslateProvider;
 use crate::page_layout::PageLayout;
 pub use crate::platform::Orientation;
 pub use crate::reader::TapZones;
@@ -79,6 +80,12 @@ pub struct Settings {
     /// The language Translate translates into, in every book; unset until
     /// the reader chooses one, and nothing is translated before.
     pub translate_language: Option<String>,
+    /// Translation service: Google Translate (default) or DeepL.
+    pub translate_provider: TranslateProvider,
+    /// Optional DeepL API key (Free keys end with `:fx`). Omitted/redacted from
+    /// problem reports (`report.sh`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepl_api_key: Option<String>,
     /// First-time setup was finished or skipped; until then it shows over
     /// Home on every launch (`screens/setup.rs`).
     pub setup_done: bool,
@@ -107,6 +114,8 @@ impl Default for Settings {
             dictionary_expanded: true,
             dictionary_at_bottom: true,
             translate_language: None,
+            translate_provider: TranslateProvider::default(),
+            deepl_api_key: None,
             setup_done: false,
         }
     }
@@ -120,6 +129,8 @@ impl Settings {
         if !FolderPreview::OFFERED.contains(&self.folder_preview) {
             self.folder_preview = FolderPreview::default();
         }
+        self.deepl_api_key =
+            self.deepl_api_key.as_deref().and_then(|key| crate::online::translate::parse_deepl_key(key).ok().flatten());
     }
 }
 pub const DEFAULT_PAGE_FLASH: u32 = 0;

@@ -294,9 +294,12 @@ Wikipedia or Google only when you open their tab; if that fails, tap **Retry**.
 
 - **Wikipedia** opens a clear match or lists the results (**Other matches**
   switches). It uses the book's language, else English; a choice is kept per book.
-- **Translate** uses Google Translate, up to 4,000 characters. It asks for a
-  target language the first time and detects the source (both can be changed).
-  Google may refuse some shared or VPN connections as busy.
+- **Translate** uses Google Translate by default (up to 4,000 characters), or an
+  optional **DeepL** Free/Pro API key (**Settings → Advanced → Translate**, or
+  paste it in Wi-Fi transfer's **Translate** tab — `:fx` keys select Free
+  automatically, and unsupported languages or an empty key fall back to Google).
+  It asks for a target language the first time and detects the source. Google
+  may refuse some shared or VPN connections as busy.
 
 Dictionaries take a passage of any length, Wikipedia up to 300 characters.
 
@@ -324,6 +327,8 @@ minutes idle.
   and jailbreak paths are hidden, Verso's own app and live data are read-only
   unless developer mode is on, and deleting library or KOReader folders asks
   for a second confirmation.
+- **Translate:** switch between Google Translate and DeepL and paste or remove a
+  DeepL API key without typing it on e-ink.
 
 ---
 
@@ -376,12 +381,12 @@ Check automatically**), or on demand via **Check for updates**.
 - **Library:** library folders, dictionaries, KOReader bulk import.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
   a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.
-- **Advanced:** text shaping, **Run setup again** (first-launch setup) and **Create problem
-  report**, plus the built-in **SSH server** switch (Dropbear + `sftp-server`,
-  port 2222, key-only login via `/mnt/us/verso/ssh/authorized_keys`, advertised
-  as `verso.local`). Tapping the version line in **Device** five times turns
-  developer mode on or off, which allows live-data edits in Wi-Fi transfer's
-  Files tab.
+- **Advanced:** text shaping, **Translate** (Google / DeepL provider and API
+  key), **Run setup again** and **Create problem report**, plus the built-in
+  **SSH server** switch (Dropbear + `sftp-server`, port 2222, key-only login via
+  `/mnt/us/verso/ssh/authorized_keys`, advertised as `verso.local`). Tapping the
+  version line in **Device** five times toggles developer mode, allowing
+  live-data edits in Wi-Fi transfer's Files tab.
 
 ### Problem reports
 
@@ -393,7 +398,7 @@ unexpectedly.
 
 Reports include a summary of recent sessions, version, update state,
 non-identifying settings, up to 1,000 log lines and hardware diagnostics.
-Book paths, library folders, the device's name and network addresses are
-automatically omitted or replaced (`<book N>`). Dictionary names, names of
-connected remotes, and names inside a faulty book (chapter files, fonts) can
-remain, so review the text file before sharing it publicly.
+Book paths, library folders, API keys, the device's name and network addresses
+are automatically omitted or replaced (`<book N>` / `<redacted>`). Dictionary
+names, connected remote names, and names inside a faulty book (chapter files,
+fonts) can remain, so review the text file before sharing it publicly.

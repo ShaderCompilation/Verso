@@ -121,6 +121,7 @@ impl Env {
                 books: None,
                 dictionaries: None,
                 files: Some(files),
+                translate: None,
             },
         ));
         let server = Server::start("127.0.0.1:0".parse().unwrap(), api, Timeouts::default()).unwrap();
