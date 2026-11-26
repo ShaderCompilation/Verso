@@ -852,8 +852,8 @@ impl Background {
         let b_end = end.saturating_sub(folders.len());
         let previews = request.folder_preview != FolderPreview::Icon && !page_folders.is_empty();
         let mut opened_ranks = None;
-        // Recently read needs the opened order even when folders show icons.
-        let ranks = if previews || (request.sort == Sort::RecentlyRead && b_start < b_end) {
+        // Recently read needs the opened order even when folders show icons or fill page 1.
+        let ranks = if previews || (request.sort == Sort::RecentlyRead && !book_indices.is_empty()) {
             if let Some(known) = request.known_ranks {
                 Some(known)
             } else {
@@ -1187,6 +1187,11 @@ impl Worker {
     #[cfg(test)]
     pub fn post_home(&self, summary: Summary) {
         self.state().latest_home = Some((summary, 0));
+    }
+    /// Marks `opened.json` changed for the UI, as a rebuild does.
+    #[cfg(test)]
+    pub fn post_opened_changed(&self) {
+        self.state().opened_changed = true;
     }
     /// True once after a rebuild changed `opened.json`; read it again then.
     pub fn take_opened_changed(&self) -> bool {
@@ -2290,6 +2295,76 @@ mod folder_tests {
         assert_eq!(snapshot.index.books.len(), 1);
         assert_eq!(snapshot.index.books[0].id, added.id);
         assert!(!snapshot.index.books.iter().any(|book| book.path == unscanned));
+        Ok(())
+    }
+
+    #[test]
+    fn warm_loads_opened_ranks_in_recently_read_when_page_one_is_all_subfolders() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let library = dir.path().join("library");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/library3.epub");
+        for i in 0..4 {
+            let sub = library.join(format!("F{i}"));
+            std::fs::create_dir_all(&sub)?;
+            std::fs::copy(&fixture, sub.join("book.epub"))?;
+        }
+        let direct = library.join("direct.epub");
+        std::fs::copy(&fixture, &direct)?;
+        let store = Store::at(dir.path().join("data"));
+        let scanned = scan(&library, &Default::default(), false, &|| false, |_| {}).unwrap().index;
+        store.save_library(&scanned)?;
+        let direct_id = scanned.books.iter().find(|b| b.path == direct).unwrap().id.clone();
+        store.save_book(&direct_id, &BookState { last_opened: 100, ..Default::default() })?;
+        store.rebuild_home_summary(&scanned)?;
+
+        let worker = Worker::new(store, vec![library.clone()], Waker::new(|| {}));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = worker.take_status()
+                && !status.working
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let wait_warm = |worker: &Worker| loop {
+            if let Some(result) = worker.take_warm() {
+                return result;
+            }
+            assert!(Instant::now() < deadline, "warm result timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+
+        // Page 1 is 4 subfolders (no visible books), Icon mode, RecentlyRead: opened_ranks still warms.
+        worker.warm(WarmRequest {
+            seq: 1,
+            navigation: Navigation { folder: Some(library.clone()), ..Default::default() },
+            per_page: 4,
+            folder_preview: FolderPreview::Icon,
+            need_states: false,
+            known_ranks: None,
+            sort: Sort::RecentlyRead,
+        });
+        let warm = wait_warm(&worker);
+        assert_eq!(warm.tiles.len(), 4);
+        assert!(warm.tiles.iter().all(|t| matches!(t, WarmTile::Folder { .. })));
+        let ranks = warm.opened_ranks.expect("opened_ranks warmed for RecentlyRead despite all-subfolder page 1");
+        assert_eq!(ranks.get(&direct_id), Some(&0));
+
+        // Title + Icon skips opened.json when page 1 is all subfolders.
+        worker.warm(WarmRequest {
+            seq: 2,
+            navigation: Navigation { folder: Some(library), ..Default::default() },
+            per_page: 4,
+            folder_preview: FolderPreview::Icon,
+            need_states: false,
+            known_ranks: None,
+            sort: Sort::Title,
+        });
+        let warm = wait_warm(&worker);
+        assert!(warm.opened_ranks.is_none());
         Ok(())
     }
 }

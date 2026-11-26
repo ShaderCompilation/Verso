@@ -132,7 +132,7 @@ impl Books {
             search.keyboard.visible = false;
         }
         self.selection = Some(Selection::new(cx.theme, self.screen, target));
-        self.update_library_header_rect(cx.theme);
+        self.update_header_rect(cx.theme);
         cx.refresh(self.screen, RefreshMode::Ui);
     }
     pub(super) fn end_selection(&mut self, cx: &mut EventCx) {
@@ -144,7 +144,7 @@ impl Books {
         }
         self.carry = None;
         if self.selection.take().is_some() {
-            self.update_library_header_rect(cx.theme);
+            self.update_header_rect(cx.theme);
             cx.refresh(self.screen, RefreshMode::Ui);
         }
     }
@@ -280,7 +280,7 @@ impl Books {
             let changes = self.library.change_paths(result.changes);
             self.apply_changes(changes, cx);
         } else {
-            self.update_library_header_rect(cx.theme);
+            self.update_header_rect(cx.theme);
             cx.refresh(self.screen, RefreshMode::Full);
         }
         let sidecars = result.sidecar_errors.len();

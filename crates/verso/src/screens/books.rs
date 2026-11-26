@@ -260,6 +260,8 @@ pub struct Books {
     jump: Option<PageJump>,
     touching: bool,
     pending: Option<Snapshot>,
+    /// `opened.json` changed in the background while browsing; consumed in `apply_pending`.
+    pending_opened: bool,
     scanning: bool,
     working: bool,
     /// The folders of the last finished scan (`LibraryWorker::scanned`).
@@ -457,6 +459,7 @@ impl Books {
             jump: None,
             touching: false,
             pending: None,
+            pending_opened: false,
             scanning: true,
             working: true,
             scanned: None,
@@ -562,10 +565,21 @@ impl Books {
             && (self.search.is_some() || self.navigation.folder.is_some())
             && (self.selection.is_none() || self.carrying())
     }
-    /// Updates the Library folder header title/subtitle bounds when controls
+    /// Updates the Library or Search header bounds when controls
     /// (Back, Sort and `New folder`, compact pager) appear or hide.
-    pub(super) fn update_library_header_rect(&mut self, t: &Theme) {
-        if self.is_home() || self.search.is_some() {
+    pub(super) fn update_header_rect(&mut self, t: &Theme) {
+        if self.is_home() {
+            return;
+        }
+        if self.search.is_some() {
+            let right = if self.show_sort() {
+                self.sort_button.rect().x - t.mm(1.5)
+            } else if self.pager.visible() {
+                self.pager.rect().x - t.mm(3.0)
+            } else {
+                self.screen.right() - t.margin
+            };
+            self.header = Rect::new(t.margin, self.header.y, (right - t.margin).max(0), self.header.h);
             return;
         }
         let header_y = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM);
@@ -638,6 +652,7 @@ impl Books {
             self.refresh_home(t);
             return;
         }
+        self.pending_opened = false;
         self.prepare_browsing();
         let started = std::time::Instant::now();
         let in_library = self.search.is_none();
@@ -721,8 +736,8 @@ impl Books {
                 self.screen.right() - t.margin - t.icon / 2
             };
             self.sort_button.place_at(Point::new(sort_cx, header_cy), t);
-            let header_right = self.sort_button.rect().x - t.mm(1.5);
-            self.header = Rect::new(t.margin, header_y, (header_right - t.margin).max(0), header_h);
+            self.header = Rect::new(t.margin, header_y, 0, header_h);
+            self.update_header_rect(t);
             self.path_rect = Rect::default();
         } else {
             let header_y = t.top_bar + t.mm(LIBRARY_HEADER_TOP_MM);
@@ -742,7 +757,7 @@ impl Books {
             };
             self.new_folder.place_at(Point::new(new_folder_cx, controls_cy), t);
             self.sort_button.place_at(Point::new(new_folder_cx - t.target, controls_cy), t);
-            self.update_library_header_rect(t);
+            self.update_header_rect(t);
             self.header = Rect::default();
         }
         self.retain_selection();
@@ -1036,6 +1051,9 @@ impl Books {
     fn grid_book(&self, i: usize) -> Option<&Book> {
         i.checked_sub(self.folders.len()).and_then(|i| self.books.get(i))
     }
+    fn visible_book_ids(&self) -> Vec<String> {
+        self.grid.cells().into_iter().filter_map(|(i, _)| self.grid_book(i).map(|b| b.id.clone())).collect()
+    }
     fn save_navigation(&mut self) {
         if let Some(search) = &mut self.search {
             search.page = self.pager.page;
@@ -1305,6 +1323,11 @@ impl Books {
         if self.is_home() {
             return;
         }
+        let opened_changed = std::mem::take(&mut self.pending_opened);
+        let old_grid = self.grid.rect();
+        let before_visible = (opened_changed && self.sort == Sort::RecentlyRead).then(|| self.visible_book_ids());
+        let mut refreshed = false;
+        let mut grid_flashed = false;
         if let Some(mut snapshot) = self.pending.take() {
             let mut replayed = false;
             for (revision, change) in &self.changes {
@@ -1333,10 +1356,10 @@ impl Books {
             if old_folder != self.navigation.folder && !self.carrying() {
                 self.end_selection(cx);
             }
-            let old_grid = self.grid.rect();
             let page = self.pager.page;
             self.pager.page = self.search.as_ref().map_or_else(|| self.navigation.page(), |s| s.page);
             self.refresh(cx.theme);
+            refreshed = true;
             if !snapshot.partial {
                 if self.search.is_none() {
                     self.navigation.set_page(self.pager.page);
@@ -1345,12 +1368,23 @@ impl Books {
             }
             if self.search.is_none() && (self.pager.page != page || old_folder != self.navigation.folder) {
                 self.refresh_grid(cx, old_grid);
+                grid_flashed = true;
             }
             log::info!(
                 "startup stage: snapshot application books={} elapsed_us={}",
                 self.index.books.len(),
                 started.elapsed().as_micros()
             );
+        }
+        if let Some(before) = before_visible {
+            if !refreshed {
+                self.refresh(cx.theme);
+            }
+            if !grid_flashed && self.visible_book_ids() != before {
+                self.refresh_grid(cx, old_grid);
+            }
+        } else if opened_changed && !refreshed && self.browsing_ready {
+            self.prioritize();
         }
     }
     fn toggle_search(&mut self, cx: &mut EventCx) {
@@ -1416,14 +1450,19 @@ impl Books {
             search.field.focused = false;
             self.apply_search(cx);
         } else if search.field.edit(input) {
-            self.selection = None;
+            let had_selection = self.selection.take().is_some();
             if matches!(input, TextInput::Clear) {
                 self.apply_search(cx);
-            } else if search::fold(search.field.value().trim()) == search.folded {
-                search.debounce_at = None;
             } else {
-                // Coalesce rapid keystrokes so sorting and grid redraws wait for a brief pause.
-                search.debounce_at = Some(cx.now + SEARCH_DEBOUNCE);
+                if search::fold(search.field.value().trim()) == search.folded {
+                    search.debounce_at = None;
+                } else {
+                    // Coalesce rapid keystrokes so sorting and grid redraws wait for a brief pause.
+                    search.debounce_at = Some(cx.now + SEARCH_DEBOUNCE);
+                }
+                if had_selection {
+                    self.update_header_rect(cx.theme);
+                }
             }
         }
     }
@@ -2245,7 +2284,7 @@ fn draw_finished_badge(cx: &mut DrawCx, cover: Rect) {
 }
 
 /// A series number in a rounded ink label at the cover's top-right, clear
-/// of the selection tick (top-left) and the finished badge (bottom-right).
+/// of the finished badge (bottom-right) and hidden during multi-select.
 fn draw_number_badge(cx: &mut DrawCx, cover: Rect, number: &str) {
     let t = cx.theme;
     let style = t.caption.weight(Weight::SemiBold).gray(PAPER);
@@ -3082,7 +3121,9 @@ impl Screen for Books {
             if finished {
                 draw_finished_badge(cx, cover);
             }
-            if let Some(number) = self.sort.badge(book).filter(|_| !self.is_home()) {
+            if let Some(number) =
+                self.sort.badge(book).filter(|_| !self.is_home() && (self.selection.is_none() || self.carrying()))
+            {
                 draw_number_badge(cx, cover, &number);
             }
             let title_style = if finished {
@@ -3657,8 +3698,13 @@ impl Screen for Books {
         if self.library.take_opened_changed() {
             self.previews.forget_order();
             self.opened_touched = true;
-            if self.browsing_ready && !self.is_home() && self.reader.is_none() {
-                self.prioritize();
+            if self.is_home() {
+                if self.sort == Sort::RecentlyRead || self.folder_preview != FolderPreview::Icon {
+                    self.warm_seq = self.warm_seq.wrapping_add(1);
+                    self.warm_due = true;
+                }
+            } else {
+                self.pending_opened = true;
             }
         }
         if let Some(warm) = self.library.take_warm() {
@@ -5181,6 +5227,249 @@ mod tests {
             assert!(books.navigation_unsaved);
             assert!(books.prelayout_due);
         });
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn opened_changed_reorders_recently_read_with_grid_flash_and_defers_for_touch_and_overlays() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("opened-live")?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.folder_preview = FolderPreview::Icon;
+        let nested = PathBuf::from("/books/Fiction/Nested");
+        let run_cx = |books: &mut Books, f: &dyn Fn(&mut Books, &mut EventCx)| -> Vec<crate::platform::Update> {
+            let mut forced = Vec::new();
+            let mut toast = None;
+            let mut needs_redraw = false;
+            let mut cx = EventCx {
+                theme: &t,
+                screen,
+                now: std::time::Instant::now(),
+                toast: &mut toast,
+                forced: &mut forced,
+                needs_redraw: &mut needs_redraw,
+                battery: None,
+            };
+            f(books, &mut cx);
+            forced
+        };
+        let mark_opened = |books: &Books, id: &str, at: u64| -> anyhow::Result<()> {
+            store.save_book(id, &BookState { last_opened: at, ..Default::default() })?;
+            store.rebuild_home_summary(&books.index)?;
+            Ok(())
+        };
+
+        // Leaf folder with 20 books (12 on page 1, 8 on page 2) in RecentlyRead + Icon mode.
+        run_cx(&mut books, &|b, cx| {
+            b.navigate(Some(nested.clone()), cx);
+            b.set_sort(Sort::RecentlyRead, cx);
+        });
+        assert_eq!(books.pager.pages, 2);
+        let page2_first = books.books[12].id.clone();
+        assert!(!books.visible_book_ids().contains(&page2_first));
+
+        // Background opened_changed moving a page-2 book to the top reorders with a grid-only Full flash.
+        mark_opened(&books, &page2_first, 100)?;
+        books.library.post_opened_changed();
+        let updates = run_cx(&mut books, &|b, cx| b.on_background(cx));
+        assert_eq!(books.visible_book_ids()[0], page2_first);
+        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Full }]);
+
+        // When the visible page's book IDs are unchanged (editing page-1 order while viewing page 2), skip the flash.
+        let page1_second = books.books[1].id.clone();
+        run_cx(&mut books, &|b, cx| b.go_to_page(1, cx));
+        let page2_before = books.visible_book_ids();
+        mark_opened(&books, &page1_second, 200)?;
+        books.library.post_opened_changed();
+        let updates = run_cx(&mut books, &|b, cx| b.on_background(cx));
+        assert_eq!(books.visible_book_ids(), page2_before);
+        assert!(updates.is_empty(), "unchanged visible page skips Full flash: {updates:?}");
+        assert_eq!(books.books[0].id, page1_second, "off-screen page 1 still reordered");
+
+        // Defer while touching or while an overlay is open, then apply once both end.
+        run_cx(&mut books, &|b, cx| b.go_to_page(0, cx));
+        let deferred_id = books.books[15].id.clone();
+        mark_opened(&books, &deferred_id, 300)?;
+        books.library.post_opened_changed();
+        let updates = run_cx(&mut books, &|b, cx| {
+            b.on_gesture(Gesture::Down(Point::new(1, 1)), cx);
+            b.on_background(cx);
+        });
+        assert!(books.pending_opened);
+        assert_ne!(books.visible_book_ids()[0], deferred_id);
+        assert!(updates.is_empty());
+
+        // Ending touch while an overlay is open still defers.
+        books.open_sort_menu(&t);
+        let updates = run_cx(&mut books, &|b, cx| {
+            b.on_gesture(Gesture::Cancel(Point::new(1, 1)), cx);
+        });
+        assert!(books.pending_opened);
+        assert_ne!(books.visible_book_ids()[0], deferred_id);
+        assert!(updates.is_empty());
+
+        // Closing the overlay consumes pending_opened and flashes the grid.
+        books.sort_menu = None;
+        let updates = run_cx(&mut books, &|b, cx| b.apply_pending(cx));
+        assert!(!books.pending_opened);
+        assert_eq!(books.visible_book_ids()[0], deferred_id);
+        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Full }]);
+
+        // Any explicit non-Home refresh() clears pending_opened.
+        books.touching = true;
+        books.library.post_opened_changed();
+        run_cx(&mut books, &|b, cx| b.on_background(cx));
+        assert!(books.pending_opened);
+        books.refresh(&t);
+        assert!(!books.pending_opened);
+        books.touching = false;
+
+        // Search in RecentlyRead also reorders live with a grid-only Full flash.
+        run_cx(&mut books, &|b, cx| {
+            b.toggle_search(cx);
+            b.search.as_mut().unwrap().keyboard.visible = false;
+        });
+        let search_target = books.books.last().unwrap().id.clone();
+        assert_ne!(books.visible_book_ids()[0], search_target);
+        mark_opened(&books, &search_target, 400)?;
+        books.library.post_opened_changed();
+        let updates = run_cx(&mut books, &|b, cx| b.on_background(cx));
+        assert_eq!(books.visible_book_ids()[0], search_target);
+        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Full }]);
+
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn opened_changed_on_home_invalidates_warm_up_and_rearms_warm_due() -> anyhow::Result<()> {
+        let (store, root) = warm_fixture("opened-home", 0)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = Books::with_store(&t, screen, Rc::new(Worker::stub()), store.clone());
+        wait_while(&mut books, &t, screen, |b| b.scanning || b.pending.is_none());
+        assert!(books.is_home());
+
+        // RecentlyRead + Icon on Home: opened_changed bumps warm_seq, re-arms warm_due,
+        // and drops an in-flight WarmResult so old-order covers are not prefetched.
+        books.sort = Sort::RecentlyRead;
+        books.folder_preview = FolderPreview::Icon;
+        books.warm_library(&t);
+        let stale = wait_warm(&mut books);
+        let seq = books.warm_seq;
+        assert!(!books.warm_due);
+        books.library.post_opened_changed();
+        with_cx(&t, screen, |cx| books.on_background(cx));
+        assert_ne!(books.warm_seq, seq);
+        assert!(books.warm_due);
+        assert_eq!(books.apply_warm(stale, &t), 0, "stale WarmResult must be dropped");
+        assert!(!books.previews.has_order());
+
+        // Non-Icon folder preview on Home also invalidates and re-arms warm_due in Title sort.
+        books.sort = Sort::Title;
+        books.folder_preview = FolderPreview::Stack;
+        books.warm_due = false;
+        let seq = books.warm_seq;
+        books.library.post_opened_changed();
+        with_cx(&t, screen, |cx| books.on_background(cx));
+        assert_ne!(books.warm_seq, seq);
+        assert!(books.warm_due);
+
+        // Title + Icon on Home does not depend on opened.json: no unnecessary re-warm.
+        books.sort = Sort::Title;
+        books.folder_preview = FolderPreview::Icon;
+        books.warm_due = false;
+        let seq = books.warm_seq;
+        books.library.post_opened_changed();
+        with_cx(&t, screen, |cx| books.on_background(cx));
+        assert_eq!(books.warm_seq, seq);
+        assert!(!books.warm_due);
+
+        drop(books);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn number_badges_hide_in_multiselect_and_search_header_expands() -> anyhow::Result<()> {
+        let (store, root) = collection_fixture("badge-and-search-header")?;
+        std::fs::create_dir_all(store.cover_path("x").parent().unwrap())?;
+        let mut index = store.library();
+        for (k, b) in index.books.iter_mut().filter(|b| b.path.starts_with("/books/Fiction/Nested")).enumerate() {
+            b.metadata.series = "Saga".into();
+            b.metadata.series_index = format!("{}", k + 1);
+            b.cover = Cover::Ready(b.id.clone());
+            image::GrayImage::from_pixel(covers::WIDTH, covers::HEIGHT, image::Luma([200]))
+                .save(store.cover_path(&b.id))?;
+        }
+        store.save_library(&index)?;
+        let t = Theme::for_dpi(300);
+        let screen = Rect::new(0, 0, 1272, 1696);
+        let mut books = browsing_books(&t, screen, Rc::new(Worker::stub()), store.clone());
+        books.scanning = false;
+        with_cx(&t, screen, |cx| {
+            books.navigate(Some("/books/Fiction/Nested".into()), cx);
+            books.set_sort(Sort::Series, cx);
+        });
+        let cover0 = books.cover_rect(books.grid.cells()[0].1, &t);
+        let inset = t.mm(1.0);
+        let badge_h = t.mm(4.0);
+        // Right edge of the top-right number badge interior (away from any digit stroke center).
+        let sample = (cover0.right() - inset - 2, cover0.y + inset + badge_h / 2);
+        let draw_px = |books: &mut Books| {
+            let (mut canvas, mut text, mut icons) = renderers(1272, 1696);
+            canvas.fill(PAPER);
+            books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut Vec::new()));
+            canvas.gray_data()[sample.1 as usize * 1272 + sample.0 as usize]
+        };
+
+        assert_eq!(draw_px(&mut books), INK, "number badge draws in normal Series view");
+        let first_id = books.books[0].id.clone();
+        let second_id = books.books[1].id.clone();
+        with_cx(&t, screen, |cx| books.start_selection(Target::Book(first_id), cx));
+        assert_eq!(draw_px(&mut books), 200, "number badge hides during multi-select");
+        // Carrying hides the selection tick and shows the number badge again.
+        with_cx(&t, screen, |cx| books.start_move(vec![Target::Book(second_id)], cx));
+        assert!(books.carrying());
+        assert_eq!(draw_px(&mut books), INK, "number badge returns while carrying");
+        with_cx(&t, screen, |cx| books.end_selection(cx));
+
+        // Search header expands into sort_button's space during multi-select (with and without pager).
+        with_cx(&t, screen, |cx| {
+            books.toggle_search(cx);
+            books.search.as_mut().unwrap().keyboard.visible = false;
+            books.refresh(cx.theme);
+            assert!(books.pager.visible(), "multi-page search");
+            let normal_right = books.header.right();
+            assert_eq!(normal_right, books.sort_button.rect().x - t.mm(1.5));
+
+            let id = books.books[0].id.clone();
+            books.start_selection(Target::Book(id.clone()), cx);
+            assert!(!books.show_sort());
+            assert_eq!(books.header.right(), books.pager.rect().x - t.mm(3.0));
+            assert!(books.header.right() > normal_right);
+            books.end_selection(cx);
+            assert_eq!(books.header.right(), normal_right);
+
+            // Narrow to a single-page search (pager hidden): header reaches the right margin.
+            let unique_title = books.books[0].metadata.title.clone();
+            books.search.as_mut().unwrap().field.edit(&TextInput::Insert(unique_title));
+            books.apply_search(cx);
+            assert!(!books.pager.visible(), "single-page search");
+            let single_normal_right = books.header.right();
+            assert_eq!(single_normal_right, books.sort_button.rect().x - t.mm(1.5));
+
+            books.start_selection(Target::Book(id), cx);
+            assert_eq!(books.header.right(), screen.right() - t.margin);
+            assert!(books.header.right() > single_normal_right);
+            books.end_selection(cx);
+            assert_eq!(books.header.right(), single_normal_right);
+        });
+
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
