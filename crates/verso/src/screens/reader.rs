@@ -532,7 +532,7 @@ impl Reader {
                     self.turn_pending = false;
                     self.pending_turn = false;
                     self.error = Some(message.clone());
-                    cx.toast(message, None);
+                    self.report_error(message, cx);
                 }
             }
             Reply::Error { generation, message } if generation == 0 || generation == self.cache.generation => {
@@ -551,11 +551,20 @@ impl Reader {
                 if self.shown.is_none() {
                     cx.refresh(self.screen, RefreshMode::Ui);
                 }
-                cx.toast(message, None);
+                self.report_error(message, cx);
             }
             _ => {}
         }
     }
+    /// A toast over the page; without one, `draw` shows the error itself.
+    fn report_error(&self, message: String, cx: &mut EventCx) {
+        if self.shown.is_some() {
+            cx.toast(message, None);
+        } else {
+            cx.redraw();
+        }
+    }
+
     fn dictionary_service(&mut self) -> &Rc<crate::dictionary::worker::Worker> {
         self.dictionary.get_or_insert_with(|| {
             Rc::new(crate::dictionary::worker::Worker::new(self.store.clone(), self.worker.waker()))
@@ -2158,6 +2167,10 @@ impl Screen for Reader {
                 bars::draw(cx, layout, &geometry, &data);
                 log::debug!("bars drawn in {} us", started.elapsed().as_micros());
             }
+        } else if let Some(error) = &self.error {
+            let width = self.screen.w - 2 * t.margin;
+            let r = Rect::new(t.margin, self.screen.h / 2 - t.mm(10.0), width, t.mm(20.0));
+            cx.paragraph(error, t.body, r, HAlign::Center);
         } else {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
         }
@@ -2233,18 +2246,20 @@ impl Screen for Reader {
             Overlay::RemoveBookmark(confirm) => confirm.draw(cx),
             Overlay::End(sheet) => sheet.draw(cx),
         }
-        if self.laying_out
-            || self.layout_at.is_some()
-            || self.error.is_some()
-            || self.save_error.is_some()
-            || self.settings_save_pending
+        // Without a page, the centred message above is the only one.
+        if self.shown.is_some()
+            && (self.laying_out
+                || self.layout_at.is_some()
+                || self.error.is_some()
+                || self.save_error.is_some()
+                || self.settings_save_pending)
         {
             let message = self
                 .error
                 .as_deref()
                 .or(self.save_error.as_ref().map(|_| "Couldn't save your place"))
                 .or(self.settings_save_pending.then_some("Couldn't save text settings"))
-                .unwrap_or(if self.shown.is_some() { "Laying out…" } else { "Opening book…" });
+                .unwrap_or("Laying out…");
             let width = self.screen.w - 2 * t.margin;
             let r = Rect::new(t.margin, t.mm(16.0), width, t.mm(10.0));
             cx.fill(r, PAPER);
@@ -4592,6 +4607,7 @@ mod tests {
             battery: None,
         };
         r.receive(Reply::Error { generation: 1, message: "failed open".into() }, &mut cx);
+        assert!(cx.toast.is_none(), "without a page, the error is shown once, by the screen itself");
         r.after_present();
         assert!(r.failed_open());
         assert!(store.book("book").finished && store.book("book").hidden_from_continue);
@@ -5351,6 +5367,11 @@ mod tests {
         assert!(!r.fills_canvas());
         assert!(needs_redraw);
         assert_eq!(forced, vec![crate::platform::Update { rect: r.screen, mode: RefreshMode::Ui }]);
+        // The notice appears once, in the middle: no status line above it.
+        canvas.fill(PAPER);
+        r.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+        let status = (theme.mm(16.0) * r.screen.w) as usize..(theme.mm(26.0) * r.screen.w) as usize;
+        assert!(canvas.gray_data()[status].iter().all(|&p| p == PAPER));
         // If page 0 arrives before the deadline, the timer is cleared cleanly.
         let (mut r2, _) = test_reader("opening-fast");
         assert!(r2.opening_notice_at.is_some());
