@@ -49,16 +49,17 @@ impl SelectionState {
         self.selected.as_ref().map(|s| s.text.clone())
     }
 
-    pub fn adjusting(&self, g: Gesture, theme: &crate::ui::theme::Theme) -> bool {
+    pub fn adjusting(&self, g: Gesture, theme: &crate::ui::theme::Theme, cover: Option<Rect>) -> bool {
         if self.captured {
             return !matches!(g, Gesture::Down(_));
         }
-        matches!(g, Gesture::Down(p) if self.on_handle(p, theme))
+        matches!(g, Gesture::Down(p) if self.on_handle(p, theme, cover))
     }
 
     /// Whether a touch at `p` would grab one of the selection's handles.
-    pub fn on_handle(&self, p: Point, theme: &crate::ui::theme::Theme) -> bool {
-        self.handles(theme.mm(1.2).max(2))
+    /// `cover` is an overlay over the page: see `handles`.
+    pub fn on_handle(&self, p: Point, theme: &crate::ui::theme::Theme, cover: Option<Rect>) -> bool {
+        self.handles(theme.mm(1.2).max(2), cover)
             .is_some_and(|handles| handles.iter().any(|(center, _)| center.distance(p) <= theme.mm(4.0) as f32))
     }
 
@@ -98,13 +99,17 @@ impl SelectionState {
         self.captured = false;
     }
 
-    fn handles(&self, radius: i32) -> Option<[(Point, Point); 2]> {
+    /// Each handle's dot and the point on its line it drags. A handle whose
+    /// line is under `cover` is hidden like one off the page: its dot sits
+    /// outside the line and would otherwise stick out of the overlay.
+    fn handles(&self, radius: i32, cover: Option<Rect>) -> Option<[(Point, Point); 2]> {
         let selection = self.selected.as_ref()?;
         let first = selection.rects.first()?;
         let last = selection.rects.last()?;
+        let shown = |line: &Rect| cover.is_none_or(|c| !c.contains(line.center()));
         Some([
             (
-                if selection.start_visible {
+                if selection.start_visible && shown(first) {
                     Point::new(first.x, first.y - radius)
                 } else {
                     Point::new(-10000, -10000)
@@ -112,7 +117,7 @@ impl SelectionState {
                 Point::new(first.x + 1, first.center().y),
             ),
             (
-                if selection.end_visible {
+                if selection.end_visible && shown(last) {
                     Point::new(last.right(), last.bottom() + radius)
                 } else {
                     Point::new(-10000, -10000)
@@ -122,13 +127,13 @@ impl SelectionState {
         ])
     }
 
-    pub fn draw(&self, cx: &mut DrawCx) {
+    pub fn draw(&self, cx: &mut DrawCx, cover: Option<Rect>) {
         let Some(selection) = &self.selected else { return };
         for rect in &selection.rects {
             cx.canvas.invert_rect(*rect);
         }
         let radius = cx.theme.mm(1.2).max(2);
-        if let Some(handles) = self.handles(radius) {
+        if let Some(handles) = self.handles(radius, cover) {
             for (center, target) in handles {
                 if center.x < 0 {
                     continue;
@@ -176,7 +181,7 @@ impl SelectionState {
                 self.dragging = false;
                 self.moved = false;
                 let radius = cx.theme.mm(1.2).max(2);
-                let handle = self.handles(radius).and_then(|handles| {
+                let handle = self.handles(radius, None).and_then(|handles| {
                     handles
                         .into_iter()
                         .enumerate()
@@ -345,7 +350,7 @@ mod tests {
     fn handles_keep_opposite_endpoint_and_consume_swipes_and_dismissal() {
         with_context(|state, worker, commands, cx| {
             state.selected = Some(selected("passage"));
-            let end = state.handles(cx.theme.mm(1.2)).unwrap()[1].0;
+            let end = state.handles(cx.theme.mm(1.2), None).unwrap()[1].0;
             assert!(state.on_gesture(Gesture::Down(end), CONTEXT, worker, cx));
             let to = Point::new(end.x - 250, end.y);
             assert!(state.on_gesture(Gesture::Move(to), CONTEXT, worker, cx));
@@ -429,7 +434,7 @@ mod tests {
         });
     }
     #[test]
-    fn extending_pages_preserves_endpoints_hides_false_handles_and_rejects_old_replies() {
+    fn extending_pages_preserves_endpoints_hides_false_and_covered_handles_and_rejects_old_replies() {
         with_context(|state, worker, commands, cx| {
             let initial = selected("passage");
             state.selected = Some(initial.clone());
@@ -440,13 +445,16 @@ mod tests {
             let (geometry, query) = next(commands);
             assert!(matches!(query,SelectionQuery::Geometry(ref r) if *r==initial.range));
             assert_eq!(state.selected.as_ref().unwrap().range, initial.range);
-            assert!(state.handles(3).is_none());
+            assert!(state.handles(3, None).is_none());
             let mut visible = initial.clone();
             visible.start_visible = false;
             visible.text.clear();
             state.receive(geometry, Ok(Some(visible)), Some(next_page), worker, cx);
             assert_eq!(state.selected.as_ref().unwrap().text, "passage");
-            assert!(state.handles(3).unwrap()[0].0.x < 0);
+            assert!(state.handles(3, None).unwrap()[0].0.x < 0);
+            let last = *state.selected.as_ref().unwrap().rects.last().unwrap();
+            assert!(state.handles(3, None).unwrap()[1].0.x >= 0);
+            assert!(state.handles(3, Some(last)).unwrap()[1].0.x < 0, "its line is under an overlay");
             state.on_gesture(Gesture::Down(Point::new(350, 110)), next_page, worker, cx);
             let (request, query) = next(commands);
             assert!(matches!(query,SelectionQuery::Extend{anchor,..} if anchor==initial.range));
@@ -469,11 +477,11 @@ mod tests {
             let (word, _) = next(commands);
             state.receive(word, Ok(Some(selected("word"))), Some(CONTEXT), worker, cx);
             let mut hints = Vec::new();
-            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints));
+            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
             assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast), "dragging should hint Fast refresh");
             state.on_gesture(Gesture::End(Point::new(120, 110)), CONTEXT, worker, cx);
             hints.clear();
-            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints));
+            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
             assert!(hints.is_empty(), "releasing should stop hinting Fast refresh");
         });
     }

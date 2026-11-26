@@ -573,6 +573,16 @@ impl Reader {
         choose(&mut state);
         self.store.save_book(&self.id, &state)
     }
+    /// The overlay drawn over the selection, which hides the handles of lines
+    /// under it.
+    fn handle_cover(&self, t: &Theme) -> Option<Rect> {
+        match &self.overlay {
+            Overlay::Lookup(lookup) => Some(lookup.rect(t)),
+            Overlay::SelectionActions(bar) => Some(bar.bounds(t)),
+            _ => None,
+        }
+    }
+
     /// Where the selection is on the page: the box around its rectangles.
     fn selected_rect(&self) -> Option<Rect> {
         self.selection.selected.as_ref().and_then(|s| s.rects.iter().copied().reduce(|a, b| a.union(&b)))
@@ -1533,7 +1543,7 @@ impl Reader {
     fn gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         if self.selection.extending {
             if let Some(bar) = &mut self.extension {
-                let on_handle = matches!(g, Gesture::Down(p) if self.selection.on_handle(p, cx.theme));
+                let on_handle = matches!(g, Gesture::Down(p) if self.selection.on_handle(p, cx.theme, None));
                 let (owned, event) = bar.gesture(&g, on_handle);
                 if owned {
                     if let Some(e) = event {
@@ -1672,7 +1682,7 @@ impl Reader {
             Overlay::SelectionActions(bar) => matches!(g, Gesture::Down(p) if !bar.bounds(cx.theme).contains(p)),
             _ => false,
         };
-        if beside && self.selection.adjusting(g, cx.theme) {
+        if beside && self.selection.adjusting(g, cx.theme, self.handle_cover(cx.theme)) {
             if matches!(self.overlay, Overlay::Lookup(_))
                 && let Some(worker) = &self.dictionary
             {
@@ -2177,7 +2187,7 @@ impl Screen for Reader {
             bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
         }
         // After the bar, so a handle over its buttons stays visible.
-        self.selection.draw(cx);
+        self.selection.draw(cx, self.handle_cover(t));
         if !self.selection.extending
             && let Some(bar) = &mut self.search_bar
         {
@@ -3569,20 +3579,20 @@ mod tests {
         test_cx(&theme, |cx| {
             r.on_gesture(Gesture::Down(handle), cx);
         });
-        assert!(r.selection.adjusting(Gesture::Move(handle), &theme), "the handle was grabbed");
+        assert!(r.selection.adjusting(Gesture::Move(handle), &theme, None), "the handle was grabbed");
         // Dragging on through the strip and lifting there still reaches the selection.
         let low = Point::new(handle.x, r.screen.h - theme.mm(2.0));
         test_cx(&theme, |cx| {
             r.on_gesture(Gesture::Move(low), cx);
             r.on_gesture(Gesture::End(low), cx);
         });
-        assert!(!r.selection.adjusting(Gesture::Move(low), &theme), "the drag ended");
+        assert!(!r.selection.adjusting(Gesture::Move(low), &theme, None), "the drag ended");
         // A touch that starts on the bar itself still belongs to the bar.
         let blank = Point::new(10, r.screen.h - theme.mm(2.0));
         test_cx(&theme, |cx| {
             r.on_gesture(Gesture::Down(blank), cx);
         });
-        assert!(!r.selection.adjusting(Gesture::Move(blank), &theme));
+        assert!(!r.selection.adjusting(Gesture::Move(blank), &theme, None));
     }
 
     #[test]
@@ -3653,7 +3663,7 @@ mod tests {
             r.on_gesture(Gesture::Down(handle), cx);
         });
         assert!(matches!(r.overlay, Overlay::None));
-        assert!(r.selection.adjusting(Gesture::Move(handle), &theme), "the handle was grabbed");
+        assert!(r.selection.adjusting(Gesture::Move(handle), &theme, None), "the handle was grabbed");
         let to = Point::new(400, 300);
         test_cx(&theme, |cx| {
             r.on_gesture(Gesture::Move(to), cx);
@@ -3876,7 +3886,7 @@ mod tests {
             r.on_gesture(Gesture::Down(handle), cx);
         });
         assert!(matches!(r.overlay, Overlay::None));
-        assert!(r.selection.adjusting(Gesture::Move(handle), &theme), "the handle was grabbed");
+        assert!(r.selection.adjusting(Gesture::Move(handle), &theme, None), "the handle was grabbed");
         let to = Point::new(400, 300);
         test_cx(&theme, |cx| {
             r.on_gesture(Gesture::Move(to), cx);
