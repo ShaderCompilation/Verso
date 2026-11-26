@@ -243,6 +243,9 @@ and Verso exits with `EXIT_RESTART` (87) for the launcher to relaunch cleanly.
   child + `verso_cre_cache_reload()`) before opening a book.
 - **No `Store` self-cycles:** worker clones strip `dictionary_service` and
   `library_worker` handles (`Store::dictionary_context`, `Store::library_worker`).
+- **Sort keys are built once** per index or sort change (`library::sort::Keys`;
+  Recently read also when the opened order changes), so comparisons never fold
+  text or parse numbers.
 - **Immutable annotations:** editing a note writes a new `<rec-id>.json` and
   atomically swaps `book-<id>.json`; never mutate an existing record file in
   place.

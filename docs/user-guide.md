@@ -76,8 +76,14 @@ in, recursively for `.epub` files (ignoring dotfiles, `.sdr` folders and symlink
 Manage scanned folders in **Settings → Library → Add folder**; removing a folder
 hides its books without deleting any files or reading progress.
 
-- **Ordering:** immediate subfolders appear first alphabetically, followed by
-  books in alphabetical title order. Empty folders are shown.
+- **Ordering:** subfolders come first, by name (empty ones are shown), then
+  books. The **Sort** button here and in Search offers **Title** (default),
+  **Author**, **Series**, **Recently read** and **Recently added** (newest file);
+  one choice applies to both and is remembered.
+- **Series order:** books whose metadata (calibre or EPUB 3) names a series come
+  first, by series and number, and show the number on their cover. The rest
+  follow by the first number in the file name or title, so in a folder where
+  only some books have metadata, check them if the order looks wrong.
 - **Navigation:** tap a folder to enter it, tap the back arrow to go up, or tap
   the current path to see its full location. Swipe left/right or tap the pager
   arrows to turn pages; tap the page counter (`1 of N`) for a **Go to page**
@@ -106,8 +112,8 @@ symbols, cursor arrows (`←`/`→`) and a submit key.
 
 Long-press any book or folder to open its action menu:
 
-- **Book:** *Open*, *Details* (metadata, language, path, reading status and
-  finished date), *Synopsis* (when present in the EPUB), *Mark finished* /
+- **Book:** *Open*, *Details* (metadata and series, language, path, reading
+  status and finished date), *Synopsis* (when present in the EPUB), *Mark finished* /
   *Mark unfinished*, *Remove from continue reading* (on Home), *Select*,
   *Move* and *Delete…* (removes the EPUB, reading state, cached cover and its
   KOReader `.sdr` metadata).

@@ -9,6 +9,16 @@
 //! path. Series order puts books with a series (from metadata) first, by series
 //! name and number; then the rest, numbered ones by the first number in the file
 //! name, or failing that in the title ([`guess_number`]); then by file name.
+//! So in a folder where only some books have series metadata, those lead even
+//! when the others' file names number them earlier.
+//!
+//! Series metadata is calibre's or an EPUB 3 `series` collection (`epub.rs`); a
+//! `set` collection is not a reading order. Recently added is the file's
+//! modified time, which moving a book keeps; a first-seen time would give every
+//! book the same one at the first scan.
+//!
+//! The Library screen keeps [`Keys`] for the whole index, so paging never
+//! sorts; the library worker picks a single page with [`select_page`].
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
