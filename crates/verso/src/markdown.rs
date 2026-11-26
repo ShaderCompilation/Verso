@@ -1013,7 +1013,8 @@ fn render_events<'a>(events: &[Event<'a>], footnotes: &mut FootnoteTracker, out:
             Event::HardBreak => out.push_str("<br/>\n"),
             Event::Rule => out.push_str("<hr/>\n"),
             Event::TaskListMarker(checked) => {
-                out.push_str(if *checked { "☑ " } else { "☐ " });
+                // Literata and Kindle built-in reading fonts lack U+2610/U+2611.
+                out.push_str(if *checked { "[x] " } else { "[ ] " });
             }
         }
         i += 1;
@@ -1269,8 +1270,8 @@ mod tests {
         assert!(html.contains("<th style=\"text-align: left\">Element</th>"));
         assert!(html.contains("<th style=\"text-align: center\">Alignment</th>"));
         assert!(html.contains("<th style=\"text-align: right\">Behavior</th>"));
-        assert!(html.contains("<li class=\"task-item\">☑ Verify monospace code preservation</li>"));
-        assert!(html.contains("<li class=\"task-item\">☐ Inspect wrapped table cells on Kindle</li>"));
+        assert!(html.contains("<li class=\"task-item\">[x] Verify monospace code preservation</li>"));
+        assert!(html.contains("<li class=\"task-item\">[ ] Inspect wrapped table cells on Kindle</li>"));
         assert!(!html.contains("<input"));
         assert!(html.contains("<img src=\"markdown-cover.png\" alt=\"Checkerboard sample\"/>"));
         assert!(html.contains("<sup><a id=\"fnref-1\" href=\"#fn-1\" role=\"doc-noteref\">1</a></sup>"));

@@ -1107,7 +1107,13 @@ static lString8 first_monospace_face() {
         if (fontMan->getFontFileNameAndFaceIndex(
                 faces[i], false, false, file, face_index, family, math, emojis)
             && family == css_ff_monospace) {
-            return UnicodeToUtf8(faces[i]);
+            lString8 name = UnicodeToUtf8(faces[i]);
+            LVFontRef font = fontMan->GetFont(16, 400, false, css_ff_monospace, name);
+            LVFont::glyph_info_t glyph;
+            // Skip symbol-only monospace fonts (e.g. Kindle MonospaceSymbol) that lack ASCII letters.
+            if (!font.isNull() && font->getGlyphInfo('a', &glyph) && font->getGlyphInfo('0', &glyph)) {
+                return name;
+            }
         }
     }
     return lString8();

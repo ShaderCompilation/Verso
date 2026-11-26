@@ -1,6 +1,6 @@
 # Verso User Guide
 
-Verso is a calm EPUB reader for jailbroken Kindles. This guide covers installing
+Verso is a calm e-reader for jailbroken Kindles. This guide covers installing
 it, reading, organising your library, looking words up, transferring
 books over Wi-Fi, importing from KOReader, updating and reporting problems.
 The latest version lives online at [verso-reader.app/guide](https://verso-reader.app/guide),
@@ -45,7 +45,7 @@ asleep.
 - **First launch:** a short setup (Welcome, Library folders, tap zones, page
   layout, KOReader import when KOReader is installed, gestures) runs over Home.
   Every choice saves at once and can be skipped; **Settings → Advanced → Run
-  setup again** reopens it. Folders holding EPUBs are found and ticked for you.
+  setup again** reopens it. Folders holding books are found and ticked for you.
 - **Uninstall:** first copy `/mnt/us/verso/data/` to your computer to keep your
   progress, highlights, notes and exports. Then delete `/mnt/us/verso`,
   `/mnt/us/extensions/verso` and `/mnt/us/documents/Verso.sh` over USB (or run
@@ -69,7 +69,7 @@ Verso opens on **Home**:
   unopened books to start with, newest files first (one row under Continue
   reading).
 - **No books:** *Finding your books…* while the first scan runs; when it finds no
-  EPUBs, **Send books over Wi-Fi** and **Choose folders** (Settings → Library).
+  books, **Send books over Wi-Fi** and **Choose folders** (Settings → Library).
 - **Notice bar:** appears above the Library card for an available update or an
   unexpected crash report.
 - **Library card:** tap to open the folder browser.
@@ -77,7 +77,7 @@ Verso opens on **Home**:
 ### Folder browser
 
 By default, Verso scans `/mnt/us/documents`, plus any folders setup found books
-in, recursively for `.epub` files (ignoring dotfiles, `.sdr` folders and symlinks).
+in, recursively for `.epub`, `.md` and `.markdown` files (ignoring dotfiles, `.sdr` folders and symlinks).
 Manage scanned folders in **Settings → Library → Add folder**; removing a folder
 hides its books without deleting any files or reading progress.
 
@@ -104,7 +104,7 @@ hides its books without deleting any files or reading progress.
   progress bar. Finishing a book is sticky — opening it again keeps the badge
   and starts **re-reading** with live progress until you choose **Mark
   unfinished**.
-- **Rescan (`↻`):** incrementally picks up added, moved or changed EPUBs.
+- **Rescan (`↻`):** incrementally picks up added, moved or changed books.
 
 ### Search and touch keyboard
 
@@ -121,9 +121,9 @@ symbols, cursor arrows (`←`/`→`) and a submit key.
 Long-press any book or folder to open its action menu:
 
 - **Book:** *Open*, *Details* (metadata and series, language, path, reading
-  status and finished date), *Synopsis* (when present in the EPUB), *Mark finished* /
+  status and finished date), *Synopsis* (when present), *Mark finished* /
   *Mark unfinished*, *Remove from continue reading* (on Home), *Select*,
-  *Move* and *Delete…* (removes the EPUB, reading state, cached cover and its
+  *Move* and *Delete…* (removes the book, reading state, cached cover and its
   KOReader `.sdr` metadata).
 - **Folder:** *Open*, *Details*, *Search in this folder*, *Mark all finished* /
   *Mark all unfinished*, *Select*, *Move*, *New folder…*, *Rename…* and
@@ -139,7 +139,15 @@ Moving a book preserves its reading position and KOReader `.sdr` folder.
 
 ## 3. Reading
 
-Verso reads **EPUB** (`.epub`, EPUB 2 and EPUB 3).
+Verso reads **EPUB** (`.epub`, EPUB 2 and 3) and **Markdown** (`.md`, `.markdown`:
+CommonMark with GFM tables, strikethrough, task lists and footnotes).
+
+- **Markdown frontmatter:** optional YAML at line 1 supports `title` (falls back
+  to the first `#` heading, then filename), `author`/`authors`, `lang`/`language`,
+  `description`/`synopsis`, `series`, `series_index` and `cover`.
+- **Markdown images & covers:** relative `cover:` paths and `![](image.png)`
+  images resolve inside the `.md` folder (single-file Wi-Fi **Books** upload
+  sends the `.md` only; copy companion images via USB or **Files**).
 
 ### Turning pages and menus
 
@@ -338,7 +346,7 @@ signs in automatically; otherwise enter the code at `http://verso.local` or the
 shown IP address). The server stops on **Done**, sleep, USB exit or after 10
 minutes idle.
 
-- **Books:** drag-and-drop EPUBs into any folder (with **+ New folder**; the
+- **Books:** drag-and-drop EPUB or Markdown files into any folder (with **+ New folder**; the
   library folder with the most books is preselected), search (accents don't matter), download or delete books. Switch to **Highlights** to download
   per-book Markdown or **Download all (.zip)**.
 - **Dictionaries:** upload StarDict archives or loose files and remove
