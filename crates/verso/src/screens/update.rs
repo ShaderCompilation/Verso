@@ -120,14 +120,14 @@ impl OfferSheet {
     }
 
     /// Lays the notes out. Notes that need pages get the tallest bottom
-    /// sheet, for fewer of them.
+    /// sheet, for fewer of them; one page, a sheet just tall enough.
     fn lay_out(&mut self, text: &mut crate::gfx::TextRenderer, t: &Theme) {
         if self.notes.laid_out() {
             return;
         }
         self.notes.lay_out(text);
-        if self.screen.w <= self.screen.h && self.notes.pager.pages > 1 {
-            self.sheet = sheet(self.sheet.title.clone(), self.screen.h, self.screen, t);
+        if let Some(height) = fitted_height(&self.sheet, &self.notes, self.screen) {
+            self.sheet = sheet(self.sheet.title.clone(), height, self.screen, t);
             self.place(t);
             self.notes.lay_out(text);
         }
@@ -196,6 +196,22 @@ impl OfferSheet {
             OfferEvent::Close | OfferEvent::Update => {}
         }
     }
+}
+
+/// The bottom sheet's height once its notes are laid out, when it should
+/// change: the whole screen for notes in pages, or less for one page so the
+/// refreshed area stays tight. None in landscape (a full-height side sheet)
+/// or when the height is already right.
+fn fitted_height(sheet: &Sheet, notes: &PagedText, screen: Rect) -> Option<i32> {
+    if screen.w > screen.h {
+        return None;
+    }
+    let height = match notes.one_page_height() {
+        Some(needed) => sheet.rect().h - (notes.body().h - needed).max(0),
+        None if notes.pager.pages > 1 => screen.h,
+        None => return None,
+    };
+    (height != sheet.rect().h).then_some(height)
 }
 
 /// Downloads the update, then shows "Updating…" and exits for the launcher
@@ -629,14 +645,15 @@ impl WhatsNewSheet {
         self.notes.place(Rect::new(c.x, top, c.w, (bottom - top).max(1)), t);
     }
 
-    /// Lays the notes out; notes that need pages get the tallest bottom sheet.
+    /// Lays the notes out; notes that need pages get the tallest bottom
+    /// sheet, one page a sheet just tall enough.
     fn lay_out(&mut self, text: &mut crate::gfx::TextRenderer, t: &Theme) {
         if self.notes.laid_out() {
             return;
         }
         self.notes.lay_out(text);
-        if self.screen.w <= self.screen.h && self.notes.pager.pages > 1 {
-            self.sheet = sheet(self.sheet.title.clone(), self.screen.h, self.screen, t);
+        if let Some(height) = fitted_height(&self.sheet, &self.notes, self.screen) {
+            self.sheet = sheet(self.sheet.title.clone(), height, self.screen, t);
             self.place(t);
             self.notes.lay_out(text);
         }
@@ -752,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn long_notes_turn_in_pages_and_short_ones_keep_the_room() {
+    fn long_notes_turn_in_pages_and_short_ones_fit() {
         use crate::gfx::{Canvas, IconRenderer, TextRenderer};
         use crate::ui::gesture::Direction;
         let (mut text, mut icons) = (TextRenderer::new(), IconRenderer::default());
@@ -762,10 +779,15 @@ mod tests {
             let mut draw =
                 |o: &mut OfferSheet| o.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut vec![]));
             let mut short = OfferSheet::new(&t, screen, sample_offer("Faster page turns."));
-            let before = short.notes.body();
+            let (before, sheet_h) = (short.notes.body(), short.sheet.rect().h);
             draw(&mut short);
             assert!(!short.notes.pager.visible(), "{w}x{h}");
-            assert!(short.notes.body().h > before.h, "{w}x{h}: one page takes the pager's room too");
+            if w > h {
+                assert!(short.notes.body().h > before.h, "{w}x{h}: one page takes the pager's room too");
+            } else {
+                assert!(short.sheet.rect().h < sheet_h, "{w}x{h}: the bottom sheet shrinks to its notes");
+                assert!(short.notes.one_page_height().is_some_and(|n| n <= short.notes.body().h), "{w}x{h}");
+            }
             let mut long = OfferSheet::new(&t, screen, sample_offer(&long_notes()));
             draw(&mut long);
             assert!(long.notes.pager.visible() && long.notes.pager.pages > 1, "{w}x{h}");
