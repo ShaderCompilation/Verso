@@ -1,9 +1,20 @@
 name: CI
 
+# Docs-only changes skip CI. Not `**/*.md`: NOTICE.md ships in the app
+# package and dist/kindle/kpm/ is packaged whole.
 on:
   push:
     branches: [master]
+    paths-ignore: &docs-only
+      - README.md
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - AGENTS.md
+      - CLAUDE.md
+      - docs/**
+      - .github/ISSUE_TEMPLATE/**
   pull_request:
+    paths-ignore: *docs-only
 
 concurrency:
   group: ci-${{ github.ref }}

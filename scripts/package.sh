@@ -39,7 +39,7 @@ fi
 RELEASED="${VERSO_RELEASED:-$(date -u +%F)}"
 
 echo "==> building"
-cargo kindle-build
+cargo kindle-build --locked
 scripts/build-ssh.sh
 scripts/build-wordforms.sh
 # The packaging tool runs on this computer. Dev profile already compiles its
