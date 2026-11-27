@@ -1,15 +1,19 @@
 // Kindle benchmark probe: observe existing display ioctls without adding waits.
-// Build as both an LD_PRELOAD library and a small touch/marker helper (see README).
+// Build as an LD_PRELOAD library (-DPRELOAD), an object linked into Verso
+// (-DLINKED, for static builds that ignore LD_PRELOAD) and a small
+// touch/marker helper (see README).
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -28,18 +32,45 @@ void verso_bench_mark(const char *name) {
     close(fd);
 }
 
-#ifdef PRELOAD
-__attribute__((constructor)) static void started(void) { verso_bench_mark("process_start"); }
+#if defined(PRELOAD) || defined(LINKED)
+// The first priority runs before C++ static constructors, so the first malloc
+// already sees one CPU (Zig's allocator caches the CPU count on first use).
+__attribute__((constructor(101))) static void started(void) {
+    // Before main, so every thread and the pre-layout child inherit it.
+    if (getenv("VERSO_BENCH_ONE_CPU")) {
+        cpu_set_t one;
+        CPU_ZERO(&one);
+        CPU_SET(0, &one);
+        if (sched_setaffinity(0, sizeof(one), &one)) verso_bench_mark("one_cpu_failed");
+    }
+    verso_bench_mark("process_start");
+}
 
-int ioctl(int fd, unsigned long request, ...) {
-    static int (*original)(int, unsigned long, ...);
+// Matches <sys/ioctl.h>: musl's request is an int.
+#ifdef __GLIBC__
+typedef unsigned long request_t;
+#else
+typedef int request_t;
+#endif
+
+#ifdef LINKED
+// Defined in the executable, so it replaces libc's ioctl for Verso's own calls.
+static int original(int fd, request_t request, void *arg) {
+    return (int)syscall(SYS_ioctl, fd, (unsigned long)request, arg);
+}
+#endif
+
+int ioctl(int fd, request_t request, ...) {
+#ifdef PRELOAD
+    static int (*original)(int, request_t, ...);
     if (!original) original = dlsym(RTLD_NEXT, "ioctl");
+#endif
     va_list args;
     va_start(args, request);
     void *arg = va_arg(args, void *);
     va_end(args);
     // Both installed apps use Kindle's MXCFB (magic F) display interface.
-    unsigned int nr = request & 0xffff;
+    unsigned int nr = (unsigned long)request & 0xffff;
     if (nr != 0x462e && nr != 0x462f && nr != 0x4637) return original(fd, request, arg);
     uint32_t *data = arg;
     double before = now();
@@ -56,7 +87,7 @@ int ioctl(int fd, unsigned long request, ...) {
         int out = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
         if (out >= 0) {
             dprintf(out, "%.9f IOCTL %d %lx %.9f %d %u %u %u %u %u %u %u\n",
-                    before, getpid(), request, now(), result, marker, waveform, mode, left, top, width, height);
+                    before, getpid(), (unsigned long)request, now(), result, marker, waveform, mode, left, top, width, height);
             close(out);
         }
     }

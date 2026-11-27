@@ -20,7 +20,7 @@ def stat(ticks):
 
 
 def fixture():
-    trace = ['0 MARK 1 turns_start']
+    trace = ['0 MARK 42 process_start', '0 MARK 1 turns_start']
     for i in range(24):
         release = 1 + i
         send = release + (.11 if i == 1 else .01)
@@ -69,6 +69,12 @@ class Measurements(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.summarize(data)
 
+    def test_reject_trace_without_process_start(self):
+        data = fixture()
+        data['trace'] = data['trace'].replace('0 MARK 42 process_start', '0 MARK 9 process_start')
+        with self.assertRaisesRegex(AssertionError, 'process_start'):
+            self.summarize(data)
+
     def test_rejected_capture_never_enters_statistics(self):
         data = fixture()
         data['capture_error'] = 'saved page did not advance'
@@ -102,6 +108,12 @@ class Measurements(unittest.TestCase):
         row = startup_analyzer.summarize(self.startup_fixture(), 'synthetic')
         self.assertEqual(row['startup_request_ms'], 100)
         self.assertEqual(row['startup_completion_ms'], 410)
+
+    def test_startup_rejects_trace_without_process_start(self):
+        data = self.startup_fixture()
+        data['trace'] = data['trace'].replace('.2 MARK 42 process_start', '.2 MARK 9 process_start')
+        with self.assertRaisesRegex(AssertionError, 'reader start'):
+            startup_analyzer.summarize(data, 'synthetic')
 
     def test_startup_rejects_failed_display_update(self):
         data = self.startup_fixture()

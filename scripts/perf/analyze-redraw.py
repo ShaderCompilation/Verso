@@ -28,6 +28,9 @@ def summarize(path):
     sends = [s for s in trace if s[1] == 'IOCTL' and int(s[3], 16) & 0xffff == 0x462e
              and start <= float(s[0]) < end]
     assert len(marks) == len(sends) == 24
+    # The probe marks its own process; without it the trace can't be trusted.
+    assert all(any(s[1] == 'MARK' and s[2] == send[2] and s[3] == 'process_start' for s in trace)
+               for send in sends), 'Missing process_start for the drawing process'
     if r.get('queued_input'):
         saved = r.get('timed_position_after_turns', r['saved_after_turns'])
         assert saved['page'] == r['initial_position']['page'] + 24
@@ -179,7 +182,7 @@ def main():
         hashes = {}
         for sample in (s for s in memory if s['screen'] == screen):
             hashes.setdefault(sample['screen_hash'], set()).add(sample['variant'])
-        if screen in ('library', 'menu') and len(hashes) > 1:
+        if (screen in ('library', 'menu') or screen.startswith('closed_')) and len(hashes) > 1:
             # Battery text can change between runs. Every observed status-screen
             # image must still match exactly in at least two distinct builds.
             assert all(len(variants) >= 2 for variants in hashes.values()), f'Unmatched {screen} pixels'

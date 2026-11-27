@@ -97,7 +97,8 @@ def main():
     parser.add_argument('binary', type=Path)
     parser.add_argument('--book', required=True, help='EPUB path already on Kindle')
     parser.add_argument('--probe', type=Path, required=True)
-    parser.add_argument('--preload', type=Path, required=True)
+    parser.add_argument('--preload', type=Path,
+                        help='probe.so; omit for a binary with the probe linked in (static builds)')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--wake-check', action='store_true',
                         help='After timing, check real sleep/wake restoration and the next turn')
@@ -130,6 +131,10 @@ def main():
     parser.add_argument('--annotation-fixture', type=Path, help='Local original reader.epub for synthetic records')
     parser.add_argument('--annotation-kind', choices=['highlight', 'bookmark'], default='highlight',
                         help='Whether the synthetic records are highlights or page bookmarks')
+    parser.add_argument('--reopen', type=int, default=0, metavar='N',
+                        help='With --memory-check, close and reopen the book N times, sampling after each close')
+    parser.add_argument('--one-cpu', action='store_true',
+                        help='Pin Verso to CPU 0 (VERSO_BENCH_ONE_CPU, set by the probe before main)')
     parser.add_argument('--dictionary-cache', metavar='STATE',
                         help='Copy STATE/dictionary-cache (e.g. a dictionary.py cold state) into the run state')
     args = parser.parse_args()
@@ -138,15 +143,17 @@ def main():
     assert args.page_flash >= 0 and 0 <= args.idle_seconds <= 30
     assert 6 <= args.font_size_pt <= 36
     assert not args.identity_memory_check or args.memory_check
-    assert args.orientation == 'portrait' or not (args.position_check or args.failure_check or args.wake_check), \
-        'Position/failure/wake lifecycle coordinates currently require portrait'
+    assert 0 <= args.reopen <= 10 and (not args.reopen or args.memory_check)
+    assert args.orientation == 'portrait' or not (args.position_check or args.failure_check or args.wake_check
+                                                  or args.reopen), \
+        'Position/failure/wake/reopen lifecycle coordinates currently require portrait'
     assert re.fullmatch(r'[a-z0-9-]+', args.variant)
     ready()
     remote(f'mkdir -p {APP}/bin {APP}/books')
     # Preserve the production executable, settings, and saved positions.
     remote(f'cmp -s {Q(args.book)} {APP}/books/book.epub || cp {Q(args.book)} {APP}/books/book.epub')
-    for name, source in [('probe', args.probe), ('probe.so', args.preload),
-                         (args.variant + '/verso', args.binary)]:
+    tools = [('probe', args.probe), (args.variant + '/verso', args.binary)]
+    for name, source in tools + ([('probe.so', args.preload)] if args.preload else []):
         remote(f'mkdir -p {APP}/bin/{args.variant}')
         upload(APP + '/bin/' + name, source.read_bytes())
     binary_sha256 = remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0]
@@ -179,7 +186,9 @@ def main():
         remote(f'tar -xf - -C {state}/annotations', fixture_tar(args.annotation_fixture, args.annotation_count, kind=args.annotation_kind))
     wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
                f'export RUST_LOG=info,verso=debug,verso::app=trace\n'
-               f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
+               + (f'export LD_PRELOAD={APP}/bin/probe.so\n' if args.preload else '')
+               + ('export VERSO_BENCH_ONE_CPU=1\n' if args.one_cpu else '')
+               + f'exec {APP}/bin/{args.variant}/verso\n')
     upload(APP + '/verso', wrapper.encode())
     pid = None
     results = None
@@ -188,6 +197,11 @@ def main():
                f'setsid sh {APP}/launcher.sh </dev/null >/dev/null 2>&1 &')
         pid = app_pid(f'{APP}/bin/{args.variant}/verso')
         wait_for(f'grep -q "first frame on screen" {APP}/verso.log')
+        # Without it the probe isn't in this process (not preloaded, not linked).
+        wait_for(f'grep -q " MARK {pid} process_start$" {trace}', 5)
+        if args.one_cpu:
+            allowed = remote(f'cat /proc/{pid}/task/*/status | grep "^Cpus_allowed_list:"').splitlines()
+            assert allowed and all(line.split()[1] == '0' for line in allowed), allowed
         samples, hashes = {}, {}
         def sample(label):
             if args.memory_check:
@@ -248,7 +262,8 @@ def main():
                    'startup_log': remote(f'grep -E "startup stage:|book .*parse|book .*layout" {APP}/{run}.setup.log || true'),
                    'annotation_count': args.annotation_count, 'annotation_kind': args.annotation_kind,
                    'annotation_setup': remote(f'grep -E "annotation resolution:|book first page" {APP}/{run}.setup.log || true'),
-                   'turn_delay_us': args.turn_delay_us,
+                   'turn_delay_us': args.turn_delay_us, 'one_cpu': args.one_cpu,
+                   'probe': 'preload' if args.preload else 'linked',
                    'persistence': remote(f'grep -E "position write:|after_present:" {APP}/verso.log || true'),
                    'setup_frames': remote(f'grep "frame: drawn" {APP}/{run}.setup.log'),
                    'trace': remote(f'cat {trace}'),
@@ -306,6 +321,12 @@ def main():
                                      f'sleep {args.idle_seconds}; '
                                      f'cat /proc/{pid}/stat; cat /proc/uptime').splitlines()
         lifecycle_hash = results['page_hash']
+        for i in range(1, args.reopen + 1):
+            remote(f'{probe} 636 848 reopen_menu; sleep 1; {probe} 65 70 reopen_close; sleep 3')
+            sample(f'closed_{i}')
+            remote(f'{probe} 200 550 reopen; sleep 3')
+            assert framebuffer_hash() == lifecycle_hash, 'Reopen changed page'
+        results['reopens'] = args.reopen
         if args.failure_check:
             saved = position()
             # A directory at the temporary-file path produces EISDIR without

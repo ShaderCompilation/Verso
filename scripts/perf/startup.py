@@ -107,8 +107,9 @@ def main():
     parser.add_argument('variant')
     parser.add_argument('binary', type=Path)
     parser.add_argument('--large', type=Path, help='Required only for the large-library fixture')
-    parser.add_argument('--probe', type=Path, help='Touch/clock helper; supply together with --preload')
-    parser.add_argument('--preload', type=Path, help='Display ioctl observer')
+    parser.add_argument('--probe', type=Path, required=True, help='Touch/clock helper')
+    parser.add_argument('--preload', type=Path,
+                        help='probe.so; omit for a binary with the probe linked in (static builds)')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--runs', type=int, default=2)
     parser.add_argument('--fixture', choices=['real', 'large'])
@@ -124,8 +125,6 @@ def main():
     args = parser.parse_args()
     assert re.fullmatch(r'[a-z0-9-]+', args.variant)
     assert re.fullmatch(r'\d+,\d+', args.collections_tap)
-    if bool(args.probe) != bool(args.preload):
-        parser.error('--probe and --preload must be supplied together')
     if args.fixture != 'real' and args.large is None:
         parser.error('--large is required unless --fixture real is selected')
     assert remote('lipc-get-prop com.lab126.powerd state; pidof verso || true; pidof reader.lua || true') == 'active'
@@ -133,13 +132,9 @@ def main():
     remote(f'mkdir -p {APP}/bin/{Q(args.variant)}')
     if not args.installed:
         upload(f'{APP}/bin/{args.variant}/verso', args.binary.read_bytes())
-    if args.probe:
-        upload(APP + '/bin/probe', args.probe.read_bytes())
+    upload(APP + '/bin/probe', args.probe.read_bytes())
+    if args.preload:
         upload(APP + '/bin/probe.so', args.preload.read_bytes())
-    else:
-        # Compatibility with earlier runs; new runs should provide both tools.
-        remote(f'cp /mnt/us/verso/persistence-check/bin/probe {APP}/bin/probe; '
-               f'cp /mnt/us/verso/persistence-check/bin/probe.so {APP}/bin/probe.so')
     remote(f'chmod 755 {APP}/bin/{Q(args.variant)}/verso {APP}/bin/probe')
     binary_sha256 = remote(f'sha256sum {APP}/bin/{args.variant}/verso').split()[0]
     assert binary_sha256 == hashlib.sha256(args.binary.read_bytes()).hexdigest(), 'Installed variant differs from binary'
@@ -171,10 +166,12 @@ def main():
                 remote(f'cp {APP}/seed-home.json {state}/home.json')
             wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
                        'export RUST_LOG=info,verso=debug\n'
-                       f'export LD_PRELOAD={APP}/bin/probe.so\nexec {APP}/bin/{args.variant}/verso\n')
+                       + (f'export LD_PRELOAD={APP}/bin/probe.so\n' if args.preload else '')
+                       + f'exec {APP}/bin/{args.variant}/verso\n')
             upload(APP + '/verso', wrapper.encode())
             pid = None
             result = dict(variant=args.variant, binary_sha256=binary_sha256,
+                          probe='preload' if args.preload else 'linked',
                           fixture=fixture, mode=mode, number=number, summary=args.summary,
                           cache='warm OS cache; fresh copy of persisted app data', samples={})
             try:
