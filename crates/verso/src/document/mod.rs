@@ -1223,12 +1223,15 @@ mod tests {
                 }
             }
         }
-        rich.go_to_page(2);
-        rich.draw(&mut buf, 600)?;
-        assert!(
-            buf[400 * 600..].iter().filter(|&&v| v < 128).count() > 200,
-            "rich.md relative checkerboard image must render"
-        );
+        // The image's page depends on the installed fonts. Its two light grays
+        // cover far more pixels than text smoothing or table shading do.
+        let mut figure = false;
+        for p in 0..rich.page_count() {
+            rich.go_to_page(p);
+            rich.draw(&mut buf, 600)?;
+            figure |= buf.iter().filter(|&&v| (150..=230).contains(&v)).count() > 40_000;
+        }
+        assert!(figure, "rich.md relative checkerboard image must render");
         assert!(rich_notes.get("1").is_some_and(|h| h.contains("First footnote explaining")), "{rich_notes:?}");
         assert!(
             rich_notes.get("2").is_some_and(|h| h.contains("Second footnote") && h.contains("<b>formatted</b>")),
