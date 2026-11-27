@@ -69,11 +69,11 @@ impl CachedCover {
                 let top_rect = Rect::new(rect.x, rect.y, w, d);
                 let right_rect = Rect::new(rect.x + w - d, rect.y + d, d, h - d);
                 if *rgb {
-                    canvas.blit_rgb(top_rect, top, w as usize);
-                    canvas.blit_rgb(right_rect, right, d as usize);
+                    canvas.blit_rgb_picture(top_rect, top, w as usize);
+                    canvas.blit_rgb_picture(right_rect, right, d as usize);
                 } else {
-                    canvas.blit_gray(top_rect, top, w as usize);
-                    canvas.blit_gray(right_rect, right, d as usize);
+                    canvas.blit_gray_picture(top_rect, top, w as usize);
+                    canvas.blit_gray_picture(right_rect, right, d as usize);
                 }
             }
         }
@@ -597,6 +597,26 @@ mod tests {
         let hidden_px =
             &raw[(((20 + d as i32) * 300 + 10) * 4) as usize..(((20 + d as i32) * 300 + 10) * 4 + 4) as usize];
         assert_eq!(hidden_px, &[0xee, 0xee, 0xee, 255]);
+
+        // Dark mode pre-flips both Gray8 and Color32 behind strips so the panel copy restores them identically.
+        let mut dark_gray = Canvas::new(300, 400);
+        dark_gray.set_dark(true);
+        dark_gray.fill(0xff);
+        strip.blit(&mut dark_gray, rect);
+        let mut out_gray = vec![0u8; 300 * 400];
+        dark_gray.copy_gray(dark_gray.bounds(), &mut out_gray, 300, true);
+        assert_eq!(out_gray[20 * 300 + 10], strip.sample_pixel(0, 0));
+        assert_eq!(out_gray[(20 + d as usize) * 300 + rect.right() as usize - 1], strip.sample_pixel(w - 1, d));
+        assert_eq!(out_gray[(20 + d as usize) * 300 + 10], 0x00, "hidden strip area stays dark paper");
+
+        let mut dark_color = Canvas::with_mode(300, 400, ColorMode::Color32);
+        dark_color.set_dark(true);
+        dark_color.fill(0xff);
+        color_strip.blit(&mut dark_color, rect);
+        let mut out_color = vec![0u8; 300 * 400 * 4];
+        dark_color.copy_rgba(dark_color.bounds(), &mut out_color, 300, true);
+        let dark_top = &out_color[((20 * 300 + 10) * 4) as usize..((20 * 300 + 10) * 4 + 4) as usize];
+        assert_eq!(dark_top, &[220, 40, 30, 255]);
     }
 
     fn fixture(label: &str) -> (Store, std::path::PathBuf) {

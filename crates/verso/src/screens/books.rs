@@ -1584,6 +1584,7 @@ impl Books {
         self.library.pause(true);
         self.thumbnails.clear();
         let settings = self.store.settings();
+        self.worker.set_dark(settings.dark_mode);
         let (layout, typography, page) = self.open_settings(&settings, t);
         let saved = self.store.book(&id);
         self.generation += 1;

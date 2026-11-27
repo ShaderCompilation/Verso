@@ -1448,6 +1448,70 @@ mod tests {
         );
         assert_eq!(panel[0], 0);
         assert_eq!(panel[1], 119);
+
+        // Dark mode keeps sleep covers identical after panel inversion, with black margins intact.
+        for orientation in [Orientation::Portrait, Orientation::Landscape] {
+            for mode in [crate::gfx::ColorMode::Gray8, crate::gfx::ColorMode::Color32] {
+                let (w, h) = match orientation {
+                    Orientation::Portrait => (600, 800),
+                    Orientation::Landscape => (800, 600),
+                };
+                struct ColorMarked;
+                impl Screen for ColorMarked {
+                    fn draw(&mut self, _: &mut DrawCx) {}
+                    fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                        Action::None
+                    }
+                    fn sleep_cover(&self, width: u32, height: u32) -> Option<crate::library::covers::CoverImage> {
+                        let mut img = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+                        img.put_pixel(10, 20, image::Rgb([40, 130, 210]));
+                        Some(crate::library::covers::CoverImage::Rgb(img))
+                    }
+                }
+                let info = DeviceInfo { name: "test".into(), width: w, height: h, dpi: 150, color: mode };
+                let screen_light: Box<dyn Screen> =
+                    if mode == crate::gfx::ColorMode::Gray8 { Box::new(Marked) } else { Box::new(ColorMarked) };
+                let screen_dark: Box<dyn Screen> =
+                    if mode == crate::gfx::ColorMode::Gray8 { Box::new(Marked) } else { Box::new(ColorMarked) };
+                let mut light_app = App::new(&info, Theme::for_dpi(150), screen_light);
+                let mut dark_app = App::new(&info, Theme::for_dpi(150), screen_dark);
+                light_app.set_orientation(orientation);
+                dark_app.set_orientation(orientation);
+                dark_app.set_dark(true);
+                assert!(light_app.draw_sleep_cover(crate::store::SleepScreen::Cover));
+                assert!(dark_app.draw_sleep_cover(crate::store::SleepScreen::Cover));
+
+                let bpp = light_app.canvas.bytes_per_pixel();
+                let read_panel = |app: &App, invert: bool| {
+                    let mut out = vec![9u8; 600 * 800 * bpp];
+                    let mut scratch = crate::gfx::RotateScratch::default();
+                    match (orientation, mode) {
+                        (Orientation::Portrait, crate::gfx::ColorMode::Gray8) => {
+                            app.canvas.copy_gray(app.canvas.bounds(), &mut out, 600, invert);
+                        }
+                        (Orientation::Landscape, crate::gfx::ColorMode::Gray8) => {
+                            app.canvas.copy_gray_rotated(app.canvas.bounds(), &mut out, 600, &mut scratch, invert);
+                        }
+                        (Orientation::Portrait, crate::gfx::ColorMode::Color32) => {
+                            app.canvas.copy_rgba(app.canvas.bounds(), &mut out, 600, invert);
+                        }
+                        (Orientation::Landscape, crate::gfx::ColorMode::Color32) => {
+                            app.canvas.copy_rgba_rotated(app.canvas.bounds(), &mut out, 600, &mut scratch);
+                            if invert {
+                                for px in out.as_chunks_mut::<4>().0 {
+                                    *px = [px[0] ^ 0xff, px[1] ^ 0xff, px[2] ^ 0xff, 0xff];
+                                }
+                            }
+                        }
+                    }
+                    out
+                };
+                let fb_l = read_panel(&light_app, false);
+                let fb_d = read_panel(&dark_app, true);
+                assert_eq!(fb_d, fb_l, "sleep cover {orientation:?} {mode:?}");
+                assert_eq!(fb_d[0], 0, "black margin stays black ({orientation:?} {mode:?})");
+            }
+        }
     }
 
     #[test]

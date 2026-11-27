@@ -600,22 +600,24 @@ impl Document for CreDocument {
         unsafe { sys::verso_cre_go_to_page(self.raw, page as c_int) };
     }
 
-    fn draw(&mut self, out: &mut [u8], stride: usize) -> Result<()> {
+    fn draw(&mut self, out: &mut [u8], stride: usize, dark: bool) -> Result<()> {
         anyhow::ensure!(stride > 0 && !out.is_empty() && out.len().is_multiple_of(stride), "invalid page buffer");
         let (w, h) = (c_int::try_from(stride)?, c_int::try_from(out.len() / stride)?);
-        if unsafe { sys::verso_cre_draw(self.raw, out.as_mut_ptr(), w, h, stride as c_int) } != 0 {
+        if unsafe { sys::verso_cre_draw(self.raw, out.as_mut_ptr(), w, h, stride as c_int, c_int::from(dark)) } != 0 {
             bail!("crengine failed to draw the page");
         }
         Ok(())
     }
 
-    fn draw_rgba(&mut self, out: &mut [u8], stride: usize) -> Result<()> {
+    fn draw_rgba(&mut self, out: &mut [u8], stride: usize, dark: bool) -> Result<()> {
         anyhow::ensure!(
             stride >= 4 && stride.is_multiple_of(4) && !out.is_empty() && out.len().is_multiple_of(stride),
             "invalid color page buffer"
         );
         let (w, h) = (c_int::try_from(stride / 4)?, c_int::try_from(out.len() / stride)?);
-        if unsafe { sys::verso_cre_draw_rgba(self.raw, out.as_mut_ptr(), w, h, stride as c_int) } != 0 {
+        if unsafe { sys::verso_cre_draw_rgba(self.raw, out.as_mut_ptr(), w, h, stride as c_int, c_int::from(dark)) }
+            != 0
+        {
             bail!("crengine failed to draw the color page");
         }
         Ok(())

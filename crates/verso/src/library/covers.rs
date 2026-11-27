@@ -67,8 +67,8 @@ impl CoverImage {
 
     pub fn blit(&self, canvas: &mut Canvas, rect: Rect) {
         match self {
-            Self::Gray(i) => canvas.blit_gray(rect, i.as_raw(), i.width() as usize),
-            Self::Rgb(i) => canvas.blit_rgb(rect, i.as_raw(), i.width() as usize),
+            Self::Gray(i) => canvas.blit_gray_picture(rect, i.as_raw(), i.width() as usize),
+            Self::Rgb(i) => canvas.blit_rgb_picture(rect, i.as_raw(), i.width() as usize),
         }
     }
 

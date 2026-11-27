@@ -79,7 +79,7 @@ fn main() {
         verso_cre_go_to_page(doc, page.min(pages - 1));
         let mut buf = vec![255u8; (w * h) as usize];
         let t = Instant::now();
-        assert_eq!(verso_cre_draw(doc, buf.as_mut_ptr(), w, h, w), 0);
+        assert_eq!(verso_cre_draw(doc, buf.as_mut_ptr(), w, h, w, 0), 0);
         let draw = ms(t);
         if let Ok(out) = std::env::var("VERSO_BENCH_PGM") {
             let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
@@ -99,7 +99,7 @@ fn main() {
         // The neighbour page, as the app renders next.
         verso_cre_go_to_page(doc, (page + 1).min(pages - 1));
         let t = Instant::now();
-        verso_cre_draw(doc, buf.as_mut_ptr(), w, h, w);
+        verso_cre_draw(doc, buf.as_mut_ptr(), w, h, w, 0);
         let draw2 = ms(t);
         let t = Instant::now();
         verso_cre_free(doc);

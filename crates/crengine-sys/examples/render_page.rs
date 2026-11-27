@@ -45,7 +45,7 @@ fn main() {
         verso_cre_go_to_page(doc, page);
         let mut buf = vec![0u8; (w * h) as usize];
         let t = Instant::now();
-        assert_eq!(verso_cre_draw(doc, buf.as_mut_ptr(), w, h, w), 0);
+        assert_eq!(verso_cre_draw(doc, buf.as_mut_ptr(), w, h, w, 0), 0);
         println!("draw page {page}: {:?}", t.elapsed());
         let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
         pgm.extend_from_slice(&buf);

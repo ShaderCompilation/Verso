@@ -129,13 +129,21 @@ unsafe extern "C" {
     pub fn verso_cre_current_page(doc: *mut VersoCreDoc) -> c_int;
     pub fn verso_cre_go_to_page(doc: *mut VersoCreDoc, page: c_int) -> c_int;
 
-    pub fn verso_cre_draw(doc: *mut VersoCreDoc, buf: *mut u8, width: c_int, height: c_int, stride: c_int) -> c_int;
+    pub fn verso_cre_draw(
+        doc: *mut VersoCreDoc,
+        buf: *mut u8,
+        width: c_int,
+        height: c_int,
+        stride: c_int,
+        dark: c_int,
+    ) -> c_int;
     pub fn verso_cre_draw_rgba(
         doc: *mut VersoCreDoc,
         buf: *mut u8,
         width: c_int,
         height: c_int,
         stride: c_int,
+        dark: c_int,
     ) -> c_int;
     pub fn verso_cre_get_prop(doc: *mut VersoCreDoc, key: *const c_char, buf: *mut c_char, buf_len: c_int) -> c_int;
 }
@@ -363,12 +371,196 @@ mod tests {
             let mut rgba = vec![0u8; 200 * 300 * 4];
             for p in 0..pages {
                 assert_eq!(verso_cre_go_to_page(doc, p), 0);
-                assert_eq!(verso_cre_draw(doc, gray.as_mut_ptr(), 200, 300, 200), 0);
-                assert_eq!(verso_cre_draw_rgba(doc, rgba.as_mut_ptr(), 200, 300, 200 * 4), 0);
+                assert_eq!(verso_cre_draw(doc, gray.as_mut_ptr(), 200, 300, 200, 0), 0);
+                assert_eq!(verso_cre_draw_rgba(doc, rgba.as_mut_ptr(), 200, 300, 200 * 4, 0), 0);
             }
             verso_cre_free(doc);
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn valid_rgb_png(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut row = Vec::with_capacity(1 + width as usize * 3);
+        row.push(0); // filter: None
+        for _ in 0..width {
+            row.extend_from_slice(&rgb);
+        }
+        let mut raw = Vec::with_capacity(row.len() * height as usize);
+        for _ in 0..height {
+            raw.extend_from_slice(&row);
+        }
+        assert!(raw.len() <= 65535);
+        let len = raw.len() as u16;
+        let mut zlib = vec![0x78, 0x01, 0x01];
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(&raw);
+        let mut s1 = 1u32;
+        let mut s2 = 0u32;
+        for &b in &raw {
+            s1 = (s1 + b as u32) % 65521;
+            s2 = (s2 + s1) % 65521;
+        }
+        zlib.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+        png.extend_from_slice(&png_chunk(b"IDAT", &zlib));
+        png.extend_from_slice(&png_chunk(b"IEND", &[]));
+        png
+    }
+
+    #[test]
+    fn dark_mode_preserves_images_and_flips_colored_text_luma() {
+        let _guard = CRE_LOCK.lock().unwrap();
+        init_cre();
+
+        let dir = std::env::temp_dir().join(format!("verso-cre-dark-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let swatch = [30u8, 150, 210];
+        std::fs::write(dir.join("swatch.png"), valid_rgb_png(40, 40, swatch)).unwrap();
+
+        let html = concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><style>"#,
+            r#"html, body { margin: 0; padding: 0; background: #ffffff; }"#,
+            r#"div { margin: 0; padding: 0; font-size: 14px; line-height: 16px; }"#,
+            r#"</style></head><body>"#,
+            r##"<div style="background-color:#231f20;color:#231f20">a</div>"##,
+            r##"<div style="background-color:#003388;color:#003388">a</div>"##,
+            r##"<div style="background-color:#990000;color:#990000">a</div>"##,
+            r##"<div style="background-color:#FFAA00;color:#FFAA00">a</div>"##,
+            r##"<div style="background-color:#000001;color:#000001">a</div>"##,
+            r##"<div style="background-color:#FEFFFF;color:#FEFFFF">a</div>"##,
+            r##"<div style="background-color:#808080;color:#808080">a</div>"##,
+            r#"<div style="background-color:rgba(0,0,1,0.25);color:transparent">a</div>"#,
+            r##"<div style="background-color:#2060a0"><div style="background-color:rgba(180,40,20,0.0);color:transparent">a</div></div>"##,
+            r#"<div><img src="swatch.png" width="40" height="40"/></div>"#,
+            r#"</body></html>"#,
+        );
+
+        let css =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/crengine/cr3gui/data/epub.css");
+        let ccss = CString::new(css.to_str().unwrap()).unwrap();
+        let cdir = CString::new(dir.to_str().unwrap()).unwrap();
+        let cname = CString::new("dark.xhtml").unwrap();
+        let clang = CString::new("en").unwrap();
+
+        let luma = |r: u8, g: u8, b: u8| (77 * r as i32 + 150 * g as i32 + 29 * b as i32 + 128) >> 8;
+        unsafe {
+            let (w, h) = (240, 800);
+            let doc = verso_cre_new(w, h, 96);
+            assert!(!doc.is_null());
+            assert_eq!(verso_cre_set_stylesheet_file(doc, ccss.as_ptr()), 0);
+            verso_cre_set_margins(doc, 0, 0, 0, 0);
+            assert_eq!(
+                verso_cre_load_html(
+                    doc,
+                    html.as_ptr().cast(),
+                    html.len() as c_int,
+                    cdir.as_ptr(),
+                    cname.as_ptr(),
+                    clang.as_ptr()
+                ),
+                0
+            );
+            verso_cre_render(doc);
+            assert_eq!(verso_cre_page_count(doc), 1);
+
+            // Test both fast (stride == width / width*4) and fallback (padded stride) drawbuf branches.
+            for extra in [0i32, 16] {
+                let gstride = w + extra;
+                let mut g_light = vec![0u8; (gstride * h) as usize];
+                let mut g_dark = vec![0u8; (gstride * h) as usize];
+                assert_eq!(verso_cre_draw(doc, g_light.as_mut_ptr(), w, h, gstride, 0), 0);
+                assert_eq!(verso_cre_draw(doc, g_dark.as_mut_ptr(), w, h, gstride, 1), 0);
+
+                let cstride = w * 4 + extra * 4;
+                let mut c_light = vec![0u8; (cstride * h) as usize];
+                let mut c_dark = vec![0u8; (cstride * h) as usize];
+                assert_eq!(verso_cre_draw_rgba(doc, c_light.as_mut_ptr(), w, h, cstride, 0), 0);
+                assert_eq!(verso_cre_draw_rgba(doc, c_dark.as_mut_ptr(), w, h, cstride, 1), 0);
+
+                let at = |buf: &[u8], x: i32, y: i32, flip: bool| -> [u8; 3] {
+                    let i = (y * cstride + x * 4) as usize;
+                    assert_eq!(buf[i + 3], 255);
+                    let f = if flip { 0xff } else { 0 };
+                    [buf[i] ^ f, buf[i + 1] ^ f, buf[i + 2] ^ f]
+                };
+                let find_rgb = |target: [u8; 3]| -> (i32, i32) {
+                    for y in 0..h {
+                        for x in 0..w {
+                            if at(&c_light, x, y, false) == target {
+                                return (x, y);
+                            }
+                        }
+                    }
+                    panic!("missing swatch {target:?} in light render");
+                };
+
+                // RGB & gray image pixels survive flip identically.
+                let (ix, iy) = find_rgb(swatch);
+                assert_eq!(at(&c_dark, ix, iy, true), swatch, "color image differs (extra={extra})");
+                let gpx_l = g_light[(iy * gstride + ix) as usize];
+                let gpx_d = g_dark[(iy * gstride + ix) as usize] ^ 0xff;
+                assert_eq!(gpx_d, gpx_l, "gray image differs after flip (extra={extra})");
+
+                // Rich black (#231f20): flips to light on both gray (plain flip) and color (patched).
+                let (rx, ry) = find_rgb([0x23, 0x1f, 0x20]);
+                assert!(g_dark[(ry * gstride + rx) as usize] ^ 0xff > 210);
+                let rich = at(&c_dark, rx, ry, true);
+                assert!(luma(rich[0], rich[1], rich[2]) >= 220, "rich black stayed dark: {rich:?}");
+
+                // Colored blocks keep hue ordering and land at luma 255 - Y within rounding.
+                let (nx, ny) = find_rgb([0x00, 0x33, 0x88]);
+                let navy = at(&c_dark, nx, ny, true);
+                assert!(navy[2] > navy[1] && navy[1] > navy[0], "navy hue lost: {navy:?}");
+                assert!((luma(navy[0], navy[1], navy[2]) - (255 - luma(0x00, 0x33, 0x88))).abs() <= 2);
+
+                let (kx, ky) = find_rgb([0x99, 0x00, 0x00]);
+                let red = at(&c_dark, kx, ky, true);
+                assert!(red[0] > red[1] && red[0] > red[2], "red hue lost: {red:?}");
+                assert!((luma(red[0], red[1], red[2]) - (255 - luma(0x99, 0x00, 0x00))).abs() <= 2);
+
+                let (gx, gy) = find_rgb([0xFF, 0xAA, 0x00]);
+                let gold = at(&c_dark, gx, gy, true);
+                assert!(gold[0] > gold[1] && gold[1] > gold[2], "gold hue lost: {gold:?}");
+                assert!((luma(gold[0], gold[1], gold[2]) - (255 - luma(0xFF, 0xAA, 0x00))).abs() <= 2);
+
+                // Near-extreme non-grays (#000001 / #FEFFFF) handle Y=0 / Y=255 without div-by-zero.
+                let (zx, zy) = find_rgb([0x00, 0x00, 0x01]);
+                assert_eq!(at(&c_dark, zx, zy, true), [255, 255, 255]);
+                let (fx, fy) = find_rgb([0xFE, 0xFF, 0xFF]);
+                assert_eq!(at(&c_dark, fx, fy, true), [0, 0, 0]);
+
+                // Pure gray (#808080) skips pre-inversion -> panel flips 0x80 to 0x7f.
+                let (mx, my) = find_rgb([0x80, 0x80, 0x80]);
+                assert_eq!(at(&c_dark, mx, my, true), [0x7f, 0x7f, 0x7f]);
+
+                // Semi-transparent rgba(0,0,1,0.25) over white blends with preserved alpha onto paper.
+                let (ax, ay) = (0..h)
+                    .flat_map(|y| (0..w).map(move |x| (x, y)))
+                    .find(|&(x, y)| {
+                        let p = at(&c_light, x, y, false);
+                        p[0] == p[1] && p[1] == p[2] && (185..=198).contains(&p[0])
+                    })
+                    .expect("missing semi-transparent swatch");
+                let semi = at(&c_dark, ax, ay, true);
+                assert!((57..=70).contains(&semi[0]) && semi[0] == semi[1] && semi[1] == semi[2], "semi={semi:?}");
+
+                // Fully transparent child over #2060a0 leaves #2060a0 intact (flipped luma, blue hue).
+                let (tx, ty) = find_rgb([0x20, 0x60, 0xa0]);
+                let trans = at(&c_dark, tx, ty, true);
+                assert!(trans[2] > trans[1] && trans[1] > trans[0], "transparent clobbered parent: {trans:?}");
+            }
+
+            verso_cre_free(doc);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

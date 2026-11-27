@@ -16,13 +16,14 @@ use super::{
 };
 use crate::annotations::{Annotation, Kind};
 use crate::geom::Rect;
-use crate::gfx::ColorMode;
+use crate::gfx::{ColorMode, highlight_gray};
 use crate::page_layout::PageLayout;
 use crate::platform::Waker;
 use anyhow::Result;
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -204,6 +205,9 @@ pub struct Page {
     pub annotation_revision: u64,
     /// The `Typography::contrast` it was drawn with.
     pub contrast: i32,
+    /// Whether this page was rendered pre-flipped for dark mode.
+    #[allow(dead_code)]
+    pub dark: bool,
     /// Highlights on the page as (highlight number, rectangles). The number
     /// counts highlights only, in saved order (`annotations::State::highlight`),
     /// so adding or removing a page bookmark leaves cached pages valid.
@@ -222,10 +226,11 @@ pub struct Paint {
 impl Paint {
     /// At most 512 KiB of prepared patches per cached page. Dense full-page
     /// stress ranges fall back to idempotent composition on the drawing canvas.
-    fn prepare(rects: Vec<Rect>, pixels: &[u8], width: u32, height: u32) -> Vec<Self> {
+    fn prepare(rects: Vec<Rect>, pixels: &[u8], width: u32, height: u32, dark: bool) -> Vec<Self> {
         let bounds = Rect::new(0, 0, width as i32, height as i32);
         let rects: Vec<_> = rects.into_iter().filter_map(|r| r.intersect(&bounds)).collect();
         let cached = rects.iter().map(|r| r.w as usize * r.h as usize).sum::<usize>() <= 512 * 1024;
+        let gray = highlight_gray(dark);
         rects
             .into_iter()
             .map(|rect| {
@@ -234,7 +239,7 @@ impl Paint {
                     patch.reserve(rect.w as usize * rect.h as usize);
                     for y in rect.y..rect.bottom() {
                         let row = y as usize * width as usize + rect.x as usize;
-                        patch.extend(pixels[row..row + rect.w as usize].iter().map(|v| (*v).min(210)));
+                        patch.extend(pixels[row..row + rect.w as usize].iter().map(|v| (*v).min(gray)));
                     }
                 }
                 Self { rect, pixels: patch }
@@ -347,6 +352,7 @@ pub enum Command {
     Page {
         generation: u64,
         number: usize,
+        dark: bool,
     },
     /// Draws the following pages at this `Typography::contrast`, in the
     /// same layout and generation.
@@ -451,6 +457,7 @@ pub struct Worker {
     rx: RefCell<mpsc::Receiver<Reply>>,
     join: Option<JoinHandle<()>>,
     fonts: RefCell<Vec<FontFace>>,
+    dark: Arc<AtomicBool>,
 }
 impl Worker {
     pub fn new(paths: Paths, dpi: u32, color: ColorMode, waker: Waker) -> Self {
@@ -459,6 +466,8 @@ impl Worker {
         let thread_waker = waker.clone();
         // For the background layout's report reader.
         let own = tx.clone();
+        let dark = Arc::new(AtomicBool::new(false));
+        let worker_dark = dark.clone();
         let join = std::thread::Builder::new()
             .name("verso-book".into())
             .spawn(move || {
@@ -648,8 +657,11 @@ impl Worker {
                             Err(_) => break,
                         },
                     };
-                    // Skip intermediate layouts already queued, preserving ordering of other commands.
-                    let command = coalesce(command, &commands, &mut pending);
+                    // Skip intermediate layouts and stale-polarity page renders, preserving ordering of other commands.
+                    let Some(command) = coalesce(command, &commands, &mut pending, worker_dark.load(Ordering::Acquire))
+                    else {
+                        continue;
+                    };
                     if matches!(command, Command::Shutdown) {
                         break;
                     }
@@ -798,12 +810,22 @@ impl Worker {
                                     }
                                 }
                             }
-                            Command::Page { generation: g, number } => {
+                            Command::Page { generation: g, number, dark: req_dark } => {
                                 if g == generation
+                                    && req_dark == worker_dark.load(Ordering::Acquire)
                                     && let (Some(d), Some(p)) = (&mut doc, &pool)
                                 {
-                                    match render(d, g, number, dimensions, color, p, annotation_revision, &annotations)
-                                    {
+                                    match render(
+                                        d,
+                                        g,
+                                        number,
+                                        dimensions,
+                                        color,
+                                        p,
+                                        annotation_revision,
+                                        &annotations,
+                                        worker_dark.load(Ordering::Acquire),
+                                    ) {
                                         Ok(page) => send(Reply::Page(page)),
                                         Err(e) => {
                                             send(Reply::PageFailed { generation: g, number, message: format!("{e:#}") })
@@ -829,6 +851,7 @@ impl Worker {
                                             p,
                                             annotation_revision,
                                             &annotations,
+                                            worker_dark.load(Ordering::Acquire),
                                         )?,
                                     });
                                 }
@@ -889,6 +912,7 @@ impl Worker {
                                 p,
                                 annotation_revision,
                                 &annotations,
+                                worker_dark.load(Ordering::Acquire),
                             )?));
                             // Text offsets don't depend on the layout: once per open,
                             // after the first page is on its way.
@@ -918,7 +942,7 @@ impl Worker {
                 prelayout.shutdown();
             })
             .expect("start book thread");
-        Self { waker, tx, rx: RefCell::new(rx), join: Some(join), fonts: RefCell::new(Vec::new()) }
+        Self { waker, tx, rx: RefCell::new(rx), join: Some(join), fonts: RefCell::new(Vec::new()), dark }
     }
     #[cfg(test)]
     pub fn stub() -> Self {
@@ -929,9 +953,19 @@ impl Worker {
         let (tx, commands) = mpsc::channel();
         let (_, rx) = mpsc::channel();
         (
-            Self { waker: Waker::new(|| {}), tx, rx: RefCell::new(rx), join: None, fonts: RefCell::new(Vec::new()) },
+            Self {
+                waker: Waker::new(|| {}),
+                tx,
+                rx: RefCell::new(rx),
+                join: None,
+                fonts: RefCell::new(Vec::new()),
+                dark: Arc::new(AtomicBool::new(false)),
+            },
             commands,
         )
+    }
+    pub fn set_dark(&self, dark: bool) {
+        self.dark.store(dark, Ordering::Release);
     }
     pub fn waker(&self) -> Waker {
         self.waker.clone()
@@ -966,7 +1000,17 @@ impl Drop for Worker {
         }
     }
 }
-fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<Command>) -> Command {
+fn coalesce(
+    mut c: Command,
+    rx: &mpsc::Receiver<Command>,
+    pending: &mut Option<Command>,
+    dark: bool,
+) -> Option<Command> {
+    if let Command::Page { dark: req_dark, .. } = &c
+        && *req_dark != dark
+    {
+        return None;
+    }
     while matches!(c, Command::Layout { .. }) {
         match rx.try_recv() {
             Ok(next @ Command::Layout { .. }) => c = next,
@@ -977,7 +1021,7 @@ fn coalesce(mut c: Command, rx: &mpsc::Receiver<Command>, pending: &mut Option<C
             Err(_) => break,
         }
     }
-    c
+    Some(c)
 }
 /// Whether checking `a` would give what checking `b` gave: the same records
 /// in the same order, as far as `holds` reads them.
@@ -1020,14 +1064,15 @@ fn render(
     pool: &Arc<PixelPool>,
     revision: u64,
     annotations: &[Annotation],
+    dark: bool,
 ) -> Result<Arc<Page>> {
     let started = std::time::Instant::now();
     let last = d.page_count().saturating_sub(1);
     d.go_to_page(number.min(last));
     let mut pixels = pool.take();
     match color {
-        ColorMode::Gray8 => d.draw(pixels.as_mut_slice(), w as usize)?,
-        ColorMode::Color32 => d.draw_rgba(pixels.as_mut_slice(), w as usize * 4)?,
+        ColorMode::Gray8 => d.draw(pixels.as_mut_slice(), w as usize, dark)?,
+        ColorMode::Color32 => d.draw_rgba(pixels.as_mut_slice(), w as usize * 4, dark)?,
     }
     let info = d.page_info()?;
     let (geometry, painted) = if annotations.is_empty() {
@@ -1056,7 +1101,7 @@ fn render(
         } else {
             let union = crate::annotations::paint_union(geometry.iter().flat_map(|(_, rects)| rects.iter().copied()));
             match color {
-                ColorMode::Gray8 => Paint::prepare(union, &pixels, w, h),
+                ColorMode::Gray8 => Paint::prepare(union, &pixels, w, h, dark),
                 // Color canvases tint highlights directly via `Canvas::highlight_rect`,
                 // so skip preparing gray patches.
                 ColorMode::Color32 => {
@@ -1089,6 +1134,7 @@ fn render(
         images: info.has_images,
         annotation_revision: revision,
         contrast: d.contrast(),
+        dark,
         painted,
         annotations: geometry,
         links: info.links,
@@ -1119,7 +1165,7 @@ mod tests {
         source[6 * 20 + 6] = 0;
         let original = source.clone();
         let rects = crate::annotations::paint_union([Rect::new(0, 0, 10, 10), Rect::new(5, 5, 10, 10)].into_iter());
-        let patches = Paint::prepare(rects, &source, 20, 20);
+        let patches = Paint::prepare(rects.clone(), &source, 20, 20, false);
         let mut canvas = crate::gfx::Canvas::new(20, 20);
         canvas.set_gray(&source);
         for p in patches {
@@ -1136,7 +1182,9 @@ mod tests {
                 );
             }
         }
-        let dense = Paint::prepare(vec![Rect::new(0, 0, 1000, 1000)], &vec![255; 1_000_000], 1000, 1000);
+        let dark_patches = Paint::prepare(rects, &source, 20, 20, true);
+        assert_eq!(dark_patches[0].pixels[0], highlight_gray(true));
+        let dense = Paint::prepare(vec![Rect::new(0, 0, 1000, 1000)], &vec![255; 1_000_000], 1000, 1000, false);
         assert!(dense[0].pixels.is_empty(), "dense ranges don't retain a second page buffer");
     }
     #[test]
@@ -1149,10 +1197,23 @@ mod tests {
             position: Position::default(),
         };
         tx.send(layout(2)).unwrap();
-        tx.send(Command::Page { generation: 2, number: 9 }).unwrap();
+        tx.send(Command::Page { generation: 2, number: 9, dark: false }).unwrap();
         let mut pending = None;
-        assert!(matches!(coalesce(layout(1), &rx, &mut pending), Command::Layout { generation: 2, .. }));
+        assert!(matches!(coalesce(layout(1), &rx, &mut pending, false), Some(Command::Layout { generation: 2, .. })));
         assert!(matches!(pending, Some(Command::Page { number: 9, .. })));
+
+        // Stale-polarity page commands are skipped while matching-polarity ones proceed.
+        let stub = Worker::stub();
+        stub.set_dark(true);
+        let dark = stub.dark.load(Ordering::Acquire);
+        let (_, empty_rx) = mpsc::channel();
+        assert!(
+            coalesce(Command::Page { generation: 2, number: 1, dark: false }, &empty_rx, &mut pending, dark).is_none()
+        );
+        assert!(matches!(
+            coalesce(Command::Page { generation: 2, number: 2, dark: true }, &empty_rx, &mut pending, dark),
+            Some(Command::Page { number: 2, dark: true, .. })
+        ));
     }
     #[test]
     fn pixel_pool_reuses_dropped_buffers_caps_count_and_clears_on_close() {

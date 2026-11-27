@@ -14,7 +14,7 @@ use crate::screens::{Action, EventCx, Screen};
 use crate::store::Store;
 use crate::transfer::{Activity, Device, Failure, Phase, Session, Snapshot, Stop};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, LINE, Theme};
+use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::{Button, ButtonKind, Sheet, TopBar};
 use verso_update::launcher::{self, EXIT_RESTART};
@@ -439,12 +439,25 @@ impl TransferScreen {
 }
 
 /// The QR code's modules, as large as fit in `rect`, on whole pixels.
+/// Dark mode draws a tight 4-module white (canvas `INK`) quiet-zone plate
+/// around dark (`PAPER`) modules so phones scan it on a black page.
 fn draw_qr(cx: &mut DrawCx, rect: Rect, qr: &qrcode::QrCode) {
     let n = qr.width() as i32;
-    // The page around it is blank, so one module of margin is enough here.
-    let module = (rect.w.min(rect.h) / (n + 2)).max(1);
+    let dark_mode = cx.canvas.is_dark();
+    let pad = if dark_mode { 8 } else { 2 };
+    let module = (rect.w.min(rect.h) / (n + pad)).max(1);
     let x0 = rect.x + (rect.w - module * n) / 2;
     let y0 = rect.y + (rect.h - module * n) / 2;
+    let module_gray = if dark_mode {
+        if let Some(plate) =
+            Rect::new(x0 - 4 * module, y0 - 4 * module, (n + 8) * module, (n + 8) * module).intersect(&rect)
+        {
+            cx.fill(plate, INK);
+        }
+        PAPER
+    } else {
+        INK
+    };
     let colors = qr.to_colors();
     for y in 0..n {
         let mut x = 0;
@@ -458,7 +471,7 @@ fn draw_qr(cx: &mut DrawCx, rect: Rect, qr: &qrcode::QrCode) {
             while x < n && dark(x) {
                 x += 1;
             }
-            cx.fill(Rect::new(x0 + start * module, y0 + y * module, (x - start) * module, module), INK);
+            cx.fill(Rect::new(x0 + start * module, y0 + y * module, (x - start) * module, module), module_gray);
         }
     }
 }
@@ -628,6 +641,7 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
 mod tests {
     use super::*;
     use crate::geom::Point;
+    use crate::gfx::Canvas;
     use crate::transfer::fake::{Net, device as fake_device, free_port};
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -896,5 +910,40 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "Done didn't rescan the library");
             std::thread::sleep(Duration::from_millis(15));
         }
+    }
+
+    #[test]
+    fn dark_qr_draws_a_tight_four_module_quiet_zone_plate() {
+        let qr =
+            qrcode::QrCode::with_error_correction_level(b"http://10.0.0.2/?code=4827", qrcode::EcLevel::M).unwrap();
+        let n = qr.width() as i32;
+        let rect = Rect::new(40, 40, 340, 340);
+        let theme = Theme::for_dpi(300);
+        let (mut text, mut icons, mut hints) =
+            (crate::gfx::TextRenderer::new(), crate::gfx::IconRenderer::default(), vec![]);
+
+        let mut light = Canvas::new(420, 420);
+        light.fill(PAPER);
+        draw_qr(&mut DrawCx::new(&mut light, &mut text, &mut icons, &theme, &mut hints), rect, &qr);
+        // Light mode draws no plate: quiet zone outside modules remains PAPER.
+        assert_eq!(light.gray_data()[40 * 420 + 40], PAPER);
+
+        let mut dark = Canvas::new(420, 420);
+        dark.set_dark(true);
+        dark.fill(PAPER);
+        draw_qr(&mut DrawCx::new(&mut dark, &mut text, &mut icons, &theme, &mut hints), rect, &qr);
+
+        let module = (rect.w.min(rect.h) / (n + 8)).max(1);
+        let x0 = rect.x + (rect.w - module * n) / 2;
+        let y0 = rect.y + (rect.h - module * n) / 2;
+        let plate = Rect::new(x0 - 4 * module, y0 - 4 * module, (n + 8) * module, (n + 8) * module);
+        let mut out = vec![0u8; 420 * 420];
+        dark.copy_gray(dark.bounds(), &mut out, 420, true);
+        let at = |x: i32, y: i32| out[y as usize * 420 + x as usize];
+        // Outside plate is black background; inside 4-module border is white; (0, 0) finder corner is black.
+        assert_eq!(at(plate.x - 1, plate.y), 0, "plate is tight to (n+8)*module");
+        assert_eq!(at(plate.x, plate.y), 255, "quiet-zone corner is white on dark panel");
+        assert_eq!(at(x0 - 1, y0 - 1), 255, "quiet-zone inner margin is white");
+        assert_eq!(at(x0, y0), 0, "finder top-left dark module is black on dark panel");
     }
 }

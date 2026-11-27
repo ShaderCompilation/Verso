@@ -55,6 +55,22 @@ impl Color {
 pub const HIGHLIGHT: Color = Color::rgb(255, 222, 110);
 /// The gray screen's highlight.
 const HIGHLIGHT_GRAY: u8 = 210;
+/// Dark-mode highlight gray on the panel (`0x55`); stored pre-flipped on the
+/// light canvas so the panel flip restores `0x55` under white ink.
+const HIGHLIGHT_GRAY_DARK: u8 = 0x55 ^ 0xff;
+/// Dark-mode amber highlight on the panel `(145, 112, 0)`, stored pre-flipped
+/// on the light canvas.
+const HIGHLIGHT_DARK: Color = Color::rgb(145 ^ 0xff, 112 ^ 0xff, 0xff);
+
+/// Highlight gray stored on the light canvas for `dark` polarity.
+pub const fn highlight_gray(dark: bool) -> u8 {
+    if dark { HIGHLIGHT_GRAY_DARK } else { HIGHLIGHT_GRAY }
+}
+
+/// Highlight RGB stored on the light canvas for `dark` polarity.
+pub const fn highlight_color(dark: bool) -> Color {
+    if dark { HIGHLIGHT_DARK } else { HIGHLIGHT }
+}
 
 enum Pixels {
     Gray(Vec<u8>),
@@ -230,18 +246,19 @@ impl Canvas {
         }
     }
 
-    /// A saved highlight: light gray on a gray canvas, `HIGHLIGHT` yellow on
-    /// a color one.
+    /// A saved highlight: light gray (or pre-flipped dark gray) on a gray
+    /// canvas, `HIGHLIGHT` yellow (or pre-flipped amber) on a color one.
     pub fn highlight_rect(&mut self, rect: Rect) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let gray = highlight_gray(self.dark);
+        let [hr, hg, hb, _] = highlight_color(self.dark).rgba();
         let (bpp, rows) = self.rows_mut(r);
         for row in rows {
             if bpp == 1 {
                 for pixel in row {
-                    *pixel = (*pixel).min(HIGHLIGHT_GRAY);
+                    *pixel = (*pixel).min(gray);
                 }
             } else {
-                let [hr, hg, hb, _] = HIGHLIGHT.rgba();
                 for px in row.as_chunks_mut::<4>().0 {
                     *px = [px[0].min(hr), px[1].min(hg), px[2].min(hb), 255];
                 }
@@ -615,15 +632,35 @@ impl Canvas {
     /// Copies an 8-bit grayscale image (`stride` bytes per row) onto the
     /// canvas, with its top-left corner at the top-left of `rect`.
     pub fn blit_gray(&mut self, rect: Rect, src: &[u8], stride: usize) {
+        self.blit_gray_inner(rect, src, stride, false);
+    }
+
+    /// Copies an 8-bit grayscale picture (`stride` bytes per row) onto the
+    /// canvas, pre-flipping pixels when `self.dark` is true so copying to the
+    /// panel restores the picture unchanged.
+    pub fn blit_gray_picture(&mut self, rect: Rect, src: &[u8], stride: usize) {
+        self.blit_gray_inner(rect, src, stride, self.dark);
+    }
+
+    fn blit_gray_inner(&mut self, rect: Rect, src: &[u8], stride: usize, invert: bool) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let flip = if invert { 0xff } else { 0 };
         for y in r.y..r.bottom() {
             let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
             let d = y as usize * self.width as usize + r.x as usize;
             let src = &src[s..s + r.w as usize];
             match &mut self.pixels {
-                Pixels::Gray(p) => p[d..d + r.w as usize].copy_from_slice(src),
+                Pixels::Gray(p) => {
+                    let dst = &mut p[d..d + r.w as usize];
+                    if invert {
+                        copy_inverted(dst, src);
+                    } else {
+                        dst.copy_from_slice(src);
+                    }
+                }
                 Pixels::Rgba(p) => {
                     for (px, &g) in p[d * 4..(d + r.w as usize) * 4].as_chunks_mut::<4>().0.iter_mut().zip(src) {
+                        let g = g ^ flip;
                         *px = [g, g, g, 255];
                     }
                 }
@@ -631,11 +668,13 @@ impl Canvas {
         }
     }
 
-    /// Copies a 24-bit RGB image (`stride` pixels per row) onto the canvas,
-    /// with its top-left corner at the top-left of `rect`. A gray canvas
-    /// keeps each pixel's brightness.
-    pub fn blit_rgb(&mut self, rect: Rect, src: &[u8], stride: usize) {
+    /// Copies a 24-bit RGB picture (`stride` pixels per row) onto the canvas,
+    /// pre-flipping pixels when `self.dark` is true (on `Gray8`, flipping after
+    /// `luma` to avoid 1-LSB truncation drift) so copying to the panel restores
+    /// the picture unchanged.
+    pub fn blit_rgb_picture(&mut self, rect: Rect, src: &[u8], stride: usize) {
         let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let flip = if self.dark { 0xff } else { 0 };
         for y in r.y..r.bottom() {
             let s = (y - rect.y) as usize * stride + (r.x - rect.x) as usize;
             let src = &src[s * 3..(s + r.w as usize) * 3];
@@ -643,14 +682,14 @@ impl Canvas {
             match &mut self.pixels {
                 Pixels::Gray(p) => {
                     for (out, px) in p[d..d + r.w as usize].iter_mut().zip(src.as_chunks::<3>().0) {
-                        *out = luma(px[0], px[1], px[2]);
+                        *out = luma(px[0], px[1], px[2]) ^ flip;
                     }
                 }
                 Pixels::Rgba(p) => {
                     for (out, px) in
                         p[d * 4..(d + r.w as usize) * 4].as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<3>().0)
                     {
-                        *out = [px[0], px[1], px[2], 255];
+                        *out = [px[0] ^ flip, px[1] ^ flip, px[2] ^ flip, 255];
                     }
                 }
             }
@@ -1196,6 +1235,84 @@ mod tests {
         assert_eq!(canvas.gray_data()[4 * 20 + 4], 0);
         assert_eq!(canvas.gray_data()[0], 210);
         assert_eq!(canvas.gray_data()[19 * 20 + 19], 255);
+
+        // Dark mode keeps white ink readable on panel, tints dark paper, and stays idempotent.
+        for mode in [ColorMode::Gray8, ColorMode::Color32] {
+            let mut dark = Canvas::with_mode(20, 20, mode);
+            dark.set_dark(true);
+            dark.fill(255); // paper (flips to 0)
+            dark.fill_rect(Rect::new(4, 4, 5, 5), 0); // ink (flips to 255)
+            dark.highlight_rect(Rect::new(0, 0, 12, 12));
+            let first = dark.raw().to_vec();
+            dark.highlight_rect(Rect::new(0, 0, 12, 12));
+            assert_eq!(dark.raw(), first);
+            let mut out = vec![0u8; 20 * 20 * dark.bytes_per_pixel()];
+            if mode == ColorMode::Gray8 {
+                dark.copy_gray(dark.bounds(), &mut out, 20, true);
+                assert_eq!(out[4 * 20 + 4], 255, "white ink preserved");
+                assert_eq!(out[0], 0x55, "dark highlight gray on panel");
+                assert_eq!(out[19 * 20 + 19], 0, "dark paper outside highlight");
+            } else {
+                dark.copy_rgba(dark.bounds(), &mut out, 20, true);
+                assert_eq!(&out[(4 * 20 + 4) * 4..][..4], &[255, 255, 255, 255]);
+                assert_eq!(&out[..4], &[145, 112, 0, 255]);
+                assert_eq!(&out[(19 * 20 + 19) * 4..][..4], &[0, 0, 0, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn dark_picture_blits_preserve_pixels_after_copy_while_blit_gray_does_not_flip() {
+        let rgb: Vec<u8> = [
+            [17, 41, 89],
+            [200, 10, 30],
+            [1, 2, 3], // exercises luma truncation vs ^ 0xff
+            [250, 251, 252],
+            [80, 160, 40],
+            [128, 128, 128],
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let gray = vec![0u8, 34, 102, 153, 204, 255];
+
+        for mode in [ColorMode::Gray8, ColorMode::Color32] {
+            let mut light = Canvas::with_mode(6, 4, mode);
+            let mut dark = Canvas::with_mode(6, 4, mode);
+            dark.set_dark(true);
+
+            light.blit_rgb_picture(Rect::new(1, 0, 3, 2), &rgb, 3);
+            dark.blit_rgb_picture(Rect::new(1, 0, 3, 2), &rgb, 3);
+            light.blit_gray_picture(Rect::new(1, 2, 3, 2), &gray, 3);
+            dark.blit_gray_picture(Rect::new(1, 2, 3, 2), &gray, 3);
+
+            if mode == ColorMode::Gray8 {
+                let (mut l_out, mut d_out) = (vec![0u8; 24], vec![0u8; 24]);
+                light.copy_gray(light.bounds(), &mut l_out, 6, false);
+                dark.copy_gray(dark.bounds(), &mut d_out, 6, true);
+                for y in 0..4 {
+                    for x in 1..4 {
+                        assert_eq!(d_out[y * 6 + x], l_out[y * 6 + x], "Gray8 ({x},{y})");
+                    }
+                }
+            } else {
+                let (mut l_out, mut d_out) = (vec![0u8; 24 * 4], vec![0u8; 24 * 4]);
+                light.copy_rgba(light.bounds(), &mut l_out, 6, false);
+                dark.copy_rgba(dark.bounds(), &mut d_out, 6, true);
+                for y in 0..4 {
+                    for x in 1..4 {
+                        let i = (y * 6 + x) * 4;
+                        assert_eq!(&d_out[i..i + 4], &l_out[i..i + 4], "Color32 ({x},{y})");
+                    }
+                }
+            }
+
+            // Plain blit_gray (used for highlight patches) must not flip on a dark canvas.
+            let mut patch_dark = Canvas::with_mode(3, 2, mode);
+            patch_dark.set_dark(true);
+            patch_dark.blit_gray(Rect::new(0, 0, 3, 2), &gray, 3);
+            assert_eq!(patch_dark.raw()[0], 0);
+        }
     }
     #[test]
     fn bounded_shapes_match_the_full_rgba_rasterizer() {

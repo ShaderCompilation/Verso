@@ -311,9 +311,9 @@ pub trait Document {
     fn current_page(&mut self) -> usize;
     fn go_to_page(&mut self, page: usize);
     /// Draws the current page as 8-bit gray (0 = black), `stride` bytes per row.
-    fn draw(&mut self, out: &mut [u8], stride: usize) -> Result<()>;
+    fn draw(&mut self, out: &mut [u8], stride: usize, dark: bool) -> Result<()>;
     /// Draws the current page as 32-bit opaque RGBA (`[R, G, B, 255]`), `stride` bytes per row.
-    fn draw_rgba(&mut self, out: &mut [u8], stride: usize) -> Result<()>;
+    fn draw_rgba(&mut self, out: &mut [u8], stride: usize, dark: bool) -> Result<()>;
 }
 
 /// Where the engine finds its data and the books, per device.
@@ -396,7 +396,7 @@ mod tests {
         doc.go_to_page(5);
         assert_eq!(doc.current_page(), 5);
         let mut buf = vec![255u8; 600 * 800];
-        doc.draw(&mut buf, 600).unwrap();
+        doc.draw(&mut buf, 600, false).unwrap();
         assert!(buf.iter().filter(|&&v| v < 128).count() > 1000, "page has no text");
 
         let position = doc.position().unwrap();
@@ -435,11 +435,11 @@ mod tests {
         doc.set_typography(&typography, 150, &PageLayout::default()).unwrap();
         doc.go_to_position(&position).unwrap();
         assert!(doc.progress().abs_diff(progress) < 100, "position should preserve text progress");
-        doc.draw(&mut buf, 600).unwrap();
+        doc.draw(&mut buf, 600, false).unwrap();
         let left = buf.clone();
         let base = Typography { alignment: Alignment::Book, ..typography };
         doc.set_typography(&base, 150, &PageLayout::default()).unwrap();
-        doc.draw(&mut buf, 600).unwrap();
+        doc.draw(&mut buf, 600, false).unwrap();
         assert_ne!(left, buf, "alignment changes rendering");
         // Every other text setting reaches the engine; contrast only redraws,
         // set on its own.
@@ -459,7 +459,7 @@ mod tests {
                 doc.set_typography(&changed, 150, &PageLayout::default()).unwrap();
             }
             doc.go_to_position(&position).unwrap();
-            doc.draw(&mut buf, 600).unwrap();
+            doc.draw(&mut buf, 600, false).unwrap();
             assert_ne!(justified, buf, "{changed:?} changes the page");
             if changed.contrast != 0 {
                 assert_eq!(doc.page_count(), page_count, "contrast keeps the layout");
@@ -469,7 +469,7 @@ mod tests {
             doc.set_typography(&base, 150, &PageLayout::default()).unwrap();
         }
         doc.go_to_position(&position).unwrap();
-        doc.draw(&mut buf, 600).unwrap();
+        doc.draw(&mut buf, 600, false).unwrap();
         assert_eq!(justified, buf, "settings back as they were draw the same page");
         drop(doc);
         // Hanging punctuation is set when a book opens.
@@ -484,17 +484,17 @@ mod tests {
         let (mut a, mut b) = (vec![255u8; 600 * 800], vec![255u8; 600 * 800]);
         hanging.go_to_page(5);
         hung.go_to_page(5);
-        hanging.draw(&mut a, 600).unwrap();
-        hung.draw(&mut b, 600).unwrap();
+        hanging.draw(&mut a, 600, false).unwrap();
+        hung.draw(&mut b, 600, false).unwrap();
         assert_ne!(a, b, "punctuation hangs into the margin");
         drop((hanging, hung));
         // This book has no CSS of its own; the dictionary fixture's sets margins and line height.
         let styled = book.with_file_name("dictionary-words.epub");
         let mut other = engine.open(&styled, &layout, Some((&base, &PageLayout::default()))).unwrap();
-        other.draw(&mut buf, 600).unwrap();
+        other.draw(&mut buf, 600, false).unwrap();
         let with_styles = buf.clone();
         other.set_typography(&Typography { book_styles: false, ..base.clone() }, 150, &PageLayout::default()).unwrap();
-        other.draw(&mut buf, 600).unwrap();
+        other.draw(&mut buf, 600, false).unwrap();
         assert_ne!(with_styles, buf, "turning the book's styles off changes the page");
         drop(other);
         let mut reopened = engine.open(&book, &layout, None).unwrap();
@@ -602,7 +602,7 @@ mod tests {
             // by checking the rightmost dark pixel on that line's band.
             let r = word_rect(d, first_word);
             let mut buf = vec![255u8; 600 * 800];
-            d.draw(&mut buf, 600).unwrap();
+            d.draw(&mut buf, 600, false).unwrap();
             let mut max_x = 0usize;
             for y in (r.y.max(0) as usize)..(r.bottom().min(800) as usize) {
                 for x in (0..600).rev() {
@@ -859,7 +859,7 @@ mod tests {
         // Dirty sentinel bytes prove draw_rgba and draw clear the full buffer
         // so recycled buffers never need an extra memset.
         let mut rgba = vec![0xAAu8; layout.width as usize * layout.height as usize * 4];
-        doc.draw_rgba(&mut rgba, layout.width as usize * 4).unwrap();
+        doc.draw_rgba(&mut rgba, layout.width as usize * 4, false).unwrap();
         let pixels = rgba.as_chunks::<4>().0;
         assert!(pixels.iter().all(|p| p[3] == 255), "all pixels must be opaque");
         assert_eq!(pixels[0], [255, 255, 255, 255], "top-left margin cleared to white");
@@ -873,9 +873,23 @@ mod tests {
         assert!(blues > 20, "expected blue link pixels, got {blues}");
         assert!(greens > 2000, "expected green image pixels, got {greens}");
 
+        // Dark-mode draw pre-flips colored text luma while keeping images readable after panel flip.
+        let mut dark_rgba = vec![0xAAu8; layout.width as usize * layout.height as usize * 4];
+        doc.draw_rgba(&mut dark_rgba, layout.width as usize * 4, true).unwrap();
+        let flipped: Vec<[u8; 4]> =
+            dark_rgba.as_chunks::<4>().0.iter().map(|p| [255 - p[0], 255 - p[1], 255 - p[2], p[3]]).collect();
+        assert!(flipped.iter().all(|p| p[3] == 255), "all dark pixels stay opaque");
+        assert_eq!(flipped[0], [0, 0, 0, 255], "top-left margin flips to dark paper");
+        let dark_reds = flipped.iter().filter(|p| p[0] > 160 && p[1] < 130 && p[2] < 130).count();
+        let dark_blues = flipped.iter().filter(|p| p[2] > 160 && p[0] < 130 && p[1] < 150).count();
+        let dark_greens = flipped.iter().filter(|p| p[1] > 150 && p[0] < 60 && p[2] < 80).count();
+        assert!(dark_reds > 20, "expected readable red heading pixels in dark mode, got {dark_reds}");
+        assert!(dark_blues > 20, "expected readable blue link pixels in dark mode, got {dark_blues}");
+        assert!(dark_greens > 2000, "expected intact green image pixels in dark mode, got {dark_greens}");
+
         // Compare against the 8-bit gray path: same page still draws cleanly.
         let mut gray = vec![0xAAu8; layout.width as usize * layout.height as usize];
-        doc.draw(&mut gray, layout.width as usize).unwrap();
+        doc.draw(&mut gray, layout.width as usize, false).unwrap();
         assert_eq!(gray[0], 255, "top-left margin cleared to white on Gray8");
         assert!(gray.iter().filter(|&&v| v < 200).count() > 2000);
         drop(doc);
@@ -1190,7 +1204,7 @@ mod tests {
         assert_eq!(rich_meta.title, "Field Notes on E-Ink Typography");
         assert_eq!(rich_meta.language, "en");
         let mut buf = vec![255u8; 600 * 800];
-        rich.draw(&mut buf, 600)?;
+        rich.draw(&mut buf, 600, false)?;
         assert!(buf.iter().filter(|&&v| v < 128).count() > 500, "rich.md rendered no ink");
 
         let mut prose = engine.open(&fixtures.join("prose.markdown"), layout, None)?;
@@ -1228,7 +1242,7 @@ mod tests {
         let mut figure = false;
         for p in 0..rich.page_count() {
             rich.go_to_page(p);
-            rich.draw(&mut buf, 600)?;
+            rich.draw(&mut buf, 600, false)?;
             figure |= buf.iter().filter(|&&v| (150..=230).contains(&v)).count() > 40_000;
         }
         assert!(figure, "rich.md relative checkerboard image must render");
@@ -1242,14 +1256,14 @@ mod tests {
         rich.go_to_page(0);
         let base_typo = Typography { paragraphs: Paragraphs::Book, ..Typography::default() };
         rich.set_typography(&base_typo, 150, &PageLayout::default())?;
-        rich.draw(&mut buf, 600)?;
+        rich.draw(&mut buf, 600, false)?;
         let md_default_buf = buf.clone();
         rich.set_typography(
             &Typography { paragraphs: Paragraphs::Indented, ..base_typo.clone() },
             150,
             &PageLayout::default(),
         )?;
-        rich.draw(&mut buf, 600)?;
+        rich.draw(&mut buf, 600, false)?;
         let indented_buf = buf.clone();
         assert_ne!(md_default_buf, indented_buf, "Paragraphs::Indented must override markdown.css");
         rich.set_typography(
@@ -1257,7 +1271,7 @@ mod tests {
             150,
             &PageLayout::default(),
         )?;
-        rich.draw(&mut buf, 600)?;
+        rich.draw(&mut buf, 600, false)?;
         assert_ne!(indented_buf, buf, "Paragraphs::Spaced overrides Paragraphs::Indented");
         assert_eq!(md_default_buf, buf, "Markdown default matches spaced paragraphs");
 
@@ -1328,7 +1342,7 @@ mod tests {
         for p in 0..doc.page_count() {
             doc.go_to_page(p);
             if doc.page_info()?.has_images {
-                doc.draw_rgba(&mut rgba, 600 * 4)?;
+                doc.draw_rgba(&mut rgba, 600 * 4, false)?;
                 let greens =
                     rgba.as_chunks::<4>().0.iter().filter(|px| px[1] > 150 && px[0] < 60 && px[2] < 80).count();
                 if greens > 2000 {
@@ -1404,10 +1418,10 @@ mod tests {
         let mut ru_doc = engine.open(&ru_path, &narrow, Some((&hyph_on, &PageLayout::default())))?;
         assert_eq!(ru_doc.metadata().language, "ru");
         let mut narrow_buf = vec![255u8; 240 * 400];
-        ru_doc.draw(&mut narrow_buf, 240)?;
+        ru_doc.draw(&mut narrow_buf, 240, false)?;
         let ru_with_hyph = narrow_buf.clone();
         ru_doc.set_typography(&hyph_off, 150, &PageLayout::default())?;
-        ru_doc.draw(&mut narrow_buf, 240)?;
+        ru_doc.draw(&mut narrow_buf, 240, false)?;
         assert_ne!(ru_with_hyph, narrow_buf, "frontmatter lang: ru must drive Russian hyphenation");
         drop(ru_doc);
 

@@ -399,8 +399,11 @@ impl Reader {
                         if !shown && self.cache.get(self.target).is_none() {
                             self.annotations.paint_pending = true;
                             if self.cache.request(self.target) {
-                                self.worker
-                                    .send(Command::Page { generation: self.cache.generation, number: self.target });
+                                self.worker.send(Command::Page {
+                                    generation: self.cache.generation,
+                                    number: self.target,
+                                    dark: self.settings.dark_mode,
+                                });
                             }
                         }
                         self.prefetch();
@@ -443,7 +446,11 @@ impl Reader {
                 if page.number == self.target {
                     self.display(page, cx);
                     if !current && self.cache.request(self.target) {
-                        self.worker.send(Command::Page { generation: self.cache.generation, number: self.target });
+                        self.worker.send(Command::Page {
+                            generation: self.cache.generation,
+                            number: self.target,
+                            dark: self.settings.dark_mode,
+                        });
                     }
                 }
             }
@@ -520,7 +527,11 @@ impl Reader {
             // Drawn before a contrast change: only the page wanted now is drawn again.
             Reply::Page(page) if page.generation == self.cache.generation && page.contrast != self.contrast() => {
                 if page.number == self.target && self.cache.request(page.number) {
-                    self.worker.send(Command::Page { generation: page.generation, number: page.number });
+                    self.worker.send(Command::Page {
+                        generation: page.generation,
+                        number: page.number,
+                        dark: self.settings.dark_mode,
+                    });
                 }
             }
             Reply::Page(page)
@@ -744,7 +755,11 @@ impl Reader {
         // Forward first: it is the common direction.
         for n in [self.target.checked_add(1), self.target.checked_sub(1)].into_iter().flatten() {
             if n < self.pages && self.cache.request(n) {
-                self.worker.send(Command::Page { generation: self.cache.generation, number: n });
+                self.worker.send(Command::Page {
+                    generation: self.cache.generation,
+                    number: n,
+                    dark: self.settings.dark_mode,
+                });
             }
         }
     }
@@ -865,7 +880,11 @@ impl Reader {
         if let Some(p) = self.cache.get(page) {
             self.display(p, cx);
         } else if self.cache.request(page) {
-            self.worker.send(Command::Page { generation: self.cache.generation, number: page });
+            self.worker.send(Command::Page {
+                generation: self.cache.generation,
+                number: page,
+                dark: self.settings.dark_mode,
+            });
         }
     }
     /// `page` is the position's page in the current layout, when known.
@@ -1426,7 +1445,11 @@ impl Reader {
         self.cache.reset(self.cache.generation);
         // A layout under way draws its first page again when it arrives.
         if !self.laying_out && self.layout_at.is_none() && self.pages > 0 && self.cache.request(self.target) {
-            self.worker.send(Command::Page { generation: self.cache.generation, number: self.target });
+            self.worker.send(Command::Page {
+                generation: self.cache.generation,
+                number: self.target,
+                dark: self.settings.dark_mode,
+            });
         }
     }
     fn contrast(&self) -> i32 {
@@ -2657,6 +2680,7 @@ mod tests {
             images: false,
             annotation_revision: 0,
             contrast: 0,
+            dark: false,
             annotations: vec![],
             painted: vec![],
             links: vec![],
@@ -3270,7 +3294,7 @@ mod tests {
             assert!(!r.cache.request(4), "another in-flight page stays requested");
             assert!(commands.try_iter().next().is_none(), "errors do not automatically retry");
             r.go(6, cx);
-            assert!(matches!(commands.try_recv(), Ok(Command::Page { generation: 1, number: 6 })));
+            assert!(matches!(commands.try_recv(), Ok(Command::Page { generation: 1, number: 6, .. })));
             // A failed speculative page must not discard this retry's target.
             r.receive(Reply::PageFailed { generation: 1, number: 4, message: "prefetch".into() }, cx);
             assert_eq!(r.target, 6);
@@ -4211,6 +4235,7 @@ mod tests {
                 images: false,
                 annotation_revision: 0,
                 contrast: 0,
+                dark: false,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -4291,6 +4316,7 @@ mod tests {
                 images: false,
                 annotation_revision: 0,
                 contrast: 0,
+                dark: false,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -4436,6 +4462,7 @@ mod tests {
                     images: false,
                     annotation_revision: 0,
                     contrast: 0,
+                    dark: false,
                     annotations: vec![],
                     painted: vec![],
                     links: vec![],
@@ -4530,6 +4557,7 @@ mod tests {
                 images: false,
                 annotation_revision: 0,
                 contrast: 0,
+                dark: false,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -4696,6 +4724,7 @@ mod tests {
                 images: false,
                 annotation_revision: 0,
                 contrast: 0,
+                dark: false,
                 annotations: vec![],
                 painted: vec![],
                 links: vec![],
@@ -5607,7 +5636,7 @@ mod tests {
         assert_eq!(r.cache.generation, 1);
         assert!(r.cache.get(4).is_none(), "pages drawn at the old contrast are dropped");
         let sent: Vec<_> = commands.try_iter().collect();
-        assert!(matches!(sent.as_slice(), [Command::Contrast(1), Command::Page { generation: 1, number: 3 }]));
+        assert!(matches!(sent.as_slice(), [Command::Contrast(1), Command::Page { generation: 1, number: 3, .. }]));
         // A page drawn before the change is asked for again, not shown.
         test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 3)), cx));
         assert_eq!(r.shown.as_ref().unwrap().contrast, 0);

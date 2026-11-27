@@ -1315,16 +1315,20 @@ int verso_cre_go_to_page(VersoCreDoc *doc, int page) {
     GUARD(-1, { return doc->view->goToPage(page, false, true, false) ? 0 : -1; })
 }
 
-int verso_cre_draw(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride) {
+int verso_cre_draw(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride, int dark) {
     GUARD(-1, {
         doc->view->Resize(width, height);
         doc->view->Render();
         if (stride == width) {
             LVGrayDrawBuf draw(width, height, 8, buf);
+            if (dark)
+                draw.setInvertImages(true);
             doc->view->Draw(draw, false);
         } else {
             std::vector<uint8_t> tmp((size_t)width * height);
             LVGrayDrawBuf draw(width, height, 8, tmp.data());
+            if (dark)
+                draw.setInvertImages(true);
             doc->view->Draw(draw, false);
             for (int y = 0; y < height; y++)
                 memcpy(buf + (size_t)y * stride, tmp.data() + (size_t)y * width, width);
@@ -1344,7 +1348,7 @@ static void cre32_to_rgba_row(const lUInt32 *src, uint8_t *dst, int width) {
     }
 }
 
-int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride) {
+int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, int stride, int dark) {
     GUARD(-1, {
         if (!buf || width <= 0 || height <= 0 || stride < width * 4)
             return -1;
@@ -1352,6 +1356,10 @@ int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, i
         doc->view->Render();
         if (stride == width * 4 && (((uintptr_t)buf) & 3) == 0) {
             LVColorDrawBuf draw(width, height, buf, 32);
+            if (dark) {
+                draw.setInvertImages(true);
+                draw.setInvertColors(true);
+            }
             doc->view->Draw(draw, false);
             for (int y = 0; y < height; y++) {
                 uint8_t *row = buf + (size_t)y * stride;
@@ -1359,6 +1367,10 @@ int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, i
             }
         } else {
             LVColorDrawBuf draw(width, height, 32);
+            if (dark) {
+                draw.setInvertImages(true);
+                draw.setInvertColors(true);
+            }
             doc->view->Draw(draw, false);
             for (int y = 0; y < height; y++) {
                 const lUInt32 *src = (const lUInt32 *)draw.GetScanLine(y);

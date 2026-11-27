@@ -997,6 +997,42 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "    UPDATE_STYLE_FIELD( text_align, css_ta_inherit );\n    UPDATE_STYLE_FIELD( text_align_last, css_ta_inherit );",
         "    UPDATE_STYLE_FIELD( text_align, css_ta_inherit );\n    UPDATE_STYLE_FIELD( text_align_last, css_ta_inherit );\n    if ( doc->getDocFlag(DOC_FLAG_VERSO_ALIGN_LEFT) ) {\n        if ( pstyle->text_align == css_ta_justify )\n            pstyle->text_align = css_ta_start;\n        if ( pstyle->text_align_last == css_ta_justify )\n            pstyle->text_align_last = css_ta_auto;\n    } else if ( doc->getDocFlag(DOC_FLAG_VERSO_ALIGN_JUSTIFY) ) {\n        if ( (nodeElementId == el_p || nodeElementId == el_li)\n             && pstyle->white_space != css_ws_pre && pstyle->white_space != css_ws_pre_wrap\n             && (pstyle->text_align == css_ta_start || pstyle->text_align == css_ta_left\n                 || pstyle->text_align == css_ta_html_align_left) )\n            pstyle->text_align = css_ta_justify;\n    }",
     ),
+    // Dark mode: preserve hue and flip luma (255 - Y) for non-grayscale
+    // colors so dark publisher blacks (#231f20) flip to light and colors keep
+    // their designed contrast and hue after the final panel flip.
+    (
+        "crengine/include/lvdrawbuf.h",
+        "inline lUInt32 invertNonGrayscaleColor( lUInt32 color ) {\n    if ( (color & 0xFFFFFFFE) == 0xFFFFFFFE || (color & 0xFF000000) == 0xFF000000 )\n        return color;\n    const lUInt8 b = color & 0xFF;\n    const lUInt8 g = (color >> 8) & 0xFF;\n    const lUInt8 r = (color >> 16) & 0xFF;\n    if ( r == g && g == b )\n        return color;\n    return color ^ 0x00FFFFFF;\n}",
+        r#"inline lUInt32 invertNonGrayscaleColor( lUInt32 color ) {
+    if ( (color & 0xFFFFFFFE) == 0xFFFFFFFE || (color & 0xFF000000) == 0xFF000000 )
+        return color;
+    const int b = (int)(color & 0xFF);
+    const int g = (int)((color >> 8) & 0xFF);
+    const int r = (int)((color >> 16) & 0xFF);
+    if ( r == g && g == b )
+        return color;
+    const int y = (77 * r + 150 * g + 29 * b + 128) >> 8;
+    const int target = 255 - y;
+    int nr, ng, nb;
+    if ( y == 0 ) {
+        nr = ng = nb = 255;
+    } else if ( y == 255 ) {
+        nr = ng = nb = 0;
+    } else if ( target > y ) {
+        const int num = target - y;
+        const int den = 255 - y;
+        nr = r + ((255 - r) * num + den / 2) / den;
+        ng = g + ((255 - g) * num + den / 2) / den;
+        nb = b + ((255 - b) * num + den / 2) / den;
+    } else {
+        nr = (r * target + y / 2) / y;
+        ng = (g * target + y / 2) / y;
+        nb = (b * target + y / 2) / y;
+    }
+    const lUInt32 out = ((lUInt32)(nr & 0xFF) << 16) | ((lUInt32)(ng & 0xFF) << 8) | (lUInt32)(nb & 0xFF);
+    return (color & 0xFF000000) | (out ^ 0x00FFFFFF);
+}"#,
+    ),
 ];
 
 /// crengine's own source list (CRE_SRCS in its CMakeLists.txt).

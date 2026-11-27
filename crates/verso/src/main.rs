@@ -311,6 +311,7 @@ fn run() -> Result<i32> {
         info.color,
         platform.waker(),
     ));
+    worker.set_dark(settings.dark_mode);
     let t_screen = Instant::now();
     #[cfg(feature = "desktop")]
     let screen = if let Some(path) = opts.book.clone() {
