@@ -1,14 +1,13 @@
-[target.armv7-unknown-linux-gnueabihf]
-# Every Kindle on hard-float firmware (5.16.3+) has at least a Cortex-A9 with
-# NEON and VFPv3-D32 (PW4 / Basic 3 on i.MX6SLL; Oasis 3 on Cortex-A7;
-# PW5 / PW6 / Scribe / ColorSoft on Cortex-A53). Cortex-A9 avoids VFPv4 and
-# hardware integer division, which PW4 and Basic 3 lack, and turns NEON on
-# without the deprecated `-C target-feature=+neon` warning.
-rustflags = ["-C", "target-cpu=cortex-a9"]
+[target.armv7-unknown-linux-musleabihf]
+# Static musl avoids any system glibc or ld.so dependency across Kindles.
+# Cortex-A9 avoids VFPv4 and hardware integer division (which PW4, Basic 3,
+# and older ARMv7 Kindles lack) and turns NEON on without the deprecated
+# `-C target-feature=+neon` warning.
+rustflags = ["-C", "target-cpu=cortex-a9", "-C", "target-feature=+crt-static"]
 
 # Shortcuts:
 #   cargo sim           -> run the desktop simulator
 #   cargo kindle-build  -> release build for the Kindle (needs zig + cargo-zigbuild)
 [alias]
 sim = "run -p verso"
-kindle-build = "zigbuild -p verso -p verso-mdns --release --no-default-features --features verso/kindle --target armv7-unknown-linux-gnueabihf.2.20"
+kindle-build = "zigbuild -p verso -p verso-mdns --release --no-default-features --features verso/kindle --target armv7-unknown-linux-musleabihf"

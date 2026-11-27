@@ -30,7 +30,7 @@ runs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: armv7-unknown-linux-gnueabihf
+        targets: armv7-unknown-linux-musleabihf
 
     - name: Cache Zig toolchain
       if: inputs.save-caches == 'true'
@@ -115,7 +115,7 @@ runs:
     - name: Cache Cargo
       uses: Swatinem/rust-cache@v2
       with:
-        shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}-glibc2.20
+        shared-key: kindle-release-zig-${{ env.ZIG_VERSION }}-musl-static
         save-if: ${{ inputs.save-caches }}
 
     - name: Compute SSH cache key

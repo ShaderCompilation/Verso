@@ -85,7 +85,7 @@ pub fn same_quotation(text: &str, quotation: &str) -> bool {
 }
 pub fn created_now() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let Ok(seconds) = libc::time_t::try_from(secs) else {
+    let Ok(seconds) = crate::clock::TimeT::try_from(secs) else {
         return secs.to_string();
     };
     let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();

@@ -10,6 +10,11 @@
 //! so a static musl build would show UTC. On musl, such a file is read here
 //! (`Zone`) and every conversion goes through `local_tm`.
 
+// `libc` marks `time_t` deprecated on 32-bit musl while its `time`,
+// `gmtime_r` and `localtime_r` bindings still take it.
+#[allow(deprecated)]
+pub(crate) type TimeT = libc::time_t;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalTime {
     pub hour: u8,
@@ -54,7 +59,7 @@ impl LocalDateTime {
     }
     /// `unix` seconds in the local time zone.
     pub fn at(unix: u64) -> Option<Self> {
-        let tm = local_tm(libc::time_t::try_from(unix).ok()?)?;
+        let tm = local_tm(TimeT::try_from(unix).ok()?)?;
         Some(Self {
             year: tm.tm_year + 1900,
             month: (tm.tm_mon + 1).clamp(1, 12) as u8,
@@ -138,13 +143,13 @@ impl LocalDateTime {
 }
 
 /// `t` in the local time zone.
-fn local_tm(t: libc::time_t) -> Option<libc::tm> {
+fn local_tm(t: TimeT) -> Option<libc::tm> {
     // SAFETY: localtime_r and gmtime_r only write the tm we pass; null means failure.
     unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         #[cfg(target_env = "musl")]
         if let Some(zone) = Zone::system() {
-            let t = t.checked_add(libc::time_t::from(zone.offset(i64::from(t))))?;
+            let t = t.checked_add(TimeT::from(zone.offset(i64::from(t))))?;
             return (!libc::gmtime_r(&t, &mut tm).is_null()).then_some(tm);
         }
         (!libc::localtime_r(&t, &mut tm).is_null()).then_some(tm)

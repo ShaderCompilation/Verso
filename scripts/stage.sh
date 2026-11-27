@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 STAGE=target/package/stage
-KINDLE=target/armv7-unknown-linux-gnueabihf/release
+KINDLE=target/armv7-unknown-linux-musleabihf/release
 SSH=target/kindle-ssh/bin
 CRE=third_party/crengine/cr3gui/data
 WF=assets/wordforms/opencorpora
@@ -26,62 +26,57 @@ copy() {
 }
 
 # Verify Kindle ELF ABI compatibility before staging:
-# - interpreter is /lib/ld-linux-armhf.so.3
-# - max required GLIBC version <= 2.20 (i.MX armhf Kindles like Oasis 3)
-# - DT_REL + DT_RELSZ == DT_JMPREL (contiguous .rel.dyn/.rel.plt for glibc <= 2.22, bug #14341)
-# - PT_TLS (if present) has vaddr % align == 0 (misaligned TLS corrupts TCB on glibc <= 2.34, bug #24606)
+# - static ARMv7 hard-float ELF32 (no PT_INTERP, no PT_DYNAMIC)
 # - PT_ARM_EXIDX is present
+# - ARM attributes: v7, VFP register args, no VFPv4/VFPv5/Fused-MAC/NEONv2/IDIV (Cortex-A9 safe)
 check_kindle_elf() {
     python3 -I - "$@" <<'PY'
 import os, re, subprocess, sys
 
-# readelf localizes its output ("(bytes)"), so parse it in the C locale.
+# readelf localizes its output, so parse it in the C locale.
 env = {**os.environ, "LC_ALL": "C"}
 env.pop("LANGUAGE", None)
 
 for path in sys.argv[1:]:
-    out = subprocess.check_output(["readelf", "-lW", "-dW", "-VW", path], text=True, env=env)
-    if "/lib/ld-linux-armhf.so.3" not in out:
-        sys.exit(f"stage.sh: {path}: expected /lib/ld-linux-armhf.so.3 interpreter")
-    if "ARM_EXIDX" not in out:
+    out = subprocess.check_output(["readelf", "-h", "-lW", "-A", path], text=True, env=env)
+    if not re.search(r"^\s*Class:\s+ELF32\b", out, re.MULTILINE):
+        sys.exit(f"stage.sh: {path}: expected ELF32 binary")
+    if not re.search(r"^\s*Machine:\s+ARM\b", out, re.MULTILINE):
+        sys.exit(f"stage.sh: {path}: expected ARM machine")
+    flags = re.search(r"^\s*Flags:\s*(.*)$", out, re.MULTILINE)
+    if not flags or "hard-float ABI" not in flags.group(1):
+        sys.exit(f"stage.sh: {path}: expected hard-float ABI in ELF flags")
+
+    phdrs = set(re.findall(r"^\s+([A-Z0-9_]+)\s+0x[0-9a-f]+\s+0x[0-9a-f]+", out, re.MULTILINE))
+    if "INTERP" in phdrs:
+        sys.exit(f"stage.sh: {path}: unexpected PT_INTERP (must be static)")
+    if "DYNAMIC" in phdrs:
+        sys.exit(f"stage.sh: {path}: unexpected PT_DYNAMIC (must be static)")
+    if "ARM_EXIDX" not in phdrs:
         sys.exit(f"stage.sh: {path}: missing PT_ARM_EXIDX program header")
-    tls_line = re.search(r"^\s+TLS\b.*$", out, re.MULTILINE)
-    if tls_line:
-        tls = re.match(
-            r"^\s+TLS\s+0x[0-9a-f]+\s+0x([0-9a-f]+)\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+[RWE ]+\s+(?:0x)?([0-9a-f]+)\s*$",
-            tls_line.group(0),
-        )
-        if not tls:
-            sys.exit(f"stage.sh: {path}: could not parse PT_TLS header: {tls_line.group(0).strip()}")
-        vaddr = int(tls.group(1), 16)
-        align = int(tls.group(2), 16)
-        if align > 0 and vaddr % align != 0:
-            sys.exit(
-                f"stage.sh: {path}: PT_TLS vaddr (0x{vaddr:x}) is not aligned to p_align (0x{align:x}); "
-                "misaligned TLS crashes glibc <= 2.34 (bug #24606)"
-            )
-    ver_section = out.split("Version needs section", 1)[-1]
-    bad_vers = [
-        v for v in re.findall(r"Name:\s+GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", ver_section)
-        if (int(v[0]), int(v[1]), int(v[2] or 0)) > (2, 20, 0)
-    ]
-    if bad_vers:
-        names = ", ".join(f"GLIBC_{a}.{b}" + (f".{c}" if c else "") for a, b, c in bad_vers)
-        sys.exit(f"stage.sh: {path}: requires glibc newer than 2.20: {names}")
-    rel = re.search(r"\(REL\)\s+0x([0-9a-f]+)", out)
-    relsz = re.search(r"\(RELSZ\)\s+(\d+)\s+\(bytes\)", out)
-    jmprel = re.search(r"\(JMPREL\)\s+0x([0-9a-f]+)", out)
-    if not (rel and relsz and jmprel):
-        sys.exit(f"stage.sh: {path}: could not find DT_REL, DT_RELSZ and DT_JMPREL (dynamic binaries always have all three)")
-    rel_end = int(rel.group(1), 16) + int(relsz.group(1), 10)
-    jmp_start = int(jmprel.group(1), 16)
-    if rel_end != jmp_start:
-        sys.exit(
-            f"stage.sh: {path}: DT_REL+DT_RELSZ (0x{rel_end:x}) != DT_JMPREL (0x{jmp_start:x}); "
-            "non-contiguous relocations crash glibc <= 2.22 (see .cargo/arm-glibc-relplt.ld)"
-        )
+
+    if not re.search(r"^\s*Tag_CPU_arch:\s*v7\b", out, re.MULTILINE):
+        sys.exit(f"stage.sh: {path}: expected Tag_CPU_arch: v7")
+    if not re.search(r"^\s*Tag_ABI_VFP_args:\s*VFP registers\b", out, re.MULTILINE):
+        sys.exit(f"stage.sh: {path}: expected Tag_ABI_VFP_args: VFP registers")
+    fp = re.search(r"^\s*Tag_FP_arch:\s*(.*)$", out, re.MULTILINE)
+    if fp and ("VFPv4" in fp.group(1) or "VFPv5" in fp.group(1)):
+        sys.exit(f"stage.sh: {path}: unsupported Tag_FP_arch for Cortex-A9: {fp.group(1).strip()}")
+    simd = re.search(r"^\s*Tag_Advanced_SIMD_arch:\s*(.*)$", out, re.MULTILINE)
+    if simd and ("Fused-MAC" in simd.group(1) or "NEONv2" in simd.group(1)):
+        sys.exit(f"stage.sh: {path}: unsupported Tag_Advanced_SIMD_arch for Cortex-A9: {simd.group(1).strip()}")
+    div = re.search(r"^\s*Tag_DIV_use:\s*(.*)$", out, re.MULTILINE)
+    if div and "Allowed" in div.group(1):
+        sys.exit(f"stage.sh: {path}: unsupported Tag_DIV_use for Cortex-A9: {div.group(1).strip()}")
 PY
 }
+
+if [ "${1:-}" = "--check-elf" ]; then
+    shift
+    [ "$#" -gt 0 ] || { echo "usage: $0 --check-elf PATH..." >&2; exit 2; }
+    check_kindle_elf "$@"
+    exit 0
+fi
 
 rm -rf "$STAGE"
 copy app "$KINDLE/verso"
