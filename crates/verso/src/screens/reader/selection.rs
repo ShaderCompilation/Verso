@@ -130,7 +130,11 @@ impl SelectionState {
     pub fn draw(&self, cx: &mut DrawCx, cover: Option<Rect>) {
         let Some(selection) = &self.selected else { return };
         for rect in &selection.rects {
-            cx.canvas.invert_rect(*rect);
+            if self.dragging {
+                cx.canvas.invert_rect_bw(*rect);
+            } else {
+                cx.canvas.invert_rect(*rect);
+            }
         }
         let radius = cx.theme.mm(1.2).max(2);
         if let Some(handles) = self.handles(radius, cover) {
@@ -144,7 +148,8 @@ impl SelectionState {
         }
         if self.dragging {
             // Fast (DU) updates keep drag feedback responsive; releasing the
-            // touch triggers App's grayscale cleanup over fast_debt.
+            // touch switches back to antialiased invert_rect and triggers
+            // App's grayscale cleanup over fast_debt.
             cx.hint(cx.canvas.bounds(), RefreshMode::Fast);
         }
     }
@@ -224,12 +229,18 @@ impl SelectionState {
             }
             _ if self.captured => {
                 if g.ends_touch() {
+                    let was_dragging = self.dragging;
                     self.released = self.dragging;
                     if self.dragging && (self.moved || matches!(g, Gesture::Swipe { .. })) {
                         self.focus(g.pos(), context, worker);
                     }
                     self.dragging = false;
                     self.captured = false;
+                    if was_dragging && self.selected.is_some() {
+                        // Switch the selection from 1-bit drag pixels back to
+                        // antialiased inversion even if fast_debt was empty.
+                        cx.redraw();
+                    }
                     self.finish(context, worker);
                 }
                 true
@@ -468,21 +479,53 @@ mod tests {
     }
 
     #[test]
-    fn dragging_hints_fast_refresh_and_release_clears_it() {
+    fn dragging_binarizes_and_hints_fast_refresh_and_release_restores_antialiased_inversion() {
         with_context(|state, worker, commands, cx| {
             let mut canvas = crate::gfx::Canvas::new(600, 800);
             let mut text = crate::gfx::TextRenderer::new();
             let mut icons = crate::gfx::IconRenderer::default();
+            let sel = selected("word");
+            let rect = sel.rects[0];
+            let seed_page = |canvas: &mut crate::gfx::Canvas| {
+                canvas.fill(255);
+                // Simulated antialiased glyph pixels inside the selection rect.
+                let row: Vec<u8> = [0, 60, 127, 128, 200, 255].into_iter().cycle().take(rect.w as usize).collect();
+                for y in rect.y..rect.bottom() {
+                    canvas.blit_gray(Rect::new(rect.x, y, rect.w, 1), &row, rect.w as usize);
+                }
+            };
+            let rect_pixels = |canvas: &crate::gfx::Canvas| -> Vec<u8> {
+                // Exclude the 3 px handle stems at the left/right edges of `rect`.
+                let x0 = (rect.x + 6) as usize;
+                let x1 = (rect.right() - 6) as usize;
+                let mut out = Vec::with_capacity((x1 - x0) * rect.h as usize);
+                for y in rect.y as usize..rect.bottom() as usize {
+                    out.extend_from_slice(&canvas.gray_data()[y * 600 + x0..y * 600 + x1]);
+                }
+                out
+            };
+
             state.on_gesture(Gesture::LongPress(Point::new(120, 110)), CONTEXT, worker, cx);
             let (word, _) = next(commands);
-            state.receive(word, Ok(Some(selected("word"))), Some(CONTEXT), worker, cx);
+            state.receive(word, Ok(Some(sel)), Some(CONTEXT), worker, cx);
+            seed_page(&mut canvas);
             let mut hints = Vec::new();
             state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
             assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast), "dragging should hint Fast refresh");
+            let drag_pixels = rect_pixels(&canvas);
+            assert!(drag_pixels.iter().all(|&p| p == 0 || p == 255), "drag selection must be pure B&W for WFM_DU");
+            assert_eq!(&drag_pixels[..6], &[255, 255, 255, 0, 0, 0]);
+
+            *cx.needs_redraw = false;
             state.on_gesture(Gesture::End(Point::new(120, 110)), CONTEXT, worker, cx);
+            assert!(*cx.needs_redraw, "releasing a dragged selection must schedule a redraw");
+            seed_page(&mut canvas);
             hints.clear();
             state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
             assert!(hints.is_empty(), "releasing should stop hinting Fast refresh");
+            let release_pixels = rect_pixels(&canvas);
+            assert_eq!(&release_pixels[..6], &[255, 195, 128, 127, 55, 0]);
+            assert_ne!(drag_pixels, release_pixels, "edge pixels must change so FrameDiff/EPDC repaint them");
         });
     }
 }

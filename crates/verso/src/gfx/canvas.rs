@@ -272,6 +272,28 @@ impl Canvas {
         }
     }
 
+    /// Binary (1-bit B&W) inversion for `RefreshMode::Fast` (`WFM_DU`) drag
+    /// frames. `WFM_DU` only drives pure black/white target pixels on i.MX
+    /// panels and leaves intermediate grays untouched while still updating the
+    /// EPDC working buffer; binarizing during drag keeps panel and buffer in
+    /// sync and ensures switching to `invert_rect` on lift updates glyph edges.
+    pub fn invert_rect_bw(&mut self, rect: Rect) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let (bpp, rows) = self.rows_mut(r);
+        for row in rows {
+            if bpp == 1 {
+                for pixel in row {
+                    *pixel = if *pixel < 128 { 255 } else { 0 };
+                }
+            } else {
+                for px in row.as_chunks_mut::<4>().0 {
+                    let v = if luma(px[0], px[1], px[2]) < 128 { 255 } else { 0 };
+                    *px = [v, v, v, 255];
+                }
+            }
+        }
+    }
+
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
         if rect.w <= 0 || rect.h <= 0 {
             return;
@@ -1020,6 +1042,36 @@ mod tests {
             }
         }
         assert_eq!(px(60, 30), 255);
+    }
+
+    #[test]
+    fn invert_rect_bw_binarizes_gray_and_color_pixels() {
+        let samples = [0u8, 64, 127, 128, 200, 255];
+        let mut gray = Canvas::new(8, 2);
+        gray.blit_gray(Rect::new(1, 0, 6, 1), &samples, 6);
+        gray.invert_rect_bw(Rect::new(1, 0, 6, 1));
+        assert_eq!(&gray.gray_data()[0..8], &[255, 255, 255, 255, 0, 0, 0, 255]);
+        assert!(gray.gray_data()[8..].iter().all(|&v| v == 255), "outside rect untouched");
+
+        let mut color = Canvas::with_mode(8, 2, ColorMode::Color32);
+        let rgba: Vec<u8> = [
+            [0, 0, 0, 255],
+            [255, 0, 0, 255],     // luma 76 (< 128) -> white
+            [127, 127, 127, 255], // luma 127 (< 128) -> white
+            [128, 128, 128, 255], // luma 128 (>= 128) -> black
+            [0, 255, 0, 255],     // luma 149 (>= 128) -> black
+            [255, 255, 255, 255],
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        color.blit_rgba(Rect::new(1, 0, 6, 1), &rgba, 6);
+        color.invert_rect_bw(Rect::new(1, 0, 6, 1));
+        for (i, want) in [255u8, 255, 255, 0, 0, 0].into_iter().enumerate() {
+            assert_eq!(rgba_at(&color, i as u32 + 1, 0), [want, want, want, 255]);
+        }
+        assert_eq!(rgba_at(&color, 0, 0), [255; 4]);
+        assert_eq!(rgba_at(&color, 7, 0), [255; 4]);
     }
 
     #[test]

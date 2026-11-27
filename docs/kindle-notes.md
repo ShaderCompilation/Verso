@@ -60,11 +60,12 @@ behaviour on other models is **(to verify)**.
   cached-RAM shadow buffer.
 - **MediaTek `hwtcon_v2` (measured):** `is_mtk = 1`, `canRotate = 0` (landscape
   is rotated in software), `hasEclipseWfm = 1`, `canHWInvert = 1`.
-- **Waveforms & completion:** monochrome uses `DU` (`Fast`), `GL16` (`Ui`),
-  `REAGL` (`Page`) and flashing `GC16` (`Full`). Color panels use `GLRC16`
-  (`Page`) and `GCC16` (`Full`) with `CFA_DEFAULT` **(to verify)**. Full flashes
-  take ~200–400 ms, varying by session **(measured)**, and are awaited lazily via `fbink_get_last_marker()` /
-  `fbink_wait_for_complete()` before the next framebuffer write, sleep or exit.
+- **Waveforms & completion:** monochrome uses `DU` (`Fast`), `GL16` (MTK) /
+  non-flashing `GC16` (i.MX; `GL16` is from-white-only) (`Ui`), `REAGL` (`Page`)
+  and flashing `GC16` (`Full`). Color panels use `GLRC16` (`Page`) and `GCC16`
+  (`Full`) with `CFA_DEFAULT` **(to verify)**. Full flashes (~200–400 ms
+  **(measured)**) are awaited lazily via `fbink_get_last_marker()` /
+  `fbink_wait_for_complete()` before the next write, sleep or exit.
 - **ARM alignment gotcha (measured):** crengine's glyph cache uses `alignas(16)`
   items that upstream allocates with 8-byte-aligned `malloc`, causing `SIGBUS`
   on NEON stores under Zig/Clang. `crates/crengine-sys/build.rs` patches a copy

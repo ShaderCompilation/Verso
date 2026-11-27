@@ -152,7 +152,7 @@ against the previous frame in **16×16 tiles**:
 | `RefreshMode` | Purpose | Monochrome | Color panel | Flashes? |
 | --- | --- | --- | --- | --- |
 | `Fast` | Press feedback, slider drags, selection | `WFM_DU` | `WFM_DU` | No |
-| `Ui` | Menus, chrome, `fast_debt` cleanup, wake strip | `WFM_GL16` | `WFM_GL16` | No |
+| `Ui` | Menus, chrome, `fast_debt` cleanup, wake strip | `WFM_GL16` (MTK) / `WFM_GC16` (i.MX) | `WFM_GL16` | No |
 | `Page` | Reading page turns | `WFM_REAGL` | `WFM_GLRC16` | No |
 | `Full` | Images, chapter starts, periodic flash, wake, library grid | `WFM_GC16` | `WFM_GCC16` | Yes |
 

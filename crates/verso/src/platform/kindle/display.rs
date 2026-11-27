@@ -11,7 +11,7 @@ use fbink_sys as fb;
 use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
 use crate::platform::framebuffer::{Format, Layout, Writer};
-use crate::platform::{FrameCheck, Orientation, RefreshMode, Unsupported, Update};
+use crate::platform::{FrameCheck, KindleWaveform, Orientation, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
 pub struct DisplaySession {
@@ -227,23 +227,18 @@ impl Display {
             // The refresh region is in framebuffer coordinates: FBInk's
             // refresh doesn't add the viewport origin itself.
             let Some(r) = self.writer.write(canvas, u.rect, self.orientation, pixels) else { continue };
-            let (wfm, flash) = if self.session.has_color_panel {
+            if self.session.has_color_panel {
                 self.cfg.cfa_mode = fb::CFA_MODE_INDEX_E_CFA_DEFAULT;
-                match u.mode {
-                    RefreshMode::Fast => (fb::WFM_MODE_INDEX_E_WFM_DU, false),
-                    RefreshMode::Ui => (fb::WFM_MODE_INDEX_E_WFM_GL16, false),
-                    RefreshMode::Page => (fb::WFM_MODE_INDEX_E_WFM_GLRC16, false),
-                    RefreshMode::Full => (fb::WFM_MODE_INDEX_E_WFM_GCC16, true),
-                }
-            } else {
-                match u.mode {
-                    RefreshMode::Fast => (fb::WFM_MODE_INDEX_E_WFM_DU, false),
-                    RefreshMode::Ui => (fb::WFM_MODE_INDEX_E_WFM_GL16, false),
-                    RefreshMode::Page => (fb::WFM_MODE_INDEX_E_WFM_REAGL, false),
-                    RefreshMode::Full => (fb::WFM_MODE_INDEX_E_WFM_GC16, true),
-                }
+            }
+            let (wfm, flash) = u.mode.kindle_waveform(self.session.has_color_panel, self.session.is_mtk);
+            self.cfg.wfm_mode = match wfm {
+                KindleWaveform::Du => fb::WFM_MODE_INDEX_E_WFM_DU,
+                KindleWaveform::Gl16 => fb::WFM_MODE_INDEX_E_WFM_GL16,
+                KindleWaveform::Gc16 => fb::WFM_MODE_INDEX_E_WFM_GC16,
+                KindleWaveform::Reagl => fb::WFM_MODE_INDEX_E_WFM_REAGL,
+                KindleWaveform::Glrc16 => fb::WFM_MODE_INDEX_E_WFM_GLRC16,
+                KindleWaveform::Gcc16 => fb::WFM_MODE_INDEX_E_WFM_GCC16,
             };
-            self.cfg.wfm_mode = wfm;
             self.cfg.is_flashing = flash;
             // SAFETY: FFI call with a valid fd and config.
             let rc = unsafe { fb::fbink_refresh(self.fd, r.y as u32, r.x as u32, r.w as u32, r.h as u32, &self.cfg) };
