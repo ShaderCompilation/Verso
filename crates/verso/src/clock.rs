@@ -4,6 +4,11 @@
 //! Kindle `/etc/localtime` links to `/var/local/system/tz`, which the Kindle's
 //! time zone setting writes (measured). The zone is read once, so a change
 //! made while Verso runs shows after the next start.
+//!
+//! That file is TZif with an empty POSIX footer. glibc then keeps the last
+//! transition's offset; musl applies the footer after the last transition,
+//! so a static musl build would show UTC. On musl, such a file is read here
+//! (`Zone`) and every conversion goes through `local_tm`.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalTime {
@@ -12,15 +17,9 @@ pub struct LocalTime {
 }
 impl LocalTime {
     pub fn now() -> Option<Self> {
-        // SAFETY: localtime_r only writes the tm we pass; null means failure.
-        unsafe {
-            let now = libc::time(std::ptr::null_mut());
-            let mut tm: libc::tm = std::mem::zeroed();
-            if libc::localtime_r(&now, &mut tm).is_null() {
-                return None;
-            }
-            Some(Self { hour: tm.tm_hour.clamp(0, 23) as u8, minute: tm.tm_min.clamp(0, 59) as u8 })
-        }
+        // SAFETY: time(NULL) only returns the current time.
+        let tm = local_tm(unsafe { libc::time(std::ptr::null_mut()) })?;
+        Some(Self { hour: tm.tm_hour.clamp(0, 23) as u8, minute: tm.tm_min.clamp(0, 59) as u8 })
     }
     /// `14:41`, `09:05`.
     pub fn h24(self) -> String {
@@ -55,21 +54,14 @@ impl LocalDateTime {
     }
     /// `unix` seconds in the local time zone.
     pub fn at(unix: u64) -> Option<Self> {
-        let t = libc::time_t::try_from(unix).ok()?;
-        // SAFETY: as in LocalTime::now.
-        unsafe {
-            let mut tm: libc::tm = std::mem::zeroed();
-            if libc::localtime_r(&t, &mut tm).is_null() {
-                return None;
-            }
-            Some(Self {
-                year: tm.tm_year + 1900,
-                month: (tm.tm_mon + 1).clamp(1, 12) as u8,
-                day: tm.tm_mday.clamp(1, 31) as u8,
-                time: LocalTime { hour: tm.tm_hour.clamp(0, 23) as u8, minute: tm.tm_min.clamp(0, 59) as u8 },
-                second: tm.tm_sec.clamp(0, 59) as u8,
-            })
-        }
+        let tm = local_tm(libc::time_t::try_from(unix).ok()?)?;
+        Some(Self {
+            year: tm.tm_year + 1900,
+            month: (tm.tm_mon + 1).clamp(1, 12) as u8,
+            day: tm.tm_mday.clamp(1, 31) as u8,
+            time: LocalTime { hour: tm.tm_hour.clamp(0, 23) as u8, minute: tm.tm_min.clamp(0, 59) as u8 },
+            second: tm.tm_sec.clamp(0, 59) as u8,
+        })
     }
     /// `2026-11-15 03:08:00`, matching KOReader's local timestamp format.
     pub fn timestamp(self) -> String {
@@ -107,6 +99,17 @@ impl LocalDateTime {
         if parts.next().is_some() || !(1970..=9999).contains(&year) {
             return None;
         }
+        #[cfg(target_env = "musl")]
+        if let Some(zone) = Zone::system() {
+            let (month, day) = (u8::try_from(month).ok()?, u8::try_from(day).ok()?);
+            if !(1..=12).contains(&month) || !(1..=days_in_month(year, month)).contains(&day) {
+                return None;
+            }
+            let utc = days_from_civil(year, month, day) * 86_400;
+            // The offset at local midnight, not at UTC midnight.
+            let t = utc - i64::from(zone.offset(utc - i64::from(zone.offset(utc))));
+            return u64::try_from(t).ok();
+        }
         // SAFETY: mktime only reads and normalizes the tm we pass.
         unsafe {
             let mut tm: libc::tm = std::mem::zeroed();
@@ -130,6 +133,94 @@ impl LocalDateTime {
             days @ 2..=7 => format!("{days} days ago"),
             _ if self.year == now.year => format!("{} {}", self.day, MONTHS[usize::from(self.month - 1)]),
             _ => format!("{} {} {}", self.day, MONTHS[usize::from(self.month - 1)], self.year),
+        }
+    }
+}
+
+/// `t` in the local time zone.
+fn local_tm(t: libc::time_t) -> Option<libc::tm> {
+    // SAFETY: localtime_r and gmtime_r only write the tm we pass; null means failure.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        #[cfg(target_env = "musl")]
+        if let Some(zone) = Zone::system() {
+            let t = t.checked_add(libc::time_t::from(zone.offset(i64::from(t))))?;
+            return (!libc::gmtime_r(&t, &mut tm).is_null()).then_some(tm);
+        }
+        (!libc::localtime_r(&t, &mut tm).is_null()).then_some(tm)
+    }
+}
+
+/// UTC offsets from a TZif file (RFC 8536) that has no POSIX footer: the
+/// offset of the last transition at or before a moment, else of type 0.
+#[cfg_attr(not(target_env = "musl"), allow(dead_code))]
+struct Zone {
+    /// Transition times, ascending, with the index into `offsets`.
+    transitions: Vec<(i64, usize)>,
+    offsets: Vec<i32>,
+}
+#[cfg_attr(not(target_env = "musl"), allow(dead_code))]
+impl Zone {
+    /// The system zone when the C library would get it wrong: `TZ` unset and
+    /// `/etc/localtime` footerless. Read once.
+    fn system() -> Option<&'static Zone> {
+        static ZONE: std::sync::OnceLock<Option<Zone>> = std::sync::OnceLock::new();
+        ZONE.get_or_init(|| {
+            if std::env::var_os("TZ").is_some() {
+                return None;
+            }
+            Zone::footerless(&std::fs::read("/etc/localtime").ok()?)
+        })
+        .as_ref()
+    }
+
+    /// None unless `data` is TZif whose footer is missing (version 1) or
+    /// empty; the C library handles a footer correctly.
+    fn footerless(data: &[u8]) -> Option<Zone> {
+        fn counts(d: &[u8]) -> Option<(u8, [usize; 6])> {
+            (d.get(..4)? == b"TZif").then_some(())?;
+            let mut c = [0; 6];
+            for (i, n) in c.iter_mut().enumerate() {
+                *n = u32::from_be_bytes(d.get(20 + 4 * i..24 + 4 * i)?.try_into().ok()?) as usize;
+            }
+            Some((d[4], c))
+        }
+        // isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt.
+        let len =
+            |c: [usize; 6], time: usize| 44 + c[3] * (time + 1) + c[4] * 6 + c[5] + c[2] * (time + 4) + c[1] + c[0];
+        let (version, c) = counts(data)?;
+        let (body, c, time) = if version >= b'2' {
+            let second = data.get(len(c, 4)..)?;
+            let (_, c) = counts(second)?;
+            let footer = second.get(len(c, 8)..)?;
+            footer.iter().all(|&b| b == b'\n').then_some(())?;
+            (second, c, 8)
+        } else {
+            (data, c, 4)
+        };
+        let body = body.get(44..len(c, time))?;
+        let (times, rest) = body.split_at(c[3] * time);
+        let (indices, rest) = rest.split_at(c[3]);
+        let offsets: Vec<i32> =
+            rest[..c[4] * 6].as_chunks::<6>().0.iter().map(|t| i32::from_be_bytes([t[0], t[1], t[2], t[3]])).collect();
+        let transitions = times
+            .chunks_exact(time)
+            .zip(indices)
+            .map(|(t, &i)| {
+                let at = match time {
+                    8 => i64::from_be_bytes(t.try_into().ok()?),
+                    _ => i64::from(i32::from_be_bytes(t.try_into().ok()?)),
+                };
+                (usize::from(i) < offsets.len()).then_some((at, usize::from(i)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!offsets.is_empty()).then_some(Zone { transitions, offsets })
+    }
+
+    fn offset(&self, t: i64) -> i32 {
+        match self.transitions.partition_point(|&(at, _)| at <= t) {
+            0 => self.offsets[0],
+            i => self.offsets[self.transitions[i - 1].1],
         }
     }
 }
@@ -246,5 +337,39 @@ mod tests {
     #[test]
     fn the_local_time_is_available() {
         assert!(LocalTime::now().is_some());
+    }
+
+    /// TZif v2 like the Kindle's: a version-1 block, then 64-bit
+    /// transitions to +5 at 1000 and +4 at 2000 (type 0 is +3), then `footer`.
+    fn tzif(footer: &[u8]) -> Vec<u8> {
+        let header = |counts: [u32; 6]| {
+            let mut h = b"TZif2".to_vec();
+            h.resize(20, 0);
+            counts.iter().for_each(|c| h.extend(c.to_be_bytes()));
+            h
+        };
+        let mut f = header([0, 0, 0, 0, 1, 1]);
+        f.extend([0, 0, 0, 0, 0, 0, 0]);
+        f.extend(header([0, 0, 0, 2, 3, 1]));
+        f.extend(1000i64.to_be_bytes());
+        f.extend(2000i64.to_be_bytes());
+        f.extend([1, 2]);
+        for offset in [3 * 3600i32, 5 * 3600, 4 * 3600] {
+            f.extend(offset.to_be_bytes());
+            f.extend([0, 0]);
+        }
+        f.push(0);
+        f.extend(footer);
+        f
+    }
+
+    #[test]
+    fn a_footerless_zone_keeps_the_last_offset() {
+        let zone = Zone::footerless(&tzif(b"\n\n")).unwrap();
+        let hours: Vec<_> = [0, 1000, 1999, 2000, 4_000_000_000].map(|t| zone.offset(t) / 3600).into();
+        assert_eq!(hours, [3, 5, 5, 4, 4]);
+        // A real footer is the C library's to apply; garbage is no zone.
+        assert!(Zone::footerless(&tzif(b"\n<+04>-4\n")).is_none());
+        assert!(Zone::footerless(&tzif(b"\n\n")[..60]).is_none());
     }
 }
