@@ -13,6 +13,21 @@ when a run ends. Runs use isolated state under `/mnt/us/verso/*-check`.
   zig cc -target arm-linux-gnueabihf.2.20 -O2 scripts/perf/probe.c -o /tmp/probe
   ```
 
+  A static build ignores `LD_PRELOAD`, so `-DLINKED` builds the same probe as an
+  object linked into Verso (it defines `ioctl` itself). Build one per target and
+  link it into the build being measured; drop `--preload` from the runs:
+
+  ```sh
+  zig cc -target arm-linux-musleabihf -mcpu=cortex_a9 -O2 -DLINKED -c scripts/perf/probe.c -o /tmp/probe-musl.o
+  RUSTFLAGS="-C target-cpu=cortex-a9 -C target-feature=+crt-static -C link-arg=/tmp/probe-musl.o" \
+    cargo zigbuild -p verso --release --no-default-features --features verso/kindle \
+    --target armv7-unknown-linux-musleabihf
+  ```
+
+  Cargo doesn't track the object: touch `crates/verso/src/main.rs` after changing
+  it. Either probe pins Verso to CPU 0 with `VERSO_BENCH_ONE_CPU=1`
+  (`redraw.py --one-cpu`).
+
 - `redraw.py`: page-turn runs (24 turns, isolated state), also the helper module
   (`remote`, `upload`, `ready`, …) the other scripts import.
 - `startup.py`: Home startup runs.
