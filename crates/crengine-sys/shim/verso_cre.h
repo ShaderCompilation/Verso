@@ -19,7 +19,8 @@ typedef struct VersoCreTypography {
     /* Line height, percent of the font's. */
     int line_spacing;
     int margin, top, bottom;
-    int justify;
+    /* 0 the book's, 1 left (keeps center/right), 2 justify (keeps center/right). */
+    int alignment;
     /* The book's own fonts instead of `face`. */
     int publisher;
     /* CSS weight of regular text (400); bold text moves with it. */

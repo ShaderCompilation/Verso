@@ -968,6 +968,35 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "                    if ( !res )\n                    {\n                        fprintf( stderr, \"cannot fill fragment %d .. %d\\n\", fillStart, fillEnd );\n                        exit(-1);\n                    }",
         "                    if ( !res )\n                    {\n                        fprintf( stderr, \"cannot fill fragment %d .. %d\\n\", fillStart, fillEnd );\n                        delete[] flags;\n                        return LVERR_FAIL;\n                    }",
     ),
+    // Verso's Alignment setting (0 = book, 1 = left, 2 = justify) overrides
+    // body text alignment without clobbering center/right headers or images
+    // wrapped in <p>. Stored in _docFlags so crengine's render context and
+    // .cr3 cache automatically track it.
+    (
+        "crengine/include/lvtinydom.h",
+        "#define DOC_FLAG_NONLINEAR_PAGEBREAK   16",
+        "#define DOC_FLAG_NONLINEAR_PAGEBREAK   16\n#define DOC_FLAG_VERSO_ALIGN_LEFT      32\n#define DOC_FLAG_VERSO_ALIGN_JUSTIFY   64",
+    ),
+    (
+        "crengine/include/lvdocviewprops.h",
+        "#define PROP_NONLINEAR_PAGEBREAK     \"crengine.doc.nonlinear.pagebreak.force\"",
+        "#define PROP_NONLINEAR_PAGEBREAK     \"crengine.doc.nonlinear.pagebreak.force\"\n#define PROP_VERSO_TEXT_ALIGN        \"verso.doc.text.align\"",
+    ),
+    (
+        "crengine/src/lvdocview.cpp",
+        "    m_doc->setDocFlag(DOC_FLAG_NONLINEAR_PAGEBREAK, m_props->getBoolDef(\n            PROP_NONLINEAR_PAGEBREAK, false));",
+        "    m_doc->setDocFlag(DOC_FLAG_NONLINEAR_PAGEBREAK, m_props->getBoolDef(\n            PROP_NONLINEAR_PAGEBREAK, false));\n    {\n        int versoAlign = m_props->getIntDef(PROP_VERSO_TEXT_ALIGN, 0);\n        m_doc->setDocFlag(DOC_FLAG_VERSO_ALIGN_LEFT, versoAlign == 1);\n        m_doc->setDocFlag(DOC_FLAG_VERSO_ALIGN_JUSTIFY, versoAlign == 2);\n    }",
+    ),
+    (
+        "crengine/src/lvdocview.cpp",
+        "        } else if (name == PROP_FOOTNOTES) {\n            bool value = props->getBoolDef(PROP_FOOTNOTES, true);\n            if (m_doc) // not when noDefaultDocument=true\n                getDocument()->setDocFlag(DOC_FLAG_ENABLE_FOOTNOTES, value);\n            REQUEST_RENDER(\"propsApply footnotes\")",
+        "        } else if (name == PROP_FOOTNOTES) {\n            bool value = props->getBoolDef(PROP_FOOTNOTES, true);\n            if (m_doc) // not when noDefaultDocument=true\n                getDocument()->setDocFlag(DOC_FLAG_ENABLE_FOOTNOTES, value);\n            REQUEST_RENDER(\"propsApply footnotes\")\n        } else if (name == PROP_VERSO_TEXT_ALIGN) {\n            int value = props->getIntDef(PROP_VERSO_TEXT_ALIGN, 0);\n            if (m_doc) {\n                getDocument()->setDocFlag(DOC_FLAG_VERSO_ALIGN_LEFT, value == 1);\n                getDocument()->setDocFlag(DOC_FLAG_VERSO_ALIGN_JUSTIFY, value == 2);\n            }\n            REQUEST_RENDER(\"propsApply verso text align\")",
+    ),
+    (
+        "crengine/src/lvrend.cpp",
+        "    UPDATE_STYLE_FIELD( text_align, css_ta_inherit );\n    UPDATE_STYLE_FIELD( text_align_last, css_ta_inherit );",
+        "    UPDATE_STYLE_FIELD( text_align, css_ta_inherit );\n    UPDATE_STYLE_FIELD( text_align_last, css_ta_inherit );\n    if ( doc->getDocFlag(DOC_FLAG_VERSO_ALIGN_LEFT) ) {\n        if ( pstyle->text_align == css_ta_justify )\n            pstyle->text_align = css_ta_start;\n        if ( pstyle->text_align_last == css_ta_justify )\n            pstyle->text_align_last = css_ta_auto;\n    } else if ( doc->getDocFlag(DOC_FLAG_VERSO_ALIGN_JUSTIFY) ) {\n        if ( (nodeElementId == el_p || nodeElementId == el_li)\n             && pstyle->white_space != css_ws_pre && pstyle->white_space != css_ws_pre_wrap\n             && (pstyle->text_align == css_ta_start || pstyle->text_align == css_ta_left\n                 || pstyle->text_align == css_ta_html_align_left) )\n            pstyle->text_align = css_ta_justify;\n    }",
+    ),
 ];
 
 /// crengine's own source list (CRE_SRCS in its CMakeLists.txt).

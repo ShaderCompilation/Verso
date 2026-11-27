@@ -61,7 +61,7 @@ pub fn key(layout: &Layout, typography: &Typography, page: &PageLayout, dpi: u32
     let px = t.font_px(dpi as f32);
     let g = p.geometry(layout.width as i32, layout.height as i32, dpi as f32, px);
     let text = format!(
-        "{}|{}x{}@{dpi}|{:?}|{:?}|{}|{}|{px}|{}|{}|{}|{:?}|{}|{}|{}|{},{},{}",
+        "{}|{}x{}@{dpi}|{:?}|{:?}|{}|{}|{px}|{}|{}|{}|{:?}|{:?}|{}|{}|{},{},{}",
         env!("CARGO_PKG_VERSION"),
         layout.width,
         layout.height,
@@ -73,7 +73,7 @@ pub fn key(layout: &Layout, typography: &Typography, page: &PageLayout, dpi: u32
         t.line_spacing,
         t.word_spacing,
         t.paragraphs,
-        t.justify,
+        t.alignment,
         t.hyphenate,
         t.book_styles,
         g.side,
@@ -747,7 +747,8 @@ mod tests {
             Typography { line_spacing: 125, ..t.clone() },
             Typography { word_spacing: 90, ..t.clone() },
             Typography { paragraphs: super::super::Paragraphs::Spaced, ..t.clone() },
-            Typography { justify: false, ..t.clone() },
+            Typography { alignment: super::super::Alignment::Left, ..t.clone() },
+            Typography { alignment: super::super::Alignment::Justify, ..t.clone() },
             Typography { hyphenate: false, ..t.clone() },
             Typography { book_styles: false, ..t.clone() },
         ] {

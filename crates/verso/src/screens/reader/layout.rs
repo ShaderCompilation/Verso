@@ -8,7 +8,7 @@
 //! page; Reader Menu → Layout has them), with [sample values](sample_data).
 use super::bars::{self, BarStyle};
 use crate::clock::LocalTime;
-use crate::document::{Position, TocEntry, Typography};
+use crate::document::{Alignment, Position, TocEntry, Typography};
 use crate::geom::{Point, Rect};
 use crate::gfx::HAlign;
 use crate::page_layout::{BAR_MM, Bar, BarItem, MAX_MARGIN_MM, MIN_MARGIN_MM, PageLayout, ProgressLine};
@@ -188,7 +188,7 @@ impl LayoutView {
             frame,
             font_px,
             line_pitch: font_px as f32 * 1.2 * spacing,
-            justify: typography.justify,
+            justify: typography.alignment != Alignment::Left,
             top_bar,
             sketch,
             half,

@@ -59,7 +59,7 @@ fn main() {
             margin: mm(4.0),
             top: mm(6.0),
             bottom: mm(12.0),
-            justify: 1,
+            alignment: 0,
             publisher: 0,
             weight: 400,
             gamma_index: 15,

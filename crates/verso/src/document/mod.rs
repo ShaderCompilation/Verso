@@ -77,7 +77,7 @@ pub struct Typography {
     /// Width of spaces, percent of the font's.
     pub word_spacing: i32,
     pub paragraphs: Paragraphs,
-    pub justify: bool,
+    pub alignment: Alignment,
     pub hyphenate: bool,
     /// The book's own CSS (sizes, indents, colours); off uses only Verso's.
     pub book_styles: bool,
@@ -97,7 +97,7 @@ impl Default for Typography {
             line_spacing: 120,
             word_spacing: 100,
             paragraphs: Paragraphs::Book,
-            justify: true,
+            alignment: Alignment::Book,
             hyphenate: true,
             book_styles: true,
             legacy_margins: None,
@@ -119,6 +119,22 @@ pub enum Paragraphs {
 }
 impl Paragraphs {
     pub const ALL: [Paragraphs; 3] = [Paragraphs::Book, Paragraphs::Indented, Paragraphs::Spaced];
+}
+
+/// Text alignment for body copy; overrides preserve `center` and `right`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Alignment {
+    /// As the book's CSS says (justified by default via `epub.css`).
+    #[default]
+    Book,
+    /// Ragged right (replaces `justify`, keeps `center` and `right`).
+    Left,
+    /// Justified (replaces `left`/`start` on `p, li`, keeps `center` and `right`).
+    Justify,
+}
+impl Alignment {
+    pub const ALL: [Alignment; 3] = [Alignment::Book, Alignment::Left, Alignment::Justify];
 }
 
 /// A setting's range and step.
@@ -415,16 +431,16 @@ mod tests {
             .unwrap();
         assert!(doc.page_count() > pages, "a bigger font should need more pages");
         doc.go_to_position(&position).unwrap();
-        let typography = Typography { size_pt: 12.0, justify: false, ..Typography::default() };
+        let typography = Typography { size_pt: 12.0, alignment: Alignment::Left, ..Typography::default() };
         doc.set_typography(&typography, 150, &PageLayout::default()).unwrap();
         doc.go_to_position(&position).unwrap();
         assert!(doc.progress().abs_diff(progress) < 100, "position should preserve text progress");
         doc.draw(&mut buf, 600).unwrap();
         let left = buf.clone();
-        let base = Typography { justify: true, ..typography };
+        let base = Typography { alignment: Alignment::Book, ..typography };
         doc.set_typography(&base, 150, &PageLayout::default()).unwrap();
         doc.draw(&mut buf, 600).unwrap();
-        assert_ne!(left, buf, "justification changes rendering");
+        assert_ne!(left, buf, "alignment changes rendering");
         // Every other text setting reaches the engine; contrast only redraws,
         // set on its own.
         let justified = buf.clone();
@@ -523,7 +539,128 @@ mod tests {
         color_draw_checks(&engine, &layout);
         bookmark_checks(&engine, &layout, &book);
         textless_bookmark_checks(&engine, &layout);
+        alignment_checks(&engine, &layout);
         markdown_checks(&engine, &layout, &cache_dir).unwrap();
+    }
+
+    /// Book alignment keeps center/right `<p>` headers; Left and Justify
+    /// override body paragraphs while still preserving center/right (direct
+    /// or inherited from a parent container).
+    fn alignment_checks(engine: &CreEngine, layout: &Layout) {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("verso-align-cre-{}.epub", std::process::id()));
+        let mut out = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        out.start_file(
+            "mimetype",
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        out.write_all(b"application/epub+zip").unwrap();
+        out.start_file("META-INF/container.xml", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        out.start_file("content.opf", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Alignment Fixture</dc:title></metadata><manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/></spine></package>"#,
+        )
+        .unwrap();
+        out.start_file("ch1.xhtml", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Align</title><style>
+.right { text-align: right; text-indent: 0; }
+.center { text-align: center; text-indent: 0; }
+.wrap { text-align: center; }
+.inwrap { text-indent: 0; }
+.just { text-align: justify; text-indent: 0; }
+.rag { text-align: left; text-indent: 0; }
+</style></head><body>
+<p class="right">RightMark</p>
+<p class="center">CenterMark</p>
+<div class="wrap"><p class="inwrap">WrapMark</p></div>
+<p class="just">JustStart alpha beta 123456789012345678901234567890 words follow on the next line.</p>
+<p class="rag">RagStart alpha beta 123456789012345678901234567890 words follow on the next line.</p>
+</body></html>"#,
+        )
+        .unwrap();
+        out.finish().unwrap();
+
+        let word_rect = |d: &mut CreDocument, q: &str| {
+            d.search_start(q).unwrap();
+            loop {
+                let b = d.search_step(std::time::Duration::from_secs(1)).unwrap();
+                if let Some(hit) = b.hits.first() {
+                    return d.select(hit.page, &SelectionQuery::Range(hit.range.clone())).unwrap().unwrap().rects[0];
+                }
+                assert_eq!(b.status, SearchStatus::Searching, "missing {q}");
+            }
+        };
+        let line_width = |d: &mut CreDocument, first_word: &str| {
+            // Measure how far across the page the first line of the paragraph spans
+            // by checking the rightmost dark pixel on that line's band.
+            let r = word_rect(d, first_word);
+            let mut buf = vec![255u8; 600 * 800];
+            d.draw(&mut buf, 600).unwrap();
+            let mut max_x = 0usize;
+            for y in (r.y.max(0) as usize)..(r.bottom().min(800) as usize) {
+                for x in (0..600).rev() {
+                    if buf[y * 600 + x] < 200 {
+                        max_x = max_x.max(x);
+                        break;
+                    }
+                }
+            }
+            max_x as i32
+        };
+
+        let base = Typography { size_pt: 12.0, alignment: Alignment::Book, ..Typography::default() };
+        let mut doc = engine.open(&path, layout, Some((&base, &PageLayout::default()))).unwrap();
+
+        let check_headers = |d: &mut CreDocument, label: &str| {
+            let right = word_rect(d, "RightMark");
+            let center = word_rect(d, "CenterMark");
+            let wrap = word_rect(d, "WrapMark");
+            assert!(
+                right.right() > 540 && right.x > 600 - right.right() + 150,
+                "{label}: RightMark should be right-aligned: {right:?}"
+            );
+            assert!((center.x + center.right() - 600).abs() < 40, "{label}: CenterMark should be centered: {center:?}");
+            assert!((wrap.x + wrap.right() - 600).abs() < 40, "{label}: WrapMark should inherit center: {wrap:?}");
+        };
+
+        // Book: right/center preserved; explicit justify stays justified, explicit left stays ragged.
+        check_headers(&mut doc, "Book");
+        let just_book = line_width(&mut doc, "JustStart");
+        let rag_book = line_width(&mut doc, "RagStart");
+        assert!(
+            just_book > rag_book + 20,
+            "Book: justified ({just_book}) should reach further right than ragged ({rag_book})"
+        );
+
+        // Left: explicit justify becomes ragged, while right/center stay untouched.
+        doc.set_typography(&Typography { alignment: Alignment::Left, ..base.clone() }, 150, &PageLayout::default())
+            .unwrap();
+        check_headers(&mut doc, "Left");
+        let just_left = line_width(&mut doc, "JustStart");
+        assert!(
+            just_left < just_book - 20,
+            "Left: justified paragraph should become ragged ({just_left} vs {just_book})"
+        );
+
+        // Justify: explicit left becomes justified, while right/center stay untouched.
+        doc.set_typography(&Typography { alignment: Alignment::Justify, ..base.clone() }, 150, &PageLayout::default())
+            .unwrap();
+        check_headers(&mut doc, "Justify");
+        let rag_just = line_width(&mut doc, "RagStart");
+        assert!(
+            rag_just > rag_book + 20,
+            "Justify: ragged paragraph should become justified ({rag_just} vs {rag_book})"
+        );
+
+        drop(doc);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Page bookmarks: the opening words start where the page starts and end

@@ -1,5 +1,5 @@
 //! Typography and font picker, with the page left visible above them.
-use crate::document::{FontFace, Paragraphs, Steps, Typography};
+use crate::document::{Alignment, FontFace, Paragraphs, Steps, Typography};
 use crate::geom::Rect;
 use crate::gfx::{Family, HAlign, Weight};
 use crate::ui::gesture::Gesture;
@@ -17,7 +17,7 @@ pub enum TextEvent {
 /// The rows of each page, in order of how often they're changed.
 const PAGES: [[&str; 5]; 2] = [
     ["Font", "Size", "Weight", "Line spacing", "Hyphenation"],
-    ["Contrast", "Word spacing", "Paragraphs", "Justify", "Book styles"],
+    ["Contrast", "Word spacing", "Paragraphs", "Alignment", "Book styles"],
 ];
 const ROW_MM: f32 = 11.5;
 
@@ -51,7 +51,7 @@ pub struct TextSheet {
     /// Page and stepper.
     numbers: Vec<(usize, Number)>,
     paragraphs: Segmented,
-    justify: Toggle,
+    alignment: Segmented,
     hyphenate: Toggle,
     book_styles: Toggle,
     pager: Pager,
@@ -144,6 +144,9 @@ impl TextSheet {
         let selected = Paragraphs::ALL.iter().position(|&p| p == typography.paragraphs).unwrap_or(0);
         let mut paragraphs = Segmented::texts(&["Book", "Indent", "Spaced"], selected);
         paragraphs.place(control("Paragraphs"));
+        let selected = Alignment::ALL.iter().position(|&a| a == typography.alignment).unwrap_or(0);
+        let mut alignment = Segmented::texts(&["Book", "Left", "Justify"], selected);
+        alignment.place(control("Alignment"));
         let toggle = |on: bool, label: &str| {
             let mut toggle = Toggle::new(on);
             toggle.place(screen.w - t.margin, row(label).1.center().y, t);
@@ -153,7 +156,7 @@ impl TextSheet {
         pager.place(Rect::new(t.margin, top + 5 * row_h, screen.w - 2 * t.margin, t.mm(11.0)), t);
         Self {
             font: control("Font"),
-            justify: toggle(typography.justify, "Justify"),
+            alignment,
             hyphenate: toggle(typography.hyphenate, "Hyphenation"),
             book_styles: toggle(typography.book_styles, "Book styles"),
             sheet,
@@ -217,8 +220,10 @@ impl TextSheet {
         {
             t.paragraphs = Paragraphs::ALL[i];
         }
-        if page == self.page("Justify") && self.justify.on_gesture(g).is_some() {
-            t.justify = self.justify.on;
+        if page == self.page("Alignment")
+            && let Some(i) = self.alignment.on_gesture(g)
+        {
+            t.alignment = Alignment::ALL[i];
         }
         if page == self.page("Hyphenation") && self.hyphenate.on_gesture(g).is_some() {
             t.hyphenate = self.hyphenate.on;
@@ -250,9 +255,10 @@ impl TextSheet {
         if page == self.page("Paragraphs") {
             self.paragraphs.draw(cx);
         }
-        for (label, toggle) in
-            [("Justify", &self.justify), ("Hyphenation", &self.hyphenate), ("Book styles", &self.book_styles)]
-        {
+        if page == self.page("Alignment") {
+            self.alignment.draw(cx);
+        }
+        for (label, toggle) in [("Hyphenation", &self.hyphenate), ("Book styles", &self.book_styles)] {
             if page == self.page(label) {
                 toggle.draw(cx);
             }
@@ -366,11 +372,14 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect) -> Vec<crate::ui::fit::Parts>
     let fonts: Vec<_> = (0..40).map(|i| FontFace { name: format!("Font {i:02}"), file: None }).collect();
     let list = FontList::new(t, screen, &fonts, true, "Font 20");
     // One sample per page: the pages share the same rows.
-    let mut pages = vec![vec![text.font, text.pager.rect()], vec![text.paragraphs.rect(), text.pager.rect()]];
+    let mut pages = vec![
+        vec![text.font, text.pager.rect()],
+        vec![text.paragraphs.rect(), text.alignment.rect(), text.pager.rect()],
+    ];
     for (page, n) in &text.numbers {
         pages[*page].push(n.stepper.rect());
     }
-    for r in text.rows.iter().filter(|r| ["Justify", "Hyphenation", "Book styles"].contains(&r.2)) {
+    for r in text.rows.iter().filter(|r| ["Hyphenation", "Book styles"].contains(&r.2)) {
         pages[r.0].push(r.1);
     }
     let [first, second] = <[_; 2]>::try_from(pages).unwrap();
@@ -392,7 +401,11 @@ mod tests {
         let t = Theme::for_dpi(300);
         for screen in [Rect::new(0, 0, 1860, 2480), Rect::new(0, 0, 2480, 1860), Rect::new(0, 0, 1696, 1272)] {
             let sheet = TextSheet::new(&t, screen, &Typography::default());
-            let controls = sheet.numbers.iter().map(|(_, n)| n.stepper.rect()).chain([sheet.paragraphs.rect()]);
+            let controls = sheet
+                .numbers
+                .iter()
+                .map(|(_, n)| n.stepper.rect())
+                .chain([sheet.paragraphs.rect(), sheet.alignment.rect()]);
             for control in controls {
                 assert!(control.w <= t.mm(72.0), "{screen:?}: {control:?}");
                 assert_eq!(control.right(), screen.w - t.margin, "{screen:?}");

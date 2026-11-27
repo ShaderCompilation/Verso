@@ -28,7 +28,7 @@ pub struct VersoCreTypography {
     pub margin: c_int,
     pub top: c_int,
     pub bottom: c_int,
-    pub justify: c_int,
+    pub alignment: c_int,
     pub publisher: c_int,
     pub weight: c_int,
     pub gamma_index: c_int,

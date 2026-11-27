@@ -1483,6 +1483,7 @@ int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
         props->setString(PROP_FONT_FACE, face);
         props->setInt(PROP_EMBEDDED_FONTS, t->publisher);
         props->setInt(PROP_EMBEDDED_STYLES, t->book_styles);
+        props->setInt(PROP_VERSO_TEXT_ALIGN, t->alignment);
         props->setInt(PROP_FONT_BASE_WEIGHT, t->weight);
         props->setInt(PROP_TEXTLANG_HYPHENATION_ENABLED, t->hyphenate);
         props->setInt(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, t->word_spacing);
@@ -1491,9 +1492,14 @@ int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
             props->setString(PROP_FONT_FAMILY_FACES, (lString8("|||||") + mono).c_str());
         v->propsApply(props);
         // propsApply() keeps the embedded-styles flag for the next document
-        // only; an open one needs the command.
-        if (v->getDocument() && v->getDocument()->getDocFlag(DOC_FLAG_ENABLE_INTERNAL_STYLES) != (t->book_styles != 0))
-            v->doCommand(DCMD_SET_INTERNAL_STYLES, t->book_styles);
+        // only; an open one needs the command. Sync alignment flags too in
+        // case m_props already held the same value.
+        if (v->getDocument()) {
+            if (v->getDocument()->getDocFlag(DOC_FLAG_ENABLE_INTERNAL_STYLES) != (t->book_styles != 0))
+                v->doCommand(DCMD_SET_INTERNAL_STYLES, t->book_styles);
+            v->getDocument()->setDocFlag(DOC_FLAG_VERSO_ALIGN_LEFT, t->alignment == 1);
+            v->getDocument()->setDocFlag(DOC_FLAG_VERSO_ALIGN_JUSTIFY, t->alignment == 2);
+        }
         // Global, like the base weight: glyphs are cached per gamma, layout isn't.
         fontMan->SetGammaIndex(t->gamma_index);
         v->setFontSize(t->px);
@@ -1509,7 +1515,6 @@ int verso_cre_typography(VersoCreDoc *doc, const VersoCreTypography *t) {
             css << "\n* { font-family: '" << escaped << "' !important; }\n";
             css << "code, pre, kbd, samp, tt { font-family: monospace !important; }\n";
         }
-        css << (t->justify ? "\np, li { text-align: justify !important; }" : "\np, li { text-align: left !important; }");
         if (t->paragraphs == 1)
             css << "\np { text-indent: 1.2em !important; margin-top: 0 !important; margin-bottom: 0 !important; }";
         else if (t->paragraphs == 2)

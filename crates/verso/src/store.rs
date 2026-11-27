@@ -1142,7 +1142,10 @@ mod tests {
         settings.normalize();
         assert_eq!(settings.page_layout.margins.sides, 10);
         assert!(!settings.page_layout.bottom.on);
-        assert_eq!((settings.typography.size_pt, settings.typography.justify), (11.0, false));
+        assert_eq!(
+            (settings.typography.size_pt, settings.typography.alignment),
+            (11.0, crate::document::Alignment::Book)
+        );
         let json = serde_json::to_string(&settings)?;
         assert!(!json.contains("footer") && !json.contains(r#""margins":2"#), "{json}");
         let mut restored: Settings = serde_json::from_str(&json)?;

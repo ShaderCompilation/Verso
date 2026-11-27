@@ -160,7 +160,7 @@ def main():
     remote(f'mkdir -p {state}; chmod 755 {APP}/bin/probe {APP}/bin/{args.variant}/verso')
     if args.dictionary_cache:
         copy_dictionary_cache(args.dictionary_cache, state)
-    typography = {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0, 'justify': True}
+    typography = {'font': 'Literata', 'size_pt': args.font_size_pt, 'spacing': 0, 'alignment': 'book'}
     settings = {'typography': typography, 'library_folders': [APP + '/books'], 'library_sort': 'title',
                 'orientation': args.orientation, 'page_flash': args.page_flash, 'setup_done': True}
     if args.page_layout is not None:

@@ -13,8 +13,8 @@ use crengine_sys as sys;
 const MARKDOWN_CSS: &str = include_str!("markdown.css");
 
 use super::{
-    Document, FontFace, Layout, Link, Metadata, Note, Opening, PageInfo, Paragraphs, Paths, Position, SearchBatch,
-    SearchHit, SearchStatus, Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
+    Alignment, Document, FontFace, Layout, Link, Metadata, Note, Opening, PageInfo, Paragraphs, Paths, Position,
+    SearchBatch, SearchHit, SearchStatus, Selection, SelectionQuery, TextRange, TextShaping, TocEntry, Typography,
 };
 
 /// crengine's gamma table without correction; `Typography::contrast` steps from it.
@@ -552,7 +552,11 @@ impl Document for CreDocument {
             margin: g.side,
             top: g.top,
             bottom: g.bottom,
-            justify: t.justify as c_int,
+            alignment: match t.alignment {
+                Alignment::Book => 0,
+                Alignment::Left => 1,
+                Alignment::Justify => 2,
+            },
             publisher: (t.font == "Publisher font") as c_int,
             weight: t.weight,
             gamma_index: GAMMA_NONE + t.contrast,

@@ -220,8 +220,9 @@ instantly from cache.
     **Hyphenation**.
   - On the second page: **Contrast** (darker or lighter letters, without
     laying the book out again), **Word spacing** 50–200%, **Paragraphs** (the
-    book's, *Indent* or *Spaced*), **Justify**, and **Book styles** (off
-    ignores the book's own CSS). Hold a side of a number to repeat.
+    book's, *Indent* or *Spaced*), **Alignment** (the book's, *Left* or
+    *Justify*), and **Book styles** (off ignores the book's own CSS). Hold a
+    side of a number to repeat.
 - **Layout** (Reader Menu → **Layout**, full-screen editor applied on close):
   - **Top bar** (default Off) and **Bottom bar** (default On: chapter title,
     page / total, percent): three tappable slots each (left, centre, right).
