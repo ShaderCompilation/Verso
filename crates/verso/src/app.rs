@@ -28,6 +28,8 @@ use crate::ui::theme::{PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::Toast;
 
+const DARK_SWITCH_WAIT: Duration = Duration::from_millis(500);
+
 /// What the Top Drawer needs from the rest of Verso: settings, screens to
 /// open, and a way to wake the UI when Wi-Fi or SSH finishes switching.
 pub struct Services {
@@ -106,6 +108,7 @@ pub struct App {
     usb_prompt: Option<Box<dyn Screen>>,
     usb_connected: bool,
     wake_cleanup: Option<Instant>,
+    dark_pending: Option<(bool, Instant)>,
     orientation: Orientation,
     /// A screen asked to turn the display; see `prepare_orientation`.
     orientation_request: Option<Orientation>,
@@ -150,6 +153,7 @@ impl App {
             usb_prompt: None,
             usb_connected: false,
             wake_cleanup: None,
+            dark_pending: None,
             orientation: Orientation::Portrait,
             orientation_request: None,
             services: None,
@@ -171,7 +175,26 @@ impl App {
 
     /// Sets whether the canvas copies out inverted for dark mode.
     pub fn set_dark(&mut self, dark: bool) {
+        self.dark_pending = None;
         self.canvas.set_dark(dark);
+    }
+
+    fn dark_mode(&self) -> bool {
+        self.dark_pending.map_or(self.canvas.is_dark(), |(dark, _)| dark)
+    }
+
+    fn commit_dark_switch(&mut self, dark: bool) {
+        self.dark_pending = None;
+        self.canvas.set_dark(dark);
+        self.refresh_all(RefreshMode::Full);
+    }
+
+    fn finish_dark_wait_if_ready(&mut self) {
+        if let Some((dark, _)) = self.dark_pending
+            && !self.stack.last().is_some_and(|s| s.waiting_for_dark())
+        {
+            self.commit_dark_switch(dark);
+        }
     }
 
     /// Saves the screens before handing the pending orientation to the
@@ -199,6 +222,9 @@ impl App {
     /// Saves every screen like a normal exit, before a relayout. On failure
     /// the error is shown and the screens stay as they are.
     fn prepare_relayout(&mut self) -> bool {
+        if let Some((dark, _)) = self.dark_pending.take() {
+            self.commit_dark_switch(dark);
+        }
         self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
         self.close_drawer();
         for s in &mut self.stack {
@@ -225,7 +251,8 @@ impl App {
         self.stack.clear();
         self.drawer = None;
         self.orientation = orientation;
-        let dark = self.canvas.is_dark();
+        let dark = self.dark_mode();
+        self.dark_pending = None;
         self.canvas = Canvas::with_mode(info.width, info.height, info.color);
         self.canvas.set_dark(dark);
         self.diff = FrameDiff::new(&self.canvas);
@@ -328,7 +355,7 @@ impl App {
 
     /// Draws a new frame if anything changed, and returns the display updates.
     pub fn frame(&mut self) -> Vec<Update> {
-        if self.asleep || !self.needs_redraw {
+        if self.asleep || self.dark_pending.is_some() || !self.needs_redraw {
             return Vec::new();
         }
         self.needs_redraw = false;
@@ -548,6 +575,7 @@ impl App {
         // SSH is read here (no subprocess); Wi-Fi in the background.
         net.read_ssh();
         net.probe();
+        let net_state = net.state();
         let book = self.stack.last().and_then(|s| s.top_drawer_book());
         if let Some(screen) = self.stack.last_mut() {
             screen.top_drawer_opened();
@@ -557,9 +585,10 @@ impl App {
             &self.theme,
             self.canvas.bounds(),
             self.orientation,
+            self.dark_mode(),
             self.frontlight,
             self.light_range,
-            net.state(),
+            net_state,
             book,
             now,
         ));
@@ -612,6 +641,33 @@ impl App {
                     net.set_ssh(on, services.store.settings().hostname);
                 }
                 self.sync_drawer();
+            }
+            DrawerEvent::DarkMode(dark) => {
+                self.close_drawer();
+                let Some(services) = &self.services else { return };
+                if let Err(e) = services.store.update_settings(|s| s.dark_mode = dark) {
+                    log::error!("saving dark mode: {e:#}");
+                    self.toast = Some(Toast::new("Couldn't save dark mode", None, Instant::now()));
+                    self.needs_redraw = true;
+                    return;
+                }
+                let mut cx = EventCx {
+                    theme: &self.theme,
+                    screen: bounds,
+                    now: Instant::now(),
+                    battery: self.battery,
+                    toast: &mut self.toast,
+                    forced: &mut self.forced,
+                    needs_redraw: &mut self.needs_redraw,
+                };
+                for screen in &mut self.stack {
+                    screen.set_dark(dark, &mut cx);
+                }
+                if self.stack.last().is_some_and(|s| s.waiting_for_dark()) {
+                    self.dark_pending = Some((dark, Instant::now() + DARK_SWITCH_WAIT));
+                } else {
+                    self.commit_dark_switch(dark);
+                }
             }
             DrawerEvent::Orientation(orientation) => {
                 self.close_drawer();
@@ -732,7 +788,11 @@ impl App {
         let screen = self.stack.last().and_then(|s| s.deadline());
         let idle = self.stack.last().filter(|s| s.has_idle_work()).map(|_| Instant::now());
         let drawer = self.drawer.as_ref().and_then(TopDrawer::deadline);
-        [screen, idle, drawer, self.toast.as_ref().map(|t| t.until), self.wake_cleanup].into_iter().flatten().min()
+        let dark = self.dark_pending.map(|(_, due)| due);
+        [screen, idle, drawer, self.toast.as_ref().map(|t| t.until), self.wake_cleanup, dark]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub fn on_tick(&mut self, now: Instant) {
@@ -774,13 +834,20 @@ impl App {
                 top_drawer::remember_hostname(&services.store, &drawer.net().ssh);
             }
         }
+        if let Some((dark, due)) = self.dark_pending
+            && (now >= due || !self.stack.last().is_some_and(|s| s.waiting_for_dark()))
+        {
+            self.commit_dark_switch(dark);
+        }
         if self.stack.last().and_then(|s| s.deadline()).is_some_and(|d| now >= d) {
             self.with_screen(|screen, cx| screen.on_tick(cx));
         }
     }
 
     pub fn busy(&self) -> bool {
-        self.stack.last().is_some_and(|s| s.busy()) || self.net.as_ref().is_some_and(DrawerWorker::busy)
+        self.dark_pending.is_some()
+            || self.stack.last().is_some_and(|s| s.busy())
+            || self.net.as_ref().is_some_and(DrawerWorker::busy)
     }
 
     pub fn has_pending_work(&self) -> bool {
@@ -801,6 +868,7 @@ impl App {
             screen.on_background(cx);
             Action::None
         });
+        self.finish_dark_wait_if_ready();
     }
     /// True once after a frame that showed a page turn.
     pub fn take_page_turn(&mut self) -> bool {
@@ -855,6 +923,9 @@ impl App {
         // Cancel captures before dropping raw touch state, including overlays.
         self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
         self.close_drawer();
+        if let Some((dark, _)) = self.dark_pending.take() {
+            self.canvas.set_dark(dark);
+        }
         for s in &mut self.stack {
             s.on_sleep();
         }
@@ -990,6 +1061,7 @@ impl App {
             Action::Orientation(o) => self.orientation_request = Some(o),
             Action::OpenTopDrawer => self.open_drawer(),
         }
+        self.finish_dark_wait_if_ready();
     }
 }
 
@@ -2141,5 +2213,171 @@ mod tests {
         tap(&mut app, back);
         assert!(app.drawer.is_none());
         assert_eq!((closed.get(), searched.get()), (1, 1));
+    }
+
+    #[test]
+    fn dark_mode_tile_saves_relayouts_and_ignores_failed_save() {
+        use top_drawer::Tile;
+        let mut d = drawer_app(true, true);
+        tap(&mut d.app, Point::new(300, 600));
+        let p = tile(&d.app, Tile::DarkMode);
+        tap(&mut d.app, p);
+        assert!(d.app.drawer.is_none());
+        assert!(d.store.settings().dark_mode);
+        assert!(d.app.canvas.is_dark());
+        assert_eq!(d.app.frame(), vec![Update { rect: Rect::new(0, 0, 600, 800), mode: RefreshMode::Full }]);
+        let landscape =
+            DeviceInfo { name: "test".into(), width: 800, height: 600, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
+        d.app.relayout(&landscape, Orientation::Landscape, |_, _| {
+            vec![Box::new(Under {
+                allows: true,
+                taps: d.taps.clone(),
+                cancels: d.cancels.clone(),
+                swipes: d.swipes.clone(),
+                open_on_tap: true,
+            })]
+        });
+        assert!(d.app.canvas.is_dark(), "dark polarity survives relayout");
+
+        // A failed settings save leaves polarity unchanged and shows a toast.
+        let settings_path = d._dir.path().join("settings.json");
+        std::fs::remove_file(&settings_path).unwrap();
+        std::fs::create_dir_all(settings_path.join("block-rename")).unwrap();
+        tap(&mut d.app, Point::new(300, 600));
+        let p = tile(&d.app, Tile::DarkMode);
+        tap(&mut d.app, p);
+        assert!(d.app.canvas.is_dark(), "failed save leaves dark mode on");
+        assert!(d.app.toast.is_some(), "failed save reports toast");
+    }
+
+    #[test]
+    fn dark_mode_wait_freezes_canvas_and_commits_on_reply_timeout_sleep_or_relayout() {
+        use top_drawer::Tile;
+        struct WaitingScreen {
+            waiting: Rc<Cell<bool>>,
+            calls: Rc<std::cell::RefCell<Vec<bool>>>,
+        }
+        impl Screen for WaitingScreen {
+            fn draw(&mut self, cx: &mut DrawCx) {
+                cx.canvas.fill(0xcc);
+            }
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn allows_top_drawer(&self) -> bool {
+                true
+            }
+            fn set_dark(&mut self, dark: bool, _: &mut EventCx) {
+                self.calls.borrow_mut().push(dark);
+            }
+            fn waiting_for_dark(&self) -> bool {
+                self.waiting.get()
+            }
+        }
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
+        let waiting = Rc::new(Cell::new(true));
+        let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            &info,
+            Theme::for_dpi(150),
+            Box::new(WaitingScreen { waiting: waiting.clone(), calls: calls.clone() }),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().to_path_buf());
+        let ops = Arc::new(top_drawer::tests::FakeNet::new(false, false));
+        app.set_services(Services { store: store.clone(), waker: Waker::new(|| {}), net: ops });
+        app.frame();
+        let light_pixels = app.canvas.raw().to_vec();
+
+        // 1. Reply arriving within 500 ms commits cleanly.
+        swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
+        settle(&mut app);
+        let p = tile(&app, Tile::DarkMode);
+        tap(&mut app, p);
+        assert_eq!(*calls.borrow(), [true]);
+        assert!(app.busy() && app.deadline().is_some());
+        assert!(!app.canvas.is_dark(), "canvas stays light while waiting");
+        assert!(app.frame().is_empty(), "closing the drawer must not draw a light frame during the wait");
+        assert_eq!(app.canvas.raw(), light_pixels.as_slice(), "canvas pixels stay untouched during wait");
+        waiting.set(false);
+        app.on_background();
+        assert!(app.canvas.is_dark() && !app.busy());
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 600, 800), mode: RefreshMode::Full }]);
+
+        // 2. Timeout (500 ms) commits canvas.dark even while screen still waits.
+        waiting.set(true);
+        swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
+        let p = tile(&app, Tile::DarkMode);
+        tap(&mut app, p);
+        let due = app.dark_pending.expect("wait started").1;
+        assert!(app.canvas.is_dark()); // still dark while switching back to light
+        app.on_tick(due);
+        assert!(app.dark_pending.is_none() && !app.canvas.is_dark());
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 600, 800), mode: RefreshMode::Full }]);
+
+        // 3. Sleep mid-wait cancels wait and commits canvas.dark immediately.
+        swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
+        let p = tile(&app, Tile::DarkMode);
+        tap(&mut app, p);
+        assert!(app.dark_pending.is_some());
+        app.on_sleep();
+        assert!(app.dark_pending.is_none() && app.canvas.is_dark());
+        app.on_wake();
+
+        // 4. Orientation preparation mid-wait cancels wait and commits canvas.dark immediately.
+        swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
+        let p = tile(&app, Tile::DarkMode);
+        tap(&mut app, p);
+        assert!(app.dark_pending.is_some());
+        app.orientation_request = Some(Orientation::Landscape);
+        assert_eq!(app.prepare_orientation(), Some((Orientation::Landscape, RelayoutState::default())));
+        assert!(app.dark_pending.is_none() && !app.canvas.is_dark());
+    }
+
+    #[test]
+    fn dark_mode_broadcasts_across_stack_without_waiting_on_buried_screens() {
+        use top_drawer::Tile;
+        struct Stacked {
+            calls: Rc<std::cell::RefCell<Vec<bool>>>,
+            waiting: bool,
+            allows: bool,
+        }
+        impl Screen for Stacked {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, _: Gesture, _: &mut EventCx) -> Action {
+                Action::None
+            }
+            fn allows_top_drawer(&self) -> bool {
+                self.allows
+            }
+            fn set_dark(&mut self, dark: bool, _: &mut EventCx) {
+                self.calls.borrow_mut().push(dark);
+            }
+            fn waiting_for_dark(&self) -> bool {
+                self.waiting
+            }
+        }
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
+        let buried = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let top = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            &info,
+            Theme::for_dpi(150),
+            Box::new(Stacked { calls: buried.clone(), waiting: true, allows: false }),
+        );
+        app.push_screen(Box::new(Stacked { calls: top.clone(), waiting: false, allows: true }));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().to_path_buf());
+        let ops = Arc::new(top_drawer::tests::FakeNet::new(false, false));
+        app.set_services(Services { store, waker: Waker::new(|| {}), net: ops });
+        app.frame();
+        swipe(&mut app, Point::new(300, 5), Point::new(300, 500));
+        let p = tile(&app, Tile::DarkMode);
+        tap(&mut app, p);
+        assert_eq!(*buried.borrow(), [true], "buried screen receives set_dark");
+        assert_eq!(*top.borrow(), [true]);
+        assert!(app.dark_pending.is_none() && app.canvas.is_dark(), "does not wait on buried screen");
     }
 }

@@ -5,7 +5,7 @@ use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, PAPER, SHADOW, Theme};
+use crate::ui::theme::{INK, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,7 +166,7 @@ impl PopupMenu {
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         let r = self.rect;
-        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), t.radius_sheet, SHADOW);
+        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), t.radius_sheet, cx.shadow_gray());
         cx.canvas.fill_rounded_rect(r, t.radius_sheet, PAPER);
         cx.canvas.stroke_rounded_rect(r, t.radius_sheet, t.border as f32, INK);
         for (k, (item, ir)) in self.items.iter().zip(self.item_rects(t)).enumerate() {

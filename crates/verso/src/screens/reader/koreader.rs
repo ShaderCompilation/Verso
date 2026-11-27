@@ -11,7 +11,7 @@ use crate::gfx::{HAlign, Weight};
 use crate::koreader::{OnOpen, Progress, Seen};
 use crate::store::BookState;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, PAPER, SHADOW, Theme};
+use crate::ui::theme::{INK, INK2, PAPER, Theme};
 use crate::ui::widget::DrawCx;
 use crate::ui::widgets::{Button, ButtonKind};
 
@@ -240,7 +240,7 @@ impl Card {
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         let (r, radius) = (self.rect, t.mm(2.2) as f32);
-        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), radius, SHADOW);
+        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), radius, cx.shadow_gray());
         cx.canvas.fill_rounded_rect(r, radius, PAPER);
         cx.canvas.stroke_rounded_rect(r, radius, t.border as f32, INK);
         let inner = Rect { y: r.y + t.mm(3.0), ..r.inset(t.mm(4.0)) };

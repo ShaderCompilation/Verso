@@ -206,7 +206,6 @@ pub struct Page {
     /// The `Typography::contrast` it was drawn with.
     pub contrast: i32,
     /// Whether this page was rendered pre-flipped for dark mode.
-    #[allow(dead_code)]
     pub dark: bool,
     /// Highlights on the page as (highlight number, rectangles). The number
     /// counts highlights only, in saved order (`annotations::State::highlight`),

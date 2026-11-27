@@ -3841,6 +3841,15 @@ impl Screen for Books {
         // Waking is usually for reading: wait for the idle delay again.
         self.last_input = now;
     }
+    fn set_dark(&mut self, dark: bool, cx: &mut EventCx) {
+        self.worker.set_dark(dark);
+        if let Some(reader) = &mut self.reader {
+            reader.set_dark(dark, cx);
+        }
+    }
+    fn waiting_for_dark(&self) -> bool {
+        self.reader.as_ref().is_some_and(Screen::waiting_for_dark)
+    }
     fn sleep_cover(&self, width: u32, height: u32) -> Option<covers::CoverImage> {
         let book = if let Some(reader) = &self.reader {
             if self.browsing_ready {

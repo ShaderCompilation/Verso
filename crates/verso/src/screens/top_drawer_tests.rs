@@ -48,45 +48,40 @@ fn check_layout(t: &Theme, l: &DrawerLayout, screen: Rect) {
 fn paperwhite_portrait_grids_have_the_same_height() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    let five = DrawerLayout::new(&t, screen, 2, 5, false, false);
-    let six = DrawerLayout::new(&t, screen, 2, 6, false, false);
-    check_layout(&t, &five, screen);
-    check_layout(&t, &six, screen);
-    assert_eq!(five.panel, six.panel, "SSH doesn't change the drawer's height");
-    let h = mm(&t, five.panel.h);
+    let seven = DrawerLayout::new(&t, screen, 2, 7, false, false);
+    check_layout(&t, &seven, screen);
+    let h = mm(&t, seven.panel.h);
     assert!((62.0..=66.0).contains(&h), "about 65 mm, not {h}");
-    assert!(five.panel.h * 2 < screen.h, "over half the page stays visible below");
-    let r5 = rows(&five);
-    assert_eq!(r5.iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
-    assert!(r5[1][0].w > r5[0][0].w, "the second row has two wider tiles");
-    let r6 = rows(&six);
-    assert_eq!(r6.iter().map(Vec::len).collect::<Vec<_>>(), [3, 3]);
-    assert_eq!(r6[0].iter().map(|r| r.x).collect::<Vec<_>>(), r6[1].iter().map(|r| r.x).collect::<Vec<_>>());
+    assert!(seven.panel.h * 2 < screen.h, "over half the page stays visible below");
+    let r7 = rows(&seven);
+    assert_eq!(r7.iter().map(Vec::len).collect::<Vec<_>>(), [4, 3]);
+    assert!(r7[1][0].w > r7[0][0].w, "the second row has three wider tiles");
     // Stacked sliders, about 8.5 mm apart.
-    assert_eq!(five.sliders.len(), 2);
-    assert_eq!(five.sliders[0].x, five.sliders[1].x);
-    let pitch = mm(&t, five.sliders[1].y - five.sliders[0].y);
+    assert_eq!(seven.sliders.len(), 2);
+    assert_eq!(seven.sliders[0].x, seven.sliders[1].x);
+    let pitch = mm(&t, seven.sliders[1].y - seven.sliders[0].y);
     assert!((8.0..=9.0).contains(&pitch), "{pitch}");
-    assert_eq!(five.dividers.len(), 2);
-    assert!((7.5..=8.6).contains(&mm(&t, five.dividers[0])), "status strip about 8 mm");
+    assert_eq!(seven.dividers.len(), 2);
+    assert!((7.5..=8.6).contains(&mm(&t, seven.dividers[0])), "status strip about 8 mm");
 }
 
 #[test]
 fn paperwhite_landscape_puts_sliders_side_by_side_and_tiles_in_one_row() {
     let t = Theme::for_dpi(300);
-    let screen = Rect::new(0, 0, 1696, 1272);
-    for tiles in [5, 6] {
-        let l = DrawerLayout::new(&t, screen, 2, tiles, false, false);
+    for screen in [Rect::new(0, 0, 1696, 1272), Rect::new(0, 0, 1648, 1236)] {
+        let l = DrawerLayout::new(&t, screen, 2, 7, false, false);
         check_layout(&t, &l, screen);
-        assert_eq!(rows(&l).len(), 1, "{tiles} tiles in one row");
+        assert_eq!(rows(&l).len(), 1, "7 tiles in one row on {screen:?}");
         assert!(mm(&t, l.tiles[0].w) >= MIN_ROW_TILE_MM);
         assert_eq!(l.sliders[0].y, l.sliders[1].y, "light and warmth side by side");
         assert!(l.sliders[0].right() < l.sliders[1].x);
         let h = mm(&t, l.panel.h);
         assert!((36.0..=41.0).contains(&h), "about 40 mm, not {h}");
+        assert!(l.panel.h * 2 < screen.h, "less than half height on {screen:?}");
     }
     // Without warmth, light takes the whole row.
-    let l = DrawerLayout::new(&t, screen, 1, 6, false, false);
+    let screen = Rect::new(0, 0, 1696, 1272);
+    let l = DrawerLayout::new(&t, screen, 1, 7, false, false);
     assert_eq!(l.sliders.len(), 1);
     assert_eq!(l.sliders[0].w, l.status.w);
 }
@@ -95,52 +90,47 @@ fn paperwhite_landscape_puts_sliders_side_by_side_and_tiles_in_one_row() {
 fn small_screens_scale_and_narrow_landscape_rows_wrap() {
     let t = Theme::for_dpi(167);
     let portrait = Rect::new(0, 0, 600, 800);
-    for (tiles, shape) in [(5, vec![3, 2]), (6, vec![3, 3])] {
-        let l = DrawerLayout::new(&t, portrait, 2, tiles, false, false);
-        check_layout(&t, &l, portrait);
-        assert_eq!(rows(&l).iter().map(Vec::len).collect::<Vec<_>>(), shape);
-        assert!(l.panel.h * 100 / portrait.h < 60, "{}", l.panel.h);
-    }
+    let l = DrawerLayout::new(&t, portrait, 2, 7, false, false);
+    check_layout(&t, &l, portrait);
+    assert_eq!(rows(&l).iter().map(Vec::len).collect::<Vec<_>>(), [4, 3]);
+    assert!(l.panel.h * 100 / portrait.h < 60, "{}", l.panel.h);
     let landscape = Rect::new(0, 0, 800, 600);
-    let six = DrawerLayout::new(&t, landscape, 2, 6, false, false);
-    check_layout(&t, &six, landscape);
-    assert_eq!(rows(&six).len(), 2, "six tiles would be under 19 mm wide: wrap to 3 × 2");
-    let five = DrawerLayout::new(&t, landscape, 2, 5, false, false);
-    check_layout(&t, &five, landscape);
-    assert_eq!(rows(&five).len(), 1, "five tiles still fit one row");
-    assert!(mm(&t, five.tiles[0].w) >= MIN_ROW_TILE_MM);
-    assert!(six.panel.h * 100 / landscape.h < 65);
+    let seven = DrawerLayout::new(&t, landscape, 2, 7, false, false);
+    check_layout(&t, &seven, landscape);
+    assert_eq!(rows(&seven).len(), 2, "seven tiles on 6\" landscape are under 17 mm wide: wrap to 4 + 3");
+    assert_eq!(rows(&seven).iter().map(Vec::len).collect::<Vec<_>>(), [4, 3]);
+    assert!(seven.panel.h * 100 / landscape.h < 65);
     // 6" at 300 dpi.
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1072, 1448);
-    check_layout(&t, &DrawerLayout::new(&t, screen, 1, 6, false, false), screen);
+    let p300 = DrawerLayout::new(&t, screen, 1, 7, false, false);
+    check_layout(&t, &p300, screen);
+    assert_eq!(rows(&p300).iter().map(Vec::len).collect::<Vec<_>>(), [4, 3]);
 }
 
 #[test]
 fn scribe_portrait_keeps_the_tiles_in_one_row() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1860, 2480);
-    for tiles in [5, 6] {
-        let l = DrawerLayout::new(&t, screen, 2, tiles, false, false);
-        check_layout(&t, &l, screen);
-        assert_eq!(rows(&l).len(), 1, "{tiles} tiles in one row on 10.2\"");
-        assert!(mm(&t, l.tiles[0].w) >= MIN_ROW_TILE_MM);
-        assert!(l.panel.h * 100 / screen.h < 25, "{}", l.panel.h);
-    }
-    // The Paperwhite's portrait rows of three stay.
-    let l = DrawerLayout::new(&t, Rect::new(0, 0, 1272, 1696), 2, 5, false, false);
-    assert_eq!(rows(&l).iter().map(Vec::len).collect::<Vec<_>>(), [3, 2]);
+    let l = DrawerLayout::new(&t, screen, 2, 7, false, false);
+    check_layout(&t, &l, screen);
+    assert_eq!(rows(&l).len(), 1, "7 tiles in one row on 10.2\"");
+    assert!(mm(&t, l.tiles[0].w) >= MIN_ROW_TILE_MM);
+    assert!(l.panel.h * 100 / screen.h < 25, "{}", l.panel.h);
+    // Paperwhite portrait balances into 4 + 3.
+    let l = DrawerLayout::new(&t, Rect::new(0, 0, 1272, 1696), 2, 7, false, false);
+    assert_eq!(rows(&l).iter().map(Vec::len).collect::<Vec<_>>(), [4, 3]);
 }
 
 #[test]
 fn no_frontlight_reading_leaves_out_the_slider_rows() {
     let t = Theme::for_dpi(300);
     let screen = Rect::new(0, 0, 1272, 1696);
-    let none = DrawerLayout::new(&t, screen, 0, 5, false, false);
+    let none = DrawerLayout::new(&t, screen, 0, 7, false, false);
     check_layout(&t, &none, screen);
     assert!(none.sliders.is_empty());
     assert_eq!(none.dividers.len(), 1);
-    assert!(none.panel.h < DrawerLayout::new(&t, screen, 1, 5, false, false).panel.h);
+    assert!(none.panel.h < DrawerLayout::new(&t, screen, 1, 7, false, false).panel.h);
 }
 
 pub(crate) fn status(running: bool, wifi: bool) -> ssh::Status {
@@ -171,6 +161,7 @@ fn drawer(net: NetState) -> (Theme, TopDrawer) {
         &t,
         Rect::new(0, 0, 1272, 1696),
         Orientation::Portrait,
+        false,
         Some(LIGHT),
         LightRange::default(),
         net,
@@ -200,15 +191,15 @@ fn ssh_tile_is_always_shown_and_stays_when_the_server_stops() {
     let (t, mut d) = drawer(net(Some(true), false));
     assert_eq!(
         d.tile_kinds(),
-        [Tile::Wifi, Tile::Ssh, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
+        [Tile::Wifi, Tile::Ssh, Tile::DarkMode, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
     );
     assert_eq!(d.tile_view(Tile::Transfer).2, "Transfer");
     let height = d.rect().h;
     d.set_net(&t, net(Some(true), true), Instant::now());
-    assert_eq!(d.tile_kinds().len(), 6);
+    assert_eq!(d.tile_kinds().len(), 7);
     assert_eq!(d.rect().h, height);
     d.set_net(&t, net(Some(true), false), Instant::now());
-    assert_eq!(d.tile_kinds().len(), 6);
+    assert_eq!(d.tile_kinds().len(), 7);
 }
 
 #[test]
@@ -234,9 +225,16 @@ fn tile_states_follow_wifi_ssh_and_orientation() {
     assert_eq!((d.tile_view(Tile::Ssh).0, d.tile_view(Tile::Ssh).3.as_str()), (TileState::On, "On · :2222"));
     d.net.ssh_pending = Some(false);
     assert_eq!(d.tile_view(Tile::Ssh).3, "Stopping…");
-    assert_eq!(d.tile_view(Tile::Orientation), (TileState::Off, Icon::Portrait, "Orientation", "Portrait".into()));
+    assert_eq!(d.tile_view(Tile::DarkMode), (TileState::Off, Icon::Moon, "Dark mode", "Off".into()));
+    d.dark = true;
+    assert_eq!(d.tile_view(Tile::DarkMode), (TileState::On, Icon::Moon, "Dark mode", "On".into()));
+    assert_eq!(d.tile_view(Tile::Orientation).0, TileState::Off);
+    assert_eq!(d.tile_view(Tile::Orientation).1, Icon::Portrait);
+    assert_eq!(d.tile_view(Tile::Orientation).3, "Portrait");
     d.orientation = Orientation::Landscape;
-    assert_eq!(d.tile_view(Tile::Orientation), (TileState::On, Icon::Landscape, "Orientation", "Landscape".into()));
+    assert_eq!(d.tile_view(Tile::Orientation).0, TileState::On);
+    assert_eq!(d.tile_view(Tile::Orientation).1, Icon::Landscape);
+    assert_eq!(d.tile_view(Tile::Orientation).3, "Landscape");
     assert_eq!(d.tile_view(Tile::Refresh).0, TileState::Off);
 }
 
@@ -259,6 +257,9 @@ fn tiles_ask_for_their_actions_and_pending_tiles_ignore_taps() {
     let (_, mut d) = drawer(net(Some(false), false));
     assert_eq!(tap_tile(&mut d, Tile::Wifi), Some(DrawerEvent::Wifi(true)));
     assert_eq!(tap_tile(&mut d, Tile::Ssh), Some(DrawerEvent::Ssh(true)));
+    assert_eq!(tap_tile(&mut d, Tile::DarkMode), Some(DrawerEvent::DarkMode(true)));
+    d.dark = true;
+    assert_eq!(tap_tile(&mut d, Tile::DarkMode), Some(DrawerEvent::DarkMode(false)));
     assert_eq!(tap_tile(&mut d, Tile::Orientation), Some(DrawerEvent::Orientation(Orientation::Landscape)));
     assert_eq!(tap_tile(&mut d, Tile::Refresh), Some(DrawerEvent::Refresh));
     assert_eq!(tap_tile(&mut d, Tile::Transfer), Some(DrawerEvent::Transfer));
@@ -349,6 +350,7 @@ fn light_sliders_follow_the_model_range() {
         &t,
         screen,
         Orientation::Portrait,
+        false,
         Some(LIGHT),
         range,
         net(Some(true), false),
@@ -382,6 +384,7 @@ fn late_frontlight_reading_adds_the_sliders_once() {
         &t,
         screen,
         Orientation::Portrait,
+        false,
         None,
         LightRange::default(),
         net(Some(true), false),
@@ -652,6 +655,7 @@ fn in_book_drawer_header_geometry_and_actions_in_portrait_landscape_and_small() 
             &t,
             screen,
             orientation,
+            false,
             Some(LIGHT),
             LightRange::default(),
             net(Some(true), false),
@@ -689,4 +693,42 @@ fn in_book_drawer_header_geometry_and_actions_in_portrait_landscape_and_small() 
     // Home/Library drawer has no back/search buttons.
     let (_, home) = drawer(net(Some(true), false));
     assert!(home.back_rect().is_none() && home.search_rect().is_none());
+}
+
+#[test]
+fn seven_tile_labels_fit_across_devices() {
+    let mut text = TextRenderer::new();
+    for (name, dpi, screen) in [
+        ("pw5-l", 300, Rect::new(0, 0, 1648, 1236)),
+        ("pw6-l", 300, Rect::new(0, 0, 1696, 1272)),
+        ("basic-167-p", 167, Rect::new(0, 0, 600, 800)),
+        ("basic-300-p", 300, Rect::new(0, 0, 1072, 1448)),
+    ] {
+        let t = Theme::for_dpi(dpi);
+        let d = TopDrawer::new(
+            &t,
+            screen,
+            if screen.w > screen.h { Orientation::Landscape } else { Orientation::Portrait },
+            false,
+            Some(LIGHT),
+            LightRange::default(),
+            net(Some(true), false),
+            None,
+            Instant::now(),
+        );
+        let title_style = t.small.weight(Weight::SemiBold);
+        let sub_style = t.caption;
+        let min_tile_w = d.layout().tiles.iter().map(|r| r.w).min().unwrap();
+        let inner = (min_tile_w - 2 * t.mm(1.2)) as f32;
+        for tile in d.tile_kinds() {
+            let (_, _, title, _) = d.tile_view(tile);
+            let w = text.width(title, title_style);
+            assert!(w <= inner, "{name} title {title:?} width {w} > inner {inner} (tile {min_tile_w}px)");
+        }
+        for sub in ["Turning off…", "Unavailable", "Checking…", "Clear screen", "All options", "Landscape", "Portrait"]
+        {
+            let w = text.width(sub, sub_style);
+            assert!(w <= inner, "{name} sub {sub:?} width {w} > inner {inner} (tile {min_tile_w}px)");
+        }
+    }
 }

@@ -21,6 +21,7 @@ pub enum Icon {
     TextSize,
     Settings,
     Sun,
+    Moon,
     Close,
     Check,
     BookOpen,
@@ -61,7 +62,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 42] = [
+    pub const ALL: [Icon; 43] = [
         Icon::ArrowLeft,
         Icon::ChevronLeft,
         Icon::ChevronRight,
@@ -71,6 +72,7 @@ impl Icon {
         Icon::TextSize,
         Icon::Settings,
         Icon::Sun,
+        Icon::Moon,
         Icon::Close,
         Icon::Check,
         Icon::BookOpen,
@@ -117,6 +119,7 @@ impl Icon {
             Icon::TextSize => include_str!("../../../../assets/icons/a-large-small.svg"),
             Icon::Settings => include_str!("../../../../assets/icons/settings.svg"),
             Icon::Sun => include_str!("../../../../assets/icons/sun.svg"),
+            Icon::Moon => include_str!("../../../../assets/icons/moon.svg"),
             Icon::Close => include_str!("../../../../assets/icons/x.svg"),
             Icon::Check => include_str!("../../../../assets/icons/check.svg"),
             Icon::BookOpen => include_str!("../../../../assets/icons/book-open.svg"),

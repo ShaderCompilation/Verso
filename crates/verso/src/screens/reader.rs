@@ -46,6 +46,7 @@ pub struct Reader {
     store: Store,
     id: String,
     settings: Settings,
+    dark: bool,
     pub fonts: Vec<FontFace>,
     metadata: Metadata,
     toc: Vec<TocEntry>,
@@ -212,6 +213,7 @@ impl Reader {
     ) -> Self {
         let mut cache = PageCache::default();
         cache.reset(generation);
+        let dark = settings.dark_mode;
         let refresh = Refresh::new(settings.page_flash);
         Self {
             settings_seen: store.settings_saves(),
@@ -221,6 +223,7 @@ impl Reader {
             store,
             id,
             settings,
+            dark,
             fonts,
             metadata: Metadata::default(),
             toc: Vec::new(),
@@ -394,7 +397,10 @@ impl Reader {
                         };
                         self.cache.evict(stale);
                         let shown = self.shown.as_ref().is_some_and(|p| {
-                            p.generation == self.cache.generation && p.number == self.target && !stale(p)
+                            p.generation == self.cache.generation
+                                && p.number == self.target
+                                && p.dark == self.dark
+                                && !stale(p)
                         });
                         if !shown && self.cache.get(self.target).is_none() {
                             self.annotations.paint_pending = true;
@@ -402,7 +408,7 @@ impl Reader {
                                 self.worker.send(Command::Page {
                                     generation: self.cache.generation,
                                     number: self.target,
-                                    dark: self.settings.dark_mode,
+                                    dark: self.dark,
                                 });
                             }
                         }
@@ -439,17 +445,22 @@ impl Reader {
                     self.jump_destination = None;
                     self.target = page.number;
                 }
-                let current = page.contrast == self.contrast();
+                let dark_ok = page.dark == self.dark;
+                let current = page.contrast == self.contrast() && dark_ok;
                 if current {
                     self.cache.insert(page.clone(), self.target);
                 }
                 if page.number == self.target {
-                    self.display(page, cx);
+                    if dark_ok {
+                        self.display(page, cx);
+                    } else if let Some(cached) = self.cache.get(self.target) {
+                        self.display(cached, cx);
+                    }
                     if !current && self.cache.request(self.target) {
                         self.worker.send(Command::Page {
                             generation: self.cache.generation,
                             number: self.target,
-                            dark: self.settings.dark_mode,
+                            dark: self.dark,
                         });
                     }
                 }
@@ -524,13 +535,20 @@ impl Reader {
                     cx.redraw();
                 }
             }
-            // Drawn before a contrast change: only the page wanted now is drawn again.
-            Reply::Page(page) if page.generation == self.cache.generation && page.contrast != self.contrast() => {
-                if page.number == self.target && self.cache.request(page.number) {
+            // Drawn before a contrast or polarity change: only the page wanted now is drawn again.
+            Reply::Page(page)
+                if page.generation == self.cache.generation
+                    && (page.contrast != self.contrast() || page.dark != self.dark) =>
+            {
+                if page.number == self.target
+                    && !self.pending_turn
+                    && self.cache.get(self.target).is_none()
+                    && self.cache.request(page.number)
+                {
                     self.worker.send(Command::Page {
                         generation: page.generation,
                         number: page.number,
-                        dark: self.settings.dark_mode,
+                        dark: self.dark,
                     });
                 }
             }
@@ -679,15 +697,21 @@ impl Reader {
         let different = self.shown.as_ref().is_none_or(|p| p.generation != page.generation || p.number != page.number);
         if !different {
             if let Some(shown) = &self.shown
-                && (shown.annotation_revision != page.annotation_revision || shown.contrast != page.contrast)
+                && (shown.annotation_revision != page.annotation_revision
+                    || shown.contrast != page.contrast
+                    || shown.dark != page.dark)
             {
+                let polarity_changed = shown.dark != page.dark;
                 // Rendered again after a resolution: without highlights on
                 // either version, the pixels are the same.
                 let unmarked = |p: &Page| p.annotations.is_empty() && p.painted.is_empty();
-                let same = shown.contrast == page.contrast && unmarked(shown) && unmarked(&page);
+                let same = !polarity_changed && shown.contrast == page.contrast && unmarked(shown) && unmarked(&page);
                 self.shown = Some(page);
                 if !same {
                     cx.redraw();
+                }
+                if polarity_changed {
+                    self.prefetch();
                 }
             }
             return;
@@ -755,11 +779,7 @@ impl Reader {
         // Forward first: it is the common direction.
         for n in [self.target.checked_add(1), self.target.checked_sub(1)].into_iter().flatten() {
             if n < self.pages && self.cache.request(n) {
-                self.worker.send(Command::Page {
-                    generation: self.cache.generation,
-                    number: n,
-                    dark: self.settings.dark_mode,
-                });
+                self.worker.send(Command::Page { generation: self.cache.generation, number: n, dark: self.dark });
             }
         }
     }
@@ -872,7 +892,7 @@ impl Reader {
             return;
         }
         let page = self.target;
-        if self.shown.as_ref().is_some_and(|p| p.number == page) {
+        if self.shown.as_ref().is_some_and(|p| p.number == page && p.dark == self.dark) {
             self.turn_pending = false;
             self.bars.stepping = false;
             return;
@@ -880,11 +900,7 @@ impl Reader {
         if let Some(p) = self.cache.get(page) {
             self.display(p, cx);
         } else if self.cache.request(page) {
-            self.worker.send(Command::Page {
-                generation: self.cache.generation,
-                number: page,
-                dark: self.settings.dark_mode,
-            });
+            self.worker.send(Command::Page { generation: self.cache.generation, number: page, dark: self.dark });
         }
     }
     /// `page` is the position's page in the current layout, when known.
@@ -1445,11 +1461,7 @@ impl Reader {
         self.cache.reset(self.cache.generation);
         // A layout under way draws its first page again when it arrives.
         if !self.laying_out && self.layout_at.is_none() && self.pages > 0 && self.cache.request(self.target) {
-            self.worker.send(Command::Page {
-                generation: self.cache.generation,
-                number: self.target,
-                dark: self.settings.dark_mode,
-            });
+            self.worker.send(Command::Page { generation: self.cache.generation, number: self.target, dark: self.dark });
         }
     }
     fn contrast(&self) -> i32 {
@@ -2157,8 +2169,32 @@ impl Reader {
 }
 
 impl Screen for Reader {
+    fn set_dark(&mut self, dark: bool, cx: &mut EventCx) {
+        self.settings.dark_mode = dark;
+        self.settings_seen = self.store.settings_saves();
+        if self.dark == dark {
+            return;
+        }
+        self.dark = dark;
+        self.worker.set_dark(dark);
+        self.cache.reset(self.cache.generation);
+        self.opening_notice_at = None;
+        if self.shown.is_none() {
+            cx.redraw();
+        }
+        if !self.laying_out && self.layout_at.is_none() && self.pages > 0 && self.cache.request(self.target) {
+            self.worker.send(Command::Page { generation: self.cache.generation, number: self.target, dark: self.dark });
+        }
+    }
+
+    fn waiting_for_dark(&self) -> bool {
+        self.error.is_none()
+            && !matches!(self.overlay, Overlay::Layout(_))
+            && self.shown.as_ref().is_some_and(|p| p.dark != self.dark)
+    }
+
     fn fills_canvas(&self) -> bool {
-        self.shown.is_some() || self.waiting_for_open()
+        self.shown.as_ref().is_some_and(|p| p.dark == self.dark) || self.waiting_for_open()
     }
 
     fn keeps_canvas(&self) -> bool {
@@ -2229,9 +2265,11 @@ impl Screen for Reader {
             return;
         }
         if let Some(page) = &self.shown {
-            match page.color {
-                crate::gfx::ColorMode::Gray8 => cx.canvas.set_gray(&page.pixels),
-                crate::gfx::ColorMode::Color32 => cx.canvas.set_rgba_opaque(&page.pixels),
+            if page.dark == self.dark {
+                match page.color {
+                    crate::gfx::ColorMode::Gray8 => cx.canvas.set_gray(&page.pixels),
+                    crate::gfx::ColorMode::Color32 => cx.canvas.set_rgba_opaque(&page.pixels),
+                }
             }
             let layout = &self.settings.page_layout;
             if layout.top.on || layout.bottom.on {
@@ -2249,7 +2287,10 @@ impl Screen for Reader {
         } else {
             cx.line("Opening book…", t.heading, self.screen.inset(t.margin), HAlign::Center);
         }
-        if let Some(page) = &self.shown {
+        let matching_page = self.shown.as_ref().is_some_and(|p| p.dark == self.dark);
+        if let Some(page) = &self.shown
+            && page.dark == self.dark
+        {
             // Prepared patches are the gray highlight; a color canvas tints
             // the page itself.
             let color = cx.canvas.mode() == crate::gfx::ColorMode::Color32;
@@ -2261,7 +2302,7 @@ impl Screen for Reader {
                 }
             }
         }
-        if let Some((_, rects)) = &self.highlight {
+        if matching_page && let Some((_, rects)) = &self.highlight {
             for rect in rects {
                 cx.canvas.invert_rect(*rect);
             }
@@ -2278,7 +2319,9 @@ impl Screen for Reader {
             bar.draw(cx, self.target, self.pages, self.selection.busy() || self.laying_out);
         }
         // After the bar, so a handle over its buttons stays visible.
-        self.selection.draw(cx, self.handle_cover(t));
+        if matching_page {
+            self.selection.draw(cx, self.handle_cover(t));
+        }
         if !self.selection.extending
             && let Some(bar) = &mut self.search_bar
         {
@@ -2400,7 +2443,7 @@ impl Screen for Reader {
             || self.selection.busy()
             || self.laying_out
             || self.layout_at.is_some()
-            || self.shown.as_ref().is_some_and(|p| p.number != self.target)
+            || self.shown.as_ref().is_some_and(|p| p.number != self.target || p.dark != self.dark)
     }
     fn deadline(&self) -> Option<Instant> {
         let step = match &self.overlay {
@@ -5645,5 +5688,134 @@ mod tests {
         test_cx(&theme, |cx| r.receive(Reply::Page(Arc::new(page)), cx));
         assert_eq!(r.shown.as_ref().unwrap().contrast, 1);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+    }
+
+    #[test]
+    fn dark_mode_switch_renders_paper_on_timeout_keeps_position_and_handles_stale_replies() {
+        let theme = Theme::for_dpi(150);
+        let (mut r, commands) = test_reader("dark-switch");
+        r.pages = 10;
+        r.laying_out = false;
+        r.target = 3;
+        let mut light_p3 = (*test_page(1, 3)).clone();
+        light_p3.pixels = vec![0x10; 600 * 800].into();
+        light_p3.offset = Some(1000);
+        let light_p3 = Arc::new(light_p3);
+        let start = Instant::now();
+        at(start, &theme, |cx| r.display(light_p3, cx));
+        r.save_pending = false;
+        r.bars.speed.add(25.0);
+        let samples_before = r.bars.speed.samples;
+        r.highlight = Some((SelectionRequest { generation: 1, page: 3, id: 1 }, vec![Rect::new(20, 20, 40, 20)]));
+        r.selection.selected = Some(crate::document::Selection {
+            text: "word".into(),
+            range: crate::document::TextRange { start: Position("s".into()), end: Position("e".into()) },
+            rects: vec![Rect::new(30, 80, 50, 20)],
+            start_page: 3,
+            start_visible: true,
+            end_visible: true,
+        });
+        r.cache.insert(test_page(1, 4), 3);
+        let _: Vec<_> = commands.try_iter().collect();
+
+        // Switch to dark mode: cache resets (including requested), shown stays, position/selection/sampler untouched.
+        test_cx(&theme, |cx| r.set_dark(true, cx));
+        assert!(r.waiting_for_dark());
+        assert!(!r.fills_canvas(), "timeout frame clears to dark paper");
+        assert_eq!(r.cache.generation, 1);
+        assert!(r.cache.get(4).is_none());
+        assert!(!r.save_pending && r.selection.selected.is_some());
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(matches!(sent.as_slice(), [Command::Page { generation: 1, number: 3, dark: true }]));
+
+        // Timeout draw keeps dark paper (no "Opening book…", no light pixels, no white invert_rect boxes).
+        let mut canvas = crate::gfx::Canvas::new(600, 800);
+        canvas.set_dark(true);
+        canvas.fill(crate::ui::theme::PAPER);
+        let (mut text, mut icons, mut hints) =
+            (crate::gfx::TextRenderer::new(), crate::gfx::IconRenderer::default(), Vec::new());
+        {
+            let mut cx = DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints);
+            r.draw(&mut cx);
+        }
+        assert_eq!(canvas.gray_data()[100 * 600 + 100], crate::ui::theme::PAPER, "timeout shows paper, not old page");
+        assert_eq!(canvas.gray_data()[25 * 600 + 25], crate::ui::theme::PAPER, "highlight invert suppressed");
+        assert_eq!(canvas.gray_data()[90 * 600 + 40], crate::ui::theme::PAPER, "selection invert suppressed");
+        assert_eq!(canvas.gray_data()[400 * 600 + 300], crate::ui::theme::PAPER, "no Opening book notice");
+
+        // Stale-polarity Reply::Page is never shown and re-requests when target isn't in flight.
+        r.cache.reset(1);
+        test_cx(&theme, |cx| r.receive(Reply::Page(test_page(1, 3)), cx));
+        assert!(!r.shown.as_ref().unwrap().dark);
+        assert!(matches!(
+            commands.try_iter().collect::<Vec<_>>().as_slice(),
+            [Command::Page { generation: 1, number: 3, dark: true }]
+        ));
+
+        // Stale-polarity Reply::Jumped accepts target without showing wrong-polarity page, and re-requests.
+        test_cx(&theme, |cx| assert!(r.jump_position(None, Position("jump".into()), cx)));
+        let jump_id = r.jump;
+        let _: Vec<_> = commands.try_iter().collect();
+        test_cx(&theme, |cx| r.receive(Reply::Jumped { jump: jump_id, page: test_page(1, 6) }, cx));
+        assert_eq!(r.target, 6);
+        assert_eq!(r.shown.as_ref().unwrap().number, 3, "light jumped page never displays");
+        assert!(matches!(
+            commands.try_iter().collect::<Vec<_>>().as_slice(),
+            [Command::Page { generation: 1, number: 6, dark: true }]
+        ));
+
+        // Back on target 3: arriving dark page replaces unmarked shown, redraws, prefetches, keeps sampler & selection.
+        r.target = 3;
+        let mut dark_p3 = (*test_page(1, 3)).clone();
+        dark_p3.dark = true;
+        dark_p3.pixels = vec![0x42; 600 * 800].into();
+        let mut redraw = false;
+        let screen = r.screen;
+        r.receive(
+            Reply::Page(Arc::new(dark_p3)),
+            &mut EventCx {
+                theme: &theme,
+                screen,
+                now: Instant::now(),
+                toast: &mut None,
+                forced: &mut vec![],
+                needs_redraw: &mut redraw,
+                battery: None,
+            },
+        );
+        assert!(redraw && !r.waiting_for_dark() && r.fills_canvas());
+        assert!(!r.save_pending, "re-render must not trigger a position write");
+        assert_eq!(r.bars.speed.samples, samples_before);
+        assert!(
+            r.bars
+                .sampler
+                .shown(start + Duration::from_secs(20), Some(1500), crate::reader::speed::Turn::Forward)
+                .is_some(),
+            "polarity switch must keep active page timing in sampler"
+        );
+        assert!(r.selection.selected.is_some());
+        let prefetches: Vec<_> = commands.try_iter().collect();
+        assert!(prefetches.iter().all(|c| matches!(c, Command::Page { dark: true, .. })));
+        assert!(!prefetches.is_empty(), "neighbours prefetched on polarity change");
+
+        // waiting_for_open cancels gracefully on set_dark so old covers don't linger.
+        let (mut opening, _) = test_reader("opening-dark");
+        assert!(opening.waiting_for_open() && opening.keeps_canvas());
+        let mut redraw2 = false;
+        opening.set_dark(
+            true,
+            &mut EventCx {
+                theme: &theme,
+                screen,
+                now: Instant::now(),
+                toast: &mut None,
+                forced: &mut vec![],
+                needs_redraw: &mut redraw2,
+                battery: None,
+            },
+        );
+        assert!(redraw2 && !opening.waiting_for_open() && !opening.keeps_canvas());
+        let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
+        let _ = std::fs::remove_dir_all(settings_path(&opening).parent().unwrap());
     }
 }

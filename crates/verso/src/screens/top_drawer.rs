@@ -3,7 +3,7 @@
 //!
 //! The app owns the drawer (`App`), drawn above the screen stack and below
 //! its prompts and toasts. It shows the clock, battery, Light and Warmth, and
-//! a grid of tiles: Wi-Fi, SSH, Orientation, Refresh, Wi-Fi transfer and
+//! a grid of tiles: Wi-Fi, SSH, Dark mode, Orientation, Refresh, Transfer and
 //! Settings. Wi-Fi and SSH switch on
 //! [`DrawerWorker`]'s thread, so opening the drawer or tapping a tile never
 //! waits on `lipc` or the mDNS responder.
@@ -28,8 +28,8 @@ use crate::ui::widgets::{IconButton, Slider};
 /// for this long. Like Settings.
 const SSH_RECHECK: Duration = Duration::from_secs(2);
 const SSH_RECHECK_FOR: Duration = Duration::from_secs(90);
-/// A landscape row of tiles narrower than this wraps into rows of three.
-const MIN_ROW_TILE_MM: f32 = 19.0;
+/// A landscape row of tiles narrower than this wraps into two balanced rows.
+const MIN_ROW_TILE_MM: f32 = 17.0;
 /// Sub-labels on an "on" (black) tile.
 const ON_SUB: u8 = 0xdd;
 
@@ -38,6 +38,7 @@ const ON_SUB: u8 = 0xdd;
 pub enum Tile {
     Wifi,
     Ssh,
+    DarkMode,
     Orientation,
     Refresh,
     Transfer,
@@ -49,7 +50,7 @@ pub enum Tile {
 pub enum TileState {
     /// White, black outline: off, or an action.
     Off,
-    /// Solid black: Wi-Fi on, SSH running, Landscape.
+    /// Solid black: Wi-Fi on, SSH running, Dark mode on, Landscape.
     On,
     /// Light gray with a dashed outline: switching; taps are ignored.
     Pending,
@@ -71,6 +72,8 @@ pub enum DrawerEvent {
     Probe,
     /// Start or stop the SSH server.
     Ssh(bool),
+    /// Switch dark mode on or off.
+    DarkMode(bool),
     /// Turn the screen.
     Orientation(Orientation),
     /// Flash the whole screen to clear ghosting.
@@ -101,8 +104,8 @@ pub struct DrawerLayout {
 
 impl DrawerLayout {
     /// `sliders`: 0 (no frontlight reading), 1 (light) or 2 (light and
-    /// warmth). `tiles`: 5, or 6 with SSH. `book`: in-book header instead of
-    /// the Home/Library status strip.
+    /// warmth). `tiles`: 7 (4 + 3 when wrapped). `book`: in-book header
+    /// instead of the Home/Library status strip.
     pub fn new(t: &Theme, screen: Rect, sliders: usize, tiles: usize, book: bool, ssh_note: bool) -> Self {
         let wide = screen.w > screen.h;
         let m = t.margin;
@@ -154,7 +157,7 @@ impl DrawerLayout {
         let mut left = tiles;
         while left > 0 {
             let n = left.min(per_row);
-            let gap = t.mm(if n >= 6 { 1.7 } else { 2.0 });
+            let gap = t.mm(if n >= 4 { 1.5 } else { 2.0 });
             // Equal tiles with exact gaps; rounding goes into the tiles.
             let span = content_w + gap;
             for i in 0..n as i32 {
@@ -184,15 +187,15 @@ impl DrawerLayout {
     }
 }
 
-/// Tiles per row: one row when the tiles stay wide enough (landscape, and
-/// 10.2" portrait), otherwise rows of three (5 = 3 + 2, 6 = 3 × 2).
+/// Tiles per row: one row when the tiles stay wide enough (6.8"+ landscape,
+/// and 10.2" portrait), otherwise two balanced rows (7 = 4 + 3).
 fn tile_columns(t: &Theme, content_w: i32, tiles: usize) -> usize {
     if tiles <= 3 {
         return tiles.max(1);
     }
-    let gap = t.mm(if tiles >= 6 { 1.7 } else { 2.0 });
+    let gap = t.mm(if tiles >= 4 { 1.5 } else { 2.0 });
     let w = (content_w - gap * (tiles as i32 - 1)) / tiles as i32;
-    if w >= t.mm(MIN_ROW_TILE_MM) { tiles } else { 3 }
+    if w >= t.mm(MIN_ROW_TILE_MM) { tiles } else { tiles.div_ceil(2) }
 }
 
 /// The parts of one slider row.
@@ -495,6 +498,7 @@ pub fn remember_hostname(store: &Store, ssh: &ssh::Status) {
 pub struct TopDrawer {
     screen: Rect,
     orientation: Orientation,
+    dark: bool,
     /// Open book context when pulled down inside a book; None on Home/Library.
     book: Option<TopDrawerBook>,
     back: Option<IconButton>,
@@ -520,6 +524,7 @@ impl TopDrawer {
         t: &Theme,
         screen: Rect,
         orientation: Orientation,
+        dark: bool,
         light: Option<Frontlight>,
         range: LightRange,
         net: NetState,
@@ -530,10 +535,11 @@ impl TopDrawer {
             range,
             screen,
             orientation,
+            dark,
             book,
             back: None,
             search: None,
-            layout: DrawerLayout::new(t, screen, 0, 5, false, false),
+            layout: DrawerLayout::new(t, screen, 0, 7, false, false),
             light: None,
             warmth: None,
             tiles: Vec::new(),
@@ -593,7 +599,7 @@ impl TopDrawer {
 
     /// Toggles first, then actions.
     pub fn tile_kinds(&self) -> Vec<Tile> {
-        vec![Tile::Wifi, Tile::Ssh, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
+        vec![Tile::Wifi, Tile::Ssh, Tile::DarkMode, Tile::Orientation, Tile::Refresh, Tile::Transfer, Tile::Settings]
     }
 
     /// One step per powerd step, like the Kindle's own sliders.
@@ -713,10 +719,10 @@ impl TopDrawer {
         changed
     }
 
-    /// The look and labels of a tile. Transfer has long labels in the
-    /// five-tile grid, where its tile is wider.
+    /// The look and labels of a tile. Transfer uses concise labels when tiles
+    /// are narrow.
     pub fn tile_view(&self, tile: Tile) -> (TileState, Icon, &'static str, String) {
-        let six = self.tiles.len() >= 6;
+        let narrow = self.tiles.len() >= 6;
         match tile {
             Tile::Wifi => {
                 let (state, sub) = match (self.net.wifi_pending, self.net.wifi) {
@@ -739,12 +745,16 @@ impl TopDrawer {
                 };
                 (state, Icon::Terminal, "SSH", sub)
             }
+            Tile::DarkMode => {
+                let (state, sub) = if self.dark { (TileState::On, "On") } else { (TileState::Off, "Off") };
+                (state, Icon::Moon, "Dark mode", sub.to_owned())
+            }
             Tile::Orientation => match self.orientation {
                 Orientation::Portrait => (TileState::Off, Icon::Portrait, "Orientation", "Portrait".to_owned()),
                 Orientation::Landscape => (TileState::On, Icon::Landscape, "Orientation", "Landscape".to_owned()),
             },
             Tile::Refresh => (TileState::Off, Icon::Refresh, "Refresh", "Clear screen".to_owned()),
-            Tile::Transfer if six => (TileState::Off, Icon::Transfer, "Transfer", "Web app".to_owned()),
+            Tile::Transfer if narrow => (TileState::Off, Icon::Transfer, "Transfer", "Web app".to_owned()),
             Tile::Transfer => (TileState::Off, Icon::Transfer, "Wi-Fi transfer", "Books & files".to_owned()),
             Tile::Settings => (TileState::Off, Icon::Settings, "Settings", "All options".to_owned()),
         }
@@ -815,6 +825,7 @@ impl TopDrawer {
             Tile::Ssh if net.ssh_pending.is_some() => None,
             Tile::Ssh if !net.ssh.running && net.ssh.unavailable.is_some() => None,
             Tile::Ssh => Some(DrawerEvent::Ssh(!net.ssh.running)),
+            Tile::DarkMode => Some(DrawerEvent::DarkMode(!self.dark)),
             Tile::Orientation => Some(DrawerEvent::Orientation(match self.orientation {
                 Orientation::Portrait => Orientation::Landscape,
                 Orientation::Landscape => Orientation::Portrait,
@@ -957,7 +968,6 @@ impl TopDrawer {
         let sub_style = t.caption.gray(sub_gray);
         let inner = rect.w - 2 * t.mm(1.2);
         if *tile == Tile::Transfer && cx.text.width(title, title_style) > inner as f32 {
-            // Narrow five-tile rows (6" landscape) take the short labels.
             (title, sub) = ("Transfer", "Web app".to_owned());
         }
         let icon_size = t.mm(3.9);

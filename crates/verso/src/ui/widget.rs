@@ -50,6 +50,12 @@ impl<'a> DrawCx<'a> {
         self.canvas.fill_rect(rect, gray);
     }
 
+    /// Elevation fill for floating cards (`SHADOW` on light paper, muted
+    /// charcoal on dark paper so rounded cards don't grow a bright halo).
+    pub fn shadow_gray(&self) -> u8 {
+        if self.canvas.is_dark() { 0xdd } else { crate::ui::theme::SHADOW }
+    }
+
     /// One line of text, cut short with "…" if needed.
     pub fn line(&mut self, text: &str, style: TextStyle, rect: Rect, align: HAlign) {
         self.text.line(self.canvas, text, style, rect, align);

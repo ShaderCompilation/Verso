@@ -215,6 +215,12 @@ pub trait Screen {
     fn on_sleep(&mut self) {}
     /// The device woke up.
     fn on_wake(&mut self, _now: Instant) {}
+    /// Switching dark mode live from the Top Drawer.
+    fn set_dark(&mut self, _dark: bool, _cx: &mut EventCx) {}
+    /// True while re-rendering the current view for a new polarity.
+    fn waiting_for_dark(&self) -> bool {
+        false
+    }
     /// Bounded cover decoding; no art means the native screensaver is used.
     fn sleep_cover(&self, _width: u32, _height: u32) -> Option<crate::library::covers::CoverImage> {
         None

@@ -6,7 +6,7 @@ use crate::{
     platform::RefreshMode,
     ui::{
         gesture::Gesture,
-        theme::{INK, INK3, LINE, PAPER, SHADOW, Theme},
+        theme::{INK, INK3, LINE, PAPER, Theme},
         widget::{DrawCx, Press, PressEvent},
     },
 };
@@ -136,7 +136,7 @@ impl SelectionActions {
     pub fn draw(&self, cx: &mut DrawCx) {
         let t = cx.theme;
         let (r, radius) = (self.rect, Self::radius(t));
-        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), radius, SHADOW);
+        cx.canvas.fill_rounded_rect(r.moved(t.mm(1.0), t.mm(1.0)), radius, cx.shadow_gray());
         cx.canvas.fill_rounded_rect(r, radius, PAPER);
         let label_style = t.caption.weight(Weight::SemiBold);
         let (icon, gap) = (t.icon_small, t.mm(0.9));

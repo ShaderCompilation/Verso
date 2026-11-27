@@ -14,7 +14,7 @@ OUT = sim.out_dir('top-drawer')
 SMALL = {'VERSO_SIM_SIZE': '600x800', 'VERSO_SIM_DPI': '167'}
 
 # Per screen: the top-edge swipe, the battery slot, Home → Library → book,
-# the menu's buttons and the drawer's six tiles.
+# the menu's buttons and the drawer's seven tiles (4 + 3 portrait, 7 × 1 PW6 landscape).
 P = {
     'swipe': ['--swipe', '636,20,636,900'],
     'battery': ['--tap', '532,77'],
@@ -31,8 +31,10 @@ P = {
     'layout': ['--tap', '1077,1584'],
     'text_next': ['--tap', '1166,1615'],
     'back': ['--tap', '80,77'],
-    'tiles': {'wifi': '243,430', 'ssh': '636,430', 'orientation': '1028,430',
-              'refresh': '243,612', 'transfer': '636,612', 'settings': '1028,612'},
+    'tiles': {'wifi': '196,431', 'ssh': '489,431', 'dark': '782,431', 'orientation': '1075,431',
+              'refresh': '245,613', 'transfer': '635,613', 'settings': '1026,613'},
+    'book_tiles': {'wifi': '196,465', 'ssh': '489,465', 'dark': '782,465', 'orientation': '1075,465',
+                   'refresh': '245,647', 'transfer': '635,647', 'settings': '1026,647'},
 }
 L = {
     'swipe': ['--swipe', '848,20,848,700'],
@@ -41,12 +43,16 @@ L = {
     'menu': ['--tap', '848,636'],
     'text': ['--tap', '1047,1169'],
     'layout': ['--tap', '1448,1169'],
-    'tiles': {'wifi': '182,333', 'orientation': '714,333'},
+    'tiles': {'wifi': '164,317', 'ssh': '392,317', 'dark': '620,317', 'orientation': '848,317',
+              'refresh': '1076,317', 'transfer': '1304,317', 'settings': '1532,317'},
+    'book_tiles': {'wifi': '164,334', 'ssh': '392,334', 'dark': '620,334', 'orientation': '848,334',
+                   'refresh': '1076,334', 'transfer': '1304,334', 'settings': '1532,334'},
 }
 
 
-def tap(screen, name):
-    return ['--tap', screen['tiles'][name]]
+def tap(screen, name, book=False):
+    key = 'book_tiles' if book else 'tiles'
+    return ['--tap', screen[key][name]]
 
 
 def main():
@@ -63,7 +69,7 @@ def main():
         'portrait-home-ssh': ({}, [*P['swipe'], *tap(P, 'ssh')]),
         'portrait-library': ({}, [*P['library'], *P['swipe']]),
         'portrait-reader': ({}, in_drawer),
-        'portrait-reader-ssh': ({}, [*in_drawer, *tap(P, 'ssh')]),
+        'portrait-reader-ssh': ({}, [*in_drawer, *tap(P, 'ssh', True)]),
         'portrait-reader-back': ({}, [*in_drawer, *P['drawer_back']]),
         'portrait-reader-search': ({}, [*in_drawer, *P['drawer_search']]),
         'portrait-reader-closed': ({}, [*in_drawer, '--tap', '636,1300']),
@@ -75,21 +81,27 @@ def main():
         'portrait-text-page-2': ({}, [*menu, *P['text'], *P['text_next']]),
         'portrait-layout': ({}, [*menu, *P['layout']]),
         'portrait-layout-closed': ({}, [*menu, *P['layout'], *P['back']]),
-        'portrait-reader-settings': ({}, [*in_drawer, *tap(P, 'settings')]),
-        'portrait-reader-settings-back': ({}, [*in_drawer, *tap(P, 'settings'), *P['back']]),
-        'portrait-reader-transfer': ({}, [*in_drawer, *tap(P, 'transfer')]),
+        'portrait-reader-settings': ({}, [*in_drawer, *tap(P, 'settings', True)]),
+        'portrait-reader-settings-back': ({}, [*in_drawer, *tap(P, 'settings', True), *P['back']]),
+        'portrait-reader-transfer': ({}, [*in_drawer, *tap(P, 'transfer', True)]),
         # Turning in place: the book and the Library folder come back.
-        'portrait-reader-turned': ({}, [*in_drawer, *tap(P, 'orientation')]),
-        'portrait-reader-turned-back': ({}, [*in_drawer, *tap(P, 'orientation'),
-                                             *L['swipe'], *tap(L, 'orientation')]),
+        'portrait-reader-turned': ({}, [*in_drawer, *tap(P, 'orientation', True)]),
+        'portrait-reader-turned-back': ({}, [*in_drawer, *tap(P, 'orientation', True),
+                                             *L['swipe'], *tap(L, 'orientation', True)]),
         'portrait-library-turned': ({}, [*P['library'], *P['swipe'], *tap(P, 'orientation')]),
+        # Dark mode: switched via the tile and shown in both orientations on 7" and 6".
+        'dark-portrait-home': ({'dark_mode': True}, P['swipe']),
+        'dark-landscape-home': ({'dark_mode': True, **land}, L['swipe']),
+        'dark-portrait-switched-reader': ({}, [*in_drawer, *tap(P, 'dark', True)]),
+        'dark-small-home': ({'dark_mode': True}, ['--swipe', '300,10,300,500'], SMALL),
+        'dark-small-landscape-home': ({'dark_mode': True, **land}, ['--swipe', '400,10,400,400'], SMALL),
         # Landscape.
         'landscape-home': (land, L['swipe']),
         'landscape-reader': (land, [*L['open'], *L['next_page'], *L['swipe']]),
         'landscape-menu': (land, [*L['open'], *L['next_page'], *L['menu']]),
         'landscape-text': (land, [*L['open'], *L['next_page'], *L['menu'], *L['text']]),
         'landscape-layout': (land, [*L['open'], *L['next_page'], *L['menu'], *L['layout']]),
-        # 6" small screen: the six tiles wrap to 3 x 2 in both orientations.
+        # 6" small screen: the seven tiles wrap to 4 + 3 in both orientations.
         'small-home': ({}, ['--swipe', '300,10,300,500'], SMALL),
         'small-reader': ({}, ['--tap', '300,740', '--tap', '90,260', '--swipe', '300,10,300,500'], SMALL),
         'small-landscape-home': (land, ['--swipe', '400,10,400,400'], SMALL),
@@ -113,6 +125,7 @@ def check(states):
     assert settings('portrait-reader-turned')['orientation'] == 'landscape'
     assert settings('portrait-reader-turned-back').get('orientation', 'portrait') == 'portrait'
     assert settings('portrait-library-turned')['orientation'] == 'landscape'
+    assert settings('dark-portrait-switched-reader')['dark_mode'] is True
 
 
 if __name__ == '__main__':
