@@ -294,6 +294,28 @@ impl Canvas {
         }
     }
 
+    /// Binary (1-bit B&W) threshold without inversion, matching
+    /// [`Self::invert_rect_bw`]'s `< 128` cutoff. Used while dragging a
+    /// selection under `RefreshMode::Fast` (`WFM_DU`) so newly deselected words
+    /// stay pure black/white in the EPDC working buffer until finger lift
+    /// restores antialiased grays cleanly.
+    pub fn binarize_rect(&mut self, rect: Rect) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let (bpp, rows) = self.rows_mut(r);
+        for row in rows {
+            if bpp == 1 {
+                for pixel in row {
+                    *pixel = if *pixel < 128 { 0 } else { 255 };
+                }
+            } else {
+                for px in row.as_chunks_mut::<4>().0 {
+                    let v = if luma(px[0], px[1], px[2]) < 128 { 0 } else { 255 };
+                    *px = [v, v, v, 255];
+                }
+            }
+        }
+    }
+
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
         if rect.w <= 0 || rect.h <= 0 {
             return;
@@ -1072,6 +1094,16 @@ mod tests {
         }
         assert_eq!(rgba_at(&color, 0, 0), [255; 4]);
         assert_eq!(rgba_at(&color, 7, 0), [255; 4]);
+
+        gray.blit_gray(Rect::new(1, 0, 6, 1), &samples, 6);
+        gray.binarize_rect(Rect::new(1, 0, 6, 1));
+        assert_eq!(&gray.gray_data()[0..8], &[255, 0, 0, 0, 255, 255, 255, 255]);
+
+        color.blit_rgba(Rect::new(1, 0, 6, 1), &rgba, 6);
+        color.binarize_rect(Rect::new(1, 0, 6, 1));
+        for (i, want) in [0u8, 0, 0, 255, 255, 255].into_iter().enumerate() {
+            assert_eq!(rgba_at(&color, i as u32 + 1, 0), [want, want, want, 255]);
+        }
     }
 
     #[test]

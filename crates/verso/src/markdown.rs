@@ -13,7 +13,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
 use crate::library::Metadata;
 
@@ -32,6 +32,7 @@ const GFM_OPTIONS: Options = Options::ENABLE_TABLES
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rendered {
     pub xhtml: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub title: String,
     pub language: String,
 }
@@ -97,6 +98,32 @@ pub fn read_file(path: &Path) -> Result<String> {
     Ok(String::from_utf8(bytes).expect("validated UTF-8"))
 }
 
+/// Reads a bounded prefix of a Markdown file sufficient to parse YAML
+/// frontmatter without loading the entire document into memory.
+fn read_frontmatter_prefix(path: &Path) -> Result<String> {
+    const PREFIX_LIMIT: usize = MAX_FRONTMATTER_BYTES + 1024;
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    ensure!(meta.len() <= MAX_BYTES as u64, "Markdown file exceeds {MAX_BYTES} bytes");
+    let mut bytes = Vec::with_capacity(meta.len().min(PREFIX_LIMIT as u64) as usize);
+    file.take((PREFIX_LIMIT + 1) as u64).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > PREFIX_LIMIT;
+    if truncated {
+        bytes.truncate(PREFIX_LIMIT);
+    }
+    ensure!(!bytes.contains(&0), "Markdown file contains NUL bytes");
+    let valid_len = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) if truncated && e.error_len().is_none() => e.valid_up_to(),
+        Err(e) => return Err(e).context("Markdown file is not valid UTF-8"),
+    };
+    bytes.truncate(valid_len);
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        bytes.drain(..3);
+    }
+    Ok(String::from_utf8(bytes).expect("validated UTF-8"))
+}
+
 /// Validates a Markdown `cover:` reference syntactically as a clean relative
 /// path inside the document's folder (no leading `/`, no `..`, no `\`, no URL
 /// scheme, no NUL). Returns a normalized `/`-separated relative path.
@@ -135,18 +162,14 @@ fn parent_dir(book_path: &Path) -> &Path {
     book_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
 }
 
-/// Checks whether a validated relative `cover` path is safe to keep in
-/// `Metadata::cover`: rejects escaping symlinks (including intermediate symlink
-/// directories or broken symlinks) and directories, while allowing a missing
-/// non-escaping file so later additions still match.
-fn validated_cover_for_metadata(book_path: Option<&Path>, raw_cover: &str) -> Option<String> {
-    let rel = sanitize_relative_cover(raw_cover).ok()?;
-    let Some(book_path) = book_path else { return Some(rel) };
-    let parent = parent_dir(book_path);
-    let Ok(canon_parent) = std::fs::canonicalize(parent) else {
-        return Some(rel);
+/// Checks whether a normalized relative path `rel` stays confined inside
+/// `base_dir` (rejecting escaping symlinks, broken symlinks, and directories,
+/// while allowing missing non-escaping files).
+fn confine_relative_path(base_dir: &Path, rel: &str, fail_closed_on_parent_err: bool) -> bool {
+    let Ok(canon_parent) = std::fs::canonicalize(base_dir) else {
+        return !fail_closed_on_parent_err;
     };
-    let mut cur = parent.to_path_buf();
+    let mut cur = base_dir.to_path_buf();
     let parts: Vec<&str> = rel.split('/').collect();
     for (idx, part) in parts.iter().enumerate() {
         cur.push(part);
@@ -154,20 +177,68 @@ fn validated_cover_for_metadata(book_path: Option<&Path>, raw_cover: &str) -> Op
             Ok(_) => {
                 let is_last = idx + 1 == parts.len();
                 let Ok(canon) = std::fs::canonicalize(&cur) else {
-                    return None;
+                    return false;
                 };
                 if !canon.starts_with(&canon_parent) || canon == canon_parent {
-                    return None;
+                    return false;
                 }
                 if is_last && !std::fs::metadata(&canon).is_ok_and(|m| m.is_file()) {
-                    return None;
+                    return false;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-            Err(_) => return None,
+            Err(_) => return false,
         }
     }
-    Some(rel)
+    true
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = (*bytes.get(i + 1)? as char).to_digit(16)?;
+            let lo = (*bytes.get(i + 2)? as char).to_digit(16)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Validates a Markdown `![](src)` target as a local relative path confined
+/// to `base_dir` (when rendering from disk). Invalid or escaping URLs return
+/// `None` so the caller blanks `src=""`.
+fn sanitize_image_src(dest_url: &str, base_dir: Option<&Path>) -> Option<String> {
+    let raw = dest_url.trim();
+    if raw.is_empty() || raw.chars().any(|c| c.is_ascii_control()) || raw.contains(['\\', ':']) || raw.starts_with('/')
+    {
+        return None;
+    }
+    let decoded = percent_decode(raw)?;
+    let rel = sanitize_relative_cover(&decoded).ok()?;
+    if let Some(dir) = base_dir
+        && !confine_relative_path(dir, &rel, true)
+    {
+        return None;
+    }
+    // Escape `%` so crengine's single DecodeHTMLUrlString pass keeps literal `%` intact.
+    Some(rel.replace('%', "%25"))
+}
+
+/// Checks whether a validated relative `cover` path is safe to keep in
+/// `Metadata::cover`: rejects escaping symlinks (including intermediate symlink
+/// directories or broken symlinks) and directories, while allowing a missing
+/// non-escaping file so later additions still match.
+fn validated_cover_for_metadata(book_path: Option<&Path>, raw_cover: &str) -> Option<String> {
+    let rel = sanitize_relative_cover(raw_cover).ok()?;
+    let Some(book_path) = book_path else { return Some(rel) };
+    confine_relative_path(parent_dir(book_path), &rel, false).then_some(rel)
 }
 
 /// Reads metadata from a Markdown file without filling an empty title from the
@@ -189,6 +260,7 @@ pub fn read(path: &Path) -> Result<Metadata> {
 }
 
 /// Reads metadata directly from validated Markdown bytes (no disk cover check).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn metadata_from_bytes(bytes: &[u8]) -> Result<Metadata> {
     let input = normalize_bytes(bytes)?;
     Ok(extract_metadata(None, input))
@@ -197,7 +269,7 @@ pub fn metadata_from_bytes(bytes: &[u8]) -> Result<Metadata> {
 /// Returns the trimmed plain-text synopsis from frontmatter (`description` or
 /// `synopsis`), or `None` when absent or empty.
 pub fn synopsis(path: &Path) -> Result<Option<String>> {
-    let input = read_file(path)?;
+    let input = read_frontmatter_prefix(path)?;
     let (fm, _) = split_frontmatter(&input);
     Ok(extract_synopsis(&fm))
 }
@@ -257,16 +329,21 @@ pub fn sample_text_from_str(input: &str, limit: usize) -> String {
 pub fn render_file(path: &Path) -> Result<Rendered> {
     let input = read_file(path)?;
     let fallback = filename_stem(path);
-    Ok(to_xhtml(&input, &fallback))
+    Ok(to_xhtml_in_dir(&input, &fallback, Some(parent_dir(path))))
 }
 
 /// Converts Markdown text (with optional YAML frontmatter) into deterministic
 /// XHTML wrapped in `<!DOCTYPE html><html lang="…">...</html>`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn to_xhtml(input: &str, fallback_title: &str) -> Rendered {
+    to_xhtml_in_dir(input, fallback_title, None)
+}
+
+fn to_xhtml_in_dir(input: &str, fallback_title: &str, base_dir: Option<&Path>) -> Rendered {
     let (fm, body) = split_frontmatter(input);
     let title = resolve_title(&fm, body, fallback_title);
     let language = fm.scalar("lang").or_else(|| fm.scalar("language")).unwrap_or("en").to_owned();
-    let body_html = render_body(body);
+    let body_html = render_body(body, base_dir);
 
     let mut xhtml = String::with_capacity(body_html.len() + 256);
     xhtml.push_str("<!DOCTYPE html><html lang=\"");
@@ -724,33 +801,24 @@ impl FootnoteTracker {
     }
 }
 
-fn render_body(body: &str) -> String {
+fn render_body(body: &str, base_dir: Option<&Path>) -> String {
     let all_events: Vec<Event<'_>> = Parser::new_ext(body, GFM_OPTIONS).collect();
     let (main_events, defs) = partition_footnotes(all_events);
     let mut tracker = FootnoteTracker::new(&defs);
 
     let mut out = String::with_capacity(body.len() + body.len() / 4);
-    render_events(&main_events, &mut tracker, &mut out);
+    render_events(&main_events, &mut tracker, base_dir, &mut out);
 
     // Render referenced footnote definitions in order of first reference (a loop
-    // handles footnotes referencing other footnotes), followed by any unreferenced
-    // definitions.
-    let mut rendered_defs = vec![false; defs.len()];
+    // handles footnotes referencing other footnotes). Unreferenced and duplicate
+    // definitions are omitted (matching GFM/Pandoc).
     let mut endnotes = String::new();
     let mut cursor = 0usize;
     while cursor < tracker.ref_order.len() {
         let def_idx = tracker.ref_order[cursor];
         let num = cursor + 1;
         cursor += 1;
-        rendered_defs[def_idx] = true;
-        write_footnote_aside(num, &defs[def_idx].events, &mut tracker, &mut endnotes);
-    }
-    let mut next_num = tracker.ref_order.len() + 1;
-    for (def_idx, def) in defs.iter().enumerate() {
-        if !rendered_defs[def_idx] {
-            write_footnote_aside(next_num, &def.events, &mut tracker, &mut endnotes);
-            next_num += 1;
-        }
+        write_footnote_aside(num, &defs[def_idx].events, &mut tracker, base_dir, &mut endnotes);
     }
 
     if !endnotes.is_empty() {
@@ -761,10 +829,16 @@ fn render_body(body: &str) -> String {
     out
 }
 
-fn write_footnote_aside<'a>(num: usize, events: &[Event<'a>], tracker: &mut FootnoteTracker, out: &mut String) {
+fn write_footnote_aside<'a>(
+    num: usize,
+    events: &[Event<'a>],
+    tracker: &mut FootnoteTracker,
+    base_dir: Option<&Path>,
+    out: &mut String,
+) {
     use std::fmt::Write;
     let _ = writeln!(out, "<aside id=\"fn-{num}\" role=\"doc-footnote\">");
-    render_events(events, tracker, out);
+    render_events(events, tracker, base_dir, out);
     out.push_str("</aside>\n");
 }
 
@@ -810,7 +884,7 @@ struct TableContext {
     cell_index: usize,
 }
 
-fn render_events<'a>(events: &[Event<'a>], footnotes: &mut FootnoteTracker, out: &mut String) {
+fn render_events<'a>(events: &[Event<'a>], footnotes: &mut FootnoteTracker, base_dir: Option<&Path>, out: &mut String) {
     let mut table_stack: Vec<TableContext> = Vec::new();
     let mut i = 0usize;
 
@@ -916,8 +990,9 @@ fn render_events<'a>(events: &[Event<'a>], footnotes: &mut FootnoteTracker, out:
                 }
                 Tag::Image { dest_url, title, .. } => {
                     let (alt, consumed) = collect_image_alt(&events[i + 1..]);
+                    let src = sanitize_image_src(dest_url, base_dir).unwrap_or_default();
                     out.push_str("<img src=\"");
-                    escape_attr(out, sanitize_href(dest_url));
+                    escape_attr(out, &src);
                     out.push_str("\" alt=\"");
                     escape_attr(out, &alt);
                     if !title.is_empty() {
@@ -1092,9 +1167,6 @@ fn escape_attr(out: &mut String, s: &str) {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _unused_cow_check(_: CowStr<'_>) {}
 
 #[cfg(test)]
 mod tests {
@@ -1293,6 +1365,108 @@ mod tests {
         assert!(!sample.contains("Ada Lovelace"));
         assert!(!sample.contains("very_long_identifier"));
         assert!(sample.contains("Paper-like screens"));
+        Ok(())
+    }
+
+    #[test]
+    fn image_src_confinement_rejects_traversal_schemes_and_escaping_symlinks() -> Result<()> {
+        for bad in [
+            "../secret.png",
+            "sub/../../secret.png",
+            "%2e%2e%2fsecret.png",
+            "%2e%2e/secret.png",
+            "/etc/passwd",
+            "%2fetc/passwd",
+            "sub\\ok.png",
+            "sub%5cok.png",
+            "img%00.png",
+            "https://example.com/a.png",
+            "file:///tmp/a.png",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+        ] {
+            let md = format!("![Bad alt]({bad})");
+            let html = to_xhtml(&md, "img").xhtml;
+            assert!(html.contains("<img src=\"\" alt=\"Bad alt\"/>"), "expected blanked src for {bad:?}: {html}");
+        }
+
+        assert!(
+            to_xhtml("![Ok](markdown-cover.png)", "img").xhtml.contains("<img src=\"markdown-cover.png\" alt=\"Ok\"/>")
+        );
+        assert!(to_xhtml("![Sub](./sub/img.png)", "img").xhtml.contains("<img src=\"sub/img.png\" alt=\"Sub\"/>"));
+        assert!(to_xhtml("![Sp](sub/my%20img.png)", "img").xhtml.contains("<img src=\"sub/my img.png\" alt=\"Sp\"/>"));
+        assert!(
+            to_xhtml("![Double](%252e%252e%252fsecret.png)", "img")
+                .xhtml
+                .contains("<img src=\"%252e%252e%252fsecret.png\" alt=\"Double\"/>")
+        );
+
+        let dir = tempfile::tempdir()?;
+        let book_dir = dir.path().join("books");
+        let outside = dir.path().join("secret.png");
+        std::fs::create_dir_all(book_dir.join("sub"))?;
+        std::fs::write(&outside, b"secret")?;
+        std::fs::write(book_dir.join("markdown-cover.png"), b"ok")?;
+        std::fs::write(book_dir.join("sub/img.png"), b"ok")?;
+        let book_path = book_dir.join("notes.md");
+
+        std::fs::write(&book_path, "![Root](markdown-cover.png)\n\n![Sub](./sub/img.png)\n")?;
+        let ok_html = render_file(&book_path)?.xhtml;
+        assert!(ok_html.contains("<img src=\"markdown-cover.png\" alt=\"Root\"/>"));
+        assert!(ok_html.contains("<img src=\"sub/img.png\" alt=\"Sub\"/>"));
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, book_dir.join("escape.png"))?;
+            std::os::unix::fs::symlink(dir.path(), book_dir.join("escape_dir"))?;
+            std::fs::write(&book_path, "![E1](escape.png)\n\n![E2](escape_dir/secret.png)\n")?;
+            let esc_html = render_file(&book_path)?.xhtml;
+            assert!(esc_html.contains("<img src=\"\" alt=\"E1\"/>"), "{esc_html}");
+            assert!(esc_html.contains("<img src=\"\" alt=\"E2\"/>"), "{esc_html}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn footnotes_omit_unreferenced_and_duplicate_definitions() {
+        let md = "Text[^dup] and[^a].\n\n[^dup]: First def.\n\n[^dup]: Second def.\n\n[^a]: Calls[^b].\n\n[^b]: Nested target.\n\n[^u1]: Unreferenced calls[^u2].\n\n[^u2]: Orphan.\n";
+        let html = to_xhtml(md, "fn").xhtml;
+        assert!(html.contains("<aside id=\"fn-1\" role=\"doc-footnote\">\n<p>First def.</p>\n</aside>"));
+        assert!(!html.contains("Second def."));
+        assert!(html.contains("<aside id=\"fn-2\" role=\"doc-footnote\">\n<p>Calls<sup><a id=\"fnref-3\" href=\"#fn-3\" role=\"doc-noteref\">3</a></sup>.</p>\n</aside>"));
+        assert!(html.contains("<aside id=\"fn-3\" role=\"doc-footnote\">\n<p>Nested target.</p>\n</aside>"));
+        assert!(!html.contains("Unreferenced calls"));
+        assert!(!html.contains("Orphan."));
+        assert!(!html.contains("id=\"fn-4\""));
+
+        let unref_only = "Plain text.\n\n[^u1]: Calls[^u2].\n\n[^u2]: Orphan.\n";
+        let unref_html = to_xhtml(unref_only, "fn").xhtml;
+        assert!(!unref_html.contains("doc-endnotes"));
+        assert!(!unref_html.contains("id=\"fn-"));
+    }
+
+    #[test]
+    fn synopsis_reads_bounded_prefix_on_large_files() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let pad_len = MAX_FRONTMATTER_BYTES + 4096;
+
+        let mut with_fm = String::from("---\ndescription: Bounded summary\n---\n");
+        with_fm.push_str(&"a".repeat(MAX_FRONTMATTER_BYTES + 1024 - with_fm.len() - 1));
+        with_fm.push('é'); // 2-byte UTF-8 char straddling the prefix truncation point
+        with_fm.push_str(&"b".repeat(4096));
+        let fm_path = dir.path().join("with-fm.md");
+        std::fs::write(&fm_path, &with_fm)?;
+        assert_eq!(synopsis(&fm_path)?.as_deref(), Some("Bounded summary"));
+
+        let no_fm = "x".repeat(pad_len);
+        let no_fm_path = dir.path().join("no-fm.md");
+        std::fs::write(&no_fm_path, &no_fm)?;
+        assert_eq!(synopsis(&no_fm_path)?, None);
+
+        let unclosed = format!("---\ndescription: Never closed\n{}", "x".repeat(pad_len));
+        let unclosed_path = dir.path().join("unclosed.md");
+        std::fs::write(&unclosed_path, &unclosed)?;
+        assert_eq!(synopsis(&unclosed_path)?, None);
         Ok(())
     }
 }

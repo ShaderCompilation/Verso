@@ -1293,17 +1293,19 @@ mod tests {
 
         // 5. All h1-h6 levels, internal #anchor navigation, and actual green PNG decoding from relative path.
         let book_dir = dir.path().join("md-book");
-        std::fs::create_dir_all(&book_dir)?;
+        std::fs::create_dir_all(book_dir.join("sub"))?;
         let mut png = std::io::Cursor::new(Vec::new());
         image::RgbImage::from_pixel(120, 80, image::Rgb([20, 180, 40])).write_to(&mut png, image::ImageFormat::Png)?;
         std::fs::write(book_dir.join("green.png"), png.get_ref())?;
+        std::fs::write(book_dir.join("sub/green.png"), png.get_ref())?;
 
         let md_path = book_dir.join("doc.md");
         let mut md_body = String::from(
             "---\ntitle: Anchor & Image Doc\nlang: en\n---\n\n\
              # One\n\nIntro with a note[^a].\n\n\
              ## Two\n### Three\n#### Four\n##### Five\n###### Six\n\n\
-             ![Green sample](green.png)\n\n",
+             ![Green sample](green.png)\n\n\
+             ![Sub green sample](./sub/green.png)\n\n",
         );
         for i in 0..45 {
             md_body.push_str(&format!("Filler paragraph {i} pushing the anchor link onto a later page.\n\n"));

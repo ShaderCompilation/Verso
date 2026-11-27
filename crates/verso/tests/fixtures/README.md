@@ -25,7 +25,6 @@ cross-reference to a chapter heading and a web link. Regenerate with
 dictionary-words.epub is an original test book of selectable single words and
 short passages for manual dictionary and base-form checks: exact entries,
 regular and irregular English inflections, possessives, function words,
-Regular and irregular English inflections, possessives, function words,
 exact-only inputs, and selection across markup, punctuation and special
 characters. Each group says what it exercises. Regenerate with
 `python3 scripts/gen-dictionary-fixture.py`. Licensed with Verso.

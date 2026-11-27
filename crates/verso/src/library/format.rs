@@ -33,7 +33,6 @@ impl BookFormat {
     }
 
     /// Canonical lowercase extension (without leading dot).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn extension(self) -> &'static str {
         match self {
             Self::Epub => "epub",

@@ -27,8 +27,6 @@ mod gfx;
 mod koreader;
 mod library;
 mod logging;
-// Wired into crengine, library, and transfer in phases 2-4.
-#[cfg_attr(not(test), allow(dead_code))]
 mod markdown;
 mod net;
 mod online;
