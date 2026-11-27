@@ -50,8 +50,10 @@ impl Waveform {
     }
 }
 
-/// Temporary Phase 1 dark-mode waveform variant (`VERSO_DARK_VARIANT`),
-/// removed before committing once the Kindle comparison settles A vs B vs C.
+/// Dark-mode waveform variant (`VERSO_DARK_VARIANT`).
+/// Variant A (`GLKW16` + `UPDATE_MODE_PARTIAL`, software flip) is the default;
+/// the remaining variants (`b`, `c`, `c-partial`, `reagl`) stay wired up for
+/// comparison for now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DarkVariant {
     /// Eclipse waveforms; `GLKW16` uses `UPDATE_MODE_PARTIAL`.

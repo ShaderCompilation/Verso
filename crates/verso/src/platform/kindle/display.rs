@@ -76,9 +76,9 @@ pub struct Display {
     pub touch_mirror_y: bool,
     /// Tracks an unawaited flashing refresh so the next write or handoff waits for it.
     flash_fence: FlashFence,
-    /// Temporary Phase 1 dark-mode waveform variant (`VERSO_DARK_VARIANT`).
+    /// Dark-mode waveform variant (`VERSO_DARK_VARIANT`, default Variant A).
     dark_variant: DarkVariant,
-    /// Temporary Phase 1 Variant C cleanup: original `vInfo.grayscale` to restore on drop.
+    /// Variant C driver night-mode cleanup: original `vInfo.grayscale` to restore on drop.
     restore_grayscale: Option<u8>,
     /// Refreshes FBInk refused, for the exit line.
     pub failed_refreshes: u32,
