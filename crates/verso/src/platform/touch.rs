@@ -32,8 +32,11 @@ pub const MAX_SLOTS: usize = 10;
 struct Slot {
     /// Tracking id the kernel reports; -1 when no finger.
     id: i32,
-    x: i32,
-    y: i32,
+    /// Last raw coordinate seen for this slot, or seeded via `EVIOCGMTSLOTS`.
+    /// `None` until known (kernels before 3.6 lack `EVIOCGMTSLOTS`), so a
+    /// suppressed axis on the first tap never fires a phantom tap at 0.
+    x: Option<i32>,
+    y: Option<i32>,
     /// What we last told the app about this slot.
     reported_id: i32,
     reported: Point,
@@ -78,7 +81,7 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(map: Mapping, x_range: (i32, i32), y_range: (i32, i32), slotted: bool) -> Self {
-        let empty = Slot { id: -1, x: 0, y: 0, reported_id: -1, reported: Point::default(), changed: false };
+        let empty = Slot { id: -1, x: None, y: None, reported_id: -1, reported: Point::default(), changed: false };
         Self { map, x_range, y_range, slotted, slots: [empty; MAX_SLOTS], slot: 0, dropping: false, held: false }
     }
 
@@ -86,9 +89,9 @@ impl Decoder {
     pub fn set_positions(&mut self, axis: u16, values: &[i32]) {
         for (slot, value) in self.slots.iter_mut().zip(values) {
             if axis == ABS_MT_POSITION_X {
-                slot.x = *value;
+                slot.x = Some(*value);
             } else {
-                slot.y = *value;
+                slot.y = Some(*value);
             }
         }
     }
@@ -142,11 +145,11 @@ impl Decoder {
                 self.slots[self.slot].changed = true;
             }
             (EV_ABS, ABS_MT_POSITION_X) => {
-                self.slots[self.slot].x = value;
+                self.slots[self.slot].x = Some(value);
                 self.slots[self.slot].changed = true;
             }
             (EV_ABS, ABS_MT_POSITION_Y) => {
-                self.slots[self.slot].y = value;
+                self.slots[self.slot].y = Some(value);
                 self.slots[self.slot].changed = true;
             }
             _ => {}
@@ -167,7 +170,6 @@ impl Decoder {
             if !s.changed {
                 continue;
             }
-            let pos = self.to_screen(s.x, s.y);
             let slot = &mut self.slots[i];
             slot.changed = false;
             // A finger lifted, or replaced by another in the same batch.
@@ -176,6 +178,9 @@ impl Decoder {
                 slot.reported_id = -1;
             }
             if s.id >= 0 {
+                let (Some(raw_x), Some(raw_y)) = (s.x, s.y) else { continue };
+                let pos = self.to_screen(raw_x, raw_y);
+                let slot = &mut self.slots[i];
                 if slot.reported_id < 0 {
                     out.push_back(touch(s.id, TouchPhase::Down, pos, now));
                 } else if pos != slot.reported {
@@ -298,6 +303,18 @@ mod tests {
         assert_eq!(feed(&mut d, &[slot(0), (EV_ABS, ID, -1), SYN]), [(7, Up, 100, 200)]);
         // evdev leaves out an axis that didn't change.
         assert_eq!(feed(&mut d, &[(EV_ABS, ID, 9), (EV_ABS, X, 110), SYN]), [(9, Down, 110, 200)]);
+    }
+
+    #[test]
+    fn unseeded_slot_waits_for_both_axes_before_reporting() {
+        // Kernels before 3.6 lack EVIOCGMTSLOTS: if the first tap omits an
+        // unchanged axis, don't fire a phantom tap at 0 on that axis.
+        let mut d = decoder(true);
+        assert_eq!(feed(&mut d, &[(EV_ABS, ID, 1), (EV_ABS, Y, 200), SYN]), []);
+        assert_eq!(feed(&mut d, &[(EV_ABS, ID, -1), SYN]), []);
+        // Once the missing axis arrives, the finger reports normally.
+        assert_eq!(feed(&mut d, &[(EV_ABS, ID, 2), (EV_ABS, X, 150), SYN]), [(2, Down, 150, 200)]);
+        assert_eq!(feed(&mut d, &[(EV_ABS, ID, -1), SYN]), [(2, Up, 150, 200)]);
     }
 
     #[test]

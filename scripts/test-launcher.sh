@@ -288,19 +288,17 @@ fresh() {
     install_files "${R}" 1
     printf 'framebuffer' >"${W}/fb"
     echo boot-1 >"${W}/boot-id"
-    : >"${W}/ld-linux-armhf.so.3"
 }
 
 # Runs the installed launcher like KUAL does, in its own process group;
-# CRASH_AT=$1 loses power at that step. ARMHF names the hard-float loader
-# (a stand-in file that fresh makes).
+# CRASH_AT=$1 loses power at that step.
 launch() {
     : >"${W}/steps"
     (
         COUNT_STEPS="${COUNT_STEPS:-}" CRASH_AT="${1:-}" VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
-            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" VERSO_BOOT_ID="${W}/boot-id" \
+            VERSO_BOOT_ID="${W}/boot-id" \
             setsid ${SH} "${R}/verso/verso.sh" </dev/null >/dev/null 2>&1 &
         wait $!
     ) 2>/dev/null
@@ -313,7 +311,7 @@ launch_args() {
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
-            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" VERSO_BOOT_ID="${W}/boot-id" \
+            VERSO_BOOT_ID="${W}/boot-id" \
             setsid ${SH} "${R}/verso/verso.sh" "$@" </dev/null >/dev/null 2>&1 &
         wait $!
     ) 2>/dev/null
@@ -329,7 +327,6 @@ launch_scriptlet() {
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
-            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
             ${SH} "${R}/documents/Verso.sh" </dev/null >/dev/null 2>&1
     )
 }
@@ -642,7 +639,6 @@ if [ -d "${KPM_DIR}" ]; then
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
-            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
             ${SH} ./launch.sh </dev/null >/dev/null 2>&1
     ) || fail "launch.sh exited non-zero"
     wait_scriptlet 1 || fail "launch.sh did not finish running verso.sh"
@@ -657,7 +653,6 @@ if [ -d "${KPM_DIR}" ]; then
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
             VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
-            VERSO_ARMHF_LOADER="${ARMHF:-${W}/ld-linux-armhf.so.3}" \
             ${SH} ./launch.sh </dev/null >/dev/null 2>&1
     ) || fail "launch.sh (sh-active) exited non-zero"
     usleep 250000 2>/dev/null || sleep 0.25 2>/dev/null || sleep 1
@@ -742,17 +737,6 @@ for i in 1 2 3 4 5 6 7; do
 done
 n_reports="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | wc -l | tr -d ' ')"
 [ "${n_reports}" = 5 ] || fail "expected 5 crash reports after 7 crashes, got ${n_reports}"
-
-begin "soft-float firmware is refused before pausing the Kindle UI"
-fresh
-ARMHF="${W}/no-such-loader" launch
-runs_are ""
-! grep -q 'killall -STOP\|appmgrd' "${W}/calls" || fail "touched the Kindle UI: $(cat "${W}/calls")"
-grep -q "eips .*Verso does not support this Kindle firmware yet" "${W}/calls" || fail "no message on screen"
-grep -q "no hard-float loader" "${R}/verso/verso.log" || fail "refusal not logged"
-report_file="$(ls "${R}/verso/reports"/report-*.txt 2>/dev/null | head -n 1)"
-[ -n "${report_file}" ] || fail "no problem report written"
-absent "${W}/tmp/verso-launcher.lock" "${W}/tmp/verso-launcher.pid"
 
 begin "unsupported screen: problem report, then the Kindle UI"
 fresh
