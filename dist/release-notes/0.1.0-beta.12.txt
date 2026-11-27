@@ -1,0 +1,9 @@
+Twelfth closed beta of Verso.
+
+- Read Markdown files (.md and .markdown), with YAML frontmatter, tables,
+  task lists, footnotes, code blocks, covers and relative images.
+- Upload and download Markdown files over Wi-Fi.
+- New Alignment setting (Book, Left or Justify) replaces the Justify switch
+  and keeps centered or right-aligned EPUB text intact.
+- Fix ragged selection edges and menu ghosting on older Kindles such as
+  Paperwhite 4.
