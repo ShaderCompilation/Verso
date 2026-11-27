@@ -60,11 +60,7 @@ make_app() {
     cat <<'EOF'
 T="${VERSO_TEST_DIR}"
 if [ "${1:-}" = "--version" ]; then
-    i=0
-    while [ -f "${T}/long-probe" ] && [ "${i}" -lt 200 ]; do
-        i=$((i + 1))
-        echo "probe line ${i}"
-    done
+    echo "version-probe" >>"${T}/calls"
     echo "Verso ${V} (fake)"
     exit 0
 fi
@@ -284,7 +280,7 @@ snapshot() {
 # A fresh pretend Kindle with version 1 installed; $1 = 2 for version 2
 # installed by an update (previous/ holding version 1's files).
 fresh() {
-    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}/long-probe" "${W}/deny-docs-rename" "${W}"/queue-* \
+    rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}/deny-docs-rename" "${W}"/queue-* \
         "${W}"/default-*
     mkdir -p "${R}" "${W}/tmp"
     : >"${W}/runs"
@@ -709,33 +705,22 @@ crash_file="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | head -n 1)"
 grep -q "Ended: crash (SIGSEGV, code 139)" "${crash_file}" || fail "crash report missing Ended line"
 grep -q "== Device identity ==" "${crash_file}" || fail "crash report missing Device identity section"
 
-begin "zero-output signal crash runs dmesg and ld.so probes"
+begin "zero-output signal crash captures filtered dmesg without ld.so probe"
 fresh
-printf 'unrelated wifi message\nverso[42]: unhandled fault in ld-2.20.so\n' >"${W}/fake-dmesg"
+printf 'unrelated wifi message\nverso[42]: unhandled fault at 0x0\n' >"${W}/fake-dmesg"
 echo silent_crash >"${W}/queue-0.1.0"
 launch
 runs_are "0.1.0"
 ui_restored_once
+grep -q "launcher: env:.*host libc:" "${R}/verso/verso.log" || fail "launcher env missing host libc label"
 crash_file="$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null | head -n 1)"
 [ -n "${crash_file}" ] || fail "no crash report created on silent SIGSEGV"
 grep -q "0B logged" "${crash_file}" || fail "expected 0B logged marker"
 grep -q "dmesg (filtered):" "${crash_file}" || fail "filtered dmesg missing"
-grep -q "unhandled fault in ld-2.20.so" "${crash_file}" || fail "dmesg fault line missing"
+grep -q "unhandled fault at 0x0" "${crash_file}" || fail "dmesg fault line missing"
 ! grep -q "unrelated wifi message" "${crash_file}" || fail "unrelated dmesg line leaked"
-grep -q "early-crash ld.so probe" "${crash_file}" || fail "early-crash ld.so probe missing"
-grep -q "Verso 0.1.0 (fake)" "${crash_file}" || fail "ld.so probe output missing"
-! grep -q "lines left out" "${crash_file}" || fail "short ld.so probe output was cut"
-
-begin "a long ld.so probe keeps its head and its tail"
-fresh
-: >"${W}/long-probe"
-echo silent_crash >"${W}/queue-0.1.0"
-launch
-sed -n '/early-crash ld.so probe/,/lines left out\]$/p' "${R}/verso/verso.log" >"${W}/probe-head"
-[ "$(wc -l <"${W}/probe-head")" -eq 42 ] || fail "the head of the ld.so probe isn't 40 lines: $(wc -l <"${W}/probe-head")"
-! grep -q "probe line 200" "${W}/probe-head" || fail "the head of the ld.so probe is its tail"
-[ "$(sed -n '/lines left out\]$/,/ launcher: /p' "${R}/verso/verso.log" | wc -l)" -eq 42 ] || fail "the tail of the ld.so probe isn't 40 lines"
-rm -f "${W}/probe-head"
+! grep -qE "ld\.so probe|LD_DEBUG" "${R}/verso/verso.log" "${crash_file}" || fail "ld.so probe ran unexpectedly"
+! grep -q "version-probe" "${W}/calls" || fail "verso --version probe was invoked on crash"
 
 begin "crash report on panic exit"
 fresh

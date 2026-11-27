@@ -54,9 +54,19 @@ use ui::gesture::{GestureConfig, GestureDetector};
 /// Events handled at most before drawing a frame.
 const MAX_BATCH: usize = 64;
 
+const fn build_abi() -> &'static str {
+    if cfg!(target_env = "musl") {
+        if cfg!(target_feature = "crt-static") { "static musl" } else { "musl" }
+    } else if cfg!(target_env = "gnu") {
+        if cfg!(target_feature = "crt-static") { "static glibc" } else { "glibc" }
+    } else {
+        "other"
+    }
+}
+
 fn main() {
     if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
-        println!("Verso {} ({})", env!("CARGO_PKG_VERSION"), env!("VERSO_GIT_COMMIT"));
+        println!("Verso {} ({}, {})", env!("CARGO_PKG_VERSION"), env!("VERSO_GIT_COMMIT"), build_abi());
         return;
     }
     if std::env::args().nth(1).as_deref() == Some(document::prelayout::ARG) {
@@ -69,9 +79,10 @@ fn main() {
     }
     logging::init();
     log::info!(
-        "Verso {} ({}) starting (pid={})",
+        "Verso {} ({}, {}) starting (pid={})",
         env!("CARGO_PKG_VERSION"),
         env!("VERSO_GIT_COMMIT"),
+        build_abi(),
         std::process::id()
     );
     match run() {
@@ -274,9 +285,10 @@ fn run() -> Result<i32> {
     let info = platform.info().clone();
     let store = store.with_color(info.color).with_page_buttons(platform.model().page_buttons);
     let mut session = format!(
-        "=== Verso session ===\nversion: {} ({})\norientation: {:?}\nscreen: {} {}x{} @ {} dpi",
+        "=== Verso session ===\nversion: {} ({}, {})\norientation: {:?}\nscreen: {} {}x{} @ {} dpi",
         env!("CARGO_PKG_VERSION"),
         env!("VERSO_GIT_COMMIT"),
+        build_abi(),
         orientation,
         info.name,
         info.width,

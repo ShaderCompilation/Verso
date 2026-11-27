@@ -11,7 +11,7 @@ usage() {
     printf '%s\n' \
         'Usage: sh collect-diagnostics.sh [--output FILE | --identity]' \
         'Print an e-reader hardware report to stdout, or create FILE.' \
-        'With --identity, print a brief 4-line model/firmware/kernel/libc summary.' \
+        'With --identity, print a brief 4-line model/firmware/kernel/host-libc summary.' \
         'Existing files are never overwritten. No network access is used.'
 }
 
@@ -235,7 +235,7 @@ identity() {
     printf 'Kindle model: %s\n' "$(kindle_model)"
     printf 'Kindle firmware: %s\n' "$(kindle_firmware)"
     printf 'Kernel and architecture: %s\n' "$(uname -srm 2>/dev/null || printf '[unavailable]')"
-    printf 'libc: %s\n' "$(libc_summary)"
+    printf 'host libc: %s\n' "$(libc_summary)"
 }
 
 report() {

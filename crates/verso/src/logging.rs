@@ -276,6 +276,22 @@ mod crash {
     const MAX_FRAMES: usize = 64;
     const MAX_MODULES: usize = 32;
     const MAX_NAME: usize = 40;
+    const ET_EXEC: u16 = 2;
+
+    /// Load bias to subtract from runtime addresses in a module mapped at
+    /// `mapping_base`: 0 for non-PIE `ET_EXEC` binaries (whose runtime
+    /// addresses already match ELF virtual addresses for `addr2line`), and
+    /// `mapping_base` for `ET_DYN` (PIE and shared libraries).
+    pub(super) fn module_load_bias(mapping_base: usize, elf_header: &[u8]) -> usize {
+        if elf_header.len() >= 18
+            && &elf_header[..4] == b"\x7fELF"
+            && u16::from_ne_bytes([elf_header[16], elf_header[17]]) == ET_EXEC
+        {
+            0
+        } else {
+            mapping_base
+        }
+    }
 
     /// An executable mapping of a file. `base` is where the file is loaded.
     #[derive(Clone, Copy)]
@@ -368,7 +384,14 @@ mod crash {
             if name[..name_len] != self.file[..self.file_len] {
                 self.file[..name_len].copy_from_slice(&name[..name_len]);
                 self.file_len = name_len;
-                self.base = start;
+                self.base = if readable && end.saturating_sub(start) >= 18 {
+                    // SAFETY: `start..end` is a readable mapping of at least 18 bytes
+                    // reported by `/proc/self/maps`; `[u8; 18]` has alignment 1.
+                    let hdr = unsafe { ptr::read_volatile(start as *const [u8; 18]) };
+                    module_load_bias(start, &hdr)
+                } else {
+                    start
+                };
             }
             if readable && perms.get(2) == Some(&b'x') && self.count < MAX_MODULES {
                 let module = Module { start, end, base: self.base, name: self.file, name_len };
@@ -426,7 +449,7 @@ mod crash {
             Some(m) => {
                 out.push_bytes(&m.name[..m.name_len]);
                 out.push_str("+");
-                out.push_hex(addr - m.base);
+                out.push_hex(addr.saturating_sub(m.base));
             }
             None => out.push_hex(addr),
         }
@@ -660,6 +683,7 @@ mod tests {
         assert_eq!(signal, Some(libc::SIGSEGV), "child stderr:\n{stderr}");
         assert!(stderr.contains("fatal signal: SIGSEGV (11)"), "missing signal line:\n{stderr}");
         assert!(stderr.contains("pc=0x"), "missing pc register:\n{stderr}");
+        #[cfg(not(all(target_env = "musl", target_feature = "crt-static")))]
         assert!(stderr.contains("fatal location:"), "missing dladdr location:\n{stderr}");
         let backtrace = stderr.split("fatal backtrace").nth(1).unwrap_or_default();
         assert!(backtrace.contains("  #1 ") && backtrace.contains(" verso-"), "no backtrace:\n{stderr}");
@@ -688,5 +712,19 @@ mod tests {
         let thumb = |first, second| super::crash::is_arm_call(true, [0, 0, first, second]);
         assert!(thumb(0xf7ff, 0xfffe) && thumb(0xf000, 0xe800) && thumb(0x0000, 0x4798), "bl, blx, blx r3");
         assert!(!thumb(0xf000, 0xb800) && !thumb(0x0000, 0x4718), "b.w, bx r3");
+    }
+
+    #[test]
+    fn module_load_bias_handles_et_exec_and_et_dyn() {
+        let mut hdr = [0u8; 18];
+        hdr[..4].copy_from_slice(b"\x7fELF");
+        hdr[16..18].copy_from_slice(&2u16.to_ne_bytes()); // ET_EXEC
+        assert_eq!(super::crash::module_load_bias(0x10000, &hdr), 0);
+
+        hdr[16..18].copy_from_slice(&3u16.to_ne_bytes()); // ET_DYN
+        assert_eq!(super::crash::module_load_bias(0x7f12_0000, &hdr), 0x7f12_0000);
+
+        assert_eq!(super::crash::module_load_bias(0x20000, b"not-elf-at-all-bytes"), 0x20000);
+        assert_eq!(super::crash::module_load_bias(0x20000, &hdr[..17]), 0x20000);
     }
 }

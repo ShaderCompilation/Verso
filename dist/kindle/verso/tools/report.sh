@@ -598,7 +598,7 @@ device_identity() {
     fi
     printf 'Kernel and architecture: %s\n' "$(uname -srm 2>/dev/null || printf '[unavailable]')"
     libc_ver="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-    printf 'libc: %s\n' "${libc_ver:-[unavailable]}"
+    printf 'host libc: %s\n' "${libc_ver:-[unavailable]}"
 }
 
 do_crash() {

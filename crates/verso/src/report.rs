@@ -458,6 +458,7 @@ mod tests {
         let id_text = String::from_utf8_lossy(&id_out.stdout);
         assert!(id_text.contains("Kindle model: Kindle Oasis 3 (2019) (code 11L, id=0x434)"), "{id_text}");
         assert!(id_text.contains("Kindle firmware: Kindle 5.18.2.1.1 (4358970010)"), "{id_text}");
+        assert!(id_text.contains("host libc: "), "{id_text}");
         assert!(!id_text.contains("9876543210"), "serial digits leaked:\n{id_text}");
 
         // Legacy hex serial: B0[17]... -> 0x17 (Kindle Paperwhite 2).
@@ -496,6 +497,7 @@ mod tests {
         assert!(crash_text.contains("Installed version: 0.1.0-beta.5"), "{crash_text}");
         assert!(crash_text.contains("Kindle model: Kindle Oasis 3 (2019) (code 11L, id=0x434)"), "{crash_text}");
         assert!(crash_text.contains("Kindle firmware: Kindle 5.18.2.1.1 (4358970010)"), "{crash_text}");
+        assert!(crash_text.contains("host libc: "), "{crash_text}");
         assert!(!crash_text.contains("9876543210"), "serial digits leaked into crash report:\n{crash_text}");
     }
 }

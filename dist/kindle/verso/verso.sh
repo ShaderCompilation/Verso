@@ -104,36 +104,19 @@ installed_version() {
     ' "${APP_DIR}/installed.json" 2>/dev/null
 }
 
-# Logs a single-line runtime environment stamp (model, firmware, kernel, libc).
+# Logs a single-line runtime environment stamp (model, firmware, kernel, host libc).
 log_env() {
     collector="${APP_DIR}/tools/collect-diagnostics.sh"
     if [ -r "${collector}" ] && grep -q -- '--identity' "${collector}" 2>/dev/null; then
         info="$(sh "${collector}" --identity 2>/dev/null | tr '\n' '|' | sed 's/|$//; s/|/ | /g')"
     else
         libc_ver="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-        info="Kernel and architecture: $(uname -srm 2>/dev/null || echo unknown) | libc: ${libc_ver:-unknown}"
+        info="Kernel and architecture: $(uname -srm 2>/dev/null || echo unknown) | host libc: ${libc_ver:-unknown}"
     fi
     [ -n "${info}" ] && log "env: ${info}"
 }
 
-# Runs a command bounded to $1 seconds across GNU and old BusyBox timeout syntaxes.
-run_bounded() {
-    secs="$1"
-    shift
-    if command -v timeout >/dev/null 2>&1; then
-        if timeout 1 sh -c 'exit 0' >/dev/null 2>&1; then
-            timeout "${secs}" "$@"
-            return $?
-        elif timeout -t 1 sh -c 'exit 0' >/dev/null 2>&1; then
-            timeout -t "${secs}" "$@"
-            return $?
-        fi
-    fi
-    return 127
-}
-
-# On signal crashes, capture filtered kernel fault/OOM lines and, when Verso
-# died before logging a single byte, a bounded dynamic-linker trace.
+# On signal crashes, capture filtered kernel fault/OOM lines.
 probe_crash_context() {
     [ "${VERSO_NO_CRASH_PROBES:-0}" = 1 ] && return 0
     if command -v dmesg >/dev/null 2>&1; then
@@ -142,30 +125,6 @@ probe_crash_context() {
             log "dmesg (filtered):"
             printf '%s\n' "${dm}" >>"${LOG}"
         fi
-    fi
-    if [ "${VERSO_OUT_BYTES}" -eq 0 ]; then
-        case "${EXIT_SIG}" in
-            SIGSEGV | SIGILL | SIGBUS | SIGABRT)
-                probe_out="$(run_bounded 2 sh -c 'LD_DEBUG=files,libs exec ./verso --version' 2>&1)"
-                probe_rc=$?
-                if [ "${probe_rc}" -ne 127 ]; then
-                    log "early-crash ld.so probe (LD_DEBUG=files,libs, exit ${probe_rc}):"
-                    if [ -n "${probe_out}" ]; then
-                        # Both ends: the libraries found first, and where it died.
-                        printf '%s\n' "${probe_out}" | cut -c 1-256 | awk '
-                            { line[NR] = $0 }
-                            END {
-                                for (i = 1; i <= NR; i++) {
-                                    if (NR <= 80 || i <= 40 || i > NR - 40) print line[i]
-                                    else if (i == 41) printf "[%d lines left out]\n", NR - 80
-                                }
-                            }' >>"${LOG}"
-                    else
-                        log "ld.so probe produced no output"
-                    fi
-                fi
-                ;;
-        esac
     fi
 }
 
