@@ -164,7 +164,8 @@ def main():
             elif args.summary == 'seeded':
                 # A complete summary produced by an earlier real-library migration run.
                 remote(f'cp {APP}/seed-home.json {state}/home.json')
-            wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
+            wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_CACHE={APP}/cache\n'
+                       f'export VERSO_BENCH_TRACE={trace}\n'
                        'export RUST_LOG=info,verso=debug\n'
                        + (f'export LD_PRELOAD={APP}/bin/probe.so\n' if args.preload else '')
                        + f'exec {APP}/bin/{args.variant}/verso\n')

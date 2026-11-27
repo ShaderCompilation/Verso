@@ -90,6 +90,17 @@ def framebuffer_hash():
     return remote('head -c 2157312 /dev/fb0 | sha256sum').split()[0]
 
 
+def reopened(expected, seconds=15):
+    """Whether the screen shows `expected` again: a cold crengine cache can
+    take longer than the fixed wait to lay the book out."""
+    until = time.monotonic() + seconds
+    while framebuffer_hash() != expected:
+        if time.monotonic() > until:
+            return False
+        time.sleep(.5)
+    return True
+
+
 def main():
     global APP
     parser = argparse.ArgumentParser(description=__doc__)
@@ -184,7 +195,10 @@ def main():
         from annotation_fixture import fixture_tar
         remote(f'mkdir -p {state}/annotations')
         remote(f'tar -xf - -C {state}/annotations', fixture_tar(args.annotation_fixture, args.annotation_count, kind=args.annotation_kind))
-    wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_BENCH_TRACE={trace}\n'
+    # The crengine cache stays in the check folder (not the user's): cold on
+    # the first run of a session, warm after.
+    wrapper = (f'#!/bin/sh\nexport VERSO_DATA={state}\nexport VERSO_CACHE={APP}/cache\n'
+               f'export VERSO_BENCH_TRACE={trace}\n'
                f'export RUST_LOG=info,verso=debug,verso::app=trace\n'
                + (f'export LD_PRELOAD={APP}/bin/probe.so\n' if args.preload else '')
                + ('export VERSO_BENCH_ONE_CPU=1\n' if args.one_cpu else '')
@@ -325,7 +339,7 @@ def main():
             remote(f'{probe} 636 848 reopen_menu; sleep 1; {probe} 65 70 reopen_close; sleep 3')
             sample(f'closed_{i}')
             remote(f'{probe} 200 550 reopen; sleep 3')
-            assert framebuffer_hash() == lifecycle_hash, 'Reopen changed page'
+            assert reopened(lifecycle_hash), 'Reopen changed page'
         results['reopens'] = args.reopen
         if args.failure_check:
             saved = position()
@@ -363,9 +377,11 @@ def main():
             assert position() == saved
             remote(f'{probe} 200 550 reopen; sleep 3')
             assert position() == saved
-            assert framebuffer_hash() == lifecycle_hash, 'Reopen changed page'
+            assert reopened(lifecycle_hash), 'Reopen changed page'
             results['close_reopen_checked'] = True
         if args.wake_check or args.position_check:
+            assert remote('lipc-get-prop com.lab126.powerd preventScreenSaver') == '0', \
+                'Sleep checks need awake mode off (scripts/kindle-awake.sh off)'
             remote('lipc-set-prop com.lab126.powerd powerButton 1')
             try:
                 wait_for('test "$(lipc-get-prop com.lab126.powerd state)" = screenSaver')
