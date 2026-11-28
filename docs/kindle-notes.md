@@ -65,7 +65,8 @@ behaviour on other models is **(to verify)**.
   flip; PW6 turns `5.48/3.94 ms` P, `8.00/6.54 ms` L vs `5.58/4.03`, `7.61/6.48 ms`
   light **(measured)**); `Settings::dark_variant` switches all five modes live,
   guarding 8-bit driver night mode (`GRAYSCALE_8BIT_INVERTED`) across sleep and
-  crashes via `/tmp/verso-fb-grayscale`. Colorsoft `GLRCK16`/`GCCK16`, ghosting
+  crashes via `/tmp/verso-fb-grayscale`. Pictures send partial `GCK16`: the PW6
+  accepts it **(measured)**; only changed pixels flashing is **(to verify)**. Colorsoft `GLRCK16`/`GCCK16` (also partial), ghosting
   and Amazon dark mode (`inverted_grayscale` only at 8 bpp) remain **(to verify)**.
   Full flashes (~200–400 ms **(measured)**) await completion lazily before the next
   write, sleep or exit.

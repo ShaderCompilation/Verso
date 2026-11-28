@@ -236,7 +236,9 @@ instantly from cache.
     2–20 mm. Landscape centres the text column to keep line length comfortable.
 - **Refresh interval** (**Settings → Display → Full page refresh**): *Every
   page*, *Every 6*, *Every 12* or *Never* (default). Chapter starts and images
-  always flash; rapid flipping defers periodic flashes.
+  always flash; rapid flipping defers periodic flashes. In dark mode, chapter
+  starts and text sheets don't, and pictures and cover grids flash only the
+  pixels that change.
 - **Text shaping** (**Settings → Advanced**): *Light* (default, HarfBuzz
   kerning without ligatures), *Full* (full HarfBuzz ligatures and complex
   scripts) or *FreeType* (fastest layout, simpler spacing). **Hanging
