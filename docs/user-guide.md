@@ -236,9 +236,8 @@ instantly from cache.
     2–20 mm. Landscape centres the text column to keep line length comfortable.
 - **Refresh interval** (**Settings → Display → Full page refresh**): *Every
   page*, *Every 6*, *Every 12* or *Never* (default). Chapter starts and images
-  always flash; rapid flipping defers periodic flashes. In dark mode, chapter
-  starts and text sheets don't, and pictures and cover grids flash only the
-  pixels that change.
+  always flash; rapid flipping defers periodic flashes. Dark mode has its own
+  settings (below).
 - **Text shaping** (**Settings → Advanced**): *Light* (default, HarfBuzz
   kerning without ligatures), *Full* (full HarfBuzz ligatures and complex
   scripts) or *FreeType* (fastest layout, simpler spacing). **Hanging
@@ -412,9 +411,16 @@ Check automatically**), or on demand via **Check for updates**.
 **Settings** has five tabs:
 
 - **Reading:** tap zones, top-right bookmark corner, check KOReader progress.
-- **Display:** orientation, full page refresh interval, **Dark mode** refresh
-  mode (Eclipse partial/full, Driver night full/partial, REAGL), folder
-  previews, series numbers.
+- **Display:** orientation, full page refresh interval, **Dark mode** refresh,
+  folder previews, series numbers. The dark mode sheet has:
+  - **Preset:** *Fewer flashes*, *Balanced* (default) or *Less ghosting*; sets
+    the next four rows. Your own mix shows as *Custom*.
+  - **Full refresh** (*As light*, *Every 6*, *12*, *24* or *Never*) and **Flash
+    chapter starts** (default Off). Text sheets never flash.
+  - **Pictures and covers:** *No flash*, *Changed area* (default) or *Full flash*.
+  - **Updates** (where the screen supports it): *Fast* (default) or *Cleaner*
+    (more flicker, less ghosting).
+  - **Rendering** (for testing): *Eclipse* (default), *Driver night* or *REAGL*.
 - **Library:** library folders, dictionaries, KOReader bulk import.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
   a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.

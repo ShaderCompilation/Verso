@@ -128,9 +128,9 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
   sleep covers and crengine book images/colored text pre-flip so pictures stay
   normal and colored text keeps its hue with inverted luma. Live switching defers
   `canvas.dark` and `App::frame()` up to 500 ms while `Reader` re-renders, then
-  commits with one `Full` refresh. `Settings::dark_variant` switches dark refresh
-  modes live (`A`, `B`, `C`, `C-partial`, `REAGL`); 8-bit driver night mode (`C`,
-  `C-partial`) engages only while dark and active, suspends before native sleep,
+  commits with one `Full` refresh. `DarkRefresh` (`dark_rendering`,
+  `dark_full_updates`, `dark_pictures`) applies live in `plan_refresh`; 8-bit
+  driver night mode engages only while dark, suspends before native sleep,
   and records `/tmp/verso-fb-grayscale` so `verso.sh` restores it after a crash.
 
 ### Frame comparison and refresh planning (`ui/damage.rs`, `app.rs`)
@@ -173,12 +173,13 @@ against the previous frame in **16×16 tiles**:
 | `Fast` | Press feedback, slider drags, selection | `WFM_DU` | `WFM_DU` | `WFM_DUNM` (MTK) / `WFM_DU` (i.MX) | `WFM_DUNM` / `WFM_DU` | No |
 | `Ui` | Menus, chrome, `fast_debt` cleanup, wake strip | `WFM_GL16` (MTK) / `WFM_GC16` (i.MX) | `WFM_GL16` | `WFM_GLKW16` | `WFM_GLKW16` | No |
 | `Page` | Reading page turns | `WFM_REAGL` | `WFM_GLRC16` | `WFM_GLKW16` | `WFM_GLRCK16` | No |
-| `Clean` | Pictures: image pages, library covers (grid paging, Home/Library, sort and view, scans, moves, selection results) | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16`, partial | `WFM_GCCK16`, partial | Light; dark only changed pixels |
+| `Clean` | Pictures: image pages, library covers (grid paging, Home/Library, sort and view, scans, moves, selection results) | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16` | `WFM_GCCK16` | Light; dark per `dark_pictures` |
 | `Full` | Light chapter starts, periodic flash, wake, first frame, sleep cover, dark and variant switches, layout changes, drawer Refresh | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16` | `WFM_GCCK16` | Yes |
 
 Eclipse modes gate on `has_eclipse_wfm` (falling back to light waveforms when
-absent; a dark `Clean` stays partial there too), and `FlashFence` gates on
-`Clean` and `Full`. Only `Full` is the whole-screen clean: `refresh_all(Full)`
+absent). A dark `Clean` is partial by default (`Changed`), flashing with
+`Full`, and planned as `Page` with `NoFlash`; `dark_full_updates` makes
+`WFM_GLKW16` flash. `FlashFence` gates on `Clean` and `Full`. Only `Full` is the whole-screen clean: `refresh_all(Full)`
 drops queued refreshes and fast debt.
 
 - **Non-blocking flashes (`platform/flash.rs`):** `Display::present` records
@@ -187,8 +188,9 @@ drops queued refreshes and fast debt.
   exit.
 - **Periodic cadence (`reader/mod.rs`):** flashes every `page_flash` turns
   (default `0` = never). Pages with images request `Clean` and TOC chapter
-  starts (`level <= 2`) `Full`; both reset the counter, but in dark mode
-  (`EventCx::dark`) chapter starts and text-sheet paging skip the flash. Rapid turns (`< 400 ms` apart)
+  starts (`level <= 2`) `Full`; both reset the counter. In dark mode
+  (`EventCx::dark`) `dark_page_flash` replaces `page_flash` when set, chapter
+  starts flash only with `dark_chapter_flash`, and text sheets never do. Rapid turns (`< 400 ms` apart)
   defer periodic flashes up to `2 × page_flash` turns.
 
 ---
