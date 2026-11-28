@@ -844,11 +844,16 @@ mod tests {
         .unwrap();
         out.start_file("content.opf", opts).unwrap();
         out.write_all(
-            br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Color Fixture</dc:title></metadata><manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="green.png" media-type="image/png"/></manifest><spine><itemref idref="ch1"/></spine></package>"#,
+            br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Color Fixture</dc:title></metadata><manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="txt" href="txt.xhtml" media-type="application/xhtml+xml"/><item id="pic" href="pic.xhtml" media-type="application/xhtml+xml"/><item id="img" href="green.png" media-type="image/png"/></manifest><spine><itemref idref="ch1"/><itemref idref="txt"/><itemref idref="pic"/></spine></package>"#,
         )
         .unwrap();
         out.start_file("green.png", opts).unwrap();
         out.write_all(png.get_ref()).unwrap();
+        for (name, body) in [("txt.xhtml", "<p>Only text.</p>"), ("pic.xhtml", r#"<div><img src="green.png"/></div>"#)]
+        {
+            out.start_file(name, opts).unwrap();
+            write!(out, r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>{body}</body></html>"#).unwrap();
+        }
         out.start_file("ch1.xhtml", opts).unwrap();
         out.write_all(
             br##"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Color</title><style>h1 { color: #d02020; } a { color: #1840d8; }</style></head><body><h1>Red Heading</h1><p>A paragraph with a <a href="#end">blue link</a>.</p><p><img src="green.png" alt="green"/></p><p id="end">End.</p></body></html>"##,
@@ -893,6 +898,12 @@ mod tests {
         doc.draw(&mut gray, layout.width as usize, false).unwrap();
         assert_eq!(gray[0], 255, "top-left margin cleared to white on Gray8");
         assert!(gray.iter().filter(|&&v| v < 200).count() > 2000);
+        // A picture-only page counts, though its page range is empty; the text
+        // page before it doesn't, though its range ends at that picture.
+        for (page, images) in [(1, false), (2, true)] {
+            doc.go_to_page(page);
+            assert_eq!(doc.page_info().unwrap().has_images, images, "page {page}");
+        }
         drop(doc);
         let _ = std::fs::remove_file(&path);
     }

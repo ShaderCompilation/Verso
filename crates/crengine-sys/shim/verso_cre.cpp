@@ -548,6 +548,18 @@ static void scan_page_range(const LVRef<ldomXRange> &range, bool *has_images, st
     range->forEach(&scanner);
 }
 
+// The range stops before its end node, so an image there is missed by the walk:
+// the last thing on a page, or the whole of a picture-only page (start == end).
+// The end can also be the next page's first node, hence the page check.
+static bool ends_with_image(LVDocView *v, const LVRef<ldomXRange> &range) {
+    if (range.isNull()) return false;
+    ldomXPointer end = range->getEnd();
+    ldomNode *node = end.getNode();
+    if (!node || !node->isElement()) return false;
+    lUInt16 id = node->getNodeId();
+    return (id == el_img || id == el_image) && v->getBookmarkPage(end) == v->getCurPage();
+}
+
 static void collect_link_rects(LVDocView *v, const std::vector<ldomNode *> &anchors,
                                std::vector<VersoCreRect> &rects, std::vector<int> &ids) {
     rects.clear();
@@ -1494,8 +1506,9 @@ int verso_cre_page_info(VersoCreDoc *doc, const char *skip_pos, char *pos_buf, i
         }
         bool has_images = false;
         std::vector<ldomNode *> anchors;
-        scan_page_range(v->getPageDocumentRange(-1), &has_images, &anchors);
-        out->has_images = has_images ? 1 : 0;
+        LVRef<ldomXRange> range = v->getPageDocumentRange(-1);
+        scan_page_range(range, &has_images, &anchors);
+        out->has_images = has_images || ends_with_image(v, range) ? 1 : 0;
         collect_link_rects(v, anchors, doc->link_rects, doc->link_ids);
         out->link_rects = (int)doc->link_rects.size();
         return 0;
