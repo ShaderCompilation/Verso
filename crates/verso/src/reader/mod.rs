@@ -159,8 +159,10 @@ impl PageCache {
 /// due then waits (see [`Refresh::turn`]).
 pub const RAPID_TURN: Duration = Duration::from_millis(400);
 
-/// Counts page turns between full flashes. Chapter starts and pages with
-/// images always flash; `every` (0 = never) adds a periodic one.
+/// Counts page turns between full flashes. Pages with images always flash,
+/// and chapter starts do in light mode (text on black ghosts little, so a dark
+/// chapter start isn't worth the white flash); `every` (0 = never) adds a
+/// periodic one.
 pub struct Refresh {
     since_flash: u32,
     every: u32,
@@ -178,13 +180,13 @@ impl Refresh {
     /// due while turns come less than [`RAPID_TURN`] apart waits for the first
     /// slower turn, up to `2 × every` turns since the last flash: a ~300 ms
     /// flash would hold up the taps queued behind it.
-    pub fn turn(&mut self, image: bool, chapter_start: bool, now: Instant) -> RefreshMode {
+    pub fn turn(&mut self, image: bool, chapter_start: bool, dark: bool, now: Instant) -> RefreshMode {
         self.since_flash += 1;
         let rapid = self.last_turn.is_some_and(|t| now.saturating_duration_since(t) < RAPID_TURN);
         self.last_turn = Some(now);
         let due = self.every > 0 && self.since_flash >= self.every;
         let deferred = rapid && self.since_flash < self.every.saturating_mul(2);
-        if image || chapter_start || due && !deferred {
+        if image || chapter_start && !dark || due && !deferred {
             self.since_flash = 0;
             RefreshMode::Full
         } else {
@@ -203,29 +205,35 @@ mod tests {
         let (full, page) = (RefreshMode::Full, RefreshMode::Page);
         // Slow turns: every 3rd flashes.
         let mut r = Refresh::new(3);
-        let modes: Vec<_> = (0..6).map(|i| r.turn(false, false, at(i * 1000))).collect();
+        let modes: Vec<_> = (0..6).map(|i| r.turn(false, false, false, at(i * 1000))).collect();
         assert_eq!(modes, [page, page, full, page, page, full]);
         // Rapid turns (200 ms apart): the due flash waits until 2 × every.
         let mut r = Refresh::new(3);
-        let modes: Vec<_> = (0..8).map(|i| r.turn(false, false, at(i * 200))).collect();
+        let modes: Vec<_> = (0..8).map(|i| r.turn(false, false, false, at(i * 200))).collect();
         assert_eq!(modes, [page, page, page, page, page, full, page, page]);
         // A pause after rapid turns flashes on the next turn.
         let mut r = Refresh::new(3);
-        let mut modes: Vec<_> = (0..4).map(|i| r.turn(false, false, at(i * 200))).collect();
-        modes.push(r.turn(false, false, at(600 + RAPID_TURN.as_millis() as u64)));
+        let mut modes: Vec<_> = (0..4).map(|i| r.turn(false, false, false, at(i * 200))).collect();
+        modes.push(r.turn(false, false, false, at(600 + RAPID_TURN.as_millis() as u64)));
         assert_eq!(modes, [page, page, page, page, full]);
         // Images and chapter starts flash even mid-flip, and restart the count.
         let mut r = Refresh::new(3);
         let modes = [
-            r.turn(false, false, at(0)),
-            r.turn(true, false, at(200)),
-            r.turn(false, true, at(400)),
-            r.turn(false, false, at(600)),
+            r.turn(false, false, false, at(0)),
+            r.turn(true, false, false, at(200)),
+            r.turn(false, true, false, at(400)),
+            r.turn(false, false, false, at(600)),
         ];
         assert_eq!(modes, [page, full, full, page]);
+        // Dark: a chapter start neither flashes nor restarts the count; images
+        // and the periodic flash still do.
+        let mut r = Refresh::new(3);
+        let turns = [(false, true), (true, false), (false, true), (false, false), (false, false)];
+        let modes: Vec<_> = (0..5).map(|i| r.turn(turns[i].0, turns[i].1, true, at(i as u64 * 1000))).collect();
+        assert_eq!(modes, [page, full, page, page, full]);
         // No periodic flash: nothing to defer.
         let mut r = Refresh::new(0);
-        assert!((0..20).all(|i| r.turn(false, false, at(i * 200)) == page));
+        assert!((0..20).all(|i| r.turn(false, false, false, at(i * 200)) == page));
     }
     #[test]
     fn zones_prioritise_menu_and_leave_forward_accessible_on_both_edges() {
@@ -358,16 +366,16 @@ mod tests {
         };
         let mut f = Refresh::new(6);
         for _ in 0..5 {
-            assert_eq!(f.turn(false, false, slow()), RefreshMode::Page);
+            assert_eq!(f.turn(false, false, false, slow()), RefreshMode::Page);
         }
-        assert_eq!(f.turn(false, false, slow()), RefreshMode::Full);
-        assert_eq!(f.turn(false, false, slow()), RefreshMode::Page);
-        assert_eq!(f.turn(true, false, slow()), RefreshMode::Full);
-        assert_eq!(f.turn(false, true, slow()), RefreshMode::Full);
+        assert_eq!(f.turn(false, false, false, slow()), RefreshMode::Full);
+        assert_eq!(f.turn(false, false, false, slow()), RefreshMode::Page);
+        assert_eq!(f.turn(true, false, false, slow()), RefreshMode::Full);
+        assert_eq!(f.turn(false, true, false, slow()), RefreshMode::Full);
         let mut every = Refresh::new(1);
-        assert!((0..3).all(|_| every.turn(false, false, slow()) == RefreshMode::Full));
+        assert!((0..3).all(|_| every.turn(false, false, false, slow()) == RefreshMode::Full));
         let mut never = Refresh::new(0);
-        assert!((0..50).all(|_| never.turn(false, false, slow()) == RefreshMode::Page));
-        assert_eq!(never.turn(false, true, slow()), RefreshMode::Full);
+        assert!((0..50).all(|_| never.turn(false, false, false, slow()) == RefreshMode::Page));
+        assert_eq!(never.turn(false, true, false, slow()), RefreshMode::Full);
     }
 }

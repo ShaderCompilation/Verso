@@ -344,6 +344,7 @@ mod tests {
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         test(&mut state, &worker, &commands, &mut cx);
     }

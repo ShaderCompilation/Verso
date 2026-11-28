@@ -727,6 +727,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut needs_redraw,
+            dark: false,
         };
 
         // Tapping Done during an upload opens the confirmation sheet instead of closing.
@@ -785,6 +786,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut needs_redraw,
+            dark: false,
         };
 
         // Without edits, Done just closes.
@@ -903,6 +905,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut needs_redraw,
+            dark: false,
         };
         assert!(matches!(screen.run_pending_work(&mut cx), Action::Pop));
         let started = Instant::now();

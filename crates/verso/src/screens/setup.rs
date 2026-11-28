@@ -965,6 +965,7 @@ mod tests {
             toast: &mut None,
             forced: &mut vec![],
             needs_redraw: &mut false,
+            dark: false,
         };
         f(&mut cx)
     }

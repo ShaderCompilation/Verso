@@ -237,6 +237,10 @@ pub struct EventCx<'a> {
     pub now: Instant,
     /// The last battery reading (None: no battery, or unknown).
     pub battery: Option<Battery>,
+    /// Dark mode, counting a switch still waiting to commit. Screens use it
+    /// only for cadence (whether a cleanup flash is worth it); the waveform
+    /// is `plan_refresh`'s choice.
+    pub dark: bool,
     pub(crate) toast: &'a mut Option<Toast>,
     pub(crate) forced: &'a mut Vec<Update>,
     pub(crate) needs_redraw: &'a mut bool,

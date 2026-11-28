@@ -566,6 +566,7 @@ mod tests {
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         let result = f(&mut cx);
         (result, toast.map(|t| t.text))

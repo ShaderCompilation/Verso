@@ -662,6 +662,7 @@ impl App {
                     toast: &mut self.toast,
                     forced: &mut self.forced,
                     needs_redraw: &mut self.needs_redraw,
+                    dark,
                 };
                 for screen in &mut self.stack {
                     screen.set_dark(dark, &mut cx);
@@ -1026,6 +1027,7 @@ impl App {
     }
 
     fn with_screen(&mut self, f: impl FnOnce(&mut dyn Screen, &mut EventCx) -> Action) {
+        let dark = self.dark_mode();
         let Some(screen) = self.stack.last_mut() else { return };
         let mut cx = EventCx {
             theme: &self.theme,
@@ -1035,6 +1037,7 @@ impl App {
             toast: &mut self.toast,
             forced: &mut self.forced,
             needs_redraw: &mut self.needs_redraw,
+            dark,
         };
         let action = f(screen.as_mut(), &mut cx);
         self.apply(action);

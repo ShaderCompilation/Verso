@@ -2214,6 +2214,7 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         s.on_gesture(Gesture::Down(p), &mut cx);
         s.on_gesture(Gesture::Tap(p), &mut cx);
@@ -2232,6 +2233,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut false,
                 battery: None,
+                dark: false,
             };
             s.on_background(&mut cx);
             if !s.busy() {
@@ -2347,6 +2349,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut false,
                 battery: None,
+                dark: false,
             };
             s.on_gesture(Gesture::Down(p), &mut cx);
             s.on_gesture(Gesture::Tap(p), &mut cx);
@@ -2441,6 +2444,7 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         assert!(s.on_text_input(&TextInput::Insert("abc-123:fx".into()), &mut cx));
         assert!(s.on_text_input(&TextInput::Submit, &mut cx));
@@ -2485,6 +2489,7 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         s.on_gesture(Gesture::Down(p), &mut cx);
         let action = s.on_gesture(Gesture::Tap(p), &mut cx);

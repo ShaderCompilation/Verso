@@ -174,7 +174,8 @@ absent), and `FlashFence` gates only on `RefreshMode::Full`.
   exit.
 - **Periodic cadence (`reader/mod.rs`):** flashes every `page_flash` turns
   (default `0` = never). Pages with images and TOC chapter starts (`level <= 2`)
-  always request `Full` and reset the counter. Rapid turns (`< 400 ms` apart)
+  request `Full` and reset the counter, but in dark mode (`EventCx::dark`)
+  chapter starts and text-sheet paging skip the flash. Rapid turns (`< 400 ms` apart)
   defer periodic flashes up to `2 × page_flash` turns.
 
 ---

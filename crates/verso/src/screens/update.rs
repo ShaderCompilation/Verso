@@ -819,6 +819,7 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         let mut s = UpdateScreen::new(&t, screen, updates, Waker::new(|| {}), version.clone(), &cx);
         let tap = |s: &mut UpdateScreen, r: Rect, cx: &mut EventCx| {

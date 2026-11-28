@@ -3437,7 +3437,7 @@ impl Screen for Books {
                 self.synopsis = None;
                 cx.redraw();
             } else if synopsis.text.pager.page != page {
-                cx.refresh(synopsis.sheet.rect(), RefreshMode::Full);
+                refresh_sheet_page(synopsis.sheet.rect(), cx);
             } else if synopsis.visual_state() != before {
                 cx.redraw();
             }
@@ -4016,10 +4016,16 @@ impl Details {
             self.pager.on_swipe(*dir);
         }
         if page != self.pager.page {
-            cx.refresh(self.sheet.rect(), RefreshMode::Full);
+            refresh_sheet_page(self.sheet.rect(), cx);
         }
         false
     }
+}
+
+/// Cleans a text sheet after a page change: a flash in light mode, none in
+/// dark, where text on black ghosts too little to be worth a white flash.
+fn refresh_sheet_page(rect: Rect, cx: &mut EventCx) {
+    cx.refresh(rect, if cx.dark { RefreshMode::Ui } else { RefreshMode::Full });
 }
 
 /// What a library confirmation sheet acts on once accepted.
@@ -4272,6 +4278,7 @@ mod tests {
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         });
     }
     pub(super) fn tap(books: &mut Books, p: Point, cx: &mut EventCx) {
@@ -5303,6 +5310,7 @@ mod tests {
                 forced: &mut forced,
                 needs_redraw: &mut needs_redraw,
                 battery: None,
+                dark: false,
             };
             f(books, &mut cx);
             forced
@@ -6921,7 +6929,7 @@ mod tests {
     }
 
     #[test]
-    fn details_paginate_long_unicode_paths_without_losing_text() {
+    fn details_paginate_long_unicode_paths_and_flash_page_changes_only_in_light() {
         let theme = Theme::for_dpi(167);
         let mut text = crate::gfx::TextRenderer::new();
         let content = format!("Title\n\nAuthor\n\nFile: {}", "Папка 世界 / ".repeat(300));
@@ -6929,8 +6937,37 @@ mod tests {
         let pages = detail_pages(&mut text, &content, theme.body, area);
         assert!(pages.len() > 1);
         assert_eq!(pages.concat(), content);
-        for page in pages {
-            assert!(text.measure(&page, theme.body, Some(area.w as f32)).1 <= area.h as f32);
+        for page in &pages {
+            assert!(text.measure(page, theme.body, Some(area.w as f32)).1 <= area.h as f32);
+        }
+        // Paging the sheet flashes it in light mode; dark text on black doesn't
+        // need the white flash.
+        let screen = Rect::new(0, 0, 600, 800);
+        for (dark, mode) in [(false, RefreshMode::Full), (true, RefreshMode::Ui)] {
+            let mut details = Details::from_text(&theme, screen, "Details", content.clone());
+            details.pager.set(0, pages.len());
+            let mut forced = Vec::new();
+            let swipe = Gesture::Swipe {
+                dir: crate::ui::gesture::Direction::Left,
+                from: Point::new(500, 600),
+                to: Point::new(100, 600),
+            };
+            let closed = details.on_gesture(
+                &swipe,
+                &mut EventCx {
+                    theme: &theme,
+                    screen,
+                    now: std::time::Instant::now(),
+                    battery: None,
+                    dark,
+                    toast: &mut None,
+                    forced: &mut forced,
+                    needs_redraw: &mut false,
+                },
+            );
+            assert!(!closed);
+            assert_eq!(details.pager.page, 1);
+            assert_eq!(forced, [crate::platform::Update { rect: details.sheet.rect(), mode }], "dark: {dark}");
         }
     }
     #[test]

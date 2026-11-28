@@ -759,7 +759,7 @@ impl Reader {
             RefreshMode::Full
         } else if self.turn_pending {
             self.turned = true;
-            self.refresh.turn(page.images, chapter_start, cx.now)
+            self.refresh.turn(page.images, chapter_start, cx.dark, cx.now)
         } else {
             RefreshMode::Ui
         };
@@ -2738,6 +2738,7 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         });
     }
 
@@ -2756,6 +2757,7 @@ mod tests {
             forced: &mut vec![],
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         });
     }
 
@@ -3054,6 +3056,7 @@ mod tests {
                     forced: &mut vec![],
                     needs_redraw: &mut false,
                     battery: None,
+                    dark: false,
                 },
             );
             toast.map(|t| t.text)
@@ -4162,6 +4165,7 @@ mod tests {
             forced: &mut forced,
             needs_redraw: &mut redraw,
             battery: None,
+            dark: false,
         };
         let catalog = |r: &Reader| {
             let worker = r.dictionary.as_ref().unwrap();
@@ -4379,6 +4383,7 @@ mod tests {
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         // Neighbour prefetches are covered elsewhere.
         let drain = || commands.try_iter().filter(|c| !matches!(c, Command::Page { .. })).collect::<Vec<_>>();
@@ -4587,6 +4592,7 @@ mod tests {
             forced: &mut Vec::new(),
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         let page = |generation, number| {
             Reply::Page(Arc::new(Page {
@@ -4748,6 +4754,7 @@ mod tests {
             forced: &mut forced,
             needs_redraw: &mut false,
             battery: None,
+            dark: false,
         };
         r.receive(Reply::Error { generation: 1, message: "failed open".into() }, &mut cx);
         assert!(cx.toast.is_none(), "without a page, the error is shown once, by the screen itself");
@@ -5318,6 +5325,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut false,
                 battery: None,
+                dark: false,
             },
         );
         r.on_gesture(
@@ -5330,6 +5338,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut false,
                 battery: None,
+                dark: false,
             },
         );
         assert_eq!(toast.map(|t| t.text).as_deref(), Some(annotations::NOT_READY));
@@ -5427,7 +5436,7 @@ mod tests {
         // The new refresh interval applies to the next turns.
         let start = Instant::now();
         let modes: Vec<_> =
-            (0..3u32).map(|i| r.refresh.turn(false, false, start + i * Duration::from_secs(1))).collect();
+            (0..3u32).map(|i| r.refresh.turn(false, false, false, start + i * Duration::from_secs(1))).collect();
         assert_eq!(modes, [RefreshMode::Page, RefreshMode::Page, RefreshMode::Full]);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
         Ok(())
@@ -5453,6 +5462,7 @@ mod tests {
                 toast: &mut toast,
                 forced: &mut forced,
                 needs_redraw: &mut needs_redraw,
+                dark: false,
             };
             r.on_gesture(g, &mut cx);
             needs_redraw
@@ -5506,6 +5516,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut needs_redraw,
+            dark: false,
         };
         r.on_tick(&mut cx);
         assert!(!r.waiting_for_open());
@@ -5545,6 +5556,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut needs_redraw,
                 battery: None,
+                dark: false,
             };
             r.receive(reply, &mut cx);
             needs_redraw
@@ -5624,6 +5636,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut needs_redraw,
+            dark: false,
         };
         r.on_tick(&mut cx);
         assert!(r.laying_out && r.layout_at.is_none());
@@ -5647,6 +5660,7 @@ mod tests {
             toast: &mut toast,
             forced: &mut forced,
             needs_redraw: &mut needs_redraw,
+            dark: false,
         };
         r.on_tick(&mut cx);
         assert!(needs_redraw, "held stepper tick updates visible font size");
@@ -5781,6 +5795,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut redraw,
                 battery: None,
+                dark: false,
             },
         );
         assert!(redraw && !r.waiting_for_dark() && r.fills_canvas());
@@ -5812,6 +5827,7 @@ mod tests {
                 forced: &mut vec![],
                 needs_redraw: &mut redraw2,
                 battery: None,
+                dark: false,
             },
         );
         assert!(redraw2 && !opening.waiting_for_open() && !opening.keeps_canvas());
