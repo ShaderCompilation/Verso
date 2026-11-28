@@ -64,6 +64,10 @@ if [ "${1:-}" = "--version" ]; then
     echo "Verso ${V} (fake)"
     exit 0
 fi
+if [ "${1:-}" = "--restore-fb-grayscale" ]; then
+    echo "restore-fb-grayscale ${2:-}" >>"${T}/calls"
+    exit 0
+fi
 echo "${V}" >>"${T}/runs"
 b=""
 if [ -s "${T}/queue-${V}" ]; then
@@ -765,6 +769,19 @@ absent "${W}/tmp/verso-transfer-firewall"
 ! grep -q 'preventScreenSaver' "${W}/calls" || fail "touched keep-awake"
 [ "$(cat "${W}/rules")" = "INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT" ] ||
     fail "firewall rules left: $(cat "${W}/rules")"
+
+begin "driver night mode left on"
+fresh
+echo 1 >"${W}/tmp/verso-fb-grayscale"
+echo crash >"${W}/queue-0.1.0"
+launch
+runs_are "0.1.0"
+ui_restored_once
+absent "${W}/tmp/verso-fb-grayscale"
+grep -q '^restore-fb-grayscale 1$' "${W}/calls" || fail "grayscale not restored: $(cat "${W}/calls")"
+restore_line="$(grep -n '^restore-fb-grayscale 1$' "${W}/calls" | head -n 1 | cut -d: -f1)"
+cont_line="$(grep -n '^killall -CONT awesome$' "${W}/calls" | head -n 1 | cut -d: -f1)"
+[ "${restore_line}" -lt "${cont_line}" ] || fail "grayscale restored after awesome resumed"
 
 begin "update"
 fresh

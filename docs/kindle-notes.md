@@ -60,14 +60,15 @@ behaviour on other models is **(to verify)**.
   rotation), `hasEclipseWfm = 1`, `canHWInvert = 1`.
 - **Waveforms & completion:** monochrome uses `DU` (`Fast`), `GL16` (MTK) /
   non-flashing `GC16` (i.MX; `GL16` is from-white-only) (`Ui`), `REAGL` (`Page`)
-  and `GC16` (`Full`); color uses `GLRC16`/`GCC16` with `CFA_DEFAULT`
-  **(to verify)**. Dark mode (`hasEclipseWfm`) defaults to Variant A (`DUNM` on
-  MTK / `GLKW16` partial / `GCK16`, software flip; PW6 turns `5.48/3.94 ms` P,
-  `8.00/6.54 ms` L vs `5.58/4.03`, `7.61/6.48 ms` light **(measured)**);
-  Colorsoft `GLRCK16`/`GCCK16`, ghosting and Amazon dark mode
-  (`inverted_grayscale` only at 8 bpp) remain **(to verify)**. Full flashes
-  (~200–400 ms **(measured)**) await completion lazily before the next write,
-  sleep or exit.
+  `GLRC16`/`GCC16` with `CFA_DEFAULT` **(to verify)**. Dark mode (`hasEclipseWfm`)
+  defaults to Variant A (`DUNM` on MTK / `GLKW16` partial / `GCK16`, software
+  flip; PW6 turns `5.48/3.94 ms` P, `8.00/6.54 ms` L vs `5.58/4.03`, `7.61/6.48 ms`
+  light **(measured)**); `Settings::dark_variant` switches all five modes live,
+  guarding 8-bit driver night mode (`GRAYSCALE_8BIT_INVERTED`) across sleep and
+  crashes via `/tmp/verso-fb-grayscale`. Colorsoft `GLRCK16`/`GCCK16`, ghosting
+  and Amazon dark mode (`inverted_grayscale` only at 8 bpp) remain **(to verify)**.
+  Full flashes (~200–400 ms **(measured)**) await completion lazily before the next
+  write, sleep or exit.
 - **ARM alignment gotcha (measured):** crengine's `alignas(16)` glyph-cache
   items crash on 8-byte `malloc` under NEON/Zig, so `crengine-sys/build.rs`
   patches a copy to use `posix_memalign`.

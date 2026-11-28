@@ -18,7 +18,9 @@ use crate::screens::setup::SetupScreen;
 use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen, WhatsNewSheet};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
-use crate::store::{FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider};
+use crate::store::{
+    DarkVariant, FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider,
+};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{FILL, INK, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
@@ -175,13 +177,15 @@ pub struct SystemSettings {
     koreader: Toggle,
     /// "Swap page buttons", on devices with buttons; always below the preview.
     swap: Toggle,
-    // Display: one column, or (landscape) orientation and folder previews
-    // side by side and the refresh choices across both below them.
+    // Display: one column in portrait; in landscape, orientation and series
+    // numbers beside folder previews and dark mode, with refresh below both.
     orientation: Segmented,
     flash: Segmented,
     previews: Segmented,
-    /// "Series numbers on covers", below the folder previews.
+    /// "Series numbers on covers", below orientation in landscape or at the bottom in portrait.
     series_badges: Toggle,
+    dark_refresh_entry: List,
+    dark_refresh_sheet: Option<DarkModeSheet>,
     // Library: folders on the left; the dictionaries and KOReader entries
     // below them side by side, or (landscape) one above the other on the right.
     library: Rect,
@@ -278,6 +282,8 @@ impl SystemSettings {
         let selected = FolderPreview::OFFERED.iter().position(|&m| m == settings.folder_preview).unwrap_or(0);
         // Covers is disabled for now; see FolderPreview::OFFERED.
         let previews = Segmented::texts(&["Stack", "Latest", "Icon"], selected);
+        let dark_refresh_entry =
+            List::new(vec![Row::new("Dark mode").value(settings.dark_variant.summary()).chevron()]);
 
         let mut add_folder = Button::new("Add folder", ButtonKind::Secondary).with_icon(Icon::Folder);
         add_folder.place(Rect::new(content.x, 0, content.w, t.mm(CONTROL_MM)), t);
@@ -351,6 +357,8 @@ impl SystemSettings {
             flash,
             previews,
             series_badges: Toggle::new(settings.series_badges),
+            dark_refresh_entry,
+            dark_refresh_sheet: None,
             library,
             dictionaries,
             dictionary_entry,
@@ -430,10 +438,8 @@ impl SystemSettings {
     // ---- Reading ----
 
     fn save(&mut self, cx: &mut EventCx, what: &str, change: impl FnOnce(&mut Settings)) -> bool {
-        let mut settings = self.store.settings();
-        change(&mut settings);
-        match self.store.save_settings(&settings) {
-            Ok(()) => true,
+        match self.store.update_settings(change) {
+            Ok(_) => true,
             Err(e) => {
                 log::error!("saving {what}: {e:#}");
                 cx.toast(format!("Couldn't save {what}"), None);
@@ -527,38 +533,48 @@ impl SystemSettings {
 
     // ---- Display ----
 
-    /// Portrait: one column. Landscape: orientation and the series numbers
-    /// switch beside the folder previews, and the refresh choices across both
-    /// below them, where all four labels fit.
+    /// Portrait: one column. Landscape: orientation and series numbers beside
+    /// folder previews and dark mode, with refresh across both below them.
     fn draw_display(&mut self, cx: &mut DrawCx) {
         let t = cx.theme;
         let mut col = Column::new(self.left, self.body);
         col.label(cx, "Orientation");
         self.orientation.place(col.control(t));
         self.orientation.draw(cx);
-        col.note(cx, "For landscape, turn the Kindle clockwise so its top edge is on the right.", &[]);
-        col.gap(t);
+        col.note(cx, "Turn clockwise for landscape, top edge on the right.", &[]);
         if self.left == self.right {
+            col.y += t.mm(3.0);
             self.draw_refresh(cx, &mut col);
-            col.gap(t);
+            col.y += t.mm(1.5);
+            self.draw_dark_refresh(cx, &mut col);
+            col.y += t.mm(3.0);
             self.draw_previews(cx, &mut col);
             self.draw_badges(cx, &mut col);
         } else {
+            col.gap(t);
             self.draw_badges(cx, &mut col);
             col.gap(t);
             let mut right = Column::new(self.right, self.body);
             self.draw_previews(cx, &mut right);
-            right.gap(t);
+            right.y += t.mm(1.0);
+            self.draw_dark_refresh(cx, &mut right);
+            right.y += t.mm(2.0);
             let mut across = Column::new(self.content, col.y.max(right.y));
             self.draw_refresh(cx, &mut across);
         }
+    }
+
+    fn draw_dark_refresh(&mut self, cx: &mut DrawCx, col: &mut Column) {
+        let row = col.take(cx.theme.row);
+        self.dark_refresh_entry.place(row, cx.theme.row, 0);
+        self.dark_refresh_entry.draw(cx);
     }
 
     fn draw_refresh(&mut self, cx: &mut DrawCx, col: &mut Column) {
         col.label(cx, "Full page refresh");
         self.flash.place(col.control(cx.theme));
         self.flash.draw(cx);
-        col.note(cx, "A brief flash clears ghosting. Chapter starts and pictures always refresh fully.", &[]);
+        col.note(cx, "Clears ghosting. Chapters and pictures always flash.", &[]);
     }
 
     fn draw_previews(&mut self, cx: &mut DrawCx, col: &mut Column) {
@@ -566,12 +582,10 @@ impl SystemSettings {
         self.previews.place(col.control(cx.theme));
         self.previews.draw(cx);
         let note = |preview| match preview {
-            FolderPreview::Covers => "Folders in Collections show four covers, the books read most recently first.",
-            FolderPreview::Stack => {
-                "Folders in Collections show three covers stacked, the book read most recently in front."
-            }
-            FolderPreview::Latest => "Folders in Collections show the cover of the book read most recently in them.",
-            FolderPreview::Icon => "Folders in Collections show a folder icon and how many books they hold.",
+            FolderPreview::Covers => "Four covers in a grid, most recently read first.",
+            FolderPreview::Stack => "Three stacked covers, most recently read in front.",
+            FolderPreview::Latest => "Cover of the most recently read book.",
+            FolderPreview::Icon => "Folder icon and book count.",
         };
         let variants: Vec<_> = FolderPreview::OFFERED.iter().map(|&p| note(p)).collect();
         col.note(cx, note(FolderPreview::OFFERED[self.previews.selected]), &variants);
@@ -583,7 +597,7 @@ impl SystemSettings {
     fn draw_badges(&mut self, cx: &mut DrawCx, col: &mut Column) {
         let t = cx.theme;
         if self.left == self.right {
-            col.y += t.mm(SECTION_GAP_MM - 1.5);
+            col.y += t.mm(2.5);
         } else {
             // Beside the folder previews, 6" landscape has no height to spare.
             col.y -= t.mm(3.0);
@@ -593,6 +607,11 @@ impl SystemSettings {
     }
 
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
+        if let Some(ListEvent::Tapped(_)) = self.dark_refresh_entry.on_gesture(g) {
+            self.dark_refresh_sheet =
+                Some(DarkModeSheet::new(cx.theme, self.screen, self.store.settings().dark_variant));
+            return Action::None;
+        }
         // Collections shows the new previews when Settings closes.
         if let Some(i) = self.previews.on_gesture(g)
             && !self.save(cx, "folder previews", |s| s.folder_preview = FolderPreview::OFFERED[i])
@@ -619,6 +638,32 @@ impl SystemSettings {
                 }
             } else {
                 self.orientation.selected = usize::from(self.store.settings().orientation == Orientation::Landscape);
+            }
+        }
+        Action::None
+    }
+
+    fn refresh_dark_variant(&mut self) {
+        let variant = self.store.settings().dark_variant;
+        if let Some(row) = self.dark_refresh_entry.rows.first_mut() {
+            row.value = Some(variant.summary().into());
+        }
+        if let Some(sheet) = &mut self.dark_refresh_sheet {
+            sheet.sync(variant);
+        }
+    }
+
+    fn handle_dark_mode_event(&mut self, event: DarkModeEvent, cx: &mut EventCx) -> Action {
+        match event {
+            DarkModeEvent::Close => self.dark_refresh_sheet = None,
+            DarkModeEvent::Select(variant) => {
+                if self.save(cx, "dark mode", |s| s.dark_variant = variant) {
+                    self.refresh_dark_variant();
+                    return Action::DarkVariant(variant);
+                }
+                if let Some(sheet) = &mut self.dark_refresh_sheet {
+                    sheet.sync(self.store.settings().dark_variant);
+                }
             }
         }
         Action::None
@@ -1372,6 +1417,7 @@ impl SystemSettings {
 
 impl Screen for SystemSettings {
     fn on_return(&mut self, cx: &mut EventCx) {
+        self.refresh_dark_variant();
         self.refresh_translate();
         if let Some(sheet) = &mut self.translate_sheet {
             sheet.sync(cx.theme, &self.store.settings());
@@ -1409,9 +1455,18 @@ impl Screen for SystemSettings {
         if let Some(sheet) = &self.translate_sheet {
             sheet.draw(cx);
         }
+        if let Some(sheet) = &self.dark_refresh_sheet {
+            sheet.draw(cx);
+        }
     }
     fn on_gesture(&mut self, g: Gesture, cx: &mut EventCx) -> Action {
         cx.redraw();
+        if let Some(sheet) = &mut self.dark_refresh_sheet {
+            if let Some(event) = sheet.on_gesture(&g) {
+                return self.handle_dark_mode_event(event, cx);
+            }
+            return Action::None;
+        }
         if let Some(sheet) = &mut self.translate_sheet {
             if let Some(event) = sheet.on_gesture(&g, cx.theme) {
                 return self.handle_translate_event(event, cx);
@@ -1526,6 +1581,7 @@ impl Screen for SystemSettings {
         let saves = self.store.settings_saves();
         if saves != self.settings_seen {
             self.settings_seen = saves;
+            self.refresh_dark_variant();
             self.refresh_translate();
             if let Some(sheet) = &mut self.translate_sheet {
                 sheet.sync(cx.theme, &self.store.settings());
@@ -1878,6 +1934,71 @@ impl TranslateSheet {
     }
 }
 
+enum DarkModeEvent {
+    Close,
+    Select(DarkVariant),
+}
+
+/// Sheet for choosing how dark mode refreshes the e-ink display.
+struct DarkModeSheet {
+    sheet: Sheet,
+    list: List,
+    note: Rect,
+    selected: DarkVariant,
+}
+
+impl DarkModeSheet {
+    fn new(t: &Theme, screen: Rect, selected: DarkVariant) -> Self {
+        let landscape = screen.w > screen.h;
+        let (sheet, row_h) = if landscape {
+            let w = (screen.w * 11 / 20).max(t.mm(72.0)).min(screen.w);
+            (Sheet::side("Dark mode refresh", w, true, screen, t), t.mm(9.5))
+        } else {
+            let h = t.mm(86.0).min(screen.h - t.top_bar);
+            (Sheet::open("Dark mode refresh", h, screen, t), t.mm(10.0))
+        };
+        let c = sheet.content(t);
+        let list_h = row_h * DarkVariant::ALL.len() as i32;
+        let mut list = List::new(Vec::new());
+        list.place(Rect::new(c.x, c.y, c.w, list_h), row_h, 0);
+        let note_y = c.y + list_h + t.mm(2.5);
+        let note = Rect::new(c.x, note_y, c.w, (c.bottom() - t.margin - note_y).max(0));
+        let mut this = Self { sheet, list, note, selected };
+        this.sync(selected);
+        this
+    }
+
+    fn sync(&mut self, selected: DarkVariant) {
+        self.selected = selected;
+        self.list.rows = DarkVariant::ALL
+            .iter()
+            .map(|&variant| {
+                let row = Row::new(variant.label());
+                if variant == selected { row.check() } else { row }
+            })
+            .collect();
+    }
+
+    fn draw(&self, cx: &mut DrawCx) {
+        self.sheet.draw(cx);
+        self.list.draw(cx);
+        cx.paragraph(self.selected.note(), cx.theme.small.gray(INK2), self.note, HAlign::Left);
+    }
+
+    fn on_gesture(&mut self, g: &Gesture) -> Option<DarkModeEvent> {
+        if self.sheet.on_gesture(g) {
+            return Some(DarkModeEvent::Close);
+        }
+        if let Some(ListEvent::Tapped(i)) = self.list.on_gesture(g) {
+            let variant = DarkVariant::ALL[i];
+            if variant != self.selected {
+                return Some(DarkModeEvent::Select(variant));
+            }
+        }
+        None
+    }
+}
+
 /// Confirmation sheet showing where a manually created problem report was saved.
 struct ReportSheet {
     sheet: Sheet,
@@ -2047,6 +2168,14 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
         samples.push(
             Parts::new("TranslateSheet", tr.sheet.rect(), buttons)
                 .body(tr.note, text_h(text, &tr.message(), t.small, tr.note.w)),
+        );
+    }
+    for variant in DarkVariant::ALL {
+        let dm = DarkModeSheet::new(t, screen, variant);
+        let buttons = (0..DarkVariant::ALL.len()).map(|i| dm.list.row_rect(i));
+        samples.push(
+            Parts::new("DarkModeSheet", dm.sheet.rect(), buttons)
+                .body(dm.note, text_h(text, variant.note(), t.small, dm.note.w)),
         );
     }
     samples
@@ -2323,5 +2452,52 @@ mod tests {
         tap(&mut s, &t, screen, remove_btn);
         assert_eq!(store.settings().deepl_api_key, None);
         assert_eq!(s.translate_entry.rows[0].value.as_deref(), Some("DeepL (no key)"));
+    }
+
+    #[test]
+    fn dark_mode_setting_opens_sheet_saves_and_fits_narrow_landscape() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("data"));
+        let (t167, screen_l) = (Theme::for_dpi(167), Rect::new(0, 0, 800, 600));
+        let mut s = SystemSettings::new(&t167, screen_l, store.clone(), Waker::new(|| {}));
+        s.tab = Tab::Display;
+        draw(&mut s, &t167, 800, 600);
+        let mut text = crate::gfx::TextRenderer::new();
+        let row_w = s.right.w;
+        for variant in DarkVariant::ALL {
+            let need = text.width("Dark mode", t167.body)
+                + t167.mm(3.0) as f32
+                + text.width(variant.summary(), t167.body)
+                + t167.icon_small as f32
+                + t167.mm(2.0) as f32;
+            assert!(need <= row_w as f32, "{variant:?} summary overflows narrow landscape row: {need} > {row_w}");
+        }
+
+        // Open sheet, pick Driver night (full), and verify save + Action::DarkVariant.
+        let row = s.dark_refresh_entry.row_rect(0);
+        let p = row.center();
+        let mut toast = None;
+        let mut cx = EventCx {
+            theme: &t167,
+            screen: screen_l,
+            now: Instant::now(),
+            toast: &mut toast,
+            forced: &mut vec![],
+            needs_redraw: &mut false,
+            battery: None,
+        };
+        s.on_gesture(Gesture::Down(p), &mut cx);
+        let action = s.on_gesture(Gesture::Tap(p), &mut cx);
+        assert!(matches!(action, Action::None));
+        assert!(s.dark_refresh_sheet.is_some());
+
+        let c_row = s.dark_refresh_sheet.as_ref().unwrap().list.row_rect(2);
+        let cp = c_row.center();
+        s.on_gesture(Gesture::Down(cp), &mut cx);
+        let action = s.on_gesture(Gesture::Tap(cp), &mut cx);
+        assert!(matches!(action, Action::DarkVariant(DarkVariant::C)));
+        assert_eq!(store.settings().dark_variant, DarkVariant::C);
+        assert_eq!(s.dark_refresh_entry.rows[0].value.as_deref(), Some("Driver full"));
+        assert_eq!(s.dark_refresh_sheet.as_ref().unwrap().selected, DarkVariant::C);
     }
 }

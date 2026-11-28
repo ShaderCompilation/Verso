@@ -77,6 +77,12 @@ fn main() {
         }
         return;
     }
+    if std::env::args().nth(1).as_deref() == Some("--restore-fb-grayscale") {
+        if let Some(val) = std::env::args().nth(2).and_then(|s| s.parse::<u8>().ok()) {
+            platform::restore_fb_grayscale(val);
+        }
+        return;
+    }
     logging::init();
     log::info!(
         "Verso {} ({}, {}) starting (pid={})",
@@ -279,6 +285,7 @@ fn run() -> Result<i32> {
     // One Store for every screen, so they share preferences and the dictionary service.
     let store = store::Store::new();
     let settings = store.settings();
+    platform.set_dark_variant(settings.dark_variant);
     let orientation = settings.orientation;
     if orientation != platform::Orientation::Portrait {
         platform.set_orientation(orientation)?;
@@ -401,6 +408,9 @@ fn run() -> Result<i32> {
         {
             log::error!("{e:#}");
             app.frontlight = platform.frontlight();
+        }
+        if let Some(variant) = app.dark_variant_request() {
+            platform.set_dark_variant(variant);
         }
         let frame_started = Instant::now();
         let updates = app.frame();

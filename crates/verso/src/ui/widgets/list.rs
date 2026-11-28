@@ -14,6 +14,7 @@ use crate::ui::widgets::toggle::{Toggle, draw_pill};
 pub enum Accessory {
     None,
     Chevron,
+    Check,
     Toggle(bool),
     /// Up and down buttons for reordering; a false side is drawn faint and
     /// ignores taps. Needs `List::slot`.
@@ -74,6 +75,11 @@ impl Row {
 
     pub fn chevron(mut self) -> Self {
         self.accessory = Accessory::Chevron;
+        self
+    }
+
+    pub fn check(mut self) -> Self {
+        self.accessory = Accessory::Check;
         self
     }
 
@@ -275,6 +281,11 @@ impl List {
                     let icon = Rect::new(right - t.icon_small + t.mm(0.6), r.y, t.icon_small, r.h);
                     cx.icon(Icon::ChevronRight, icon, t.icon_small, fg2);
                     right -= t.icon_small + t.mm(1.0);
+                }
+                Accessory::Check => {
+                    let icon = Rect::new(right - t.icon_small, r.y, t.icon_small, r.h);
+                    cx.icon(Icon::Check, icon, t.icon_small, fg);
+                    right -= t.icon_small + t.mm(1.5);
                 }
                 Accessory::Toggle(on) => {
                     let (w, h) = Toggle::size(t);

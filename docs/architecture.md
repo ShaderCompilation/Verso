@@ -128,7 +128,10 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
   sleep covers and crengine book images/colored text pre-flip so pictures stay
   normal and colored text keeps its hue with inverted luma. Live switching defers
   `canvas.dark` and `App::frame()` up to 500 ms while `Reader` re-renders, then
-  commits with one `Full` refresh.
+  commits with one `Full` refresh. `Settings::dark_variant` switches dark refresh
+  modes live (`A`, `B`, `C`, `C-partial`, `REAGL`); 8-bit driver night mode (`C`,
+  `C-partial`) engages only while dark and active, suspends before native sleep,
+  and records `/tmp/verso-fb-grayscale` so `verso.sh` restores it after a crash.
 
 ### Frame comparison and refresh planning (`ui/damage.rs`, `app.rs`)
 

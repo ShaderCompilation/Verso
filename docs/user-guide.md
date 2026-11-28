@@ -410,7 +410,9 @@ Check automatically**), or on demand via **Check for updates**.
 **Settings** has five tabs:
 
 - **Reading:** tap zones, top-right bookmark corner, check KOReader progress.
-- **Display:** orientation, full page refresh interval, folder previews.
+- **Display:** orientation, full page refresh interval, **Dark mode** refresh
+  mode (Eclipse partial/full, Driver night full/partial, REAGL), folder
+  previews, series numbers.
 - **Library:** library folders, dictionaries, KOReader bulk import.
 - **Device:** sleep screen (**Book cover** [default, falls back to Amazon when
   a book has no cover] or **Amazon**), Wi-Fi toggle, Wi-Fi transfer, updates.

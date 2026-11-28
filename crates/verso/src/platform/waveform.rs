@@ -7,6 +7,7 @@
 use crate::platform::RefreshMode;
 
 /// Panel capabilities reported by FBInk at startup.
+#[cfg_attr(not(any(feature = "kindle", test)), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PanelCaps {
     pub has_color_panel: bool,
@@ -15,6 +16,7 @@ pub struct PanelCaps {
 }
 
 /// Waveform mode requested from FBInk for one refresh.
+#[cfg_attr(not(any(feature = "kindle", test)), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waveform {
     Du,
@@ -50,11 +52,9 @@ impl Waveform {
     }
 }
 
-/// Dark-mode waveform variant (`VERSO_DARK_VARIANT`).
-/// Variant A (`GLKW16` + `UPDATE_MODE_PARTIAL`, software flip) is the default;
-/// the remaining variants (`b`, `c`, `c-partial`, `reagl`) stay wired up for
-/// comparison for now.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How dark mode refreshes the e-ink panel (`Settings::dark_variant`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DarkVariant {
     /// Eclipse waveforms; `GLKW16` uses `UPDATE_MODE_PARTIAL`.
     #[default]
@@ -64,28 +64,63 @@ pub enum DarkVariant {
     /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`); `GLKW16` uses `UPDATE_MODE_FULL`.
     C,
     /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`); `GLKW16` uses `UPDATE_MODE_PARTIAL`.
+    #[serde(alias = "c-partial")]
     CPartial,
-    /// Light waveforms (`REAGL` etc.) on flipped pixels, as a baseline.
+    /// Light waveforms (`REAGL` etc.) on flipped pixels.
     Reagl,
 }
 
 impl DarkVariant {
-    pub fn from_env() -> Self {
-        match std::env::var("VERSO_DARK_VARIANT").ok().as_deref().map(str::to_ascii_lowercase).as_deref() {
-            Some("b") => Self::B,
-            Some("c") => Self::C,
-            Some("c-partial") => Self::CPartial,
-            Some("reagl") => Self::Reagl,
-            _ => Self::A,
+    pub const ALL: [Self; 5] = [Self::A, Self::B, Self::C, Self::CPartial, Self::Reagl];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::A => "Eclipse (partial)",
+            Self::B => "Eclipse (full)",
+            Self::C => "Driver night (full)",
+            Self::CPartial => "Driver night (partial)",
+            Self::Reagl => "REAGL",
         }
     }
 
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::A => "Eclipse",
+            Self::B => "Eclipse full",
+            Self::C => "Driver full",
+            Self::CPartial => "Driver partial",
+            Self::Reagl => "REAGL",
+        }
+    }
+
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::A => {
+                "Software pixel flip with partial eclipse updates (GLKW16). No flash on page turns; leaves the Kindle display driver untouched. The default."
+            }
+            Self::B => {
+                "Software pixel flip with full eclipse updates (GLKW16). Less ghosting than partial, with a brief flash on each update."
+            }
+            Self::C => {
+                "Kindle driver night mode with full eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit."
+            }
+            Self::CPartial => {
+                "Kindle driver night mode with partial eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit."
+            }
+            Self::Reagl => {
+                "Software pixel flip with standard light-mode waveforms (REAGL). Useful on panels where eclipse modes ghost more."
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
     pub fn uses_driver_night_mode(self) -> bool {
         matches!(self, Self::C | Self::CPartial)
     }
 }
 
 /// What `Display::present` sends to FBInk and whether it arms `FlashFence`.
+#[cfg_attr(not(any(feature = "kindle", test)), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefreshPlan {
     pub waveform: Waveform,
@@ -107,6 +142,7 @@ pub struct RefreshPlan {
 /// waveforms (`DU` / `GL16` / `REAGL` / `GC16` or color equivalents) with
 /// `UPDATE_MODE_PARTIAL` for non-`Full`. `DUNM` is gated on `caps.is_mtk`
 /// because FBInk maps `DUNM` to `AUTO` on i.MX.
+#[cfg_attr(not(any(feature = "kindle", test)), allow(dead_code))]
 pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: DarkVariant) -> RefreshPlan {
     let mark_flash_fence = mode == RefreshMode::Full;
     if !dark || !caps.has_eclipse_wfm || variant == DarkVariant::Reagl {
@@ -286,5 +322,20 @@ mod tests {
             ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::Reagl)),
             ALL_MODES.map(|m| plan_refresh(m, false, pw6, DarkVariant::A))
         );
+    }
+
+    #[test]
+    fn dark_variant_round_trips_serde_and_accepts_c_partial_alias() {
+        for variant in DarkVariant::ALL {
+            let json = serde_json::to_string(&variant).unwrap();
+            let decoded: DarkVariant = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, variant);
+        }
+        assert_eq!(serde_json::from_str::<DarkVariant>(r#""c-partial""#).unwrap(), DarkVariant::CPartial);
+        assert!(!DarkVariant::A.uses_driver_night_mode());
+        assert!(!DarkVariant::B.uses_driver_night_mode());
+        assert!(DarkVariant::C.uses_driver_night_mode());
+        assert!(DarkVariant::CPartial.uses_driver_night_mode());
+        assert!(!DarkVariant::Reagl.uses_driver_night_mode());
     }
 }

@@ -12,7 +12,7 @@ use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
 use crate::platform::framebuffer::{Format, Layout, Writer};
 use crate::platform::waveform::{DarkVariant, PanelCaps, plan_refresh};
-use crate::platform::{FrameCheck, Orientation, Unsupported, Update};
+use crate::platform::{FrameCheck, Orientation, RefreshMode, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
 pub struct DisplaySession {
@@ -76,9 +76,10 @@ pub struct Display {
     pub touch_mirror_y: bool,
     /// Tracks an unawaited flashing refresh so the next write or handoff waits for it.
     flash_fence: FlashFence,
-    /// Dark-mode waveform variant (`VERSO_DARK_VARIANT`, default Variant A).
+    /// Dark-mode refresh variant (`Settings::dark_variant`, default Variant A).
     dark_variant: DarkVariant,
-    /// Variant C driver night-mode cleanup: original `vInfo.grayscale` to restore on drop.
+    /// Driver night-mode cleanup: original `vInfo.grayscale` to restore on
+    /// leaving night mode, native sleep, or drop.
     restore_grayscale: Option<u8>,
     /// Refreshes FBInk refused, for the exit line.
     pub failed_refreshes: u32,
@@ -87,6 +88,12 @@ pub struct Display {
 const KEEP_CURRENT_ROTATE: u32 = 1 << 7;
 const KEEP_CURRENT_BITDEPTH: u8 = 1 << 7;
 const GRAYSCALE_8BIT_INVERTED: u8 = 2;
+const FB_GRAYSCALE_MARKER: &str = "verso-fb-grayscale";
+
+fn grayscale_marker_path() -> std::path::PathBuf {
+    let tmp = std::env::var_os("VERSO_TMP").map(std::path::PathBuf::from).unwrap_or_else(|| "/tmp".into());
+    tmp.join(FB_GRAYSCALE_MARKER)
+}
 
 impl Display {
     pub fn open() -> Result<Self> {
@@ -104,33 +111,6 @@ impl Display {
             if fb::fbink_init(fd, &cfg) < 0 {
                 fb::fbink_close(fd);
                 bail!("FBInk failed to initialise");
-            }
-            let dark_variant = DarkVariant::from_env();
-            if dark_variant != DarkVariant::A {
-                log::info!("dark mode waveform variant: {dark_variant:?}");
-            }
-            let mut restore_grayscale = None;
-            if dark_variant.uses_driver_night_mode() {
-                let mut vinfo: fb::fb_var_screeninfo = std::mem::zeroed();
-                let mut finfo: fb::fb_fix_screeninfo = std::mem::zeroed();
-                fb::fbink_get_fb_info(&mut vinfo, &mut finfo);
-                log::info!("Variant C: initial fb info bpp={}, grayscale={}", vinfo.bits_per_pixel, vinfo.grayscale);
-                if vinfo.bits_per_pixel == 8 && vinfo.grayscale != GRAYSCALE_8BIT_INVERTED as u32 {
-                    let orig = vinfo.grayscale as u8;
-                    let rc = fb::fbink_set_fb_info(
-                        fd,
-                        KEEP_CURRENT_ROTATE,
-                        KEEP_CURRENT_BITDEPTH,
-                        GRAYSCALE_8BIT_INVERTED,
-                        &cfg,
-                    );
-                    if rc < 0 {
-                        log::warn!("Variant C: fbink_set_fb_info(GRAYSCALE_8BIT_INVERTED) failed: {rc}");
-                    } else {
-                        log::info!("Variant C: switched fb grayscale {orig} -> {GRAYSCALE_8BIT_INVERTED} (rc={rc})");
-                        restore_grayscale = Some(orig);
-                    }
-                }
             }
 
             let mut st: fb::FBInkState = std::mem::zeroed();
@@ -187,10 +167,6 @@ impl Display {
                     session.inverted,
                 );
                 print_refusal(fd, &msg);
-                if let Some(orig) = restore_grayscale {
-                    let rc = fb::fbink_set_fb_info(fd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, orig, &cfg);
-                    log::info!("Variant C: restored fb grayscale to {orig} on open failure (rc={rc})");
-                }
                 fb::fbink_close(fd);
                 Err(Unsupported(msg).into())
             };
@@ -243,10 +219,119 @@ impl Display {
                 touch_mirror_x: st.touch_mirror_x,
                 touch_mirror_y: st.touch_mirror_y,
                 flash_fence: FlashFence::default(),
-                dark_variant,
-                restore_grayscale,
+                dark_variant: DarkVariant::default(),
+                restore_grayscale: None,
                 failed_refreshes: 0,
             })
+        }
+    }
+
+    pub fn set_dark_variant(&mut self, variant: DarkVariant) {
+        if self.dark_variant != variant {
+            log::info!("dark mode refresh: {variant:?}");
+            self.dark_variant = variant;
+        }
+    }
+
+    pub fn dark_variant(&self) -> DarkVariant {
+        self.dark_variant
+    }
+
+    /// Refreshes FBInk state and framebuffer mapping after `fbink_set_fb_info`
+    /// (which calls `fbink_reinit`). Updates `writer` and `session.inverted`
+    /// and returns whether `writer.inverted()` changed.
+    fn refresh_fbink_mapping(&mut self) -> bool {
+        // SAFETY: valid fd and config, zeroed C struct.
+        let mut st: fb::FBInkState = unsafe { std::mem::zeroed() };
+        unsafe { fb::fbink_get_state(&self.cfg, &mut st) };
+        let mut fb_len = 0usize;
+        // SAFETY: valid fd.
+        let ptr = unsafe { fb::fbink_get_fb_pointer(self.fd, &mut fb_len) };
+        if !ptr.is_null() && self.writer.required_len().is_some_and(|n| fb_len >= n) {
+            self.fb = ptr;
+            self.fb_len = fb_len;
+        } else {
+            log::warn!("driver night mode: fbink_get_fb_pointer returned ptr={ptr:?} len={fb_len}");
+        }
+        let changed = self.writer.inverted() != st.inverted_grayscale;
+        self.writer.set_inverted(st.inverted_grayscale);
+        self.session.inverted = st.inverted_grayscale;
+        changed
+    }
+
+    /// Engages or disengages driver night mode (`GRAYSCALE_8BIT_INVERTED`) to
+    /// match `dark && self.dark_variant.uses_driver_night_mode()`.
+    /// Returns `true` if `writer.inverted()` changed and `/dev/fb0` needs a
+    /// full rewrite.
+    pub fn sync_driver_night_mode(&mut self, dark: bool) -> bool {
+        let want = dark && self.dark_variant.uses_driver_night_mode();
+        if want && self.restore_grayscale.is_none() {
+            // SAFETY: valid zero-initialized structs passed to FBInk.
+            let mut vinfo: fb::fb_var_screeninfo = unsafe { std::mem::zeroed() };
+            let mut finfo: fb::fb_fix_screeninfo = unsafe { std::mem::zeroed() };
+            unsafe { fb::fbink_get_fb_info(&mut vinfo, &mut finfo) };
+            if vinfo.bits_per_pixel != 8 || vinfo.grayscale == GRAYSCALE_8BIT_INVERTED as u32 {
+                return false;
+            }
+            self.wait_for_complete();
+            let orig = vinfo.grayscale as u8;
+            let marker = grayscale_marker_path();
+            if let Err(e) = std::fs::write(&marker, orig.to_string()) {
+                log::warn!("driver night mode: couldn't write {}: {e}", marker.display());
+                return false;
+            }
+            // SAFETY: valid fd and config.
+            let rc = unsafe {
+                fb::fbink_set_fb_info(
+                    self.fd,
+                    KEEP_CURRENT_ROTATE,
+                    KEEP_CURRENT_BITDEPTH,
+                    GRAYSCALE_8BIT_INVERTED,
+                    &self.cfg,
+                )
+            };
+            if rc < 0 {
+                let _ = std::fs::remove_file(&marker);
+                log::warn!("driver night mode: fbink_set_fb_info(GRAYSCALE_8BIT_INVERTED) failed: {rc}");
+                return false;
+            }
+            self.restore_grayscale = Some(orig);
+            let changed = self.refresh_fbink_mapping();
+            log::info!(
+                "driver night mode: switched fb grayscale {orig} -> {GRAYSCALE_8BIT_INVERTED} (rc={rc}, inverted={})",
+                self.writer.inverted()
+            );
+            return changed;
+        }
+        if !want && let Some(orig) = self.restore_grayscale.take() {
+            self.wait_for_complete();
+            // SAFETY: valid fd and config, restoring original grayscale value.
+            let rc =
+                unsafe { fb::fbink_set_fb_info(self.fd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, orig, &self.cfg) };
+            if rc < 0 {
+                log::warn!("driver night mode: failed to restore fb grayscale {orig}: {rc}");
+                self.restore_grayscale = Some(orig);
+                return false;
+            }
+            let _ = std::fs::remove_file(grayscale_marker_path());
+            let changed = self.refresh_fbink_mapping();
+            log::info!(
+                "driver night mode: restored fb grayscale -> {orig} (rc={rc}, inverted={})",
+                self.writer.inverted()
+            );
+            return changed;
+        }
+        false
+    }
+
+    /// Restores the original framebuffer grayscale when handing the display
+    /// back (native sleep or exit). Returns whether driver night mode was active.
+    pub fn suspend_driver_night_mode(&mut self) -> bool {
+        if self.restore_grayscale.is_some() {
+            self.sync_driver_night_mode(false);
+            true
+        } else {
+            false
         }
     }
 
@@ -261,6 +346,9 @@ impl Display {
             bail!("canvas is {}x{}, expected {cw}x{ch}", canvas.width(), canvas.height());
         }
         let canvas_bounds = canvas.bounds();
+        let polarity_changed = self.sync_driver_night_mode(canvas.is_dark());
+        let full_screen = [Update { rect: canvas_bounds, mode: RefreshMode::Full }];
+        let updates = if polarity_changed { &full_screen[..] } else { updates };
         for u in updates {
             if u.rect.intersect(&canvas_bounds).is_none() {
                 continue;
@@ -373,15 +461,34 @@ impl Drop for Display {
     fn drop(&mut self) {
         // Don't hand the display back to the launcher mid-flash on an error exit.
         self.wait_for_pending_flash();
-        if let Some(orig) = self.restore_grayscale.take() {
-            // Wait for any in-flight night-mode update before switching grayscale back.
-            self.wait_for_complete();
-            // SAFETY: restores the original grayscale flag recorded in `open`.
-            let rc =
-                unsafe { fb::fbink_set_fb_info(self.fd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, orig, &self.cfg) };
-            log::info!("Variant C: restored fb grayscale to {orig} (rc={rc})");
-        }
+        self.suspend_driver_night_mode();
         // SAFETY: closes the session opened in `open`; the mapping isn't used after this.
         unsafe { fb::fbink_close(self.fd) };
+    }
+}
+
+/// Restores the framebuffer's 8-bit grayscale flag outside a live `Display`
+/// session (called by the launcher after a crash).
+pub fn restore_fb_grayscale(orig: u8) {
+    // SAFETY: plain FFI calls; FBInkConfig is valid when zeroed.
+    unsafe {
+        let fd = fb::fbink_open();
+        if fd < 0 {
+            eprintln!("restore-fb-grayscale: fbink_open failed: {fd}");
+            return;
+        }
+        let mut cfg: fb::FBInkConfig = std::mem::zeroed();
+        cfg.is_quiet = true;
+        cfg.no_viewport = true;
+        if fb::fbink_init(fd, &cfg) < 0 {
+            eprintln!("restore-fb-grayscale: fbink_init failed");
+            fb::fbink_close(fd);
+            return;
+        }
+        let rc = fb::fbink_set_fb_info(fd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, orig, &cfg);
+        if rc < 0 {
+            eprintln!("restore-fb-grayscale: fbink_set_fb_info({orig}) failed: {rc}");
+        }
+        fb::fbink_close(fd);
     }
 }

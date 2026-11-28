@@ -33,6 +33,7 @@ use super::{
 };
 use crate::gfx::Canvas;
 use display::Display;
+pub use display::restore_fb_grayscale;
 use input::{KeySource, Remote, TouchInput};
 
 /// Set by SIGINT/SIGTERM/SIGHUP, so we can shut down cleanly.
@@ -454,6 +455,7 @@ impl Platform for Kindle {
         if !cover && !self.native_sleep {
             // Let any in-flight flash finish before Amazon's UI draws its sleep screen.
             self.display.wait_for_complete();
+            let suspended_night = self.display.suspend_driver_night_mode();
             self.inputs_mut().touch.grab(false)?;
             self.grab_buttons(false);
             // A missed handoff (no launcher, or one too busy to ack) must not end
@@ -463,6 +465,9 @@ impl Platform for Kindle {
                 Ok(()) => self.native_sleep = true,
                 Err(e) => {
                     log::warn!("sleep handoff failed, sleeping on Verso's own screen: {e:#}");
+                    if suspended_night {
+                        self.display.sync_driver_night_mode(true);
+                    }
                     self.inputs_mut().touch.grab(true)?;
                     self.grab_buttons(true);
                 }
@@ -521,7 +526,7 @@ impl Platform for Kindle {
             format!("device: {} ({}, {}, id={:#06x})", s.device_name, s.codename, s.platform, s.device_id),
             self.profile_line.clone(),
             format!(
-                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, eclipse={}, {} dpi, mtk={}, inverted={}",
+                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, eclipse={}, {} dpi, mtk={}, inverted={}, dark_variant={:?}",
                 s.view_width,
                 s.view_height,
                 s.view_hori_origin,
@@ -536,6 +541,7 @@ impl Platform for Kindle {
                 s.dpi,
                 s.is_mtk,
                 s.inverted,
+                self.display.dark_variant(),
             ),
             // Touch and page buttons are logged by `finish_startup`.
             format!(
@@ -558,6 +564,10 @@ impl Platform for Kindle {
         // orientation.
         self.queue.retain(|e| !matches!(e, Event::Touch(_) | Event::Key { .. }));
         Ok(())
+    }
+
+    fn set_dark_variant(&mut self, variant: super::DarkVariant) {
+        self.display.set_dark_variant(variant);
     }
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {

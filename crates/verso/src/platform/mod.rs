@@ -44,9 +44,8 @@ pub mod ssh;
 #[cfg(any(feature = "kindle", test))]
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod touch;
-#[cfg(any(feature = "kindle", test))]
-#[cfg_attr(not(feature = "kindle"), allow(dead_code))]
-mod waveform;
+pub mod waveform;
+pub use waveform::DarkVariant;
 pub mod wifi;
 
 /// How an area of the e-ink screen should be refreshed. The app states its
@@ -352,6 +351,9 @@ pub trait Platform {
     /// must redraw everything.
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()>;
 
+    /// Selects how dark mode refreshes the e-ink panel (waveforms and driver night mode).
+    fn set_dark_variant(&mut self, _variant: DarkVariant) {}
+
     /// Waits for the next event. Returns `None` if `timeout` passes first;
     /// `None` as the timeout waits forever.
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>>;
@@ -437,6 +439,14 @@ pub fn open(device: Option<&str>) -> Result<Box<dyn Platform>> {
         let _ = device;
         Ok(Box::new(kindle::Kindle::open()?))
     }
+}
+
+/// Restores the framebuffer's 8-bit grayscale mode (called by the launcher on crash cleanup).
+pub fn restore_fb_grayscale(value: u8) {
+    #[cfg(feature = "kindle")]
+    kindle::restore_fb_grayscale(value);
+    #[cfg(feature = "desktop")]
+    let _ = value;
 }
 
 #[cfg(test)]

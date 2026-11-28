@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
 use crate::platform::{
-    Battery, DeviceInfo, Frontlight, KeyAction, LightRange, Orientation, RefreshMode, TextInput, Update, Waker,
+    Battery, DarkVariant, DeviceInfo, Frontlight, KeyAction, LightRange, Orientation, RefreshMode, TextInput, Update,
+    Waker,
 };
 use crate::screens::system::{ExitChoice, ExitPrompt};
 use crate::screens::top_drawer::{self, DrawerEvent, DrawerWorker, NetOps, TopDrawer};
@@ -109,6 +110,7 @@ pub struct App {
     usb_connected: bool,
     wake_cleanup: Option<Instant>,
     dark_pending: Option<(bool, Instant)>,
+    dark_variant_request: Option<DarkVariant>,
     orientation: Orientation,
     /// A screen asked to turn the display; see `prepare_orientation`.
     orientation_request: Option<Orientation>,
@@ -154,6 +156,7 @@ impl App {
             usb_connected: false,
             wake_cleanup: None,
             dark_pending: None,
+            dark_variant_request: None,
             orientation: Orientation::Portrait,
             orientation_request: None,
             services: None,
@@ -919,6 +922,10 @@ impl App {
         self.light_request.take()
     }
 
+    pub fn dark_variant_request(&mut self) -> Option<DarkVariant> {
+        self.dark_variant_request.take()
+    }
+
     pub fn on_sleep(&mut self) {
         // Cancel captures before dropping raw touch state, including overlays.
         self.on_gesture(Gesture::Cancel(crate::geom::Point::default()));
@@ -1059,6 +1066,12 @@ impl App {
                 self.exit_code = Some(code);
             }
             Action::Orientation(o) => self.orientation_request = Some(o),
+            Action::DarkVariant(variant) => {
+                self.dark_variant_request = Some(variant);
+                if self.dark_mode() {
+                    self.refresh_all(RefreshMode::Full);
+                }
+            }
             Action::OpenTopDrawer => self.open_drawer(),
         }
         self.finish_dark_wait_if_ready();
@@ -2379,5 +2392,31 @@ mod tests {
         assert_eq!(*buried.borrow(), [true], "buried screen receives set_dark");
         assert_eq!(*top.borrow(), [true]);
         assert!(app.dark_pending.is_none() && app.canvas.is_dark(), "does not wait on buried screen");
+    }
+
+    #[test]
+    fn dark_variant_action_queues_platform_update_and_flashes_only_when_dark() {
+        struct VariantScreen(DarkVariant);
+        impl Screen for VariantScreen {
+            fn draw(&mut self, _: &mut DrawCx) {}
+            fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
+                if matches!(g, Gesture::Tap(_)) { Action::DarkVariant(self.0) } else { Action::None }
+            }
+        }
+        let info =
+            DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(VariantScreen(DarkVariant::B)));
+        app.frame();
+
+        tap(&mut app, Point::new(100, 100));
+        assert_eq!(app.dark_variant_request(), Some(DarkVariant::B));
+        assert_eq!(app.dark_variant_request(), None);
+        assert!(app.frame().is_empty(), "light mode does not flash when switching dark refresh variant");
+
+        app.set_dark(true);
+        app.stack[0] = Box::new(VariantScreen(DarkVariant::C));
+        tap(&mut app, Point::new(100, 100));
+        assert_eq!(app.dark_variant_request(), Some(DarkVariant::C));
+        assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 600, 800), mode: RefreshMode::Full }]);
     }
 }

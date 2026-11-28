@@ -56,6 +56,8 @@ START_TIMEOUT="${VERSO_START_TIMEOUT:-120}"
 # Wi-Fi transfer (crates/verso/src/transfer/mod.rs has the same names).
 TRANSFER_FIREWALL="${TMP}/verso-transfer-firewall"
 TRANSFER_PORT=80
+# Driver night mode (crates/verso/src/platform/kindle/display.rs).
+FB_GRAYSCALE_MARKER="${TMP}/verso-fb-grayscale"
 EXIT_INSTALL=85
 EXIT_GO_BACK=86
 EXIT_RESTART=87
@@ -225,6 +227,17 @@ restore() {
     trap - EXIT
     [ -n "${WATCHER}" ] && kill "${WATCHER}" 2>/dev/null
     log "restoring the Kindle UI"
+    if [ -f "${FB_GRAYSCALE_MARKER}" ]; then
+        orig_gs="$(cat "${FB_GRAYSCALE_MARKER}" 2>/dev/null)"
+        rm -f "${FB_GRAYSCALE_MARKER}"
+        case "${orig_gs}" in
+            '' | *[!0-9]*) ;;
+            *)
+                "${APP_DIR}/verso" --restore-fb-grayscale "${orig_gs}" >>"${LOG}" 2>&1 || true
+                log "restored framebuffer grayscale to ${orig_gs} after exit"
+                ;;
+        esac
+    fi
     [ "${STATUS_STOPPED}" = yes ] && killall -CONT JunoStatusBarDriver 2>/dev/null
     [ "${AWESOME_STOPPED}" = yes ] && killall -CONT awesome 2>/dev/null
     # Put back what was on screen before, so there's no flash of our UI

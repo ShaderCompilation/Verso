@@ -107,6 +107,18 @@ impl Writer {
         Self { layout, shadow: Vec::new(), scratch: RotateScratch::default() }
     }
 
+    pub fn inverted(&self) -> bool {
+        self.layout.inverted
+    }
+
+    pub fn set_inverted(&mut self, inverted: bool) {
+        self.layout.inverted = inverted;
+    }
+
+    pub fn required_len(&self) -> Option<usize> {
+        self.layout.required_len()
+    }
+
     /// Copies `rect` of `canvas` (drawn in `orientation`) into `fb`, the
     /// whole framebuffer mapping, which must be at least
     /// `layout.required_len()` long. Returns the changed panel rectangle in
@@ -454,6 +466,29 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn set_inverted_updates_write_and_check_polarity() {
+        for format in [Format::Gray8, Format::Rgba32, Format::Bgra32] {
+            let l = layout(format, (1, 1), false);
+            let mut fb = vec![0u8; l.required_len().unwrap()];
+            let mut c = canvas(Orientation::Portrait);
+            c.set_dark(true);
+            let mut writer = Writer::new(l);
+            assert!(!writer.inverted());
+            assert!(writer.required_len().is_some());
+
+            writer.write(&c, c.bounds(), Orientation::Portrait, &mut fb);
+            assert_eq!(writer.check(&c, Orientation::Portrait, &fb).changed, 0);
+
+            writer.set_inverted(true);
+            assert!(writer.inverted());
+            assert_eq!(writer.check(&c, Orientation::Portrait, &fb).changed, H, "{format:?}");
+            writer.write(&c, c.bounds(), Orientation::Portrait, &mut fb);
+            assert_eq!(writer.check(&c, Orientation::Portrait, &fb).changed, 0);
+            assert_eq!(gray_at(&fb, &l, 0, 0), 0);
         }
     }
 }

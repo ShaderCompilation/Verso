@@ -18,7 +18,7 @@ use crate::library::LibraryIndex;
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 pub use crate::online::translate::Provider as TranslateProvider;
 use crate::page_layout::PageLayout;
-pub use crate::platform::Orientation;
+pub use crate::platform::{DarkVariant, Orientation};
 pub use crate::reader::TapZones;
 use anyhow::{Context, Result};
 pub use dictionary_folders::{
@@ -97,6 +97,9 @@ pub struct Settings {
     pub setup_done: bool,
     /// Light text on black across the whole app. Toggled from the Top Drawer.
     pub dark_mode: bool,
+    /// Dark-mode e-ink refresh mode (waveforms and optional driver night mode).
+    /// Settings → Display → Dark mode.
+    pub dark_variant: DarkVariant,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -129,6 +132,7 @@ impl Default for Settings {
             deepl_api_key: None,
             setup_done: false,
             dark_mode: false,
+            dark_variant: DarkVariant::default(),
         }
     }
 }
