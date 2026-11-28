@@ -8,7 +8,7 @@
 //! 1294bb3d, 2026-11-21). KOReader drives every Kindle's light through
 //! powerd's `flIntensity` and `currentAmberLevel` with 0..=24 steps.
 //! On the PW2, PW3 and Voyage (`canTurnFrontlightOff = no`) step 0 is dim,
-//! not off; their firmware is soft-float, so Verso doesn't run there anyway.
+//! not off.
 //!
 //! Only models with a report are `tested`.
 

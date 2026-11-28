@@ -1,5 +1,11 @@
 Thirteenth closed beta of Verso.
 
+## Older Kindles
+
+- Verso now runs on Paperwhite 3, Basic 2, Oasis (2016) and Oasis 2 with
+  firmware 5.16.2.1.1. Start it from KUAL. These models are still untested on
+  real hardware, so please send a problem report.
+
 ## Dark mode
 
 - Read in dark mode. Turn it on from the top drawer or in Settings under

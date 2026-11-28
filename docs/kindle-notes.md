@@ -9,19 +9,20 @@ behaviour on other models is **(to verify)**.
 
 ## 1. Target ABI, firmware and models
 
-- **Build target:** `armv7-unknown-linux-gnueabihf`, glibc **2.20** (floor for
-  i.MX armhf models like Oasis 3), `-C target-cpu=cortex-a9` (`.cargo/config.toml`
-  and `crengine-sys` `-mcpu=cortex-a9`). Cortex-A9 enables NEON/VFPv3-D32
-  without emitting VFPv4 or hardware integer division that i.MX6SLL models
-  (PW4, Basic 3) lack. `.cargo/arm-glibc-relplt.ld` keeps `.rel.plt` immediately
-  after `.rel.dyn` so LLD does not place `.ARM.exidx` between them, avoiding an
-  instant `SIGSEGV` in glibc ≤ 2.22 `ld.so` under Zig's default `-z now` (glibc
-  bug #14341).
-- **Hard-float firmware only (5.16.3+):** requires `/lib/ld-linux-armhf.so.3`.
-  `verso.sh` checks for it before pausing the Kindle UI; if absent, it prints
-  via `eips` (avoiding apostrophes, which `eips` cannot draw), saves a problem
-  report and exits without altering the UI. Older soft-float Kindles are not
-  supported.
+- **Build target:** `armv7-unknown-linux-musleabihf`, static (`+crt-static`),
+  `-C target-cpu=cortex-a9` (`.cargo/config.toml` and `crengine-sys`
+  `-mcpu=cortex-a9`): no system libc or `ld.so`, so one binary runs on hard-
+  and soft-float firmware. Cortex-A9 enables NEON/VFPv3-D32 without emitting
+  VFPv4 or hardware integer division that i.MX6SLL models (PW4, Basic 3) lack.
+  `scripts/stage.sh` checks the ELF.
+- **Firmware:** 5.16.3+ (hard-float), plus PW3, Basic 2, Oasis 1 and Oasis 2 on
+  their soft-float 5.16.2.1.1 (kernel 3.0.35), where KUAL is the launcher and
+  KPM isn't built for them. Checked only in an emulated PW3; real hardware
+  (waveforms, touch, light, sleep, speed) is **(to verify)**. PW2, Basic 1 and
+  Voyage are not supported.
+- **Musl time zone:** the Kindle's `/etc/localtime` has an empty POSIX footer,
+  which musl applies after the last transition (UTC); `clock.rs` reads the
+  transitions itself.
 - **Self-contained binary:** system libraries under `/usr/lib` are not relied on
   because firmware updates can change them; crengine, FreeType, HarfBuzz,
   Hunspell, image codecs and FBInk are statically linked (with Zig's static
@@ -95,7 +96,8 @@ behaviour on other models is **(to verify)**.
 - **Coordinate resync (measured):** evdev suppresses unchanged axes even across
   `EVIOCGRAB`. On startup, wake and `SYN_DROPPED`, `reset_contacts()` queries
   `EVIOCGMTSLOTS` and `EVIOCGABS(ABS_MT_SLOT)` so the first tap after wake does
-  not land at zero on an unchanged axis.
+  not land at zero on an unchanged axis. Kernel 3.0.35 lacks
+  `EVIOCGMTSLOTS`, so a slot reports no touch until both axes are known.
 - **Page-turn buttons:** probed only on profiles with `page_buttons` (or
   unknown models). `KEY_PAGEUP` (104) / `KEY_F23` (193) → previous and
   `KEY_PAGEDOWN` (109) / `KEY_YEN` (124) → next, swapped in landscape. Oasis
@@ -225,8 +227,6 @@ rather than stopping it:
   non-PII 2–3 char model code from `/proc/usid` and the single firmware string
   from `/etc/prettyversion.txt`, never full serials). `verso.sh` logs that
   environment stamp, run duration and byte count, and on fatal-signal crashes
-  appends filtered `dmesg` fault/OOM lines plus both ends (40 lines each) of an
-  `LD_DEBUG=files,libs` probe when Verso died with 0 bytes logged. `logging.rs`
-  logs fatal signals (registers, a raw backtrace) and dies with the first one,
-  even if the handler faults. Never call glibc's `backtrace()` there: it loads
-  the Kindle's libgcc_s, whose ARM unwinder crashes in our LLVM libunwind.
+  appends filtered `dmesg` fault/OOM lines. `logging.rs` logs fatal signals
+  (registers, a raw backtrace whose addresses go straight into `addr2line`) and
+  dies with the first one, even if the handler faults.

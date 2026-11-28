@@ -63,16 +63,17 @@ required), pausing Amazon's UI while you read and restoring it cleanly on exit.
 
 ## Supported Kindles
 
-Verso requires a **jailbroken Kindle** on **hard-float firmware (5.16.3+)**
-with the **Universal Hotfix** (for direct library launch — no KUAL needed),
-**KPM** (recommended on 5.19.4+) or **KUAL**. The up-to-date supported-devices
-list is at [verso-reader.app/install#devices](https://verso-reader.app/install#devices).
+Verso requires a **jailbroken Kindle**. On firmware **5.16.3 and later** launch
+it with the **Universal Hotfix** (directly from the library, no KUAL needed),
+**KPM** (recommended on 5.19.4+) or **KUAL**. Paperwhite 3, Basic 2, Oasis 1 and
+Oasis 2 need firmware **5.16.2.1.1** and **KUAL**. The up-to-date
+supported-devices list is at [verso-reader.app/install#devices](https://verso-reader.app/install#devices).
 
 | Status | Models |
 | --- | --- |
 | **Tested** | Kindle Paperwhite 4 (2018), Paperwhite 5 (2021), Paperwhite 6 (12th gen, 2024), Basic 3 (2019), Basic 4 (2022), Basic 5 (2024), Oasis 3 (2019), Colorsoft (2024) |
-| **Untested (device profiles included)** | Scribe (2022–2025) |
-| **Not supported** | Older soft-float Kindles (Paperwhite 2/3, Voyage, Oasis 1/2, Basic 1/2) and firmware older than 5.16.3 |
+| **Untested (device profiles included)** | Scribe (2022–2025), Paperwhite 3 (2015), Basic 2 (2016), Oasis (2016), Oasis 2 (2017) |
+| **Not supported** | Paperwhite 2 (2013), Basic (2014), Voyage (2014) |
 
 On an untested model, Verso shows a one-time notice at launch. If you try it on
 another Kindle, **Settings → Advanced → Create problem report** (or **KUAL →
@@ -117,7 +118,7 @@ git submodule update --init --recursive --depth 1
 
 cargo sim           # build and run the desktop simulator
 cargo test          # run the test suite
-cargo kindle-build  # release build for hard-float Kindles (needs zig + cargo-zigbuild)
+cargo kindle-build  # static release build for Kindles (needs zig + cargo-zigbuild)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full toolchain setup, simulator

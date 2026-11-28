@@ -10,10 +10,11 @@ alongside the [roadmap](https://verso-reader.app/roadmap).
 
 ## 1. Install, launch and uninstall
 
-**Requirements:** a jailbroken Kindle on **hard-float firmware (5.16.3+)** with
-the **Universal Hotfix** (for direct library launch — no KUAL needed), **KPM**
-(recommended on 5.19.4+ where KUAL is broken) or **KUAL**. Soft-float Kindles
-are refused before touching the Kindle UI. The supported-devices list is at
+**Requirements:** a jailbroken Kindle on firmware **5.16.3+** with the
+**Universal Hotfix** (for direct library launch — no KUAL needed), **KPM**
+(recommended on 5.19.4+ where KUAL is broken) or **KUAL**. Paperwhite 3, Basic
+2, Oasis 1 and Oasis 2 are also supported on firmware **5.16.2.1.1**; start
+Verso from **KUAL** there. The supported-devices list is at
 [verso-reader.app/install#devices](https://verso-reader.app/install#devices).
 
 1. Download `verso-<version>.zip` from

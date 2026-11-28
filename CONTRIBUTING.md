@@ -21,7 +21,7 @@ and git submodules. Cross-compiling for the Kindle additionally uses **Zig**
 git submodule update --init --recursive --depth 1
 
 # Kindle cross-compile prerequisites (only needed for ARM builds)
-rustup target add armv7-unknown-linux-gnueabihf
+rustup target add armv7-unknown-linux-musleabihf
 cargo install cargo-zigbuild
 cargo install bindgen-cli   # only if regenerating FBInk bindings
 ```
@@ -39,7 +39,7 @@ package manager) and make sure `zig` is on `PATH`.
 | `scripts/sim.sh` | The same, with flags for the model, colour preview and start screen (`--help`). |
 | `cargo test` | Run workspace unit and integration tests. |
 | `cargo test -p verso <filter>` | Run targeted tests while iterating. |
-| `cargo kindle-build` | Release build for hard-float Kindles (`verso` + `verso-mdns`). |
+| `cargo kindle-build` | Static release build for Kindles (`verso` + `verso-mdns`). |
 | `cargo clippy --all-targets` | Lint the desktop build (also check `--no-default-features --features kindle` for Kindle code). |
 | `cargo fmt --check` | Check formatting against `rustfmt.toml`. |
 | `scripts/test-launcher.sh` | Power-loss and rollback test suite for `verso.sh` using fake Kindle commands. |
