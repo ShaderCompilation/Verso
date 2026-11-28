@@ -20,7 +20,6 @@ pub(super) struct SelectionState {
     queued: Option<Point>,
     captured: bool,
     dragging: bool,
-    drag_rects: Vec<Rect>,
     moved: bool,
     offset: Point,
     released: bool,
@@ -35,22 +34,7 @@ impl SelectionState {
         self.anchor = None;
         self.queued = None;
         self.dragging = false;
-        self.drag_rects.clear();
         self.released = false;
-    }
-
-    fn record_drag_rects(&mut self, rects: &[Rect]) {
-        for &rect in rects {
-            if let Some(existing) = self
-                .drag_rects
-                .iter_mut()
-                .find(|r| r.y == rect.y && r.h == rect.h && r.x <= rect.right() && rect.x <= r.right())
-            {
-                *existing = existing.union(&rect);
-            } else {
-                self.drag_rects.push(rect);
-            }
-        }
     }
 
     pub fn busy(&self) -> bool {
@@ -101,7 +85,6 @@ impl SelectionState {
         }
         self.pending = None;
         self.queued = None;
-        self.drag_rects.clear();
         self.released = false;
         if let Some(s) = &mut self.selected {
             s.rects.clear();
@@ -146,17 +129,8 @@ impl SelectionState {
 
     pub fn draw(&self, cx: &mut DrawCx, cover: Option<Rect>) {
         let Some(selection) = &self.selected else { return };
-        if self.dragging {
-            for rect in &self.drag_rects {
-                cx.canvas.binarize_rect(*rect);
-            }
-        }
         for rect in &selection.rects {
-            if self.dragging {
-                cx.canvas.invert_rect_bw(*rect);
-            } else {
-                cx.canvas.invert_rect(*rect);
-            }
+            cx.canvas.invert_rect(*rect);
         }
         let radius = cx.theme.mm(1.2).max(2);
         if let Some(handles) = self.handles(radius, cover) {
@@ -169,9 +143,8 @@ impl SelectionState {
             }
         }
         if self.dragging {
-            // Fast (DU) updates keep drag feedback responsive; releasing the
-            // touch switches back to antialiased invert_rect and triggers
-            // App's grayscale cleanup over fast_debt.
+            // Fast (DU) updates keep drag feedback responsive; App draws
+            // them in black and white and cleans them up once the touch ends.
             cx.hint(cx.canvas.bounds(), RefreshMode::Fast);
         }
     }
@@ -201,7 +174,6 @@ impl SelectionState {
         if matches!(g, Gesture::Down(_)) {
             self.captured = false;
             self.dragging = false;
-            self.drag_rects.clear();
         }
         match g {
             Gesture::Down(p) if self.selected.is_some() || self.pending.is_some() => {
@@ -224,14 +196,8 @@ impl SelectionState {
                     self.queued = None;
                     self.offset = Point::new(p.x - target.x, p.y - target.y);
                     self.dragging = true;
-                    if let Some(rects) = self.selected.as_ref().map(|s| s.rects.clone()) {
-                        self.record_drag_rects(&rects);
-                    }
                 } else if self.extending {
                     self.dragging = true;
-                    if let Some(rects) = self.selected.as_ref().map(|s| s.rects.clone()) {
-                        self.record_drag_rects(&rects);
-                    }
                     self.offset = Point::default();
                     self.focus(p, context, worker);
                 } else {
@@ -258,20 +224,12 @@ impl SelectionState {
             }
             _ if self.captured => {
                 if g.ends_touch() {
-                    let was_dragging = self.dragging;
-                    let had_drag_rects = !self.drag_rects.is_empty();
                     self.released = self.dragging;
                     if self.dragging && (self.moved || matches!(g, Gesture::Swipe { .. })) {
                         self.focus(g.pos(), context, worker);
                     }
                     self.dragging = false;
-                    self.drag_rects.clear();
                     self.captured = false;
-                    if was_dragging && (self.selected.is_some() || had_drag_rects) {
-                        // Switch the selection from 1-bit drag pixels back to
-                        // antialiased inversion even if fast_debt was empty.
-                        cx.redraw();
-                    }
                     self.finish(context, worker);
                 }
                 true
@@ -302,9 +260,6 @@ impl SelectionState {
                 // The initial word remains fixed while extending in either direction.
                 if self.anchor.is_none() {
                     self.anchor = Some(selection.range.clone());
-                }
-                if self.dragging {
-                    self.record_drag_rects(&selection.rects);
                 }
                 self.selected = Some(selection);
                 cx.redraw();
@@ -514,96 +469,21 @@ mod tests {
     }
 
     #[test]
-    fn dragging_binarizes_and_hints_fast_refresh_and_release_restores_antialiased_inversion() {
+    fn dragging_hints_fast_refresh_and_release_clears_it() {
         with_context(|state, worker, commands, cx| {
             let mut canvas = crate::gfx::Canvas::new(600, 800);
             let mut text = crate::gfx::TextRenderer::new();
             let mut icons = crate::gfx::IconRenderer::default();
-            let rect_a = Rect::new(100, 100, 102, 30);
-            let rect_b = Rect::new(202, 100, 102, 30);
-            let full_band = Rect::new(100, 100, 204, 30);
-            let make_sel = |text: &str, rects: Vec<Rect>| Selection {
-                range: TextRange { start: Position("start".into()), end: Position("end".into()) },
-                text: text.into(),
-                rects,
-                start_page: 0,
-                start_visible: true,
-                end_visible: true,
-            };
-            let seed_page = |canvas: &mut crate::gfx::Canvas| {
-                canvas.fill(255);
-                // Simulated antialiased glyph pixels across both rects.
-                let row: Vec<u8> = [0, 60, 127, 128, 200, 255].into_iter().cycle().take(full_band.w as usize).collect();
-                for y in full_band.y..full_band.bottom() {
-                    canvas.blit_gray(Rect::new(full_band.x, y, full_band.w, 1), &row, full_band.w as usize);
-                }
-            };
-            let rect_pixels = |canvas: &crate::gfx::Canvas, rect: Rect| -> Vec<u8> {
-                // Exclude the 6 px handle stems/margins at the left/right edges of `rect`.
-                let x0 = (rect.x + 6) as usize;
-                let x1 = (rect.right() - 6) as usize;
-                let mut out = Vec::with_capacity((x1 - x0) * rect.h as usize);
-                for y in rect.y as usize..rect.bottom() as usize {
-                    out.extend_from_slice(&canvas.gray_data()[y * 600 + x0..y * 600 + x1]);
-                }
-                out
-            };
-
             state.on_gesture(Gesture::LongPress(Point::new(120, 110)), CONTEXT, worker, cx);
             let (word, _) = next(commands);
-            state.receive(word, Ok(Some(make_sel("word", vec![rect_a]))), Some(CONTEXT), worker, cx);
-            seed_page(&mut canvas);
+            state.receive(word, Ok(Some(selected("word"))), Some(CONTEXT), worker, cx);
             let mut hints = Vec::new();
             state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
             assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast), "dragging should hint Fast refresh");
-            let drag_a = rect_pixels(&canvas, rect_a);
-            assert!(drag_a.iter().all(|&p| p == 0 || p == 255), "drag selection must be pure B&W for WFM_DU");
-            assert_eq!(&drag_a[..6], &[255, 255, 255, 0, 0, 0]);
-
-            // Grow selection to [rect_a, rect_b].
-            state.on_gesture(Gesture::Move(Point::new(260, 110)), CONTEXT, worker, cx);
-            let (grow, _) = next(commands);
-            state.receive(grow, Ok(Some(make_sel("two words", vec![rect_a, rect_b]))), Some(CONTEXT), worker, cx);
-            seed_page(&mut canvas);
-            hints.clear();
-            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
-            assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast));
-            assert_eq!(&rect_pixels(&canvas, rect_b)[..6], &[255, 255, 255, 0, 0, 0]);
-
-            // Shrink selection back to [rect_a] while still dragging: deselected
-            // rect_b must stay binarized (0/255, non-inverted) until finger lift.
-            state.on_gesture(Gesture::Move(Point::new(140, 110)), CONTEXT, worker, cx);
-            let (shrink, _) = next(commands);
-            state.receive(shrink, Ok(Some(make_sel("word", vec![rect_a]))), Some(CONTEXT), worker, cx);
-            seed_page(&mut canvas);
-            hints.clear();
-            state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
-            assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast));
-            let shrunk_a = rect_pixels(&canvas, rect_a);
-            let deselected_drag_b = rect_pixels(&canvas, rect_b);
-            assert!(shrunk_a.iter().all(|&p| p == 0 || p == 255));
-            assert_eq!(&shrunk_a[..6], &[255, 255, 255, 0, 0, 0]);
-            assert!(deselected_drag_b.iter().all(|&p| p == 0 || p == 255), "deselected drag rect must stay pure B&W");
-            assert_eq!(&deselected_drag_b[..6], &[0, 0, 0, 255, 255, 255]);
-
-            // Release restores antialiased pixels on both the remaining selection and deselected rect.
-            *cx.needs_redraw = false;
-            state.on_gesture(Gesture::End(Point::new(140, 110)), CONTEXT, worker, cx);
-            assert!(*cx.needs_redraw, "releasing a dragged selection must schedule a redraw");
-            let (final_ext, _) = next(commands);
-            state.receive(final_ext, Ok(Some(make_sel("word", vec![rect_a]))), Some(CONTEXT), worker, cx);
-            let (quote, _) = next(commands);
-            state.receive(quote, Ok(Some(make_sel("word", vec![rect_a]))), Some(CONTEXT), worker, cx);
-            seed_page(&mut canvas);
+            state.on_gesture(Gesture::End(Point::new(120, 110)), CONTEXT, worker, cx);
             hints.clear();
             state.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, cx.theme, &mut hints), None);
             assert!(hints.is_empty(), "releasing should stop hinting Fast refresh");
-            let release_a = rect_pixels(&canvas, rect_a);
-            let release_b = rect_pixels(&canvas, rect_b);
-            assert_eq!(&release_a[..6], &[255, 195, 128, 127, 55, 0]);
-            assert_eq!(&release_b[..6], &[0, 60, 127, 128, 200, 255]);
-            assert_ne!(shrunk_a, release_a, "selected edge pixels must change on lift");
-            assert_ne!(deselected_drag_b, release_b, "deselected edge pixels must change on lift");
         });
     }
 }

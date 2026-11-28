@@ -8,6 +8,12 @@
 //!   or the screen's default if nobody hinted it.
 //! - screens can also *force* a refresh of an area even if nothing changed
 //!   there (a periodic full flash, a redraw after wake).
+//! - changed tiles that come out `Fast` (`WFM_DU`) are made black and white
+//!   where they changed before they are sent and remembered: on i.MX panels
+//!   `DU` leaves a pixel heading for a gray as it was while the controller
+//!   still records the gray, so a later grayscale refresh would find nothing
+//!   to fix. Binarized, the glass, the controller and the baseline agree, and
+//!   the first non-`Fast` frame finds the grays changed and refreshes them.
 
 use crate::geom::Rect;
 use crate::gfx::Canvas;
@@ -219,6 +225,27 @@ impl FrameDiff {
         Tiles { cols, rows, dirty }
     }
 
+    /// Binarizes the changed tiles of `canvas` that resolve to `Fast`: only
+    /// their pixels that differ from the baseline (the others are on the
+    /// glass already), so a widget hinting the whole screen `Fast` touches
+    /// no more than what changed. A tile that then matches the baseline is no
+    /// longer changed, so redrawing a `Fast` scene that already went out
+    /// black and white sends nothing.
+    pub fn binarize_fast(&self, canvas: &mut Canvas, tiles: &mut Tiles, hints: &[Update], default: RefreshMode) {
+        if default != RefreshMode::Fast && !hints.iter().any(|h| h.mode == RefreshMode::Fast) {
+            return;
+        }
+        for row in 0..tiles.rows {
+            for col in 0..tiles.cols {
+                let i = (row * tiles.cols + col) as usize;
+                let r = tiles.tile_rect(col, row);
+                if tiles.dirty[i] && tile_mode(r, hints, default) == RefreshMode::Fast {
+                    tiles.dirty[i] = canvas.binarize_changed(r, &self.prev);
+                }
+            }
+        }
+    }
+
     /// Remembers the changed tiles of `canvas` as what's now on screen,
     /// one copy per run of changed tiles in a row.
     pub fn commit(&mut self, canvas: &Canvas, tiles: &Tiles) {
@@ -244,13 +271,11 @@ impl FrameDiff {
 /// screen updates to send.
 pub fn plan(tiles: &Tiles, bounds: Rect, hints: &[Update], default: RefreshMode, forced: &[Update]) -> Vec<Update> {
     // Each changed tile's mode.
-    let mode_of = |col: i32, row: i32| {
-        let r = tiles.tile_rect(col, row);
-        hints.iter().filter(|h| h.rect.intersect(&r).is_some()).map(|h| h.mode).max().unwrap_or(default)
-    };
     let modes: Vec<Option<RefreshMode>> = (0..tiles.rows)
         .flat_map(|row| (0..tiles.cols).map(move |col| (col, row)))
-        .map(|(col, row)| tiles.dirty[(row * tiles.cols + col) as usize].then(|| mode_of(col, row)))
+        .map(|(col, row)| {
+            tiles.dirty[(row * tiles.cols + col) as usize].then(|| tile_mode(tiles.tile_rect(col, row), hints, default))
+        })
         .collect();
 
     // Runs of same-mode tiles in each row, grown downwards while the next
@@ -317,6 +342,11 @@ pub fn plan(tiles: &Tiles, bounds: Rect, hints: &[Update], default: RefreshMode,
     // blocks on a flash it just started in the same frame.
     updates.sort_by_key(|u| u.mode >= RefreshMode::Clean);
     updates
+}
+
+/// A changed tile's mode: the strongest hint overlapping it, or `default`.
+fn tile_mode(tile: Rect, hints: &[Update], default: RefreshMode) -> RefreshMode {
+    hints.iter().filter(|h| h.rect.intersect(&tile).is_some()).map(|h| h.mode).max().unwrap_or(default)
 }
 
 /// Merges same-mode rectangles that overlap or touch into their bounding
@@ -464,6 +494,50 @@ mod tests {
         color.fill_rect_color(Rect::new(70, 40, 1, 1), Color::rgb(255, 255, 0));
         let tiles = color_diff.changed(&color);
         assert_eq!(plan(&tiles, bounds(), &[], Ui, &[]), vec![Update { rect: Rect::new(64, 32, 16, 16), mode: Ui }]);
+    }
+
+    #[test]
+    fn fast_tiles_go_out_black_and_white_and_the_next_frame_restores_their_grays() {
+        for mode in [ColorMode::Gray8, ColorMode::Color32] {
+            let at = |c: &Canvas, x: usize, y: usize| c.raw()[(y * W as usize + x) * c.bytes_per_pixel()];
+            let scene = |c: &mut Canvas, pressed: bool| {
+                c.fill(255);
+                c.fill_rect(Rect::new(2, 2, 2, 2), 0x99); // unchanged, in the pressed tile
+                c.fill_rect(Rect::new(20, 2, 2, 2), 0x99); // unchanged, in a Fast-hinted tile
+                if pressed {
+                    c.fill_rect(Rect::new(8, 8, 2, 2), 0x22); // a dark fill
+                    c.fill_rect(Rect::new(8, 0, 2, 2), 0xbb); // a light line
+                }
+            };
+            let fast = [Update { rect: Rect::new(0, 0, 32, 16), mode: Fast }];
+            let mut canvas = Canvas::with_mode(W, H, mode);
+            scene(&mut canvas, false);
+            let mut diff = synced(&canvas);
+
+            scene(&mut canvas, true);
+            let mut tiles = diff.changed(&canvas);
+            diff.binarize_fast(&mut canvas, &mut tiles, &fast, Ui);
+            assert_eq!(
+                plan(&tiles, bounds(), &fast, Ui, &[]),
+                vec![Update { rect: Rect::new(0, 0, 16, 16), mode: Fast }]
+            );
+            assert_eq!([at(&canvas, 8, 8), at(&canvas, 8, 0)], [0, 255], "{mode:?}: changed pixels are 0 or 255");
+            assert_eq!([at(&canvas, 2, 2), at(&canvas, 20, 2)], [0x99; 2], "{mode:?}: unchanged pixels stay");
+            diff.commit(&canvas, &tiles);
+
+            // Redrawn under the same hint, the binarized scene is no change.
+            scene(&mut canvas, true);
+            let mut tiles = diff.changed(&canvas);
+            diff.binarize_fast(&mut canvas, &mut tiles, &fast, Ui);
+            assert!(!tiles.any(), "{mode:?}");
+
+            // Without the hint (the finger lifted), the grays come back as a change.
+            scene(&mut canvas, true);
+            let mut tiles = diff.changed(&canvas);
+            diff.binarize_fast(&mut canvas, &mut tiles, &[], Ui);
+            assert_eq!(plan(&tiles, bounds(), &[], Ui, &[]), vec![Update { rect: Rect::new(0, 0, 16, 16), mode: Ui }]);
+            assert_eq!([at(&canvas, 8, 8), at(&canvas, 8, 0)], [0x22, 0xbb], "{mode:?}");
+        }
     }
 
     #[test]

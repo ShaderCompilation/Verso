@@ -153,8 +153,15 @@ against the previous frame in **16×16 tiles**:
   says whether the framebuffer still holds Verso's frame (2 s later on the
   Kindle, and at the first touch). Only after Amazon's own sleep screen does it
   also repaint: every 0.1 s for 5 s, the whole screen with `Ui` if overwritten.
-- **`fast_debt`:** every `Fast` (1-bit B&W `DU`) rect is remembered and given a
-  clean `Ui` pass automatically once the finger lifts.
+- **`Fast` is binarized:** in changed tiles that resolve to `Fast`, the pixels
+  that differ from `prev` are set to black or white (luma < 128 is black)
+  before presenting and committing (`FrameDiff::binarize_fast`). On i.MX, `DU`
+  leaves a pixel heading for a gray as it was while the EPDC records the gray,
+  so a later `Ui` pass saw no change. Now the next normal frame differs wherever
+  grays belong. Gray-only marks (a `LINE` slider track) vanish under `Fast`, so
+  widgets draw them black while pressed.
+- **`fast_debt`:** every `Fast` rect is remembered and given a `Ui` pass once
+  the finger lifts; the lift also forces that redraw.
 
 ### Waveforms and flash cadence
 

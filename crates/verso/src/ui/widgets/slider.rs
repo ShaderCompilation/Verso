@@ -1,7 +1,8 @@
 //! A value on a track: tap to jump, or drag. Snaps to steps.
 //! A touch that sets off mostly vertically is a swipe across the slider, not a
 //! drag: the value goes back to what it was and the slider lets the touch go.
-//! Refreshed with `Fast` while the finger is down.
+//! Refreshed with `Fast` while the finger is down, which sends only black and
+//! white: the gray track and ticks are drawn as thin black lines meanwhile.
 
 use crate::geom::{Point, Rect};
 use crate::platform::RefreshMode;
@@ -135,8 +136,14 @@ impl Slider {
         let t = cx.theme;
         let (x0, x1) = self.track();
         let cy = self.rect.center().y;
-        let track_h = t.hairline + 2;
-        cx.canvas.fill_rounded_rect(Rect::new(x0, cy - track_h / 2, x1 - x0, track_h), 2.0, LINE);
+        let dragging = self.drag.is_some();
+        if dragging {
+            let h = t.hairline.max(1);
+            cx.fill(Rect::new(x0, cy - h / 2, x1 - x0, h), INK);
+        } else {
+            let track_h = t.hairline + 2;
+            cx.canvas.fill_rounded_rect(Rect::new(x0, cy - track_h / 2, x1 - x0, track_h), 2.0, LINE);
+        }
         let kx = x0 + ((x1 - x0) as f32 * self.frac()).round() as i32;
         let filled_h = t.mm(1.0);
         if kx > x0 {
@@ -150,13 +157,14 @@ impl Slider {
             let n = ((self.max - self.min) / self.step).round() as i32;
             for i in 1..n {
                 let tx = x0 + (x1 - x0) * i / n;
-                cx.fill(Rect::new(tx - 1, cy + t.mm(1.6), 3, t.mm(1.0)), INK3);
+                let (w, gray) = if dragging { (t.hairline.max(1), INK) } else { (3, INK3) };
+                cx.fill(Rect::new(tx - w / 2, cy + t.mm(1.6), w, t.mm(1.0)), gray);
             }
         }
         let r = self.knob_r as f32;
         cx.canvas.fill_circle(kx as f32, cy as f32, r, PAPER);
         cx.canvas.stroke_circle(kx as f32, cy as f32, r, t.border as f32, INK);
-        if self.drag.is_some() {
+        if dragging {
             cx.hint(self.hit, RefreshMode::Fast);
         }
     }
@@ -221,6 +229,24 @@ mod tests {
         s.on_gesture(&Gesture::LongPress(from));
         assert_eq!(s.on_gesture(&Gesture::Move(Point::new(600, 120))), None);
         assert_eq!(s.on_gesture(&Gesture::End(Point::new(600, 120))), Some(SliderEvent::Released(12.0)));
+    }
+
+    #[test]
+    fn dragging_draws_the_gray_track_black_for_fast_refreshes() {
+        let theme = Theme::for_dpi(300);
+        let (mut canvas, mut text, mut icons) =
+            (crate::gfx::Canvas::new(1200, 300), crate::gfx::TextRenderer::new(), crate::gfx::IconRenderer::default());
+        let mut s = slider();
+        // A point on the unfilled track, right of the knob at 8 of 24.
+        let at = |c: &crate::gfx::Canvas| c.gray_data()[130 * 1200 + 900];
+        let mut draw = |s: &Slider| {
+            let mut hints = Vec::new();
+            s.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &theme, &mut hints));
+            at(&canvas)
+        };
+        assert_eq!(draw(&s), LINE);
+        s.on_gesture(&Gesture::Down(Point::new(400, 130)));
+        assert_eq!(draw(&s), INK);
     }
 
     #[test]

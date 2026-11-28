@@ -443,7 +443,8 @@ impl App {
             // (most of a grid-only library frame's diff time) nor emits a
             // redundant Ui update along unaligned edges of the forced rect.
             let flashed: Vec<Rect> = forced.iter().filter(|u| u.mode >= RefreshMode::Clean).map(|u| u.rect).collect();
-            let tiles = self.diff.changed_outside(&self.canvas, &flashed);
+            let mut tiles = self.diff.changed_outside(&self.canvas, &flashed);
+            self.diff.binarize_fast(&mut self.canvas, &mut tiles, &hints, RefreshMode::Ui);
             let updates = damage::plan(&tiles, bounds, &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
             updates

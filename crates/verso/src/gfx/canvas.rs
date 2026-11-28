@@ -300,48 +300,36 @@ impl Canvas {
         }
     }
 
-    /// Binary (1-bit B&W) inversion for `RefreshMode::Fast` (`WFM_DU`) drag
-    /// frames. `WFM_DU` only drives pure black/white target pixels on i.MX
-    /// panels and leaves intermediate grays untouched while still updating the
-    /// EPDC working buffer; binarizing during drag keeps panel and buffer in
-    /// sync and ensures switching to `invert_rect` on lift updates glyph edges.
-    pub fn invert_rect_bw(&mut self, rect: Rect) {
-        let Some(r) = rect.intersect(&self.bounds()) else { return };
+    /// Turns the pixels in `rect` that differ from `prev` (a frame laid out
+    /// like this canvas) pure black or white, split at luma 128, and returns
+    /// whether any still differ. For `RefreshMode::Fast` (`WFM_DU`): see
+    /// `FrameDiff::binarize_fast`.
+    pub fn binarize_changed(&mut self, rect: Rect, prev: &[u8]) -> bool {
+        let Some(r) = rect.intersect(&self.bounds()) else { return false };
+        let stride = self.width as usize * self.bytes_per_pixel();
         let (bpp, rows) = self.rows_mut(r);
-        for row in rows {
+        let mut differs = false;
+        for (y, row) in (r.y as usize..).zip(rows) {
+            let start = y * stride + r.x as usize * bpp;
+            let old = &prev[start..start + row.len()];
             if bpp == 1 {
-                for pixel in row {
-                    *pixel = if *pixel < 128 { 255 } else { 0 };
+                for (px, &o) in row.iter_mut().zip(old) {
+                    if *px != o {
+                        *px = if *px < 128 { 0 } else { 255 };
+                        differs |= *px != o;
+                    }
                 }
             } else {
-                for px in row.as_chunks_mut::<4>().0 {
-                    let v = if luma(px[0], px[1], px[2]) < 128 { 255 } else { 0 };
-                    *px = [v, v, v, 255];
+                for (px, o) in row.as_chunks_mut::<4>().0.iter_mut().zip(old.as_chunks::<4>().0) {
+                    if px != o {
+                        let v = if luma(px[0], px[1], px[2]) < 128 { 0 } else { 255 };
+                        *px = [v, v, v, 255];
+                        differs |= px != o;
+                    }
                 }
             }
         }
-    }
-
-    /// Binary (1-bit B&W) threshold without inversion, matching
-    /// [`Self::invert_rect_bw`]'s `< 128` cutoff. Used while dragging a
-    /// selection under `RefreshMode::Fast` (`WFM_DU`) so newly deselected words
-    /// stay pure black/white in the EPDC working buffer until finger lift
-    /// restores antialiased grays cleanly.
-    pub fn binarize_rect(&mut self, rect: Rect) {
-        let Some(r) = rect.intersect(&self.bounds()) else { return };
-        let (bpp, rows) = self.rows_mut(r);
-        for row in rows {
-            if bpp == 1 {
-                for pixel in row {
-                    *pixel = if *pixel < 128 { 0 } else { 255 };
-                }
-            } else {
-                for px in row.as_chunks_mut::<4>().0 {
-                    let v = if luma(px[0], px[1], px[2]) < 128 { 0 } else { 255 };
-                    *px = [v, v, v, 255];
-                }
-            }
-        }
+        differs
     }
 
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, gray: u8) {
@@ -1182,46 +1170,6 @@ mod tests {
             }
         }
         assert_eq!(px(60, 30), 255);
-    }
-
-    #[test]
-    fn invert_rect_bw_binarizes_gray_and_color_pixels() {
-        let samples = [0u8, 64, 127, 128, 200, 255];
-        let mut gray = Canvas::new(8, 2);
-        gray.blit_gray(Rect::new(1, 0, 6, 1), &samples, 6);
-        gray.invert_rect_bw(Rect::new(1, 0, 6, 1));
-        assert_eq!(&gray.gray_data()[0..8], &[255, 255, 255, 255, 0, 0, 0, 255]);
-        assert!(gray.gray_data()[8..].iter().all(|&v| v == 255), "outside rect untouched");
-
-        let mut color = Canvas::with_mode(8, 2, ColorMode::Color32);
-        let rgba: Vec<u8> = [
-            [0, 0, 0, 255],
-            [255, 0, 0, 255],     // luma 76 (< 128) -> white
-            [127, 127, 127, 255], // luma 127 (< 128) -> white
-            [128, 128, 128, 255], // luma 128 (>= 128) -> black
-            [0, 255, 0, 255],     // luma 149 (>= 128) -> black
-            [255, 255, 255, 255],
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        color.blit_rgba(Rect::new(1, 0, 6, 1), &rgba, 6);
-        color.invert_rect_bw(Rect::new(1, 0, 6, 1));
-        for (i, want) in [255u8, 255, 255, 0, 0, 0].into_iter().enumerate() {
-            assert_eq!(rgba_at(&color, i as u32 + 1, 0), [want, want, want, 255]);
-        }
-        assert_eq!(rgba_at(&color, 0, 0), [255; 4]);
-        assert_eq!(rgba_at(&color, 7, 0), [255; 4]);
-
-        gray.blit_gray(Rect::new(1, 0, 6, 1), &samples, 6);
-        gray.binarize_rect(Rect::new(1, 0, 6, 1));
-        assert_eq!(&gray.gray_data()[0..8], &[255, 0, 0, 0, 255, 255, 255, 255]);
-
-        color.blit_rgba(Rect::new(1, 0, 6, 1), &rgba, 6);
-        color.binarize_rect(Rect::new(1, 0, 6, 1));
-        for (i, want) in [0u8, 0, 0, 255, 255, 255].into_iter().enumerate() {
-            assert_eq!(rgba_at(&color, i as u32 + 1, 0), [want, want, want, 255]);
-        }
     }
 
     #[test]
