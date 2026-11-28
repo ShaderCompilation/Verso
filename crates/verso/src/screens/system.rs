@@ -766,12 +766,25 @@ impl SystemSettings {
         }
     }
 
-    /// Saves a change from the dark mode sheet. Only a waveform change goes
-    /// to the platform: the reader reads the cadence from the settings.
+    /// Saves a change from the dark mode sheet. Of the refresh settings only a
+    /// waveform change goes to the platform: the reader reads the cadence from
+    /// the settings.
     fn handle_dark_mode_event(&mut self, event: DarkModeEvent, cx: &mut EventCx) -> Action {
-        let DarkModeEvent::Change(dark) = event else {
-            self.dark_refresh_sheet = None;
-            return Action::None;
+        let dark = match event {
+            DarkModeEvent::Close => {
+                self.dark_refresh_sheet = None;
+                return Action::None;
+            }
+            DarkModeEvent::Switch(on) => {
+                if self.save(cx, "dark mode", |s| s.dark_mode = on) {
+                    return Action::DarkMode(on);
+                }
+                if let Some(sheet) = &mut self.dark_refresh_sheet {
+                    sheet.on.on = !on;
+                }
+                return Action::None;
+            }
+            DarkModeEvent::Change(dark) => dark,
         };
         let before = self.store.settings().dark_refresh();
         let saved = self.save(cx, "dark mode", |s| dark.apply(s));
@@ -2047,12 +2060,14 @@ impl TranslateSheet {
 
 enum DarkModeEvent {
     Close,
+    /// The dark mode switch after a tap.
+    Switch(bool),
     /// The sheet's settings after a tap.
     Change(DarkSettings),
 }
 
-/// Sheet for how dark mode refreshes the e-ink display: the preset the rows
-/// match, a row per setting, and a note on what the choice costs. In
+/// Sheet for dark mode and how it refreshes the e-ink display: the on/off
+/// switch, the preset the rows match, a row per setting, and a note on what the choice costs. In
 /// portrait each label stands above its control; landscape is too short for
 /// that, so labels stand beside them.
 struct DarkModeSheet {
@@ -2062,6 +2077,8 @@ struct DarkModeSheet {
     /// Each label, its area, and whether it's in body text (beside its
     /// control, or a switch's) rather than a section label.
     labels: Vec<(&'static str, Rect, bool)>,
+    /// Dark mode itself, as the Top Drawer's tile switches it.
+    on: Toggle,
     /// Nothing is selected (`DARK_PRESETS.len()`) when no preset matches.
     preset: Segmented,
     page_flash: Segmented,
@@ -2081,6 +2098,7 @@ impl DarkModeSheet {
             eclipse,
             beside: screen.w > screen.h,
             labels: Vec::new(),
+            on: Toggle::new(settings.dark_mode),
             preset: Segmented::texts(&DARK_PRESETS.map(|p| p.name), 0),
             page_flash: Segmented::texts(&["As light", "Every 6", "Every 12", "Every 24", "Never"], 0),
             chapter: Toggle::new(false),
@@ -2125,12 +2143,14 @@ impl DarkModeSheet {
             y = control.bottom() + gap;
             control
         };
+        // A toggle where the controls start in landscape, at the right edge in portrait.
+        let toggle_right = |r: Rect| if beside { r.x + toggle_w } else { r.right() };
+        let on = row("Use dark mode", true);
+        self.on.place(toggle_right(on), on.center().y, t);
         self.preset.place(row("Preset", false));
         self.page_flash.place(row("Full refresh", false));
-        // The toggle where the controls start in landscape, at the right edge in portrait.
-        let switch = row("Flash chapter starts", true);
-        let right = if beside { switch.x + toggle_w } else { switch.right() };
-        self.chapter.place(right, switch.center().y, t);
+        let chapter = row("Flash chapter starts", true);
+        self.chapter.place(toggle_right(chapter), chapter.center().y, t);
         self.pictures.place(row("Pictures and covers", false));
         if let Some(updates) = &mut self.updates {
             updates.place(row("Updates", false));
@@ -2172,6 +2192,7 @@ impl DarkModeSheet {
                 cx.section_label(label, rect);
             }
         }
+        self.on.draw(cx);
         self.preset.draw(cx);
         self.page_flash.draw(cx);
         self.chapter.draw(cx);
@@ -2186,6 +2207,9 @@ impl DarkModeSheet {
     fn on_gesture(&mut self, g: &Gesture) -> Option<DarkModeEvent> {
         if self.sheet.on_gesture(g) {
             return Some(DarkModeEvent::Close);
+        }
+        if let Some(on) = self.on.on_gesture(g) {
+            return Some(DarkModeEvent::Switch(on));
         }
         let mut dark = self.dark;
         if let Some(i) = self.preset.on_gesture(g) {
@@ -2215,7 +2239,7 @@ impl DarkModeSheet {
         let mut targets = vec![self.preset.rect(), self.page_flash.rect(), self.pictures.rect()];
         targets.extend(self.updates.as_ref().map(Segmented::rect));
         targets.push(self.rendering.rect());
-        targets.push(self.chapter.rect().at_least(t.target, t.target));
+        targets.extend([&self.on, &self.chapter].map(|s| s.rect().at_least(t.target, t.target)));
         targets
     }
 }
@@ -2720,6 +2744,14 @@ mod tests {
             s.dark_refresh_sheet.as_ref().unwrap()
         }
         assert!(sheet(&s).updates.is_some());
+
+        // The switch saves and sends the app to the other polarity.
+        let on = sheet(&s).on.rect().center();
+        let on = Rect::new(on.x, on.y, 1, 1);
+        assert!(matches!(tap_action(&mut s, on), Action::DarkMode(true)));
+        assert!(store.settings().dark_mode && sheet(&s).on.on);
+        assert!(matches!(tap_action(&mut s, on), Action::DarkMode(false)));
+        assert!(!store.settings().dark_mode);
 
         // A preset writes its four fields, keeps the rendering, and sends the
         // waveform change to the platform.

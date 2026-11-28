@@ -52,6 +52,8 @@ pub enum Action {
     /// Turn the screen. The app saves like on exit and rebuilds its screens
     /// at the new size as they were (see [`RelayoutState`]).
     Orientation(Orientation),
+    /// Switch every screen and the panel to the saved dark mode setting.
+    DarkMode(bool),
     /// Apply new dark-mode waveform settings (and flash if dark mode is on).
     DarkRefresh(DarkRefresh),
     /// Open the Top Drawer (quick settings) over this screen.

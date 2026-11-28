@@ -192,6 +192,29 @@ impl App {
         self.refresh_all(RefreshMode::Full);
     }
 
+    /// Tells every screen about a saved dark mode switch, and shows it once
+    /// the top one has re-rendered.
+    fn switch_dark(&mut self, dark: bool) {
+        let mut cx = EventCx {
+            theme: &self.theme,
+            screen: self.canvas.bounds(),
+            now: Instant::now(),
+            battery: self.battery,
+            toast: &mut self.toast,
+            forced: &mut self.forced,
+            needs_redraw: &mut self.needs_redraw,
+            dark,
+        };
+        for screen in &mut self.stack {
+            screen.set_dark(dark, &mut cx);
+        }
+        if self.stack.last().is_some_and(|s| s.waiting_for_dark()) {
+            self.dark_pending = Some((dark, Instant::now() + DARK_SWITCH_WAIT));
+        } else {
+            self.commit_dark_switch(dark);
+        }
+    }
+
     fn finish_dark_wait_if_ready(&mut self) {
         if let Some((dark, _)) = self.dark_pending
             && !self.stack.last().is_some_and(|s| s.waiting_for_dark())
@@ -655,24 +678,7 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
-                let mut cx = EventCx {
-                    theme: &self.theme,
-                    screen: bounds,
-                    now: Instant::now(),
-                    battery: self.battery,
-                    toast: &mut self.toast,
-                    forced: &mut self.forced,
-                    needs_redraw: &mut self.needs_redraw,
-                    dark,
-                };
-                for screen in &mut self.stack {
-                    screen.set_dark(dark, &mut cx);
-                }
-                if self.stack.last().is_some_and(|s| s.waiting_for_dark()) {
-                    self.dark_pending = Some((dark, Instant::now() + DARK_SWITCH_WAIT));
-                } else {
-                    self.commit_dark_switch(dark);
-                }
+                self.switch_dark(dark);
             }
             DrawerEvent::Orientation(orientation) => {
                 self.close_drawer();
@@ -1070,6 +1076,7 @@ impl App {
                 self.exit_code = Some(code);
             }
             Action::Orientation(o) => self.orientation_request = Some(o),
+            Action::DarkMode(dark) => self.switch_dark(dark),
             Action::DarkRefresh(dark) => {
                 self.dark_refresh_request = Some(dark);
                 if self.dark_mode() {

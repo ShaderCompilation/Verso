@@ -411,8 +411,9 @@ Check automatically**), or on demand via **Check for updates**.
 **Settings** has five tabs:
 
 - **Reading:** tap zones, top-right bookmark corner, check KOReader progress.
-- **Display:** orientation, full page refresh interval, **Dark mode** refresh,
+- **Display:** orientation, full page refresh interval, **Dark mode** and its refresh,
   folder previews, series numbers. The dark mode sheet has:
+  - **Use dark mode:** the same switch as the top drawer's tile.
   - **Preset:** *Fewer flashes*, *Balanced* (default) or *Less ghosting*; sets
     the next four rows. Your own mix shows as *Custom*.
   - **Full refresh** (*As light*, *Every 6*, *12*, *24* or *Never*) and **Flash
