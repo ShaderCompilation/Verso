@@ -3,7 +3,7 @@ use crate::document::{Alignment, FontFace, Paragraphs, Steps, Typography};
 use crate::geom::Rect;
 use crate::gfx::{Family, HAlign, Weight};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{List, ListEvent, Pager, Row, Segmented, Sheet, SideLabel, Step, Stepper, Toggle};
 use std::time::Instant;
@@ -242,7 +242,7 @@ impl TextSheet {
         }
         if page == self.page("Font") {
             let color = if self.press.is_down() {
-                cx.fill(self.font, INK);
+                cx.fill(self.font, INK_FILL);
                 PAPER
             } else {
                 INK2

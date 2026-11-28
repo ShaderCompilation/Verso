@@ -160,6 +160,9 @@ against the previous frame in **16×16 tiles**:
   so a later `Ui` pass saw no change. Now the next normal frame differs wherever
   grays belong. Gray-only marks (a `LINE` slider track) vanish under `Fast`, so
   widgets draw them black while pressed.
+- **Solid dark fills use `INK_FILL`, never `INK`:** i.MX partial refreshes skip
+  pixels whose value is unchanged, so text under a pure-black fill ghosts
+  through it on open and looks eroded on close. Text, icons and outlines stay `INK`.
 - **`fast_debt`:** every `Fast` rect is remembered and given a `Ui` pass once
   the finger lifts; the lift also forces that redraw.
 

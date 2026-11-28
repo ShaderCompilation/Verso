@@ -1,6 +1,6 @@
 //! Selection belongs to one browsing list; only the page may change.
 use super::*;
-use crate::ui::theme::PAPER;
+use crate::ui::theme::{INK_FILL, PAPER};
 
 /// Circular selection badge (`52 × 52` at 300 dpi, `12 px` inset) anchored to
 /// the top-left of `front` (book cover, folder front cover, or Icon tile).
@@ -178,7 +178,7 @@ impl Books {
         let r = badge.w as f32 / 2.0;
         let (cx_f, cy_f) = (badge.x as f32 + r, badge.y as f32 + r);
         if selection.items.contains(&target) {
-            cx.canvas.fill_circle(cx_f, cy_f, r, INK);
+            cx.canvas.fill_circle(cx_f, cy_f, r, INK_FILL);
             cx.icon(Icon::Check, badge, t.mm(2.5), PAPER);
         } else {
             cx.canvas.fill_circle(cx_f, cy_f, r, PAPER);

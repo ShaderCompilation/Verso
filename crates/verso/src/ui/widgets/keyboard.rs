@@ -5,7 +5,7 @@ use crate::geom::Rect;
 use crate::gfx::{Family, HAlign, Icon, TextStyle, Weight};
 use crate::platform::{RefreshMode, TextInput};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{FILL, INK, INK3, LINE, PAPER, Theme};
+use crate::ui::theme::{FILL, INK, INK_FILL, INK3, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 
 /// Maximum interval between two Shift taps to engage Caps Lock.
@@ -72,7 +72,7 @@ impl Key {
                 cx.canvas.stroke_rounded_rect(r, radius, border, INK);
                 INK
             } else {
-                cx.canvas.fill_rounded_rect(r, radius, INK);
+                cx.canvas.fill_rounded_rect(r, radius, INK_FILL);
                 PAPER
             }
         } else {
@@ -91,7 +91,7 @@ impl Key {
                     INK
                 }
                 KeyStyle::Active | KeyStyle::Primary => {
-                    cx.canvas.fill_rounded_rect(r, radius, INK);
+                    cx.canvas.fill_rounded_rect(r, radius, INK_FILL);
                     PAPER
                 }
             }

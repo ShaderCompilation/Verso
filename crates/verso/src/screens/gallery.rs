@@ -10,7 +10,7 @@ use crate::platform::RefreshMode;
 use crate::screens::books::Books;
 use crate::screens::{Action, EventCx, Screen};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
     Button, ButtonKind, Grid, GridEvent, IconButton, List, ListEvent, MenuEvent, Pager, PopupMenu, Row, Segment,
@@ -296,7 +296,7 @@ impl Gallery {
         let (title, author, gray) = BOOKS[index];
         let cover = Rect::new(cell.x, cell.y, cell.w, (cell.w as f32 * 1.5) as i32);
         let (bg, fg) = match (pressed, gray) {
-            (true, _) => (INK, PAPER),
+            (true, _) => (INK_FILL, PAPER),
             (false, Some(g)) => (g, if g < 0x80 { PAPER } else { INK }),
             (false, None) => (PAPER, INK),
         };
@@ -526,7 +526,7 @@ impl TextSheet {
         }
         // The font field: the current font, in itself, and a chevron.
         let (fg, fg2) = if self.font_press.is_down() {
-            cx.canvas.fill_rounded_rect(self.font, t.radius, INK);
+            cx.canvas.fill_rounded_rect(self.font, t.radius, INK_FILL);
             cx.hint(self.font, RefreshMode::Fast);
             (PAPER, PAPER)
         } else {

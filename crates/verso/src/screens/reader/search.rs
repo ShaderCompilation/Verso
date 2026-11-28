@@ -11,7 +11,7 @@ use crate::gfx::{HAlign, Icon, Weight};
 use crate::platform::{RefreshMode, TextInput};
 use crate::reader;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{Button, ButtonKind, IconButton, Keyboard, Pager, TextField, TopBar};
 use unicode_segmentation::UnicodeSegmentation;
@@ -340,7 +340,7 @@ impl SearchView {
         for (i, r) in self.rows(session) {
             let pressed = self.pressed == Some(i) && self.press.is_down();
             if pressed {
-                cx.fill(r, INK);
+                cx.fill(r, INK_FILL);
                 cx.hint(r, RefreshMode::Fast);
             }
             let hit = &session.hits[i];
@@ -577,7 +577,7 @@ fn draw_snippet(cx: &mut DrawCx, hit: &SearchHit, rect: Rect, fg: u8, invert_mat
                 let joined = k > 0 && line[k - 1].matched;
                 let left =
                     if joined { line[k - 1].x + cx.text.width(&line[k - 1].text, bold).ceil() as i32 } else { piece.x };
-                cx.fill(Rect::new(rect.x + left, y + pad, piece.x + w - left, line_h - 2 * pad), INK);
+                cx.fill(Rect::new(rect.x + left, y + pad, piece.x + w - left, line_h - 2 * pad), INK_FILL);
                 cx.line(&piece.text, style.gray(PAPER), r, HAlign::Left);
             } else {
                 cx.line(&piece.text, style, r, HAlign::Left);

@@ -18,7 +18,7 @@ use crate::store::{
     without_dictionary_folder,
 };
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{Button, ButtonKind, IconButton, Pager, PagerEvent, TopBar};
 
@@ -419,7 +419,7 @@ impl Screen for DictionaryFolders {
             let pressed = self.pressed == Some(row) && self.press.is_down();
             let (fg, fg2) = if pressed { (PAPER, PAPER) } else { (INK, INK2) };
             if pressed {
-                cx.fill(r, INK);
+                cx.fill(r, INK_FILL);
             }
             let text = Rect { w: r.w - t.target, ..r };
             let (top, bottom) = text.split_top(r.h / 2 + t.mm(0.4));

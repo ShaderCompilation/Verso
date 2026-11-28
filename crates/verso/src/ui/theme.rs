@@ -8,6 +8,11 @@ use crate::gfx::{Family, TextStyle, Weight};
 // so they show without dithering.
 /// Text, icons, borders, pressed fills.
 pub const INK: u8 = 0x00;
+/// Solid dark area fills (selected, pressed, "on"). Never 0: i.MX partial
+/// refreshes skip pixels whose value is unchanged, so book text under a pure
+/// black fill ghosts through it and erodes when it closes. Text, icons and
+/// borders stay `INK`.
+pub const INK_FILL: u8 = 0x22;
 /// Secondary text: authors, values, labels.
 pub const INK2: u8 = 0x55;
 /// Disabled text, page counts.

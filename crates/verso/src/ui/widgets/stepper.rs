@@ -6,7 +6,7 @@ use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, TextStyle};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK3, PAPER};
+use crate::ui::theme::{INK, INK_FILL, INK3, PAPER};
 use crate::ui::widget::DrawCx;
 
 /// Time between repeats while a side is held.
@@ -144,12 +144,12 @@ impl Stepper {
         {
             let fg = if self.pressed == Some(step) {
                 // Rounded on the outer side only.
-                cx.canvas.fill_rounded_rect(side, t.radius, INK);
+                cx.canvas.fill_rounded_rect(side, t.radius, INK_FILL);
                 let inner = match step {
                     Step::Less => side.split_right(side.w / 2).0,
                     Step::More => side.split_left(side.w / 2).0,
                 };
-                cx.fill(inner, INK);
+                cx.fill(inner, INK_FILL);
                 cx.hint(side, RefreshMode::Fast);
                 PAPER
             } else if enabled {

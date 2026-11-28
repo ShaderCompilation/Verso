@@ -28,7 +28,7 @@ use crate::{
     screens::EventCx,
     ui::{
         gesture::Gesture,
-        theme::{INK, INK2, LINE, PAPER, Theme},
+        theme::{INK, INK_FILL, INK2, LINE, PAPER, Theme},
         widget::{DrawCx, Press, PressEvent},
         widgets::{Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, Row, Sheet, TextField},
     },
@@ -1630,7 +1630,7 @@ impl Lookup {
             let (fg, quiet) = if pressed { (PAPER, PAPER) } else { (INK, INK2) };
             if pressed {
                 let pill = Rect::new(r.x - t.mm(1.0), r.y + t.mm(0.6), w + gap + after + t.mm(2.0), r.h - t.mm(1.2));
-                cx.canvas.fill_rounded_rect(pill, t.radius, INK);
+                cx.canvas.fill_rounded_rect(pill, t.radius, INK_FILL);
                 cx.hint(pill, RefreshMode::Fast);
             }
             cx.line(label, style.gray(fg), Rect::new(r.x, r.y, w + 2, r.h), HAlign::Left);

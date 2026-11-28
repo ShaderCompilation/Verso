@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
-use crate::ui::theme::{INK, PAPER, Theme};
+use crate::ui::theme::{INK_FILL, PAPER, Theme};
 use crate::ui::widget::DrawCx;
 
 pub const TOAST_TIME: Duration = Duration::from_millis(2500);
@@ -41,7 +41,7 @@ impl Toast {
         let style = t.body.gray(PAPER);
         let text_w = cx.text.width(&self.text, style).ceil() as i32;
         let r = self.rect(text_w, cx.bounds(), bottom, t);
-        cx.canvas.fill_rounded_rect(r, r.h as f32 / 2.0, INK);
+        cx.canvas.fill_rounded_rect(r, r.h as f32 / 2.0, INK_FILL);
         let mut inner = r.inset_xy(t.mm(6.0), 0);
         if let Some(icon) = self.icon {
             let (icon_rect, rest) = inner.split_left(t.icon_small);

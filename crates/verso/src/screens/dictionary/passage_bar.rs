@@ -6,7 +6,7 @@ use crate::{
     platform::RefreshMode,
     ui::{
         gesture::Gesture,
-        theme::{INK, INK3, LINE, PAPER, Theme},
+        theme::{INK, INK_FILL, INK3, LINE, PAPER, Theme},
         widget::{DrawCx, Press, PressEvent},
     },
 };
@@ -146,7 +146,7 @@ impl SelectionActions {
             let pressed = self.pressed == Some(i) && self.press.is_down();
             // Pressed cells invert, like buttons.
             let fg = if primary != pressed {
-                Self::fill_cell(cx, i, cell, INK);
+                Self::fill_cell(cx, i, cell, INK_FILL);
                 PAPER
             } else if self.enabled(i) {
                 INK

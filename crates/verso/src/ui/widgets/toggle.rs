@@ -2,7 +2,7 @@
 
 use crate::geom::Rect;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK3, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK3, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 
 pub struct Toggle {
@@ -61,7 +61,7 @@ pub fn draw_pill(cx: &mut DrawCx, rect: Rect, on: bool, enabled: bool) {
     let knob = h - 2.0 * cx.theme.mm(0.8) as f32;
     let cy = rect.y as f32 + h / 2.0;
     if on {
-        cx.canvas.fill_rounded_rect(rect, h / 2.0, ink);
+        cx.canvas.fill_rounded_rect(rect, h / 2.0, if enabled { INK_FILL } else { INK3 });
         cx.canvas.fill_circle(rect.right() as f32 - h / 2.0, cy, knob / 2.0, PAPER);
     } else {
         cx.canvas.stroke_rounded_rect(rect, h / 2.0, cx.theme.border as f32, ink);

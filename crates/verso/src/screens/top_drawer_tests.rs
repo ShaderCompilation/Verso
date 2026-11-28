@@ -419,10 +419,10 @@ fn drawing_shows_on_pending_and_pressed_tiles() {
         let r = d.layout().tiles[i];
         Point::new(r.x + t.mm(2.0), r.y + t.mm(1.0))
     };
-    assert_eq!(px(corner(Tile::Wifi)), INK, "Wi-Fi on: solid black");
+    assert_eq!(px(corner(Tile::Wifi)), INK_FILL, "Wi-Fi on: dark gray, never 0 (i.MX skips unchanged pixels)");
     assert_eq!(px(corner(Tile::Ssh)), FILL, "SSH stopping: light gray");
     assert_eq!(px(corner(Tile::Orientation)), PAPER, "portrait: white");
-    assert_eq!(px(corner(Tile::Refresh)), INK, "pressed: inverted");
+    assert_eq!(px(corner(Tile::Refresh)), INK_FILL, "pressed: inverted");
     assert!(hints.iter().any(|h| h.mode == RefreshMode::Fast && h.rect.contains(refresh)));
     assert_eq!(px(Point::new(600, d.rect().bottom() + 10)), 0x77, "nothing below the drawer");
     assert_eq!(px(Point::new(600, d.rect().bottom() - 2)), INK, "bottom border");

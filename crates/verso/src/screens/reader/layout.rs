@@ -15,7 +15,7 @@ use crate::page_layout::{BAR_MM, Bar, BarItem, MAX_MARGIN_MM, MIN_MARGIN_MM, Pag
 use crate::platform::{Battery, RefreshMode};
 use crate::reader::bars::{BarData, ItemText};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, INK3, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{MenuEvent, PopupMenu, Segmented, SideLabel, Step, Stepper, Toggle, TopBar};
 use std::time::Instant;
@@ -507,7 +507,7 @@ impl LayoutView {
                 let down = pressed == Some((k, slot));
                 if down {
                     let r = thirds[slot];
-                    cx.canvas.fill_rounded_rect(r, t.radius, INK);
+                    cx.canvas.fill_rounded_rect(r, t.radius, INK_FILL);
                     cx.hint(r, RefreshMode::Fast);
                 }
                 let (text, gray) = match bar.slots[slot] {

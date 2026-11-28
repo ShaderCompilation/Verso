@@ -23,7 +23,7 @@ use crate::screens::update::{OfferEvent, OfferSheet, UpdateScreen};
 use crate::screens::{Action, EventCx, RelayoutState, Screen, TopDrawerBook, TopDrawerBookAction};
 use crate::store::{BookState, FolderPreview, Store, navigation::Writer as NavigationWriter};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK2, LINE, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
     Button, ButtonKind, Grid, GridEvent, IconButton, Keyboard, MenuEvent, Pager, PagerEvent, PopupMenu, Sheet, Slider,
@@ -2322,7 +2322,7 @@ fn draw_finished_badge(cx: &mut DrawCx, cover: Rect) {
     let r = size as f32 / 2.0;
     let (x, y) = (badge.x as f32 + r, badge.y as f32 + r);
     cx.canvas.fill_circle(x, y, r + (2 * t.border) as f32, PAPER);
-    cx.canvas.fill_circle(x, y, r, INK);
+    cx.canvas.fill_circle(x, y, r, INK_FILL);
     cx.icon(Icon::Check, badge, t.mm(2.4), PAPER);
 }
 
@@ -2342,7 +2342,7 @@ fn draw_number_badge(cx: &mut DrawCx, cover: Rect, number: &str) {
         r + ring as f32,
         PAPER,
     );
-    cx.canvas.fill_rounded_rect(badge, r, INK);
+    cx.canvas.fill_rounded_rect(badge, r, INK_FILL);
     cx.line(number, style, badge, HAlign::Center);
 }
 
@@ -2388,7 +2388,7 @@ fn folder_title_style(t: &Theme, screen: Rect) -> TextStyle {
 fn draw_library_card(cx: &mut DrawCx, r: Rect, subtitle: &str, pressed: bool) {
     let t = cx.theme;
     let (fg, sub_fg) = if pressed {
-        cx.canvas.fill_rounded_rect(r, t.radius, INK);
+        cx.canvas.fill_rounded_rect(r, t.radius, INK_FILL);
         cx.hint(r, RefreshMode::Fast);
         (PAPER, PAPER)
     } else {
@@ -2430,7 +2430,7 @@ fn smart_counts(folders: usize, books: usize) -> String {
 fn draw_notice_bar(cx: &mut DrawCx, message_text: &str, action: &str, r: Rect, pressed: bool) {
     let t = cx.theme;
     let (text, accent) = if pressed {
-        cx.canvas.fill_rounded_rect(r, t.radius, INK);
+        cx.canvas.fill_rounded_rect(r, t.radius, INK_FILL);
         cx.hint(r, RefreshMode::Fast);
         (crate::ui::theme::PAPER, crate::ui::theme::PAPER)
     } else {
@@ -4707,8 +4707,8 @@ mod tests {
         // Fast hint stays limited to the circular badge area.
         assert_eq!(draw(&mut books), (None, Some(RefreshMode::Fast)));
         let px = |x: i32, y: i32| canvas.gray_data()[y as usize * 1272 + x as usize];
-        // Selected badge: solid INK circle with white checkmark inside.
-        assert_eq!(px(badge0.x + 12, badge0.y + 12), INK, "selected badge fills solid INK");
+        // Selected badge: solid INK_FILL circle with white checkmark inside.
+        assert_eq!(px(badge0.x + 12, badge0.y + 12), INK_FILL, "selected badge fills solid INK");
         let check_white = (badge0.y + 10..badge0.bottom() - 10)
             .flat_map(|y| (badge0.x + 10..badge0.right() - 10).map(move |x| px(x, y)))
             .any(|g| g > 200);
@@ -5486,7 +5486,7 @@ mod tests {
             canvas.gray_data()[sample.1 as usize * 1272 + sample.0 as usize]
         };
 
-        assert_eq!(draw_px(&mut books), INK, "number badge draws in Title sort");
+        assert_eq!(draw_px(&mut books), INK_FILL, "number badge draws in Title sort");
         let first_id = books.books[0].id.clone();
         let second_id = books.books[1].id.clone();
         with_cx(&t, screen, |cx| books.start_selection(Target::Book(first_id), cx));
@@ -5494,7 +5494,7 @@ mod tests {
         // Carrying hides the selection tick and shows the number badge again.
         with_cx(&t, screen, |cx| books.start_move(vec![Target::Book(second_id)], cx));
         assert!(books.carrying());
-        assert_eq!(draw_px(&mut books), INK, "number badge returns while carrying");
+        assert_eq!(draw_px(&mut books), INK_FILL, "number badge returns while carrying");
         with_cx(&t, screen, |cx| books.end_selection(cx));
         let mut settings = store.settings();
         settings.series_badges = false;
@@ -7303,7 +7303,7 @@ mod tests {
         canvas.fill(PAPER);
         books.draw(&mut DrawCx::new(&mut canvas, &mut text, &mut icons, &t, &mut hints));
         assert!(hints.iter().any(|h| h.rect == books.library_card && h.mode == RefreshMode::Fast));
-        assert_eq!(px(&canvas, books.library_card.x + 20, books.library_card.y + 20), INK);
+        assert_eq!(px(&canvas, books.library_card.x + 20, books.library_card.y + 20), INK_FILL);
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -7719,7 +7719,7 @@ mod tests {
         assert_eq!(px(c1.x + 10, c1.bottom() + 4), INK, "finished 100% solid bar");
         assert_eq!(px(c1.right() - 10, c1.bottom() + 4), INK);
         let (bx, by) = badge(c1);
-        assert_eq!(px(bx, by), INK, "finished cover has a check badge");
+        assert_eq!(px(bx, by), INK_FILL, "finished cover has a check badge");
         // Book 2 (unread): no bar below the cover.
         let c2 = books.cover_rect(cells[2].1, &t);
         for dy in 0..8 {
@@ -7730,7 +7730,7 @@ mod tests {
         assert_eq!(px(c3.x + 10, c3.bottom() + 2), INK, "re-reading filled portion");
         assert_eq!(px(c3.right() - 10, c3.bottom() + 2), crate::ui::theme::INK3, "re-reading remaining track");
         let (bx, by) = badge(c3);
-        assert_eq!(px(bx, by), INK, "a re-reading cover keeps its check badge");
+        assert_eq!(px(bx, by), INK_FILL, "a re-reading cover keeps its check badge");
         drop(books);
         std::fs::remove_dir_all(root)?;
         Ok(())

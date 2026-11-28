@@ -1705,7 +1705,7 @@ fn the_passage_bar_floats_beside_the_selection_on_every_screen() {
         let highlight = bar.cell(SelectionAction::Highlight);
         assert_eq!(
             gray(&canvas, crate::geom::Point::new(highlight.x + 3, highlight.center().y)),
-            crate::ui::theme::INK
+            crate::ui::theme::INK_FILL
         );
         let shadow = crate::geom::Point::new(bar.rect().center().x, bar.rect().bottom() + t.mm(0.5));
         assert_eq!(gray(&canvas, shadow), crate::ui::theme::SHADOW);

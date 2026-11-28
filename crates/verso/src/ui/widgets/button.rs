@@ -5,7 +5,7 @@ use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon, TextRenderer, TextStyle};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK3, LINE, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK3, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,14 +110,14 @@ impl Button {
                     INK
                 }
                 ButtonKind::Secondary => {
-                    cx.canvas.fill_rounded_rect(r, radius, INK);
+                    cx.canvas.fill_rounded_rect(r, radius, INK_FILL);
                     PAPER
                 }
             }
         } else {
             match self.kind {
                 ButtonKind::Primary => {
-                    cx.canvas.fill_rounded_rect(r, radius, INK);
+                    cx.canvas.fill_rounded_rect(r, radius, INK_FILL);
                     PAPER
                 }
                 ButtonKind::Secondary => {
@@ -192,7 +192,7 @@ impl IconButton {
         let fg = if !self.enabled || self.dimmed && !self.press.is_down() {
             INK3
         } else if self.press.is_down() {
-            cx.canvas.fill_rounded_rect(self.rect, cx.theme.radius, INK);
+            cx.canvas.fill_rounded_rect(self.rect, cx.theme.radius, INK_FILL);
             cx.hint(self.rect, RefreshMode::Fast);
             PAPER
         } else {

@@ -5,7 +5,7 @@ use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,7 +174,7 @@ impl PopupMenu {
                 crate::ui::theme::INK3
             } else if self.pressed == Some(k) && self.press.is_down() {
                 // Round only the corners that sit in a corner of the card.
-                cx.canvas.fill_rounded_rect(ir, t.radius_sheet - t.border as f32, INK);
+                cx.canvas.fill_rounded_rect(ir, t.radius_sheet - t.border as f32, INK_FILL);
                 let [top_left, top_right, bottom_left, bottom_right] = self.card_corners(k);
                 let c = (t.radius_sheet.ceil() as i32).min(ir.w / 2).min(ir.h / 2);
                 for (rounded, x, y) in [
@@ -184,7 +184,7 @@ impl PopupMenu {
                     (bottom_right, ir.right() - c, ir.bottom() - c),
                 ] {
                     if !rounded {
-                        cx.fill(Rect::new(x, y, c, c), INK);
+                        cx.fill(Rect::new(x, y, c, c), INK_FILL);
                     }
                 }
                 cx.hint(ir, RefreshMode::Fast);

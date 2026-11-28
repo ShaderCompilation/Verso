@@ -22,7 +22,7 @@ use crate::store::{
     DarkVariant, FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider,
 };
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{FILL, INK, INK2, LINE, PAPER, Theme};
+use crate::ui::theme::{FILL, INK, INK_FILL, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{
     Button, ButtonKind, IconButton, Keyboard, List, ListEvent, Pager, PagerEvent, Row, Segmented, Sheet, TextField,
@@ -1346,19 +1346,19 @@ pub(super) fn draw_zones(cx: &mut DrawCx, page: Rect, zones: TapZones, corner: O
     let back = zones.back(inner);
     let menu = TapZones::menu(page);
     let ink = |zone: Zone| if tried == Some(zone) { PAPER } else { INK };
-    let page_fill = if tried == Some(Zone::Forward) { INK } else { PAPER };
-    let back_fill = if tried == Some(Zone::Back) { INK } else { FILL_ZONE };
+    let page_fill = if tried == Some(Zone::Forward) { INK_FILL } else { PAPER };
+    let back_fill = if tried == Some(Zone::Back) { INK_FILL } else { FILL_ZONE };
     cx.canvas.fill_rounded_rect(page, t.radius, page_fill);
     cx.canvas.fill_rounded_rect(back, t.radius - t.border as f32, back_fill);
     // Square off the shading's inner edge.
     let half = back.w / 2;
     cx.fill(if back.x == inner.x { back.split_right(half).0 } else { back.split_left(half).0 }, back_fill);
-    let menu_fill = if tried == Some(Zone::Menu) { INK } else { PAPER };
+    let menu_fill = if tried == Some(Zone::Menu) { INK_FILL } else { PAPER };
     cx.canvas.fill_rounded_rect(menu, t.radius, menu_fill);
     cx.canvas.stroke_rounded_rect(menu, t.radius, t.hairline as f32, INK2);
     if let Some(size) = corner {
         let square = crate::reader::bookmark_corner(inner, size);
-        let fill = if tried == Some(Zone::Bookmark) { INK } else { PAPER };
+        let fill = if tried == Some(Zone::Bookmark) { INK_FILL } else { PAPER };
         cx.canvas.fill_rounded_rect(square, t.radius, fill);
         cx.canvas.stroke_rounded_rect(square, t.radius, t.hairline as f32, INK2);
         cx.icon(Icon::BookmarkFilled, square, size * 3 / 5, ink(Zone::Bookmark));

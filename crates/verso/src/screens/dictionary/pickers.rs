@@ -6,7 +6,7 @@ use crate::{
     platform::RefreshMode,
     ui::{
         gesture::Gesture,
-        theme::{INK, INK2, PAPER, Theme},
+        theme::{INK, INK_FILL, INK2, PAPER, Theme},
         widget::{DrawCx, Press, PressEvent},
         widgets::{Button, ButtonKind, List, ListEvent, Pager, Row, button::fit_label},
     },
@@ -41,7 +41,7 @@ impl DropDown {
             return;
         }
         let (fg, quiet) = if self.press.is_down() {
-            cx.canvas.fill_rounded_rect(r, t.radius, INK);
+            cx.canvas.fill_rounded_rect(r, t.radius, INK_FILL);
             cx.hint(r, RefreshMode::Fast);
             (PAPER, PAPER)
         } else {

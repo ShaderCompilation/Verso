@@ -3,7 +3,7 @@
 use crate::geom::Rect;
 use crate::gfx::{HAlign, Icon};
 use crate::ui::gesture::Gesture;
-use crate::ui::theme::{INK, INK3, PAPER};
+use crate::ui::theme::{INK, INK_FILL, INK3, PAPER};
 use crate::ui::widget::DrawCx;
 
 pub enum Segment {
@@ -90,12 +90,12 @@ impl Segmented {
             let selected = i == self.selected;
             let fg = if selected {
                 // Rounded on the outside only: fill rounded, then square off inner sides.
-                cx.canvas.fill_rounded_rect(*seg, t.radius, INK);
+                cx.canvas.fill_rounded_rect(*seg, t.radius, INK_FILL);
                 if i > 0 {
-                    cx.fill(seg.split_left(seg.w / 2).0, INK);
+                    cx.fill(seg.split_left(seg.w / 2).0, INK_FILL);
                 }
                 if i + 1 < n {
-                    cx.fill(seg.split_right(seg.w / 2).0, INK);
+                    cx.fill(seg.split_right(seg.w / 2).0, INK_FILL);
                 }
                 PAPER
             } else {

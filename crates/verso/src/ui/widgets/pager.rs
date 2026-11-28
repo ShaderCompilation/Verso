@@ -9,7 +9,7 @@ use crate::geom::{Point, Rect};
 use crate::gfx::{HAlign, Icon, TextStyle};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::{Direction, Gesture};
-use crate::ui::theme::{INK, INK2, PAPER, Theme};
+use crate::ui::theme::{INK, INK_FILL, INK2, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::button::IconButton;
 
@@ -201,7 +201,7 @@ impl Pager {
         let pill = self.pill(cx, style, if self.compact { "/" } else { "of" });
         let radius = pill.h as f32 / 2.0;
         if self.counter_press.is_down() {
-            cx.canvas.fill_rounded_rect(pill, radius, INK);
+            cx.canvas.fill_rounded_rect(pill, radius, INK_FILL);
             cx.line(&label, style.gray(PAPER), text_rect, HAlign::Center);
             cx.hint(pill, RefreshMode::Fast);
         } else {

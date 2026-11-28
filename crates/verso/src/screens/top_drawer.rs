@@ -19,7 +19,7 @@ use crate::platform::{Frontlight, LightRange, Orientation, RefreshMode, Waker, s
 use crate::screens::TopDrawerBook;
 use crate::store::Store;
 use crate::ui::gesture::{Direction, Gesture};
-use crate::ui::theme::{FILL, INK, INK2, LINE, PAPER, Theme};
+use crate::ui::theme::{FILL, INK, INK_FILL, INK2, LINE, PAPER, Theme};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::{IconButton, Slider};
 
@@ -955,7 +955,7 @@ impl TopDrawer {
         let dark = (state == TileState::On) != pressed;
         let (fill, ink, sub_gray) = match state {
             TileState::Pending => (FILL, INK, INK2),
-            _ if dark => (INK, PAPER, ON_SUB),
+            _ if dark => (INK_FILL, PAPER, ON_SUB),
             _ => (PAPER, INK, INK2),
         };
         cx.canvas.fill_rounded_rect(rect, t.radius, fill);

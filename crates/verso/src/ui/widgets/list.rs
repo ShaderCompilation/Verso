@@ -6,7 +6,7 @@ use crate::gfx::{HAlign, Icon, Weight};
 use crate::platform::RefreshMode;
 use crate::ui::gesture::Gesture;
 use crate::ui::layout::Paging;
-use crate::ui::theme::{INK, INK2, INK3, LINE, PAPER};
+use crate::ui::theme::{INK, INK_FILL, INK2, INK3, LINE, PAPER};
 use crate::ui::widget::{DrawCx, Press, PressEvent};
 use crate::ui::widgets::toggle::{Toggle, draw_pill};
 
@@ -256,7 +256,7 @@ impl List {
             let row = &self.rows[i];
             let pressed = self.pressed_part(i);
             let (fg, fg2) = if pressed == Some(Part::Row) {
-                cx.fill(r, INK);
+                cx.fill(r, INK_FILL);
                 cx.hint(r, RefreshMode::Fast);
                 (PAPER, PAPER)
             } else if !row.enabled {
@@ -350,7 +350,7 @@ fn draw_rank(cx: &mut DrawCx, circle: Rect, rank: Option<usize>, enabled: bool, 
     };
     if pressed {
         let halo = circle.inset(-t.mm(1.0));
-        cx.canvas.fill_circle(cxp, cyp, halo.w as f32 / 2.0, INK);
+        cx.canvas.fill_circle(cxp, cyp, halo.w as f32 / 2.0, INK_FILL);
         cx.hint(halo, RefreshMode::Fast);
     }
     match rank {
@@ -374,7 +374,7 @@ fn draw_step(cx: &mut DrawCx, area: Rect, icon: Icon, active: bool, pressed: boo
     let icon_rect =
         Rect::new(rect.center().x - t.icon_small / 2, rect.center().y - t.icon_small / 2, t.icon_small, t.icon_small);
     if pressed {
-        cx.canvas.fill_rounded_rect(rect, t.radius, INK);
+        cx.canvas.fill_rounded_rect(rect, t.radius, INK_FILL);
         cx.hint(rect, RefreshMode::Fast);
         cx.icon(icon, icon_rect, t.icon_small, PAPER);
     } else {
