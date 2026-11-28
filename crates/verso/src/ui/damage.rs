@@ -315,7 +315,7 @@ pub fn plan(tiles: &Tiles, bounds: Rect, hints: &[Update], default: RefreshMode,
     }
     // Send non-flashing updates before flashing ones so Display::present never
     // blocks on a flash it just started in the same frame.
-    updates.sort_by_key(|u| u.mode == RefreshMode::Full);
+    updates.sort_by_key(|u| u.mode >= RefreshMode::Clean);
     updates
 }
 
@@ -579,14 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn forced_refreshes_drop_covered_weaker_forced_and_order_full_last() {
+    fn forced_refreshes_drop_covered_weaker_forced_and_order_flashes_last() {
         let (canvas, mut diff) = setup();
         let grid = Rect::new(10, 20, 120, 60);
         let inside_debt = Update { rect: Rect::new(20, 30, 20, 20), mode: Ui };
         let outside_debt = Update { rect: Rect::new(10, 82, 30, 10), mode: Ui };
-        let forced = [Update { rect: grid, mode: Full }, inside_debt, outside_debt];
+        // Full beats a Clean it covers; a Clean of its own still flashes last.
+        let inside_clean = Update { rect: Rect::new(40, 30, 20, 20), mode: Clean };
+        let outside_clean = Update { rect: Rect::new(132, 20, 20, 20), mode: Clean };
+        let forced = [outside_clean, Update { rect: grid, mode: Full }, inside_debt, inside_clean, outside_debt];
         let updates = plan(&diff.changed(&canvas), bounds(), &[], Ui, &forced);
-        assert_eq!(updates, vec![outside_debt, Update { rect: grid, mode: Full }]);
+        assert_eq!(updates, vec![outside_debt, outside_clean, Update { rect: grid, mode: Full }]);
     }
 
     #[test]

@@ -281,7 +281,7 @@ impl Books {
             self.apply_changes(changes, cx);
         } else {
             self.update_header_rect(cx.theme);
-            cx.refresh(self.screen, RefreshMode::Full);
+            cx.refresh(self.screen, RefreshMode::Clean);
         }
         let sidecars = result.sidecar_errors.len();
         if result.errors.is_empty() {

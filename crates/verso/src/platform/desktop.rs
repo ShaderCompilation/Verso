@@ -546,6 +546,7 @@ fn tint(mode: RefreshMode) -> (u32, u32, u32) {
         RefreshMode::Fast => (230, 50, 50),
         RefreshMode::Ui => (50, 110, 230),
         RefreshMode::Page => (40, 170, 80),
+        RefreshMode::Clean => (170, 60, 200),
         RefreshMode::Full => (240, 150, 30),
     }
 }

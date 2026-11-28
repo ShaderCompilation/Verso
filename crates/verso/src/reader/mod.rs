@@ -159,10 +159,10 @@ impl PageCache {
 /// due then waits (see [`Refresh::turn`]).
 pub const RAPID_TURN: Duration = Duration::from_millis(400);
 
-/// Counts page turns between full flashes. Pages with images always flash,
-/// and chapter starts do in light mode (text on black ghosts little, so a dark
-/// chapter start isn't worth the white flash); `every` (0 = never) adds a
-/// periodic one.
+/// Counts page turns between full flashes. Pages with images always get a
+/// `Clean` (in dark mode it flashes only the changed pixels), and chapter
+/// starts flash in light mode (text on black ghosts little, so a dark chapter
+/// start isn't worth the white flash); `every` (0 = never) adds a periodic one.
 pub struct Refresh {
     since_flash: u32,
     every: u32,
@@ -186,9 +186,12 @@ impl Refresh {
         self.last_turn = Some(now);
         let due = self.every > 0 && self.since_flash >= self.every;
         let deferred = rapid && self.since_flash < self.every.saturating_mul(2);
-        if image || chapter_start && !dark || due && !deferred {
+        if chapter_start && !dark || due && !deferred {
             self.since_flash = 0;
             RefreshMode::Full
+        } else if image {
+            self.since_flash = 0;
+            RefreshMode::Clean
         } else {
             RefreshMode::Page
         }
@@ -202,7 +205,7 @@ mod tests {
     fn periodic_flash_waits_during_rapid_turns_but_images_and_chapters_do_not() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let (full, page) = (RefreshMode::Full, RefreshMode::Page);
+        let (full, clean, page) = (RefreshMode::Full, RefreshMode::Clean, RefreshMode::Page);
         // Slow turns: every 3rd flashes.
         let mut r = Refresh::new(3);
         let modes: Vec<_> = (0..6).map(|i| r.turn(false, false, false, at(i * 1000))).collect();
@@ -224,13 +227,17 @@ mod tests {
             r.turn(false, true, false, at(400)),
             r.turn(false, false, false, at(600)),
         ];
-        assert_eq!(modes, [page, full, full, page]);
+        assert_eq!(modes, [page, clean, full, page]);
         // Dark: a chapter start neither flashes nor restarts the count; images
         // and the periodic flash still do.
         let mut r = Refresh::new(3);
         let turns = [(false, true), (true, false), (false, true), (false, false), (false, false)];
         let modes: Vec<_> = (0..5).map(|i| r.turn(turns[i].0, turns[i].1, true, at(i as u64 * 1000))).collect();
-        assert_eq!(modes, [page, full, page, page, full]);
+        assert_eq!(modes, [page, clean, page, page, full]);
+        // A chapter start or a due flash on an image page beats its Clean.
+        let mut r = Refresh::new(2);
+        assert_eq!(r.turn(true, true, false, at(0)), full);
+        assert_eq!([r.turn(false, false, true, at(1000)), r.turn(true, false, true, at(2000))], [page, full]);
         // No periodic flash: nothing to defer.
         let mut r = Refresh::new(0);
         assert!((0..20).all(|i| r.turn(false, false, false, at(i * 200)) == page));
@@ -370,7 +377,7 @@ mod tests {
         }
         assert_eq!(f.turn(false, false, false, slow()), RefreshMode::Full);
         assert_eq!(f.turn(false, false, false, slow()), RefreshMode::Page);
-        assert_eq!(f.turn(true, false, false, slow()), RefreshMode::Full);
+        assert_eq!(f.turn(true, false, false, slow()), RefreshMode::Clean);
         assert_eq!(f.turn(false, true, false, slow()), RefreshMode::Full);
         let mut every = Refresh::new(1);
         assert!((0..3).all(|_| every.turn(false, false, false, slow()) == RefreshMode::Full));

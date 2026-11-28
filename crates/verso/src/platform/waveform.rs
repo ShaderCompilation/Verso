@@ -127,7 +127,7 @@ pub struct RefreshPlan {
     /// Maps to FBInk's `is_flashing` (`UPDATE_MODE_FULL` when true).
     pub is_flashing: bool,
     /// Whether `Display::present` records the marker in `FlashFence`.
-    /// Always gated strictly on `RefreshMode::Full`, never on `is_flashing`.
+    /// Gated on `RefreshMode::Full` and `Clean`, never on `is_flashing`.
     pub mark_flash_fence: bool,
 }
 
@@ -142,16 +142,20 @@ pub struct RefreshPlan {
 /// waveforms (`DU` / `GL16` / `REAGL` / `GC16` or color equivalents) with
 /// `UPDATE_MODE_PARTIAL` for non-`Full`. `DUNM` is gated on `caps.is_mtk`
 /// because FBInk maps `DUNM` to `AUTO` on i.MX.
+///
+/// `Clean` is `Full` in light mode. On a dark canvas it keeps the GC-class
+/// waveform (pre-flipped pictures are bright and grey, so `GLKW16` would leave
+/// ghosts) but with `UPDATE_MODE_PARTIAL`, so unchanged black stays black.
 #[cfg_attr(not(any(feature = "kindle", test)), allow(dead_code))]
 pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: DarkVariant) -> RefreshPlan {
-    let mark_flash_fence = mode == RefreshMode::Full;
+    let mark_flash_fence = mode >= RefreshMode::Clean;
     if !dark || !caps.has_eclipse_wfm || variant == DarkVariant::Reagl {
         let waveform = if caps.has_color_panel {
             match mode {
                 RefreshMode::Fast => Waveform::Du,
                 RefreshMode::Ui => Waveform::Gl16,
                 RefreshMode::Page => Waveform::Glrc16,
-                RefreshMode::Full => Waveform::Gcc16,
+                RefreshMode::Clean | RefreshMode::Full => Waveform::Gcc16,
             }
         } else {
             match mode {
@@ -164,10 +168,11 @@ pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: Dar
                     }
                 }
                 RefreshMode::Page => Waveform::Reagl,
-                RefreshMode::Full => Waveform::Gc16,
+                RefreshMode::Clean | RefreshMode::Full => Waveform::Gc16,
             }
         };
-        return RefreshPlan { waveform, is_flashing: mode == RefreshMode::Full, mark_flash_fence };
+        let is_flashing = mode == RefreshMode::Full || mode == RefreshMode::Clean && !dark;
+        return RefreshPlan { waveform, is_flashing, mark_flash_fence };
     }
 
     let waveform = match mode {
@@ -186,7 +191,7 @@ pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: Dar
                 Waveform::Glkw16
             }
         }
-        RefreshMode::Full => {
+        RefreshMode::Clean | RefreshMode::Full => {
             if caps.has_color_panel {
                 Waveform::Gcck16
             } else {
@@ -203,10 +208,20 @@ pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: Dar
 mod tests {
     use super::*;
 
-    const ALL_MODES: [RefreshMode; 4] = [RefreshMode::Fast, RefreshMode::Ui, RefreshMode::Page, RefreshMode::Full];
+    const ALL_MODES: [RefreshMode; 5] =
+        [RefreshMode::Fast, RefreshMode::Ui, RefreshMode::Page, RefreshMode::Clean, RefreshMode::Full];
+
+    /// What a dark canvas gets without eclipse waveforms (or under `REAGL`):
+    /// the light plans, except that `Clean` refreshes only changed pixels.
+    fn light_with_partial_clean(caps: PanelCaps, variant: DarkVariant) -> [RefreshPlan; 5] {
+        ALL_MODES.map(|m| {
+            let plan = plan_refresh(m, false, caps, variant);
+            RefreshPlan { is_flashing: plan.is_flashing && m != RefreshMode::Clean, ..plan }
+        })
+    }
 
     #[test]
-    fn light_waveforms_match_panel_color_and_only_full_flashes() {
+    fn light_waveforms_match_panel_color_and_only_clean_and_full_flash() {
         for has_eclipse_wfm in [false, true] {
             for is_mtk in [false, true] {
                 for variant in
@@ -222,6 +237,7 @@ mod tests {
                             RefreshPlan { waveform: ui, is_flashing: false, mark_flash_fence: false },
                             RefreshPlan { waveform: Waveform::Reagl, is_flashing: false, mark_flash_fence: false },
                             RefreshPlan { waveform: Waveform::Gc16, is_flashing: true, mark_flash_fence: true },
+                            RefreshPlan { waveform: Waveform::Gc16, is_flashing: true, mark_flash_fence: true },
                         ]
                     );
 
@@ -234,8 +250,16 @@ mod tests {
                             RefreshPlan { waveform: Waveform::Gl16, is_flashing: false, mark_flash_fence: false },
                             RefreshPlan { waveform: Waveform::Glrc16, is_flashing: false, mark_flash_fence: false },
                             RefreshPlan { waveform: Waveform::Gcc16, is_flashing: true, mark_flash_fence: true },
+                            RefreshPlan { waveform: Waveform::Gcc16, is_flashing: true, mark_flash_fence: true },
                         ]
                     );
+                    // Light Clean is Full, field for field.
+                    for caps in [mono, color] {
+                        assert_eq!(
+                            plan_refresh(RefreshMode::Clean, false, caps, variant),
+                            plan_refresh(RefreshMode::Full, false, caps, variant)
+                        );
+                    }
                 }
             }
         }
@@ -251,6 +275,7 @@ mod tests {
                 RefreshPlan { waveform: Waveform::Dunm, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
+                RefreshPlan { waveform: Waveform::Gck16, is_flashing: false, mark_flash_fence: true },
                 RefreshPlan { waveform: Waveform::Gck16, is_flashing: true, mark_flash_fence: true },
             ]
         );
@@ -263,6 +288,7 @@ mod tests {
                 RefreshPlan { waveform: Waveform::Du, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
+                RefreshPlan { waveform: Waveform::Gck16, is_flashing: false, mark_flash_fence: true },
                 RefreshPlan { waveform: Waveform::Gck16, is_flashing: true, mark_flash_fence: true },
             ]
         );
@@ -275,24 +301,25 @@ mod tests {
                 RefreshPlan { waveform: Waveform::Dunm, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glrck16, is_flashing: false, mark_flash_fence: false },
+                RefreshPlan { waveform: Waveform::Gcck16, is_flashing: false, mark_flash_fence: true },
                 RefreshPlan { waveform: Waveform::Gcck16, is_flashing: true, mark_flash_fence: true },
             ]
         );
 
         // Without has_eclipse_wfm (PW4, Basic 3, PW3): fall back to light waveforms
-        // with PARTIAL for non-Full even under Variant B.
+        // with PARTIAL for non-Full (Clean included) even under Variant B.
         for is_mtk in [false, true] {
             for variant in [DarkVariant::A, DarkVariant::B] {
                 let old_mono = PanelCaps { has_color_panel: false, has_eclipse_wfm: false, is_mtk };
                 assert_eq!(
                     ALL_MODES.map(|m| plan_refresh(m, true, old_mono, variant)),
-                    ALL_MODES.map(|m| plan_refresh(m, false, old_mono, variant)),
+                    light_with_partial_clean(old_mono, variant),
                     "mono fallback is_mtk={is_mtk} {variant:?}"
                 );
                 let old_color = PanelCaps { has_color_panel: true, has_eclipse_wfm: false, is_mtk };
                 assert_eq!(
                     ALL_MODES.map(|m| plan_refresh(m, true, old_color, variant)),
-                    ALL_MODES.map(|m| plan_refresh(m, false, old_color, variant)),
+                    light_with_partial_clean(old_color, variant),
                     "color fallback is_mtk={is_mtk} {variant:?}"
                 );
             }
@@ -300,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn only_full_marks_the_flash_fence_even_when_glkw16_uses_full_update_mode() {
+    fn only_clean_and_full_mark_the_flash_fence_even_when_glkw16_uses_full_update_mode() {
         let pw6 = PanelCaps { has_color_panel: false, has_eclipse_wfm: true, is_mtk: true };
         let plans = ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::B));
         assert_eq!(plans, ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::C)));
@@ -314,13 +341,14 @@ mod tests {
                 RefreshPlan { waveform: Waveform::Dunm, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: true, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: true, mark_flash_fence: false },
+                RefreshPlan { waveform: Waveform::Gck16, is_flashing: false, mark_flash_fence: true },
                 RefreshPlan { waveform: Waveform::Gck16, is_flashing: true, mark_flash_fence: true },
             ]
         );
         // REAGL baseline uses light waveforms on dark canvases.
         assert_eq!(
             ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::Reagl)),
-            ALL_MODES.map(|m| plan_refresh(m, false, pw6, DarkVariant::A))
+            light_with_partial_clean(pw6, DarkVariant::A)
         );
     }
 

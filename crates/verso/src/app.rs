@@ -438,12 +438,12 @@ impl App {
             self.diff.mark_canvas_as_baseline();
             vec![Update { rect: bounds, mode: strongest }]
         } else {
-            // Pixels covered by a forced Full refresh will be sent to the panel
+            // Pixels covered by a forced flash (Clean or Full) will be sent to the panel
             // with the strongest mode anyway: tile diffing neither reads them
             // (most of a grid-only library frame's diff time) nor emits a
             // redundant Ui update along unaligned edges of the forced rect.
-            let full: Vec<Rect> = forced.iter().filter(|u| u.mode == RefreshMode::Full).map(|u| u.rect).collect();
-            let tiles = self.diff.changed_outside(&self.canvas, &full);
+            let flashed: Vec<Rect> = forced.iter().filter(|u| u.mode >= RefreshMode::Clean).map(|u| u.rect).collect();
+            let tiles = self.diff.changed_outside(&self.canvas, &flashed);
             let updates = damage::plan(&tiles, bounds, &hints, RefreshMode::Ui, &forced);
             self.diff.commit(&self.canvas, &tiles);
             updates

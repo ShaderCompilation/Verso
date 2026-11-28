@@ -142,13 +142,13 @@ against the previous frame in **16×16 tiles**:
   `>= Ui` (page turn, wake, first frame) with no stronger local rect, tile
   diffing is skipped and `mark_canvas_as_baseline()` defers copying `Canvas`
   into `prev` until a partial frame actually needs to diff (`sync_baseline`).
-- **Skip rects (`changed_outside`):** pixels inside forced `Full` rects (such
-  as grid-only library paging) copy straight into `prev` without comparison;
+- **Skip rects (`changed_outside`):** pixels inside forced `Clean` or `Full`
+  rects (such as grid-only library paging) copy straight into `prev` without comparison;
   remaining bands check 16-row strips in 64-byte chunks before per-tile tests.
 - **Hints & ordering:** changed tiles take the strongest overlapping widget
   hint (default `Ui`), merge into rectangles, drop rects subsumed by stronger
-  forced updates, and sort **non-`Full` before `Full`** so non-blocking flashes
-  never stall same-frame chrome updates.
+  forced updates, and sort **non-flashing before `Clean` and `Full`** so
+  non-blocking flashes never stall same-frame chrome updates.
 - **Frame check (`frame_watch.rs`):** after the launch and wake frames the log
   says whether the framebuffer still holds Verso's frame (2 s later on the
   Kindle, and at the first touch). Only after Amazon's own sleep screen does it
@@ -163,19 +163,22 @@ against the previous frame in **16×16 tiles**:
 | `Fast` | Press feedback, slider drags, selection | `WFM_DU` | `WFM_DU` | `WFM_DUNM` (MTK) / `WFM_DU` (i.MX) | `WFM_DUNM` / `WFM_DU` | No |
 | `Ui` | Menus, chrome, `fast_debt` cleanup, wake strip | `WFM_GL16` (MTK) / `WFM_GC16` (i.MX) | `WFM_GL16` | `WFM_GLKW16` | `WFM_GLKW16` | No |
 | `Page` | Reading page turns | `WFM_REAGL` | `WFM_GLRC16` | `WFM_GLKW16` | `WFM_GLRCK16` | No |
-| `Full` | Images, chapter starts, periodic flash, wake, library grid | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16` | `WFM_GCCK16` | Yes |
+| `Clean` | Pictures: image pages, library covers (grid paging, Home/Library, sort and view, scans, moves, selection results) | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16`, partial | `WFM_GCCK16`, partial | Light; dark only changed pixels |
+| `Full` | Light chapter starts, periodic flash, wake, first frame, sleep cover, dark and variant switches, layout changes, drawer Refresh | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16` | `WFM_GCCK16` | Yes |
 
 Eclipse modes gate on `has_eclipse_wfm` (falling back to light waveforms when
-absent), and `FlashFence` gates only on `RefreshMode::Full`.
+absent; a dark `Clean` stays partial there too), and `FlashFence` gates on
+`Clean` and `Full`. Only `Full` is the whole-screen clean: `refresh_all(Full)`
+drops queued refreshes and fast debt.
 
 - **Non-blocking flashes (`platform/flash.rs`):** `Display::present` records
   FBInk's refresh marker in `FlashFence` instead of blocking ~300 ms immediately,
   and awaits it lazily right before the next framebuffer write, sleep handoff or
   exit.
 - **Periodic cadence (`reader/mod.rs`):** flashes every `page_flash` turns
-  (default `0` = never). Pages with images and TOC chapter starts (`level <= 2`)
-  request `Full` and reset the counter, but in dark mode (`EventCx::dark`)
-  chapter starts and text-sheet paging skip the flash. Rapid turns (`< 400 ms` apart)
+  (default `0` = never). Pages with images request `Clean` and TOC chapter
+  starts (`level <= 2`) `Full`; both reset the counter, but in dark mode
+  (`EventCx::dark`) chapter starts and text-sheet paging skip the flash. Rapid turns (`< 400 ms` apart)
   defer periodic flashes up to `2 × page_flash` turns.
 
 ---

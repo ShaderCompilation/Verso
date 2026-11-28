@@ -1123,7 +1123,7 @@ impl Books {
                 return;
             }
         };
-        cx.refresh(rect, RefreshMode::Full);
+        cx.refresh(rect, RefreshMode::Clean);
     }
     /// Shows another page of the browsing grid: arrows, swipes and the page jump.
     fn go_to_page(&mut self, page: usize, cx: &mut EventCx) {
@@ -1179,7 +1179,7 @@ impl Books {
         self.pager.page = self.navigation.page();
         self.refresh(cx.theme);
         self.save_navigation();
-        cx.refresh(self.screen, RefreshMode::Full);
+        cx.refresh(self.screen, RefreshMode::Clean);
     }
     fn open_home(&mut self, cx: &mut EventCx) {
         if self.is_home() || self.carrying() {
@@ -1191,7 +1191,7 @@ impl Books {
         }
         self.home_active = true;
         self.refresh(cx.theme);
-        cx.refresh(self.screen, RefreshMode::Full);
+        cx.refresh(self.screen, RefreshMode::Clean);
     }
     fn navigate(&mut self, folder: Option<PathBuf>, cx: &mut EventCx) {
         if !self.carrying() {
@@ -1233,7 +1233,7 @@ impl Books {
             self.thumbnails.clear();
             if !self.is_home() {
                 self.refresh(cx.theme);
-                cx.refresh(self.screen, RefreshMode::Full);
+                cx.refresh(self.screen, RefreshMode::Clean);
             }
         }
         if settings.series_badges != self.series_badges {
@@ -1256,7 +1256,7 @@ impl Books {
                 self.warm_due = true;
             } else {
                 self.refresh(cx.theme);
-                cx.refresh(self.screen, RefreshMode::Full);
+                cx.refresh(self.screen, RefreshMode::Clean);
             }
         }
         let roots = self.store.library_folders();
@@ -1795,7 +1795,7 @@ impl Books {
             }
             Leave::Home | Leave::Back => {}
         }
-        cx.refresh(self.screen, RefreshMode::Full);
+        cx.refresh(self.screen, RefreshMode::Clean);
     }
     fn open_menu(&mut self, id: String, anchor: Point, t: &Theme) {
         let state = self.store.book(&id);
@@ -2100,7 +2100,7 @@ impl Books {
         self.refresh(cx.theme);
         self.save_navigation();
         if self.is_home() {
-            cx.refresh(self.screen, RefreshMode::Full);
+            cx.refresh(self.screen, RefreshMode::Clean);
         } else {
             self.refresh_grid(cx, old_grid);
         }
@@ -5330,12 +5330,12 @@ mod tests {
         let page2_first = books.books[12].id.clone();
         assert!(!books.visible_book_ids().contains(&page2_first));
 
-        // Background opened_changed moving a page-2 book to the top reorders with a grid-only Full flash.
+        // Background opened_changed moving a page-2 book to the top reorders with a grid-only Clean flash.
         mark_opened(&books, &page2_first, 100)?;
         books.library.post_opened_changed();
         let updates = run_cx(&mut books, &|b, cx| b.on_background(cx));
         assert_eq!(books.visible_book_ids()[0], page2_first);
-        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Full }]);
+        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Clean }]);
 
         // When the visible page's book IDs are unchanged (editing page-1 order while viewing page 2), skip the flash.
         let page1_second = books.books[1].id.clone();
@@ -5345,7 +5345,7 @@ mod tests {
         books.library.post_opened_changed();
         let updates = run_cx(&mut books, &|b, cx| b.on_background(cx));
         assert_eq!(books.visible_book_ids(), page2_before);
-        assert!(updates.is_empty(), "unchanged visible page skips Full flash: {updates:?}");
+        assert!(updates.is_empty(), "unchanged visible page skips the Clean flash: {updates:?}");
         assert_eq!(books.books[0].id, page1_second, "off-screen page 1 still reordered");
 
         // Defer while touching or while an overlay is open, then apply once both end.
@@ -5375,7 +5375,7 @@ mod tests {
         let updates = run_cx(&mut books, &|b, cx| b.apply_pending(cx));
         assert!(!books.pending_opened);
         assert_eq!(books.visible_book_ids()[0], deferred_id);
-        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Full }]);
+        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Clean }]);
 
         // Any explicit non-Home refresh() clears pending_opened.
         books.touching = true;
@@ -5386,7 +5386,7 @@ mod tests {
         assert!(!books.pending_opened);
         books.touching = false;
 
-        // Search in RecentlyRead also reorders live with a grid-only Full flash.
+        // Search in RecentlyRead also reorders live with a grid-only Clean flash.
         run_cx(&mut books, &|b, cx| {
             b.toggle_search(cx);
             b.search.as_mut().unwrap().keyboard.visible = false;
@@ -5397,7 +5397,7 @@ mod tests {
         books.library.post_opened_changed();
         let updates = run_cx(&mut books, &|b, cx| b.on_background(cx));
         assert_eq!(books.visible_book_ids()[0], search_target);
-        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Full }]);
+        assert_eq!(updates, vec![crate::platform::Update { rect: books.grid.rect(), mode: RefreshMode::Clean }]);
 
         drop(books);
         std::fs::remove_dir_all(root)?;
@@ -6072,10 +6072,10 @@ mod tests {
             assert!(!app.wants_exit());
             let updates = app.frame();
             assert!(!updates.is_empty());
-            assert!(updates.iter().all(|u| u.mode != RefreshMode::Full && u.rect.y >= t.top_bar));
+            assert!(updates.iter().all(|u| u.mode < RefreshMode::Clean && u.rect.y >= t.top_bar));
         }
         assert!(app.on_text_input(&TextInput::Clear));
-        assert!(app.frame().iter().all(|u| u.mode != RefreshMode::Full));
+        assert!(app.frame().iter().all(|u| u.mode < RefreshMode::Clean));
         assert!(app.on_text_input(&TextInput::Submit));
         app.frame();
         assert!(!app.on_text_input(&TextInput::Insert("q".into())), "unfocused input can reach simulator shortcuts");
@@ -6103,21 +6103,21 @@ mod tests {
         let mut app = crate::app::App::new(&paperwhite(), t.clone(), Box::new(books));
         app.frame();
 
-        // Paging a folder: top bar stays untouched; Full is confined to
+        // Paging a folder: top bar stays untouched; Clean is confined to
         // the grid and ordered last (after pager Ui cleanup).
         app.on_gesture(Gesture::Down(next_pos));
         app.frame();
         app.on_gesture(Gesture::Tap(next_pos));
         let updates = app.frame();
         assert!(!updates.is_empty());
-        assert_eq!(updates.last(), Some(&crate::platform::Update { rect: grid_rect, mode: RefreshMode::Full }));
+        assert_eq!(updates.last(), Some(&crate::platform::Update { rect: grid_rect, mode: RefreshMode::Clean }));
         assert!(
-            updates[..updates.len() - 1].iter().all(|u| u.mode != RefreshMode::Full),
-            "non-flashing updates must precede Full: {updates:?}"
+            updates[..updates.len() - 1].iter().all(|u| u.mode < RefreshMode::Clean),
+            "non-flashing updates must precede Clean: {updates:?}"
         );
         assert!(updates.iter().all(|u| u.rect.y >= t.top_bar), "paging must not touch the top bar: {updates:?}");
 
-        // A sort change: the same grid-only Full; the header and the closing
+        // A sort change: the same grid-only Clean; the header and the closing
         // menu take non-flashing updates below the top bar.
         app.on_gesture(Gesture::Down(sort_pos));
         app.frame();
@@ -6127,19 +6127,19 @@ mod tests {
         app.frame();
         app.on_gesture(Gesture::Tap(author_pos));
         let updates = app.frame();
-        assert_eq!(updates.last(), Some(&crate::platform::Update { rect: grid_rect, mode: RefreshMode::Full }));
-        assert!(updates[..updates.len() - 1].iter().all(|u| u.mode != RefreshMode::Full), "one Full: {updates:?}");
+        assert_eq!(updates.last(), Some(&crate::platform::Update { rect: grid_rect, mode: RefreshMode::Clean }));
+        assert!(updates[..updates.len() - 1].iter().all(|u| u.mode < RefreshMode::Clean), "one Clean: {updates:?}");
         assert!(updates.iter().all(|u| u.rect.y >= t.top_bar), "sorting must not touch the top bar: {updates:?}");
 
-        // Navigating Back to parent folder: top bar stays untouched, Full is confined to the grid.
+        // Navigating Back to parent folder: top bar stays untouched, Clean is confined to the grid.
         app.on_gesture(Gesture::Down(back_pos));
         app.frame();
         app.on_gesture(Gesture::Tap(back_pos));
         let updates = app.frame();
-        let fulls: Vec<_> = updates.iter().filter(|u| u.mode == RefreshMode::Full).collect();
-        assert_eq!(fulls.len(), 1);
-        assert_eq!(updates.last().map(|u| u.mode), Some(RefreshMode::Full));
-        assert!(fulls[0].rect.y >= t.top_bar, "folder flash must stay below top bar: {fulls:?}");
+        let cleans: Vec<_> = updates.iter().filter(|u| u.mode == RefreshMode::Clean).collect();
+        assert_eq!(cleans.len(), 1);
+        assert_eq!(updates.last().map(|u| u.mode), Some(RefreshMode::Clean));
+        assert!(cleans[0].rect.y >= t.top_bar, "folder flash must stay below top bar: {cleans:?}");
         assert!(updates.iter().all(|u| u.rect.y >= t.top_bar), "folder navigation must not touch top bar: {updates:?}");
 
         drop(app);

@@ -127,7 +127,7 @@ impl Books {
         self.pager.page = self.navigation.page();
         self.refresh(cx.theme);
         self.save_navigation();
-        cx.refresh(self.screen, RefreshMode::Full);
+        cx.refresh(self.screen, RefreshMode::Clean);
     }
     pub(super) fn paste_reason(&self) -> Option<&'static str> {
         let carry = self.carry.as_ref()?;
@@ -208,7 +208,7 @@ impl Books {
             self.apply_changes(changes, cx);
         }
         self.library.pause(false);
-        cx.refresh(self.screen, RefreshMode::Full);
+        cx.refresh(self.screen, RefreshMode::Clean);
         let total = carry.items.len();
         if let PasteEnd::Failed(error) = end {
             // Also reconcile the very rare case where a sidecar error and its
@@ -461,7 +461,7 @@ mod tests {
             assert!(b.details.as_ref().unwrap().content.contains("Moved 1 of 3"));
             assert_eq!(b.index.books.iter().find(|e| e.id == "0").unwrap().path, dest.join("A.epub"));
             assert_eq!(store.book("0").progress, 3700);
-            assert!(cx.forced.iter().any(|update| update.mode == RefreshMode::Full));
+            assert!(cx.forced.iter().any(|update| update.mode == RefreshMode::Clean));
         });
         drop(b);
         std::fs::remove_dir_all(root)?;

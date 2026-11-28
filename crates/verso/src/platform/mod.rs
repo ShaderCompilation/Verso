@@ -59,7 +59,11 @@ pub enum RefreshMode {
     Ui,
     /// Tuned for text. Page turns.
     Page,
-    /// Full flash that clears all ghosting. Images and after wake.
+    /// Pictures: covers and image pages. The same as `Full` in light mode;
+    /// in dark mode only the changed pixels flash, so the black around a
+    /// picture stays black.
+    Clean,
+    /// Full flash that clears all ghosting. Wake, switches, explicit refresh.
     Full,
 }
 
