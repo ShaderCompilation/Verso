@@ -171,7 +171,10 @@ rather than stopping it:
 - **Power events:** child `lipc-wait-event -m com.lab126.powerd`
   (`PR_SET_PDEATHSIG(SIGTERM)`) streams `goingToScreenSaver`,
   `outOfScreenSaver`, `exitingScreenSaver`, `wakeupFromSuspend`, `charging`,
-  `notCharging` and `battLevelChanged`; a second, `com.lab126.hal` USB events.
+  `notCharging` and `battLevelChanged`, plus the suspend stages
+  (`readyToSuspend`, `suspending`, `resuming`, …), which are only logged: every
+  powerd event goes in the log at info from `goingToScreenSaver` until 30 s
+  after `outOfScreenSaver`. A second listener takes `com.lab126.hal` USB events.
 - **Late wake banner cleanup:** every wake schedules a forced `Ui` rewrite of
   the panel's bottom 10% after **1.5 s** (rescheduled by `exitingScreenSaver` /
   `wakeupFromSuspend`) to clear Amazon's post-hibernation banner. Short wake

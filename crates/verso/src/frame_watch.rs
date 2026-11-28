@@ -8,6 +8,9 @@
 //! which the launcher doesn't pause, redraws itself when the sleep screen
 //! closes, usually after Verso's frame is out. Nothing tells Verso when, so
 //! the framebuffer is checked often and drawn again where it was overwritten.
+//! For the log, it is also sampled once a second until 30 s after the frame
+//! or the last late power event (`wakeupFromSuspend`), whichever is later:
+//! the first result, every change and the last one.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +23,9 @@ const CHECK_AFTER: Duration = Duration::from_secs(2);
 /// and how often to look.
 const GUARD_FOR: Duration = Duration::from_secs(5);
 const GUARD_EVERY: Duration = Duration::from_millis(100);
+/// How long after a native wake frame, or a late power event, to sample it.
+const SAMPLE_FOR: Duration = Duration::from_secs(30);
+const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 enum Touch {
@@ -43,6 +49,12 @@ pub struct FrameWatch {
     /// Whether to guard the next frame; when the guard looks next.
     guard: bool,
     guard_due: Option<Instant>,
+    /// Whether this wake was from Amazon's sleep screen.
+    native: bool,
+    /// The next sample, the last one, and what the last logged one said.
+    sample_due: Option<Instant>,
+    sample_until: Option<Instant>,
+    sampled: Option<String>,
     touch: Touch,
 }
 
@@ -56,6 +68,10 @@ impl FrameWatch {
             check_due: None,
             guard: false,
             guard_due: None,
+            native: false,
+            sample_due: None,
+            sample_until: None,
+            sampled: None,
             touch: Touch::Waiting,
         }
     }
@@ -63,6 +79,7 @@ impl FrameWatch {
     /// Going to sleep: nothing to watch until the next wake.
     pub fn sleep(&mut self) {
         (self.shown, self.check_due, self.guard_due, self.touch) = (None, None, None, Touch::Done);
+        (self.native, self.sample_due, self.sample_until, self.sampled) = (false, None, None, None);
     }
 
     /// Watches for the first frame after a wake, and guards it after Amazon's
@@ -70,6 +87,18 @@ impl FrameWatch {
     pub fn wake(&mut self, native: bool) {
         (self.after, self.shown, self.check_due, self.touch) = ("wake", None, None, Touch::Waiting);
         (self.guard, self.guard_due) = (native, None);
+        (self.native, self.sample_due, self.sample_until, self.sampled) = (native, None, None, None);
+    }
+
+    /// A late power event: after a native wake, sample until `SAMPLE_FOR`
+    /// after it. Before the frame is out, its own window covers it.
+    pub fn late_power(&mut self, now: Instant) {
+        if self.native && self.shown.is_some() {
+            self.sample_until = self.sample_until.max(Some(now + SAMPLE_FOR));
+            if self.sample_due.is_none() {
+                (self.sample_due, self.sampled) = (Some(now + SAMPLE_EVERY), None);
+            }
+        }
     }
 
     pub fn presented(&mut self, updates: &[Update], now: Instant) {
@@ -77,6 +106,9 @@ impl FrameWatch {
             self.shown = Some(now);
             self.check_due = self.timed.then(|| now + CHECK_AFTER);
             self.guard_due = std::mem::take(&mut self.guard).then(|| now + GUARD_EVERY);
+            if self.native {
+                (self.sample_due, self.sample_until) = (Some(now + SAMPLE_EVERY), Some(now + SAMPLE_FOR));
+            }
         }
         if let Touch::Counting { refreshes, largest, .. } = &mut self.touch {
             *refreshes += updates.len();
@@ -89,7 +121,27 @@ impl FrameWatch {
     }
 
     pub fn deadline(&self) -> Option<Instant> {
-        [self.check_due, self.guard_due].into_iter().flatten().min()
+        [self.check_due, self.guard_due, self.sample_due].into_iter().flatten().min()
+    }
+
+    /// Samples the frame with `check` when due: the line to log, if this
+    /// one's result is new or it's the last.
+    pub fn take_sample(&mut self, now: Instant, check: impl FnOnce() -> Option<String>) -> Option<String> {
+        let (shown, until) = (self.shown?, self.sample_until?);
+        self.sample_due.take_if(|due| now >= *due)?;
+        let next = now + SAMPLE_EVERY;
+        self.sample_due = (next <= until).then_some(next);
+        let check = check()?;
+        let after = (now - shown).as_secs_f32();
+        let last = self.sample_due.is_none();
+        let new = self.sampled.as_ref() != Some(&check);
+        let line = match (new, last) {
+            (_, true) => format!("last frame sample {after:.1} s after the wake frame: {check}"),
+            (true, false) => format!("frame sample {after:.1} s after the wake frame: {check}"),
+            (false, false) => return None,
+        };
+        self.sampled = Some(check);
+        Some(line)
     }
 
     /// Whether to look now if the guarded frame was overwritten: what to
@@ -212,5 +264,45 @@ mod tests {
         watch.presented(&update, at(50_000));
         watch.sleep();
         assert_eq!((watch.take_guard_due(at(50_100)), watch.deadline()), (None, None), "asleep again");
+    }
+
+    #[test]
+    fn samples_a_native_wake_frame_for_the_log_and_logs_what_changes() {
+        let t = Instant::now();
+        let at = |ms| t + Duration::from_millis(ms);
+        let update = [Update { rect: Rect::new(0, 0, 100, 100), mode: RefreshMode::Full }];
+        let intact = || Some("intact".to_owned());
+        let mut watch = FrameWatch::new(true);
+        watch.presented(&update, at(0));
+        assert_eq!(watch.take_sample(at(1000), || panic!("not after a launch")), None);
+        watch.sleep();
+        watch.wake(true);
+        watch.late_power(at(9_000));
+        watch.presented(&update, at(10_000));
+        let sample = |watch: &mut FrameWatch, ms, check: &str| watch.take_sample(at(ms), || Some(check.to_owned()));
+        assert_eq!(sample(&mut watch, 10_500, "intact"), None, "not due");
+        assert_eq!(
+            sample(&mut watch, 11_000, "intact").as_deref(),
+            Some("frame sample 1.0 s after the wake frame: intact")
+        );
+        assert_eq!(sample(&mut watch, 12_000, "intact"), None, "the same");
+        assert_eq!(sample(&mut watch, 13_000, "bad").as_deref(), Some("frame sample 3.0 s after the wake frame: bad"));
+        // wakeupFromSuspend 20 s in: until 30 s after it.
+        watch.late_power(at(30_000));
+        let looks = (13_001..70_000).filter(|&ms| watch.take_sample(at(ms), intact).is_some()).count();
+        assert_eq!(looks, 2, "back to intact, and the last at 50 s");
+        // A late event after the samples ended starts them again.
+        watch.late_power(at(80_000));
+        assert_eq!(
+            sample(&mut watch, 81_000, "intact").as_deref(),
+            Some("frame sample 71.0 s after the wake frame: intact")
+        );
+        watch.sleep();
+        assert_eq!(watch.take_sample(at(82_000), intact), None, "asleep");
+        // A wake from Verso's own cover isn't sampled.
+        watch.wake(false);
+        watch.presented(&update, at(90_000));
+        watch.late_power(at(90_500));
+        assert_eq!(watch.take_sample(at(92_000), || panic!("not native")), None);
     }
 }

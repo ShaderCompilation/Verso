@@ -484,6 +484,10 @@ fn run() -> Result<i32> {
         {
             log::info!("{what}: {check}");
         }
+        if let Some(line) = watch.take_sample(Instant::now(), || Some(platform.check_frame(app.canvas())?.to_string()))
+        {
+            log::info!("{line}");
+        }
         if quit || app.wants_exit() {
             if app.on_quit() {
                 log::info!("exit requested");
@@ -582,7 +586,10 @@ fn run() -> Result<i32> {
                         store.updates().check_on_wake(&platform.waker());
                     }
                 }
-                Some(Event::WakeRepaint) => app.schedule_wake_cleanup(),
+                Some(Event::WakeRepaint) => {
+                    app.schedule_wake_cleanup();
+                    watch.late_power(Instant::now());
+                }
                 Some(Event::PowerChanged) => {
                     app.set_battery(platform.battery());
                     if let Some(connected) = platform.usb_connected()

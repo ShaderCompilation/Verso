@@ -258,6 +258,34 @@ impl Hal {
     }
 }
 
+/// The powerd events the listener subscribes to. The suspend stages
+/// (`readyToSuspend` … `resuming`) are only logged: they show when the
+/// Kindle hibernated and in what order it woke.
+pub const EVENTS: &str = "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,\
+    notCharging,battLevelChanged,readyToSuspend,suspending,suspended,suspendGrace,resuming";
+
+/// How long after `outOfScreenSaver` powerd events still go in the log.
+const TRACE_AFTER_WAKE: Duration = Duration::from_secs(30);
+
+/// Which powerd events the log shows at info: from going to sleep until
+/// `TRACE_AFTER_WAKE` after waking, so a report of a bad wake says what came
+/// when. Otherwise `battLevelChanged` alone would fill it.
+#[derive(Default)]
+pub struct Trace {
+    asleep: bool,
+    woke: Option<Instant>,
+}
+impl Trace {
+    pub fn shows(&mut self, line: &str, now: Instant) -> bool {
+        match line.split_whitespace().next() {
+            Some("goingToScreenSaver") => (self.asleep, self.woke) = (true, None),
+            Some("outOfScreenSaver") => (self.asleep, self.woke) = (false, Some(now)),
+            _ => {}
+        }
+        self.asleep || self.woke.is_some_and(|at| now.saturating_duration_since(at) < TRACE_AFTER_WAKE)
+    }
+}
+
 pub fn parse(line: &str) -> Option<Event> {
     match line.split_whitespace().next()? {
         "goingToScreenSaver" => Some(Event::Sleep),
@@ -427,6 +455,19 @@ mod tests {
         assert_eq!(Status::parse(b"broken"), None);
     }
     #[test]
+    fn powerd_events_are_shown_from_sleep_until_a_while_after_waking() {
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        let mut trace = Trace::default();
+        assert!(!trace.shows("battLevelChanged 80", at(0)));
+        for line in ["goingToScreenSaver 2", "readyToSuspend 3", "battLevelChanged 79", "wakeupFromSuspend 9"] {
+            assert!(trace.shows(line, at(1)), "{line}");
+        }
+        assert!(trace.shows("outOfScreenSaver 1", at(2)));
+        assert!(trace.shows("exitingScreenSaver", at(31)));
+        assert!(!trace.shows("battLevelChanged 78", at(32)));
+    }
+    #[test]
     fn power_events_match_exact_names_and_ignore_arguments() {
         assert_eq!(parse("goingToScreenSaver 4"), Some(Event::Sleep));
         assert_eq!(parse("outOfScreenSaver 6"), Some(Event::Wake));
@@ -437,6 +478,11 @@ mod tests {
         assert_eq!(parse("battLevelChanged 87"), Some(Event::PowerChanged));
         for unknown in ["", "readyToSuspend 3", "unknown goingToScreenSaver"] {
             assert_eq!(parse(unknown), None);
+        }
+        // The listener subscribes to every event it parses.
+        let names = ["goingToScreenSaver", "outOfScreenSaver", "exitingScreenSaver", "wakeupFromSuspend"];
+        for name in names.into_iter().chain(["charging", "notCharging", "battLevelChanged"]) {
+            assert!(parse(name).is_some() && EVENTS.split(',').any(|e| e == name), "{name}");
         }
         assert_eq!(Hal::parse("usbUnconfigured 1"), Some(Hal::Unconfigured));
         // The listener subscribes to every event it parses.

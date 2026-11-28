@@ -249,8 +249,12 @@ impl Kindle {
         let power = Listener::start(
             "verso-power",
             "com.lab126.powerd",
-            "goingToScreenSaver,outOfScreenSaver,exitingScreenSaver,wakeupFromSuspend,charging,notCharging,battLevelChanged",
+            super::power::EVENTS,
             super::power::parse,
+            {
+                let mut trace = super::power::Trace::default();
+                move |line| if trace.shows(line, Instant::now()) { log::Level::Info } else { log::Level::Debug }
+            },
             // Without power events we cannot safely own the display. Exit via
             // the launcher rather than leave an unresponsive reader running.
             (Event::Quit, "power event listener stopped; returning to Kindle UI"),
@@ -263,6 +267,8 @@ impl Kindle {
             "com.lab126.hal",
             Hal::EVENTS,
             |line| Hal::parse(line).map(Some),
+            // `hal_event` logs the ones it uses.
+            |_| log::Level::Debug,
             (None, "hal listener stopped; asking powerd about cables"),
             hal_tx,
             fd_waker(wake_fd.clone()),
@@ -756,13 +762,15 @@ impl Listener {
     /// Starts the thread, which spawns `lipc-wait-event` itself: the fork
     /// (~5 ms) stays off the UI thread, and `PR_SET_PDEATHSIG` fires when the
     /// *thread* that forked the child exits, so that must be the thread that
-    /// lives as long as the listener (never a short-lived one). `stopped` is
-    /// sent, and its note logged, if the child ends or can't start.
+    /// lives as long as the listener (never a short-lived one). `level` says
+    /// how to log each line. `stopped` is sent, and its note logged, if the
+    /// child ends or can't start.
     fn start<T: Send + 'static>(
         thread: &str,
         publisher: &'static str,
         events: &'static str,
         parse: fn(&str) -> Option<T>,
+        mut level: impl FnMut(&str) -> log::Level + Send + 'static,
         stopped: (T, &'static str),
         tx: std::sync::mpsc::Sender<T>,
         waker: Waker,
@@ -793,7 +801,7 @@ impl Listener {
                 }
             };
             for line in spawned.into_iter().flat_map(|out| std::io::BufReader::new(out).lines().map_while(Result::ok)) {
-                log::debug!("{publisher}: {line}");
+                log::log!(level(&line), "{publisher}: {line}");
                 let Some(e) = parse(&line) else { continue };
                 if tx.send(e).is_err() {
                     return;
