@@ -1,0 +1,24 @@
+Thirteenth closed beta of Verso.
+
+## Dark mode
+
+- Read in dark mode. Turn it on from the top drawer or in Settings under
+  Display.
+- Covers and book pictures are not inverted, and colored text is adjusted to
+  stay readable.
+- Choose Fewer flashes, Balanced or Less ghosting, or set each refresh option
+  yourself.
+
+## Fixes
+
+- Pictures in books are no longer enlarged to two or three times their size,
+  and resized pictures look smoother.
+- Pages that hold only a picture now refresh as picture pages.
+- Fixed damaged layout caches, which could make a book take a few seconds
+  longer to open.
+- On older Kindles such as Paperwhite 4, dragging a slider no longer leaves
+  dots behind, and book text no longer shows through dark buttons and menus.
+- On Colorsoft, Wi-Fi transfer shows its network name again, not only the IP
+  address.
+- On 6-inch Kindles, the Wi-Fi transfer screen no longer draws text over the
+  QR code.
