@@ -149,6 +149,7 @@ pub fn model(profile: Option<&Profile>, id: u16, fbink_name: &str) -> DeviceMode
             key: p.model.to_owned(),
             light_range: p.range,
             page_buttons: p.page_buttons.is_some(),
+            ..DeviceModel::default()
         },
         None => {
             let known =

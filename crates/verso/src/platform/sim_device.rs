@@ -30,12 +30,14 @@ pub struct Preset {
     pub page_buttons: bool,
     /// A color panel: the app draws on a `Color32` canvas.
     pub color: bool,
+    /// Eclipse waveforms, as on the Paperwhite 5 and later.
+    pub eclipse: bool,
     /// The window's starting size relative to the screen.
     pub scale: f64,
 }
 
 const fn preset(name: &'static str, width: u32, height: u32, dpi: u32, light: Light) -> Preset {
-    Preset { name, width, height, dpi, light, page_buttons: false, color: false, scale: 0.5 }
+    Preset { name, width, height, dpi, light, page_buttons: false, color: false, eclipse: false, scale: 0.5 }
 }
 
 pub const DEFAULT: &str = "pw6";
@@ -44,12 +46,12 @@ pub const PRESETS: &[Preset] = &[
     // 6" Basic (10th and earlier): small enough to show at full size.
     Preset { scale: 1.0, ..preset("basic-167", 600, 800, 167, Light::White) },
     preset("basic-300", 1072, 1448, 300, Light::White),
-    preset("pw5", 1236, 1648, 300, Light::WhiteWarm),
-    preset("pw6", 1272, 1696, 300, Light::WhiteWarm),
+    Preset { eclipse: true, ..preset("pw5", 1236, 1648, 300, Light::WhiteWarm) },
+    Preset { eclipse: true, ..preset("pw6", 1272, 1696, 300, Light::WhiteWarm) },
     Preset { page_buttons: true, ..preset("oasis3", 1264, 1680, 300, Light::WhiteWarm) },
-    Preset { color: true, ..preset("colorsoft", 1264, 1680, 300, Light::WhiteWarm) },
+    Preset { color: true, eclipse: true, ..preset("colorsoft", 1264, 1680, 300, Light::WhiteWarm) },
     // 10.2": a third of the panel still fits a laptop display.
-    Preset { scale: 0.33, ..preset("scribe", 1860, 2480, 300, Light::WhiteWarm) },
+    Preset { scale: 0.33, eclipse: true, ..preset("scribe", 1860, 2480, 300, Light::WhiteWarm) },
 ];
 
 /// The simulated device after the environment's overrides.
@@ -62,6 +64,7 @@ pub struct SimDevice {
     pub light: Light,
     pub page_buttons: bool,
     pub color: bool,
+    pub eclipse: bool,
     pub scale: f64,
     /// `VERSO_SIM_SIZE` or `VERSO_SIM_DPI` changed the preset's screen.
     pub custom_screen: bool,
@@ -109,6 +112,7 @@ impl SimDevice {
             untested: self.untested,
             key: format!("sim {}", self.name),
             page_buttons: self.page_buttons,
+            eclipse_waveforms: self.eclipse,
             ..DeviceModel::default()
         }
     }
@@ -127,11 +131,12 @@ impl SimDevice {
             Light::WhiteWarm => "white + warm",
         };
         format!(
-            "sim device: {}{}, frontlight: {light}, page buttons: {}, color: {}",
+            "sim device: {}{}, frontlight: {light}, page buttons: {}, color: {}, eclipse: {}",
             self.name,
             if self.custom_screen { " (custom screen)" } else { "" },
             yes_no(self.page_buttons),
             yes_no(self.color),
+            yes_no(self.eclipse),
         )
     }
 }
@@ -166,6 +171,7 @@ pub fn resolve(flag: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Resu
         light: p.light,
         page_buttons: p.page_buttons,
         color: p.color,
+        eclipse: p.eclipse,
         scale: p.scale,
         custom_screen: false,
         untested: env("VERSO_SIM_UNTESTED").is_some_and(|v| v.trim() == "1"),
@@ -252,6 +258,7 @@ mod tests {
         assert_eq!(get("pw5").initial_light(), Some(Frontlight { brightness: 12, warmth: Some(0) }));
         assert!(get("oasis3").page_buttons && !get("pw6").page_buttons);
         assert!(get("colorsoft").color && !get("oasis3").color);
+        assert!(get("pw5").eclipse && get("colorsoft").eclipse && !get("basic-167").eclipse && !get("oasis3").eclipse);
         assert_eq!(get("colorsoft").color_mode(), ColorMode::Color32);
         assert_eq!(get("pw6").color_mode(), ColorMode::Gray8);
         assert!(!get("colorsoft").kaleido, "the preview starts off");

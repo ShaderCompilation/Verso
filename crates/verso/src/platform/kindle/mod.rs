@@ -219,7 +219,10 @@ impl Kindle {
             let keys = buttons.into_iter().collect();
             Ok(Inputs { touch, keys, remotes, gate: Gate::default(), postponed: None })
         })?;
-        let model = kindle_profiles::model(profile, id, &display.name);
+        let model = DeviceModel {
+            eclipse_waveforms: display.session.has_eclipse_wfm,
+            ..kindle_profiles::model(profile, id, &display.name)
+        };
         let lights = Lights::for_profile(profile);
         let profile_line = match profile {
             Some(p) => format!(

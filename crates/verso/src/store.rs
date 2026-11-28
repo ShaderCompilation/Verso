@@ -285,6 +285,8 @@ pub struct Store {
     color: crate::gfx::ColorMode,
     /// The device has page-turn buttons, so Settings offers to swap them.
     page_buttons: bool,
+    /// The panel has eclipse waveforms, so Settings offers dark mode's Updates row.
+    eclipse_waveforms: bool,
 }
 impl Store {
     pub fn new() -> Self {
@@ -331,6 +333,7 @@ impl Store {
             live_data_edited: Default::default(),
             color: crate::gfx::ColorMode::Gray8,
             page_buttons: false,
+            eclipse_waveforms: false,
         }
     }
     pub fn with_color(mut self, color: crate::gfx::ColorMode) -> Self {
@@ -343,6 +346,13 @@ impl Store {
     }
     pub fn has_page_buttons(&self) -> bool {
         self.page_buttons
+    }
+    pub fn with_eclipse_waveforms(mut self, eclipse_waveforms: bool) -> Self {
+        self.eclipse_waveforms = eclipse_waveforms;
+        self
+    }
+    pub fn has_eclipse_waveforms(&self) -> bool {
+        self.eclipse_waveforms
     }
     pub fn color_mode(&self) -> crate::gfx::ColorMode {
         self.color
@@ -721,6 +731,7 @@ impl Store {
             live_data_edited: Default::default(),
             color: crate::gfx::ColorMode::Gray8,
             page_buttons: false,
+            eclipse_waveforms: false,
         }
     }
     fn book_path(&self, id: &str) -> PathBuf {

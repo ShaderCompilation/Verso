@@ -291,7 +291,11 @@ fn run() -> Result<i32> {
         platform.set_orientation(orientation)?;
     }
     let info = platform.info().clone();
-    let store = store.with_color(info.color).with_page_buttons(platform.model().page_buttons);
+    let model = platform.model();
+    let store = store
+        .with_color(info.color)
+        .with_page_buttons(model.page_buttons)
+        .with_eclipse_waveforms(model.eclipse_waveforms);
     let mut session = format!(
         "=== Verso session ===\nversion: {} ({}, {})\norientation: {:?}\nscreen: {} {}x{} @ {} dpi",
         env!("CARGO_PKG_VERSION"),

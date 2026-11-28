@@ -19,7 +19,7 @@ use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen, WhatsNewSheet};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::{
-    DarkRendering, FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider,
+    DarkPictures, DarkRendering, FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider,
 };
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{FILL, INK, INK_FILL, INK2, LINE, PAPER, Theme};
@@ -52,62 +52,113 @@ const SSH_RECHECK_FOR: Duration = Duration::from_secs(90);
 /// Full-flash intervals offered in Settings (0 = never).
 const FLASH_CHOICES: [u32; 4] = [1, 6, 12, 0];
 
-/// The dark refresh choices until the dark mode sheet gets a row per setting:
-/// each sets `dark_rendering` and `dark_full_updates`.
-struct DarkChoice {
-    label: &'static str,
-    summary: &'static str,
-    note: &'static str,
+/// Dark mode's full-refresh intervals (`None` = as in light mode, 0 = never).
+const DARK_FLASH_CHOICES: [Option<u32>; 5] = [None, Some(6), Some(12), Some(24), Some(0)];
+
+/// The offered dark interval closest to `every`, for hand-edited settings.
+fn dark_flash_choice(every: Option<u32>) -> usize {
+    match every {
+        None => 0,
+        Some(0) => DARK_FLASH_CHOICES.len() - 1,
+        Some(n) => (1..DARK_FLASH_CHOICES.len() - 1)
+            .min_by_key(|&i| DARK_FLASH_CHOICES[i].unwrap_or(0).abs_diff(n))
+            .unwrap_or(1),
+    }
+}
+
+const DARK_PICTURES: [DarkPictures; 3] = [DarkPictures::NoFlash, DarkPictures::Changed, DarkPictures::Full];
+const DARK_RENDERINGS: [DarkRendering; 3] = [DarkRendering::Eclipse, DarkRendering::DriverNight, DarkRendering::Reagl];
+
+/// The dark mode sheet's settings, as it shows and changes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DarkSettings {
+    page_flash: Option<u32>,
+    chapter_flash: bool,
+    pictures: DarkPictures,
+    full_updates: bool,
     rendering: DarkRendering,
+}
+
+impl DarkSettings {
+    fn of(s: &Settings) -> Self {
+        Self {
+            page_flash: s.dark_page_flash,
+            chapter_flash: s.dark_chapter_flash,
+            pictures: s.dark_pictures,
+            full_updates: s.dark_full_updates,
+            rendering: s.dark_rendering,
+        }
+    }
+
+    fn apply(self, s: &mut Settings) {
+        s.dark_page_flash = self.page_flash;
+        s.dark_chapter_flash = self.chapter_flash;
+        s.dark_pictures = self.pictures;
+        s.dark_full_updates = self.full_updates;
+        s.dark_rendering = self.rendering;
+    }
+
+    /// The preset these settings match, if any. Without eclipse waveforms
+    /// the hidden Updates row doesn't count.
+    fn preset(self, eclipse: bool) -> Option<usize> {
+        let key = |s: Self| Self { full_updates: eclipse && s.full_updates, ..s };
+        DARK_PRESETS.iter().position(|p| key(p.apply(self)) == key(self))
+    }
+}
+
+/// A preset sets everything but the rendering.
+struct DarkPreset {
+    name: &'static str,
+    note: &'static str,
+    page_flash: Option<u32>,
+    chapter_flash: bool,
+    pictures: DarkPictures,
     full_updates: bool,
 }
-const DARK_CHOICES: [DarkChoice; 5] = [
-    DarkChoice {
-        label: "Eclipse (partial)",
-        summary: "Eclipse",
-        note: "Software pixel flip with partial eclipse updates (GLKW16). No flash on page turns; leaves the Kindle display driver untouched. The default.",
-        rendering: DarkRendering::Eclipse,
+
+impl DarkPreset {
+    fn apply(&self, s: DarkSettings) -> DarkSettings {
+        DarkSettings {
+            page_flash: self.page_flash,
+            chapter_flash: self.chapter_flash,
+            pictures: self.pictures,
+            full_updates: self.full_updates,
+            ..s
+        }
+    }
+}
+
+const DARK_PRESETS: [DarkPreset; 3] = [
+    DarkPreset {
+        name: "Fewer flashes",
+        note: "Dark mode never flashes. Ghosting builds up over pages and pictures.",
+        page_flash: Some(0),
+        chapter_flash: false,
+        pictures: DarkPictures::NoFlash,
         full_updates: false,
     },
-    DarkChoice {
-        label: "Eclipse (full)",
-        summary: "Eclipse full",
-        note: "Software pixel flip with full eclipse updates (GLKW16). Less ghosting than partial, with a brief flash on each update.",
-        rendering: DarkRendering::Eclipse,
+    DarkPreset {
+        name: "Balanced",
+        note: "Flashes as often as light mode, and only the changed parts of pictures. The default.",
+        page_flash: None,
+        chapter_flash: false,
+        pictures: DarkPictures::Changed,
+        full_updates: false,
+    },
+    DarkPreset {
+        name: "Less ghosting",
+        note: "Flashes every 12 pages, at chapter starts and on pictures. The least ghosting.",
+        page_flash: Some(12),
+        chapter_flash: true,
+        pictures: DarkPictures::Full,
         full_updates: true,
-    },
-    DarkChoice {
-        label: "Driver night (full)",
-        summary: "Driver full",
-        note: "Kindle driver night mode with full eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit.",
-        rendering: DarkRendering::DriverNight,
-        full_updates: true,
-    },
-    DarkChoice {
-        label: "Driver night (partial)",
-        summary: "Driver partial",
-        note: "Kindle driver night mode with partial eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit.",
-        rendering: DarkRendering::DriverNight,
-        full_updates: false,
-    },
-    DarkChoice {
-        label: "REAGL",
-        summary: "REAGL",
-        note: "Software pixel flip with standard light-mode waveforms (REAGL). Useful on panels where eclipse modes ghost more.",
-        rendering: DarkRendering::Reagl,
-        full_updates: false,
     },
 ];
+const DARK_CUSTOM_NOTE: &str = "Your own mix. Tap a preset to start over from one.";
 
-/// The choice in `DARK_CHOICES` matching `settings` (REAGL ignores full updates).
-fn dark_choice(settings: &Settings) -> usize {
-    DARK_CHOICES
-        .iter()
-        .position(|c| {
-            c.rendering == settings.dark_rendering
-                && (c.rendering == DarkRendering::Reagl || c.full_updates == settings.dark_full_updates)
-        })
-        .unwrap_or(0)
+/// The Display tab's Dark mode row: the preset's name, or Custom.
+fn dark_summary(s: &Settings, eclipse: bool) -> &'static str {
+    DarkSettings::of(s).preset(eclipse).map_or("Custom", |i| DARK_PRESETS[i].name)
 }
 
 /// The offered choice closest to `every`, for hand-edited settings.
@@ -244,6 +295,8 @@ pub struct SystemSettings {
     series_badges: Toggle,
     dark_refresh_entry: List,
     dark_refresh_sheet: Option<DarkModeSheet>,
+    /// The panel has eclipse waveforms: the dark mode sheet shows Updates.
+    eclipse: bool,
     // Library: folders on the left; the dictionaries and KOReader entries
     // below them side by side, or (landscape) one above the other on the right.
     library: Rect,
@@ -340,8 +393,9 @@ impl SystemSettings {
         let selected = FolderPreview::OFFERED.iter().position(|&m| m == settings.folder_preview).unwrap_or(0);
         // Covers is disabled for now; see FolderPreview::OFFERED.
         let previews = Segmented::texts(&["Stack", "Latest", "Icon"], selected);
+        let eclipse = store.has_eclipse_waveforms();
         let dark_refresh_entry =
-            List::new(vec![Row::new("Dark mode").value(DARK_CHOICES[dark_choice(&settings)].summary).chevron()]);
+            List::new(vec![Row::new("Dark mode").value(dark_summary(&settings, eclipse)).chevron()]);
 
         let mut add_folder = Button::new("Add folder", ButtonKind::Secondary).with_icon(Icon::Folder);
         add_folder.place(Rect::new(content.x, 0, content.w, t.mm(CONTROL_MM)), t);
@@ -417,6 +471,7 @@ impl SystemSettings {
             series_badges: Toggle::new(settings.series_badges),
             dark_refresh_entry,
             dark_refresh_sheet: None,
+            eclipse,
             library,
             dictionaries,
             dictionary_entry,
@@ -666,8 +721,8 @@ impl SystemSettings {
 
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
         if let Some(ListEvent::Tapped(_)) = self.dark_refresh_entry.on_gesture(g) {
-            self.dark_refresh_sheet =
-                Some(DarkModeSheet::new(cx.theme, self.screen, dark_choice(&self.store.settings())));
+            let settings = self.store.settings();
+            self.dark_refresh_sheet = Some(DarkModeSheet::new(cx.theme, self.screen, &settings, self.eclipse));
             return Action::None;
         }
         // Collections shows the new previews when Settings closes.
@@ -701,32 +756,28 @@ impl SystemSettings {
         Action::None
     }
 
-    fn refresh_dark_choice(&mut self) {
-        let choice = dark_choice(&self.store.settings());
+    fn refresh_dark_mode(&mut self) {
+        let settings = self.store.settings();
         if let Some(row) = self.dark_refresh_entry.rows.first_mut() {
-            row.value = Some(DARK_CHOICES[choice].summary.into());
+            row.value = Some(dark_summary(&settings, self.eclipse).into());
         }
         if let Some(sheet) = &mut self.dark_refresh_sheet {
-            sheet.sync(choice);
+            sheet.sync(DarkSettings::of(&settings));
         }
     }
 
+    /// Saves a change from the dark mode sheet. Only a waveform change goes
+    /// to the platform: the reader reads the cadence from the settings.
     fn handle_dark_mode_event(&mut self, event: DarkModeEvent, cx: &mut EventCx) -> Action {
-        match event {
-            DarkModeEvent::Close => self.dark_refresh_sheet = None,
-            DarkModeEvent::Select(i) => {
-                let choice = &DARK_CHOICES[i];
-                let saved = self.save(cx, "dark mode", |s| {
-                    s.dark_rendering = choice.rendering;
-                    s.dark_full_updates = choice.full_updates;
-                });
-                self.refresh_dark_choice();
-                if saved {
-                    return Action::DarkRefresh(self.store.settings().dark_refresh());
-                }
-            }
-        }
-        Action::None
+        let DarkModeEvent::Change(dark) = event else {
+            self.dark_refresh_sheet = None;
+            return Action::None;
+        };
+        let before = self.store.settings().dark_refresh();
+        let saved = self.save(cx, "dark mode", |s| dark.apply(s));
+        self.refresh_dark_mode();
+        let after = self.store.settings().dark_refresh();
+        if saved && after != before { Action::DarkRefresh(after) } else { Action::None }
     }
 
     // ---- Library ----
@@ -1477,7 +1528,7 @@ impl SystemSettings {
 
 impl Screen for SystemSettings {
     fn on_return(&mut self, cx: &mut EventCx) {
-        self.refresh_dark_choice();
+        self.refresh_dark_mode();
         self.refresh_translate();
         if let Some(sheet) = &mut self.translate_sheet {
             sheet.sync(cx.theme, &self.store.settings());
@@ -1641,7 +1692,7 @@ impl Screen for SystemSettings {
         let saves = self.store.settings_saves();
         if saves != self.settings_seen {
             self.settings_seen = saves;
-            self.refresh_dark_choice();
+            self.refresh_dark_mode();
             self.refresh_translate();
             if let Some(sheet) = &mut self.translate_sheet {
                 sheet.sync(cx.theme, &self.store.settings());
@@ -1996,68 +2047,176 @@ impl TranslateSheet {
 
 enum DarkModeEvent {
     Close,
-    /// An index into `DARK_CHOICES`.
-    Select(usize),
+    /// The sheet's settings after a tap.
+    Change(DarkSettings),
 }
 
-/// Sheet for choosing how dark mode refreshes the e-ink display.
+/// Sheet for how dark mode refreshes the e-ink display: the preset the rows
+/// match, a row per setting, and a note on what the choice costs. In
+/// portrait each label stands above its control; landscape is too short for
+/// that, so labels stand beside them.
 struct DarkModeSheet {
     sheet: Sheet,
-    list: List,
+    eclipse: bool,
+    beside: bool,
+    /// Each label, its area, and whether it's in body text (beside its
+    /// control, or a switch's) rather than a section label.
+    labels: Vec<(&'static str, Rect, bool)>,
+    /// Nothing is selected (`DARK_PRESETS.len()`) when no preset matches.
+    preset: Segmented,
+    page_flash: Segmented,
+    chapter: Toggle,
+    pictures: Segmented,
+    /// Hidden without eclipse waveforms, where full updates change nothing.
+    updates: Option<Segmented>,
+    rendering: Segmented,
     note: Rect,
-    /// An index into `DARK_CHOICES`.
-    selected: usize,
+    dark: DarkSettings,
 }
 
 impl DarkModeSheet {
-    fn new(t: &Theme, screen: Rect, selected: usize) -> Self {
-        let landscape = screen.w > screen.h;
-        let (sheet, row_h) = if landscape {
-            let w = (screen.w * 11 / 20).max(t.mm(72.0)).min(screen.w);
-            (Sheet::side("Dark mode refresh", w, true, screen, t), t.mm(9.5))
-        } else {
-            let h = t.mm(86.0).min(screen.h - t.top_bar);
-            (Sheet::open("Dark mode refresh", h, screen, t), t.mm(10.0))
+    fn new(t: &Theme, screen: Rect, settings: &Settings, eclipse: bool) -> Self {
+        let mut this = Self {
+            sheet: Sheet::open("Dark mode", screen.h, screen, t),
+            eclipse,
+            beside: screen.w > screen.h,
+            labels: Vec::new(),
+            preset: Segmented::texts(&DARK_PRESETS.map(|p| p.name), 0),
+            page_flash: Segmented::texts(&["As light", "Every 6", "Every 12", "Every 24", "Never"], 0),
+            chapter: Toggle::new(false),
+            pictures: Segmented::texts(&["No flash", "Changed area", "Full flash"], 0),
+            updates: eclipse.then(|| Segmented::texts(&["Fast", "Cleaner"], 0)),
+            rendering: Segmented::texts(&["Eclipse", "Driver night", "REAGL"], 0),
+            note: Rect::default(),
+            dark: DarkSettings::of(settings),
         };
-        let c = sheet.content(t);
-        let list_h = row_h * DARK_CHOICES.len() as i32;
-        let mut list = List::new(Vec::new());
-        list.place(Rect::new(c.x, c.y, c.w, list_h), row_h, 0);
-        let note_y = c.y + list_h + t.mm(2.5);
-        let note = Rect::new(c.x, note_y, c.w, (c.bottom() - t.margin - note_y).max(0));
-        let mut this = Self { sheet, list, note, selected };
-        this.sync(selected);
+        // Lay out once to measure, then again in the sheet that fits it.
+        let content = this.sheet.content(t);
+        let header = content.y - this.sheet.rect().y;
+        let h = this.layout(t, content.y) - content.y;
+        this.sheet = Sheet::open("Dark mode", (header + h + t.margin).min(screen.h), screen, t);
+        this.layout(t, this.sheet.content(t).y);
+        this.sync(this.dark);
         this
     }
 
-    fn sync(&mut self, selected: usize) {
-        self.selected = selected;
-        self.list.rows = DARK_CHOICES
-            .iter()
-            .enumerate()
-            .map(|(i, choice)| {
-                let row = Row::new(choice.label);
-                if i == selected { row.check() } else { row }
-            })
-            .collect();
+    /// Places the rows from `top`; returns the note's bottom.
+    fn layout(&mut self, t: &Theme, top: i32) -> i32 {
+        let c = self.sheet.content(t);
+        let beside = self.beside;
+        let (control_h, label_h) = (t.mm(CONTROL_MM), t.mm(LABEL_MM));
+        let gap = t.mm(if beside { 1.5 } else { 2.0 });
+        let label_w = if beside { c.w * 3 / 10 } else { 0 };
+        let toggle_w = Toggle::size(t).0;
+        let mut y = top;
+        let mut labels = Vec::new();
+        // A switch's label is body text level with it, also in portrait.
+        let mut row = |label: &'static str, switch: bool| {
+            let control = if beside {
+                labels.push((label, Rect::new(c.x, y, label_w, control_h), true));
+                Rect::new(c.x + label_w, y, c.w - label_w, control_h)
+            } else if switch {
+                labels.push((label, Rect::new(c.x, y, c.w - toggle_w - t.mm(3.0), control_h), true));
+                Rect::new(c.x, y, c.w, control_h)
+            } else {
+                labels.push((label, Rect::new(c.x, y, c.w, label_h), false));
+                Rect::new(c.x, y + label_h, c.w, control_h)
+            };
+            y = control.bottom() + gap;
+            control
+        };
+        self.preset.place(row("Preset", false));
+        self.page_flash.place(row("Full refresh", false));
+        // The toggle where the controls start in landscape, at the right edge in portrait.
+        let switch = row("Flash chapter starts", true);
+        let right = if beside { switch.x + toggle_w } else { switch.right() };
+        self.chapter.place(right, switch.center().y, t);
+        self.pictures.place(row("Pictures and covers", false));
+        if let Some(updates) = &mut self.updates {
+            updates.place(row("Updates", false));
+        }
+        self.rendering.place(row("Rendering (for testing)", false));
+        self.labels = labels;
+        // Room for two lines of the note (all are that short).
+        let note_h = (t.small.size * 2.6).ceil() as i32;
+        self.note = Rect::new(c.x, y + t.mm(1.0), c.w, note_h);
+        self.note.bottom()
+    }
+
+    fn sync(&mut self, dark: DarkSettings) {
+        self.dark = dark;
+        self.preset.selected = dark.preset(self.eclipse).unwrap_or(DARK_PRESETS.len());
+        self.page_flash.selected = dark_flash_choice(dark.page_flash);
+        self.chapter.on = dark.chapter_flash;
+        self.pictures.selected = DARK_PICTURES.iter().position(|&p| p == dark.pictures).unwrap_or(1);
+        if let Some(updates) = &mut self.updates {
+            updates.selected = usize::from(dark.full_updates);
+        }
+        self.rendering.selected = DARK_RENDERINGS.iter().position(|&r| r == dark.rendering).unwrap_or(0);
+    }
+
+    fn note_text(&self) -> &'static str {
+        DARK_PRESETS.get(self.preset.selected).map_or(DARK_CUSTOM_NOTE, |p| p.note)
     }
 
     fn draw(&self, cx: &mut DrawCx) {
+        let t = cx.theme;
         self.sheet.draw(cx);
-        self.list.draw(cx);
-        cx.paragraph(DARK_CHOICES[self.selected].note, cx.theme.small.gray(INK2), self.note, HAlign::Left);
+        for &(label, rect, body) in &self.labels {
+            if body {
+                // Centred on its control, on two lines when it needs them.
+                let w = rect.w - t.mm(2.0);
+                let h = (cx.text.measure(label, t.body, Some(w as f32)).1.ceil() as i32).min(rect.h);
+                cx.paragraph(label, t.body, Rect::new(rect.x, rect.y + (rect.h - h) / 2, w, h), HAlign::Left);
+            } else {
+                cx.section_label(label, rect);
+            }
+        }
+        self.preset.draw(cx);
+        self.page_flash.draw(cx);
+        self.chapter.draw(cx);
+        self.pictures.draw(cx);
+        if let Some(updates) = &self.updates {
+            updates.draw(cx);
+        }
+        self.rendering.draw(cx);
+        cx.paragraph(self.note_text(), t.small.gray(INK2), self.note, HAlign::Left);
     }
 
     fn on_gesture(&mut self, g: &Gesture) -> Option<DarkModeEvent> {
         if self.sheet.on_gesture(g) {
             return Some(DarkModeEvent::Close);
         }
-        if let Some(ListEvent::Tapped(i)) = self.list.on_gesture(g)
-            && i != self.selected
-        {
-            return Some(DarkModeEvent::Select(i));
+        let mut dark = self.dark;
+        if let Some(i) = self.preset.on_gesture(g) {
+            dark = DARK_PRESETS[i].apply(dark);
         }
-        None
+        if let Some(i) = self.page_flash.on_gesture(g) {
+            dark.page_flash = DARK_FLASH_CHOICES[i];
+        }
+        if let Some(on) = self.chapter.on_gesture(g) {
+            dark.chapter_flash = on;
+        }
+        if let Some(i) = self.pictures.on_gesture(g) {
+            dark.pictures = DARK_PICTURES[i];
+        }
+        if let Some(i) = self.updates.as_mut().and_then(|u| u.on_gesture(g)) {
+            dark.full_updates = i == 1;
+        }
+        if let Some(i) = self.rendering.on_gesture(g) {
+            dark.rendering = DARK_RENDERINGS[i];
+        }
+        (dark != self.dark).then_some(DarkModeEvent::Change(dark))
+    }
+
+    /// The controls' touch areas, for tests.
+    #[cfg(test)]
+    fn targets(&self, t: &Theme) -> Vec<Rect> {
+        let mut targets = vec![self.preset.rect(), self.page_flash.rect(), self.pictures.rect()];
+        targets.extend(self.updates.as_ref().map(Segmented::rect));
+        targets.push(self.rendering.rect());
+        targets.push(self.chapter.rect().at_least(t.target, t.target));
+        targets
     }
 }
 
@@ -2232,12 +2391,12 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
                 .body(tr.note, text_h(text, &tr.message(), t.small, tr.note.w)),
         );
     }
-    for (i, choice) in DARK_CHOICES.iter().enumerate() {
-        let dm = DarkModeSheet::new(t, screen, i);
-        let buttons = (0..DARK_CHOICES.len()).map(|i| dm.list.row_rect(i));
+    for eclipse in [false, true] {
+        let dm = DarkModeSheet::new(t, screen, &Settings::default(), eclipse);
+        let notes = DARK_PRESETS.iter().map(|p| p.note).chain([DARK_CUSTOM_NOTE]);
+        let note_h = notes.map(|n| text_h(text, n, t.small, dm.note.w)).max().unwrap_or(0);
         samples.push(
-            Parts::new("DarkModeSheet", dm.sheet.rect(), buttons)
-                .body(dm.note, text_h(text, choice.note, t.small, dm.note.w)),
+            Parts::new("DarkModeSheet", dm.sheet.rect(), dm.targets(t)).dense(t.mm(CONTROL_MM)).body(dm.note, note_h),
         );
     }
     samples
@@ -2521,59 +2680,72 @@ mod tests {
     }
 
     #[test]
-    fn dark_mode_setting_opens_sheet_saves_and_fits_narrow_landscape() {
+    fn dark_mode_sheet_applies_presets_shows_custom_and_hides_updates_without_eclipse() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::at(dir.path().join("data"));
-        let (t167, screen_l) = (Theme::for_dpi(167), Rect::new(0, 0, 800, 600));
-        let mut s = SystemSettings::new(&t167, screen_l, store.clone(), Waker::new(|| {}));
+        let store = Store::at(dir.path().join("data")).with_eclipse_waveforms(true);
+        let (t, screen) = (Theme::for_dpi(167), Rect::new(0, 0, 800, 600));
+        let mut s = SystemSettings::new(&t, screen, store.clone(), Waker::new(|| {}));
         s.tab = Tab::Display;
-        draw(&mut s, &t167, 800, 600);
+        draw(&mut s, &t, 800, 600);
+        // Every summary fits the Display row in narrow landscape.
         let mut text = crate::gfx::TextRenderer::new();
-        let row_w = s.right.w;
-        for choice in &DARK_CHOICES {
-            let need = text.width("Dark mode", t167.body)
-                + t167.mm(3.0) as f32
-                + text.width(choice.summary, t167.body)
-                + t167.icon_small as f32
-                + t167.mm(2.0) as f32;
-            assert!(
-                need <= row_w as f32,
-                "{} summary overflows narrow landscape row: {need} > {row_w}",
-                choice.summary
-            );
+        for summary in DARK_PRESETS.iter().map(|p| p.name).chain(["Custom"]) {
+            let need = text.width("Dark mode", t.body)
+                + t.mm(3.0) as f32
+                + text.width(summary, t.body)
+                + t.icon_small as f32
+                + t.mm(2.0) as f32;
+            assert!(need <= s.right.w as f32, "{summary} overflows the row: {need} > {}", s.right.w);
         }
+        assert_eq!(s.dark_refresh_entry.rows[0].value.as_deref(), Some("Balanced"));
 
-        // Open sheet, pick Driver night (full), and verify save + Action::DarkRefresh.
+        let tap_action = |s: &mut SystemSettings, rect: Rect| {
+            let mut toast = None;
+            let mut cx = EventCx {
+                theme: &t,
+                screen,
+                now: Instant::now(),
+                toast: &mut toast,
+                forced: &mut vec![],
+                needs_redraw: &mut false,
+                battery: None,
+                dark: false,
+            };
+            s.on_gesture(Gesture::Down(rect.center()), &mut cx);
+            s.on_gesture(Gesture::Tap(rect.center()), &mut cx)
+        };
         let row = s.dark_refresh_entry.row_rect(0);
-        let p = row.center();
-        let mut toast = None;
-        let mut cx = EventCx {
-            theme: &t167,
-            screen: screen_l,
-            now: Instant::now(),
-            toast: &mut toast,
-            forced: &mut vec![],
-            needs_redraw: &mut false,
-            battery: None,
-            dark: false,
-        };
-        s.on_gesture(Gesture::Down(p), &mut cx);
-        let action = s.on_gesture(Gesture::Tap(p), &mut cx);
-        assert!(matches!(action, Action::None));
-        assert!(s.dark_refresh_sheet.is_some());
+        assert!(matches!(tap_action(&mut s, row), Action::None));
+        fn sheet(s: &SystemSettings) -> &DarkModeSheet {
+            s.dark_refresh_sheet.as_ref().unwrap()
+        }
+        assert!(sheet(&s).updates.is_some());
 
-        let c_row = s.dark_refresh_sheet.as_ref().unwrap().list.row_rect(2);
-        let cp = c_row.center();
-        s.on_gesture(Gesture::Down(cp), &mut cx);
-        let action = s.on_gesture(Gesture::Tap(cp), &mut cx);
-        let driver_full = crate::store::DarkRefresh {
-            rendering: DarkRendering::DriverNight,
-            full_updates: true,
-            ..Default::default()
-        };
-        assert!(matches!(action, Action::DarkRefresh(d) if d == driver_full));
-        assert_eq!(store.settings().dark_refresh(), driver_full);
-        assert_eq!(s.dark_refresh_entry.rows[0].value.as_deref(), Some("Driver full"));
-        assert_eq!(s.dark_refresh_sheet.as_ref().unwrap().selected, 2);
+        // A preset writes its four fields, keeps the rendering, and sends the
+        // waveform change to the platform.
+        let less = sheet(&s).preset.rect().columns(3, 0)[2];
+        let action = tap_action(&mut s, less);
+        let settings = store.settings();
+        assert_eq!(
+            (settings.dark_page_flash, settings.dark_chapter_flash, settings.dark_pictures, settings.dark_full_updates),
+            (Some(12), true, DarkPictures::Full, true)
+        );
+        assert_eq!(settings.dark_rendering, DarkRendering::Eclipse);
+        assert!(matches!(action, Action::DarkRefresh(d) if d == settings.dark_refresh()));
+        assert_eq!(s.dark_refresh_entry.rows[0].value.as_deref(), Some("Less ghosting"));
+        assert_eq!(sheet(&s).preset.selected, 2);
+
+        // A hand-made mix is Custom; a cadence change needs no platform call.
+        let every_6 = sheet(&s).page_flash.rect().columns(5, 0)[1];
+        assert!(matches!(tap_action(&mut s, every_6), Action::None));
+        assert_eq!(store.settings().dark_page_flash, Some(6));
+        assert_eq!(s.dark_refresh_entry.rows[0].value.as_deref(), Some("Custom"));
+        assert_eq!(sheet(&s).preset.selected, DARK_PRESETS.len());
+
+        // Without eclipse waveforms Updates is hidden and doesn't count
+        // towards a preset.
+        let plain = Settings { dark_full_updates: true, ..Settings::default() };
+        assert!(DarkModeSheet::new(&t, screen, &plain, false).updates.is_none());
+        assert_eq!((dark_summary(&plain, false), dark_summary(&plain, true)), ("Balanced", "Custom"));
     }
 }

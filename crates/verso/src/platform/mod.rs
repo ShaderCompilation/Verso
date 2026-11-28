@@ -136,6 +136,8 @@ pub struct DeviceModel {
     pub light_range: LightRange,
     /// It has page-turn buttons: Settings offers to swap them.
     pub page_buttons: bool,
+    /// The panel has eclipse waveforms: Settings offers dark mode's Updates row.
+    pub eclipse_waveforms: bool,
 }
 
 /// The device has a screen or input Verso can't drive yet. The Kindle
