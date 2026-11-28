@@ -106,8 +106,8 @@ these safety invariants always hold:
 Test each line: would an agent make a mistake without it, and can't it find
 this out from the code in a minute? Otherwise leave it out. A change that would
 push a doc past its budget first cuts or merges something. When a plan is done,
-fold at most about 15 lines into the public docs, fix what the feature made
-untrue, and move the plan to `notes/archive/` (listed in its `README.md`).
+update the public docs for what the feature added or changed (within their
+budgets), and move the plan to `notes/archive/` (listed in its `README.md`).
 
 ## Tests
 
