@@ -54,9 +54,17 @@ macro_rules! say {
 /// process exit code.
 pub fn run(options: Options) -> i32 {
     START.get_or_init(Instant::now);
-    let Some(lock) = Lock::acquire() else {
-        say!("another responder is running");
-        return 0;
+    let lock = match Lock::acquire() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            say!("another responder is running");
+            return 0;
+        }
+        // /tmp full, most likely; Verso warns that no responder started.
+        Err(e) => {
+            say!("can't take {PID_FILE}: {e}");
+            return 1;
+        }
     };
     let watch = match options.watch.map(|pid| watch(pid, options.watch_name.as_deref())).transpose() {
         Ok(watch) => watch,
@@ -188,15 +196,17 @@ fn send(socket: &UdpSocket, sends: Vec<Send>) {
 struct Lock(File);
 
 impl Lock {
-    fn acquire() -> Option<Lock> {
-        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(PID_FILE).ok()?;
+    /// `None` when another responder holds the lock.
+    fn acquire() -> io::Result<Option<Lock>> {
+        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(PID_FILE)?;
         // SAFETY: flock on a file descriptor we own.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return None;
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::WouldBlock { Ok(None) } else { Err(e) };
         }
-        file.set_len(0).ok()?;
-        write!(file, "{}", std::process::id()).ok()?;
-        Some(Lock(file))
+        file.set_len(0)?;
+        write!(file, "{}", std::process::id())?;
+        Ok(Some(Lock(file)))
     }
 }
 

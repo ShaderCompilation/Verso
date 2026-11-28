@@ -81,7 +81,10 @@ pub fn start_for_verso(label: &str) -> Option<i32> {
         return None;
     }
     ensure(label, std::process::id() as i32, "verso");
-    wait_until(PIDFILE_GRACE, || verso_mdns::running_pid().is_some());
+    if !wait_until(PIDFILE_GRACE, || verso_mdns::running_pid().is_some()) {
+        log::warn!("mDNS: the responder didn't start; is /tmp full? (see {LOG})");
+        return None;
+    }
     verso_mdns::running_pid().filter(|&pid| watches(pid, std::process::id() as i32))
 }
 

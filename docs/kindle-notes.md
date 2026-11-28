@@ -124,7 +124,9 @@ rather than stopping it:
 - **Log:** UTC timestamps in `verso.log`. `verso/running` (boot id, start time)
   exists during a session so the next launch notes unended sessions and reboots.
 - **Pause order** (flags set *before* acting so `trap restore EXIT` always undoes
-  them): save `/dev/fb0` to `/tmp/verso-fb.dump`, disable `pillow`
+  them): save the visible screen of `/dev/fb0` (`stride × yres`; the virtual
+  buffer is twice as tall) to `/tmp/verso-fb.dump`, only if `/tmp` (a 64 MiB
+  tmpfs) keeps 16 MiB free, then disable `pillow`
   (`disableEnablePillow disable`), `SIGSTOP` `awesome`, `SIGSTOP`
   `JunoStatusBarDriver` (separate `com.lab126.gtkstatusbar` X window on PW6
   **(measured)**; `/proc/comm` truncated to `JunoStatusBarDr`), `SIGSTOP`

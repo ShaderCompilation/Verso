@@ -127,6 +127,12 @@ EOF
 #!/bin/sh
 [ -f "${VERSO_TEST_DIR}/fake-dmesg" ] && cat "${VERSO_TEST_DIR}/fake-dmesg"
 EOF
+    # /tmp's free space in KiB, from a file.
+    cat >"${B}/df" <<'EOF'
+#!/bin/sh
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "tmpfs 65536 0 $(cat "${VERSO_TEST_DIR}/tmp-free" 2>/dev/null || echo 50000) 0% /var"
+EOF
     # A firewall that keeps its rules in a file, one per line.
     cat >"${B}/iptables" <<'EOF'
 #!/bin/sh
@@ -285,12 +291,17 @@ snapshot() {
 # installed by an update (previous/ holding version 1's files).
 fresh() {
     rm -rf "${R}" "${W}/tmp" "${W}/runs" "${W}/calls" "${W}/protocol" "${W}/steps" "${W}/rules" "${W}/rules.new" "${W}/sh-active" "${W}/fake-dmesg" "${W}/deny-docs-rename" "${W}"/queue-* \
-        "${W}"/default-*
-    mkdir -p "${R}" "${W}/tmp"
+        "${W}"/default-* "${W}/tmp-free" "${W}/sysfs"
+    mkdir -p "${R}" "${W}/tmp" "${W}/sysfs"
     : >"${W}/runs"
     : >"${W}/calls"
     install_files "${R}" 1
-    printf 'framebuffer' >"${W}/fb"
+    # A 4-byte stride, 3 visible rows of 6; the landscape mode comes first.
+    printf 'abcdefghijklmnopqrstuvwx' >"${W}/fb"
+    echo 4 >"${W}/sysfs/stride"
+    echo 4,6 >"${W}/sysfs/virtual_size"
+    echo 0,0 >"${W}/sysfs/pan"
+    printf 'U:6x4p-0\nU:4x3p-0\n' >"${W}/sysfs/modes"
     echo boot-1 >"${W}/boot-id"
 }
 
@@ -300,7 +311,7 @@ launch() {
     : >"${W}/steps"
     (
         COUNT_STEPS="${COUNT_STEPS:-}" CRASH_AT="${1:-}" VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
-            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_FB_SYSFS="${W}/sysfs" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             VERSO_BOOT_ID="${W}/boot-id" \
             setsid ${SH} "${R}/verso/verso.sh" </dev/null >/dev/null 2>&1 &
@@ -313,7 +324,7 @@ launch_args() {
     : >"${W}/steps"
     (
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
-            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_FB_SYSFS="${W}/sysfs" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             VERSO_BOOT_ID="${W}/boot-id" \
             setsid ${SH} "${R}/verso/verso.sh" "$@" </dev/null >/dev/null 2>&1 &
@@ -329,7 +340,7 @@ launch_scriptlet() {
     chmod 755 "${R}/documents/Verso.sh"
     (
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
-            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_FB_SYSFS="${W}/sysfs" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             ${SH} "${R}/documents/Verso.sh" </dev/null >/dev/null 2>&1
     )
@@ -484,6 +495,18 @@ grep -q "active app at pause: com.lab126.KPPMainApp$" "${R}/verso/verso.log" || 
 ! grep -q "has no end" "${R}/verso/verso.log" || fail "a first launch said the last session has no end"
 absent "${R}/verso/running"
 [ -z "$(ls "${R}/verso/reports"/crash-*.txt 2>/dev/null)" ] || fail "clean exit created a crash report"
+# Only the visible screen was saved, and put back.
+[ "$(cat "${W}/fb")" = abcdefghijkl ] || fail "screen not restored as saved: $(cat "${W}/fb")"
+absent "${W}/tmp/verso-fb.dump"
+
+begin "no room in /tmp to save the screen"
+fresh
+echo 16000 >"${W}/tmp-free"
+launch
+runs_are "0.1.0"
+ui_restored_once
+[ "$(cat "${W}/fb")" = abcdefghijklmnopqrstuvwx ] || fail "screen written back: $(cat "${W}/fb")"
+grep -q "not saving the screen: 16000 KiB free" "${R}/verso/verso.log" || fail "skipped save not logged"
 
 if [ -f "${SCRIPTLET}" ]; then
     begin "scriptlet headers and SH_Integration handoff"
@@ -641,7 +664,7 @@ if [ -d "${KPM_DIR}" ]; then
     (
         cd "${W}/kpm-v1" || exit 1
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
-            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_FB_SYSFS="${W}/sysfs" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             ${SH} ./launch.sh </dev/null >/dev/null 2>&1
     ) || fail "launch.sh exited non-zero"
@@ -655,7 +678,7 @@ if [ -d "${KPM_DIR}" ]; then
     (
         cd "${W}/kpm-v1" || exit 1
         VERSO_TEST_DIR="${W}" VERSO_TEST_SCRIPT="${SELF}" VERSO_TEST_SHELL="${SH}" \
-            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_LAUNCHER_BIN="${W}/bin" \
+            VERSO_STORAGE_ROOT="${R}" VERSO_TMP="${W}/tmp" VERSO_FB="${W}/fb" VERSO_FB_SYSFS="${W}/sysfs" VERSO_LAUNCHER_BIN="${W}/bin" \
             VERSO_LAUNCHER_SHELL="${SH}" VERSO_START_TIMEOUT=2 VERSO_REFUSAL_WAIT=0 \
             ${SH} ./launch.sh </dev/null >/dev/null 2>&1
     ) || fail "launch.sh (sh-active) exited non-zero"

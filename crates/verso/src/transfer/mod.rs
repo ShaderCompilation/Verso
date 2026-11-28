@@ -682,7 +682,9 @@ fn run(device: &Device, shared: &Shared, waker: &Waker, label: &str) {
         state.address = address;
         state.hostname = hostname;
         if (state.phase, state.address, state.hostname.clone()) != before {
-            if state.phase != before.0 {
+            // The name is usually won a second after Ready.
+            let named = before.2.is_none() && state.hostname.is_some();
+            if state.phase != before.0 || named {
                 log::info!(
                     "Wi-Fi transfer: {:?}, address: {}, name advertised: {}",
                     state.phase,

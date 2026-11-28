@@ -14,6 +14,7 @@
 #         3. Crash report list + newest crash report
 #         4. Tail of verso.log and verso.log.old (up to 1,000 lines, redacted)
 #         5. Hardware diagnostics (collect-diagnostics.sh)
+#         6. /tmp space and the mDNS responder's log (names and addresses redacted)
 #
 # Environment overrides (simulator / tests):
 #   VERSO_STORAGE_ROOT  replaces /mnt/us
@@ -707,6 +708,17 @@ do_report() {
             sh "${COLLECTOR}" 2>/dev/null || printf '%s\n' '[collect-diagnostics.sh failed]'
         else
             printf '[collect-diagnostics.sh not found at %s]\n' "${COLLECTOR}"
+        fi
+
+        # A full /tmp stops the mDNS responder and the sleep handoff.
+        printf '\n== 6. /tmp and the mDNS responder ==\n'
+        df -k /tmp 2>/dev/null || printf '%s\n' '[df failed]'
+        if [ -r /tmp/verso-mdns.log ]; then
+            printf '%s\n' '--- /tmp/verso-mdns.log (last 40 lines) ---'
+            tail -n 40 /tmp/verso-mdns.log 2>/dev/null |
+                sed -e 's/[A-Za-z0-9-]*\.local/<name>.local/g' -e 's/[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*/<address>/g'
+        else
+            printf '%s\n' '[no /tmp/verso-mdns.log]'
         fi
 
         printf '\n== End of problem report ==\n'

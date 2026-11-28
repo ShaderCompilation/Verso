@@ -10,7 +10,8 @@
 # passes its name as $1, for the log. Installed at /mnt/us/verso/verso.sh.
 #
 # For scripts/test-launcher.sh only: VERSO_STORAGE_ROOT replaces /mnt/us,
-# VERSO_TMP replaces /tmp, VERSO_FB replaces /dev/fb0, VERSO_LAUNCHER_BIN
+# VERSO_TMP replaces /tmp, VERSO_FB replaces /dev/fb0 (VERSO_FB_SYSFS its
+# /sys/class/graphics folder), VERSO_LAUNCHER_BIN
 # holds fake Kindle commands and counting file tools, VERSO_LAUNCHER_SHELL
 # replaces /bin/sh, VERSO_BOOT_ID the kernel's boot id file,
 # VERSO_START_TIMEOUT the 120 s a new version gets to start and
@@ -31,6 +32,7 @@ fi
 ROOT="${VERSO_STORAGE_ROOT:-/mnt/us}"
 TMP="${VERSO_TMP:-/tmp}"
 FB="${VERSO_FB:-/dev/fb0}"
+FB_SYSFS="${VERSO_FB_SYSFS:-/sys/class/graphics/fb0}"
 APP_DIR="${ROOT}/verso"
 LOG="${APP_DIR}/verso.log"
 PIDFILE="${TMP}/verso-launcher.pid"
@@ -710,6 +712,47 @@ note_last_session() {
     echo "${boot:-unknown} $(now)" 2>/dev/null >"${RUNNING}"
 }
 
+# The bytes from the framebuffer's start to the end of the visible screen:
+# stride × (pan offset + yres). The virtual framebuffer is twice as tall, and
+# 16.5 MiB at 32 bpp (Colorsoft). Empty when sysfs doesn't say.
+fb_visible_bytes() {
+    stride="$(cat "${FB_SYSFS}/stride" 2>/dev/null)"
+    vsize="$(cat "${FB_SYSFS}/virtual_size" 2>/dev/null)"
+    pan="$(cat "${FB_SYSFS}/pan" 2>/dev/null)"
+    xres="${vsize%%,*}" yvirt="${vsize#*,}" pany="${pan#*,}"
+    # modes lists the landscape mode too; the one as wide as the buffer counts.
+    yres="$(sed -n "s/^U:${xres}x\([0-9]*\).*/\1/p" "${FB_SYSFS}/modes" 2>/dev/null | head -n 1)"
+    case "${stride}:${xres}:${yvirt}" in *[!0-9:]* | :* | *::* | *:) return ;; esac
+    case "${yres}" in '' | *[!0-9]*) yres="${yvirt}" ;; esac
+    case "${pany}" in '' | *[!0-9]*) pany=0 ;; esac
+    rows=$((pany + yres))
+    [ "${rows}" -gt "${yvirt}" ] && rows="${yvirt}"
+    echo $((stride * rows))
+}
+
+# Saves the screen for restore() to put back, so there's no flash of our UI
+# while Home loads. Only if /tmp keeps FB_DUMP_MARGIN KiB free afterwards: /tmp
+# is the 64 MiB /var tmpfs, and when it's full the mDNS responder and the
+# native sleep handoff can't write their files. Not dd: busybox head.
+FB_DUMP_MARGIN=16384
+save_screen() {
+    bytes="$(fb_visible_bytes)"
+    if [ -z "${bytes}" ]; then
+        log "not saving the screen: the framebuffer's size is unknown"
+        return
+    fi
+    free="$(df -Pk "${TMP}" 2>/dev/null | awk 'NR > 1 { a = $4 } END { print a }')"
+    case "${free}" in '' | *[!0-9]*) free=0 ;; esac
+    if [ $((free - (bytes + 1023) / 1024)) -lt "${FB_DUMP_MARGIN}" ]; then
+        log "not saving the screen: ${free} KiB free in /tmp"
+        return
+    fi
+    if ! head -c "${bytes}" "${FB}" >"${FB_DUMP}" 2>/dev/null; then
+        rm -f "${FB_DUMP}"
+        log "couldn't save the screen"
+    fi
+}
+
 # The app Amazon's UI had in front. Its id only: nothing after it.
 log_active_app() {
     app="$(lipc-get-prop com.lab126.appmgrd activeApp 2>/dev/null)"
@@ -735,7 +778,7 @@ log_active_app &
 # Pause the Kindle UI, the same way KOReader does on this firmware.
 # Each flag is set *before* acting, so an interruption can't skip its undo.
 log "pausing the Kindle UI"
-cat "${FB}" >"${FB_DUMP}" 2>/dev/null
+save_screen
 PILLOW_DISABLED=yes
 lipc-set-prop com.lab126.pillow disableEnablePillow disable  # status bar
 AWESOME_STOPPED=yes
