@@ -2,7 +2,7 @@
 
 Verso is a calm, lightweight e-reader for jailbroken Kindles, written in Rust:
 crengine for books, FBInk for the e-ink screen, and a desktop simulator for
-development. It hasn't launched yet and runs on the maintainer's test Kindle.
+development. It is in closed beta.
 
 ## What to read
 
@@ -41,7 +41,7 @@ don't link paths inside it from public files.
 |---|---|
 | `cargo sim` | Desktop simulator (`-- --screenshot out.png --tap x,y …` renders headless; see `main.rs`) |
 | `cargo test` / `cargo test -p verso <filter>` | Full suite (seconds) / targeted tests |
-| `cargo clippy --all-targets`, `cargo fmt --check` | Lint and format checks |
+| `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` | Lint and format checks |
 | `cargo kindle-build` | Release build for the Kindle (armv7, cargo-zigbuild) |
 | `scripts/deploy.sh [--no-run]` | Build, install on the Kindle, run through the launcher, stream the log |
 | `scripts/kindle-awake.sh on\|off\|status` | Keep the Kindle from sleeping during device work |
@@ -75,24 +75,21 @@ don't link paths inside it from public files.
 
 ## On the Kindle
 
-It's someone's own reading device (`ssh kindle`). The full readiness and
-verification steps are in the `verify` skill (`notes/skills/verify/`) where you
-have it; these rules always hold:
+It's someone's own reading device (`ssh kindle`). Follow the `verify` skill
+(`notes/skills/verify/`) for readiness, wake/app-closing and verification steps;
+these safety invariants always hold:
 
 - Write only inside `/mnt/us/verso`, `/mnt/us/extensions/verso` and `/tmp`, plus
-  the one file `/mnt/us/documents/Verso.sh` (the library launcher).
-  Writing `/dev/fb0` and sending touches to `/dev/input/event1` while Verso has
-  grabbed it are fine.
+  `/mnt/us/documents/Verso.sh` (the library launcher). Writing `/dev/fb0` and
+  sending touches to `/dev/input/event1` while Verso has grabbed it are fine.
 - Never run `mntroot`, `dd`, a factory reset or a firmware update, and never
   touch `/var/local`, `/etc` or the jailbreak files.
-- Before running Verso: the Kindle is awake (`lipc-get-prop com.lab126.powerd
-  state` is `active`) and no other reader (KOReader) runs. If not, ask the user.
-- Never kill or pause other apps by hand; only Verso's launcher pauses and
-  resumes the Kindle UI. Leave the Kindle UI running and the device as you found
-  it, and tell the user if something was off.
+- Never kill or pause Amazon's UI by hand; only Verso's launcher pauses and
+  resumes it. Stopping a running Verso or KOReader cleanly (`SIGTERM`) is fine.
 - Keep the user's books, settings and reading state; experiment in isolated
-  state under `/mnt/us/verso/<name>-check`. When done, the installed build must
-  be the latest one (`scripts/deploy.sh --no-run`).
+  state under `/mnt/us/verso/<name>-check`. When done, leave the Kindle UI
+  running, awake mode off, and the latest build installed
+  (`scripts/deploy.sh --no-run`).
 
 ## What goes where
 
@@ -117,12 +114,14 @@ untrue, and move the plan to `notes/archive/` (listed in its `README.md`).
 - **One test per rule**, at the lowest level that shows it. Before writing one,
   ask what regression it catches that no other test does. Extend an existing
   table or scenario rather than adding a near-copy.
-- Targeted tests while working; the full suite, `cargo clippy` and
-  `cargo fmt --check` once before committing.
+- Targeted tests while working; the full suite, `cargo clippy --all-targets -- -D warnings`
+  and `cargo fmt --check` once before committing, plus `cargo kindle-build` when
+  changing Kindle-only code.
 - Simulator captures only for new or changed UI, in one orientation unless the
   layouts differ. Device checks only for what needs the device: touch, refresh,
   device integration, performance on paths with a target.
-- No new script over about 100 lines without asking; extend the shared ones.
+- Extend the shared helpers (`scripts/sim.py`, `scripts/perf/redraw.py`) instead
+  of writing new scripts from scratch.
 
 ## Commits
 
@@ -152,5 +151,7 @@ untrue, and move the plan to `notes/archive/` (listed in its `README.md`).
 - **Ask for help** when you need the user to do something, and say why.
 - **Push back** plainly on features that are very hard, unconventional or likely
   to hurt performance.
-- **No backwards compatibility yet:** replace formats and code cleanly, no
-  migrations or shims. Still keep the user's books and reading state intact.
+- **Closed beta compatibility:** refactor internal code cleanly without shims,
+  but keep existing users' books, settings, reading state and annotations
+  working across updates (migrate or fall back cleanly when changing persisted
+  formats).
