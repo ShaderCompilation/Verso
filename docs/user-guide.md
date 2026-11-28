@@ -182,9 +182,10 @@ or `☀` / battery in the Reader Menu) to open the **Top Drawer**:
 
 - **Light** and **Warmth** sliders (0–24; Warmth is hidden on models without
   warm LEDs).
-- Quick tiles for **Wi-Fi**, **Orientation** (Portrait / Landscape), **Refresh**
-  (full-screen flash to clear ghosting), **Wi-Fi transfer**, **Settings**, and
-  **SSH**.
+- Quick tiles for **Wi-Fi**, **SSH**, **Dark mode** (covers, book pictures and
+  QR codes stay normal; colored text adjusts luminance to remain legible),
+  **Orientation** (Portrait / Landscape), **Refresh** (full-screen flash to
+  clear ghosting), **Transfer** and **Settings**.
 
 ### Reader Menu, Contents, Search and Footnotes
 

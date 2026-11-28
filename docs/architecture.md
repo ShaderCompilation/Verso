@@ -123,6 +123,12 @@ z-order (bottom to top): active `Screen` → `TopDrawer` → queued startup
   portrait by rendering upright and rotating 90° onto the landscape canvas.
 - The simulator's `colorsoft` preset can preview Kaleido 3 color (`C` key,
   `platform/kaleido.rs`): 300-dpi luma with 2×2 averaged 150-dpi muted chroma.
+- **Dark mode:** screens draw light-polarity pixels; `Writer` flips them on the
+  copy into `/dev/fb0` (and simulators), while covers, behind-cover strips,
+  sleep covers and crengine book images/colored text pre-flip so pictures stay
+  normal and colored text keeps its hue with inverted luma. Live switching defers
+  `canvas.dark` and `App::frame()` up to 500 ms while `Reader` re-renders, then
+  commits with one `Full` refresh.
 
 ### Frame comparison and refresh planning (`ui/damage.rs`, `app.rs`)
 
@@ -149,12 +155,15 @@ against the previous frame in **16×16 tiles**:
 
 ### Waveforms and flash cadence
 
-| `RefreshMode` | Purpose | Monochrome | Color panel | Flashes? |
-| --- | --- | --- | --- | --- |
-| `Fast` | Press feedback, slider drags, selection | `WFM_DU` | `WFM_DU` | No |
-| `Ui` | Menus, chrome, `fast_debt` cleanup, wake strip | `WFM_GL16` (MTK) / `WFM_GC16` (i.MX) | `WFM_GL16` | No |
-| `Page` | Reading page turns | `WFM_REAGL` | `WFM_GLRC16` | No |
-| `Full` | Images, chapter starts, periodic flash, wake, library grid | `WFM_GC16` | `WFM_GCC16` | Yes |
+| `RefreshMode` | Purpose | Light mono | Light color | Dark mono (eclipse) | Dark color (eclipse) | Flashes? |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Fast` | Press feedback, slider drags, selection | `WFM_DU` | `WFM_DU` | `WFM_DUNM` (MTK) / `WFM_DU` (i.MX) | `WFM_DUNM` / `WFM_DU` | No |
+| `Ui` | Menus, chrome, `fast_debt` cleanup, wake strip | `WFM_GL16` (MTK) / `WFM_GC16` (i.MX) | `WFM_GL16` | `WFM_GLKW16` | `WFM_GLKW16` | No |
+| `Page` | Reading page turns | `WFM_REAGL` | `WFM_GLRC16` | `WFM_GLKW16` | `WFM_GLRCK16` | No |
+| `Full` | Images, chapter starts, periodic flash, wake, library grid | `WFM_GC16` | `WFM_GCC16` | `WFM_GCK16` | `WFM_GCCK16` | Yes |
+
+Eclipse modes gate on `has_eclipse_wfm` (falling back to light waveforms when
+absent), and `FlashFence` gates only on `RefreshMode::Full`.
 
 - **Non-blocking flashes (`platform/flash.rs`):** `Display::present` records
   FBInk's refresh marker in `FlashFence` instead of blocking ~300 ms immediately,

@@ -54,22 +54,23 @@ behaviour on other models is **(to verify)**.
   bitmap-row centering into `view_vert_origin` (`+4` px on 1448 px panels, `+8`
   on 1648/1680/2480 px), pushing full refreshes past `yres` (MTK returns `EBADF`).
 - **Pixel formats:** accepts 8-bit (`Y8`, honouring `inverted_grayscale`) and
-  32-bit (`RGBA`/`RGB32`, `BGRA`/`BGR32`). On 32-bit panels (Colorsoft),
-  `Writer` swizzles R↔B row by row straight from the canvas and never reads
-  back from write-combining `/dev/fb0`; landscape first turns the frame into a
-  cached-RAM shadow buffer.
-- **MediaTek `hwtcon_v2` (measured):** `is_mtk = 1`, `canRotate = 0` (landscape
-  is rotated in software), `hasEclipseWfm = 1`, `canHWInvert = 1`.
+  32-bit (`RGBA`/`RGB32`, `BGRA`/`BGR32`). On Colorsoft, `Writer` swizzles
+  R↔B directly without reading `/dev/fb0`; landscape rotates into RAM first.
+- **MediaTek `hwtcon_v2` (measured):** `is_mtk = 1`, `canRotate = 0` (software
+  rotation), `hasEclipseWfm = 1`, `canHWInvert = 1`.
 - **Waveforms & completion:** monochrome uses `DU` (`Fast`), `GL16` (MTK) /
   non-flashing `GC16` (i.MX; `GL16` is from-white-only) (`Ui`), `REAGL` (`Page`)
-  and flashing `GC16` (`Full`). Color panels use `GLRC16` (`Page`) and `GCC16`
-  (`Full`) with `CFA_DEFAULT` **(to verify)**. Full flashes (~200–400 ms
-  **(measured)**) are awaited lazily via `fbink_get_last_marker()` /
-  `fbink_wait_for_complete()` before the next write, sleep or exit.
-- **ARM alignment gotcha (measured):** crengine's glyph cache uses `alignas(16)`
-  items that upstream allocates with 8-byte-aligned `malloc`, causing `SIGBUS`
-  on NEON stores under Zig/Clang. `crates/crengine-sys/build.rs` patches a copy
-  to use `posix_memalign`.
+  and `GC16` (`Full`); color uses `GLRC16`/`GCC16` with `CFA_DEFAULT`
+  **(to verify)**. Dark mode (`hasEclipseWfm`) defaults to Variant A (`DUNM` on
+  MTK / `GLKW16` partial / `GCK16`, software flip; PW6 turns `5.48/3.94 ms` P,
+  `8.00/6.54 ms` L vs `5.58/4.03`, `7.61/6.48 ms` light **(measured)**);
+  Colorsoft `GLRCK16`/`GCCK16`, ghosting and Amazon dark mode
+  (`inverted_grayscale` only at 8 bpp) remain **(to verify)**. Full flashes
+  (~200–400 ms **(measured)**) await completion lazily before the next write,
+  sleep or exit.
+- **ARM alignment gotcha (measured):** crengine's `alignas(16)` glyph-cache
+  items crash on 8-byte `malloc` under NEON/Zig, so `crengine-sys/build.rs`
+  patches a copy to use `posix_memalign`.
 
 ---
 
