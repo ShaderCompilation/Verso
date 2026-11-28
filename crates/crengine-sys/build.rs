@@ -565,6 +565,71 @@ const CRENGINE_FIXES: &[(&str, &str, &str)] = &[
         "        lUInt32 newCRC = buf.getCRC();",
         "        lUInt32 newCRC = lStr_crc32( 0, buf.buf(), buf.pos() - 4 );",
     ),
+    // crengine writes the index from a copy taken before the write. When the
+    // index has grown, the write moves it into a free block, and the saved
+    // copy still lists that block as free: a later layout puts data there and
+    // the next index write overwrites it ("packed data CRC doesn't match", and
+    // the book is laid out from scratch). Copy and write again until the index
+    // stays where it is.
+    (
+        "crengine/src/lvtinydom.cpp",
+        r#"    CacheFileItem * index = new CacheFileItem[count]();
+    int sz = count * sizeof(CacheFileItem);
+    for ( int i = 0; i < count; i++ ) {
+        memcpy( &index[i], _index[i], sizeof(CacheFileItem) );
+        if (index[i]._dataType == CBT_INDEX) {
+            index[i]._dataHash = 0;
+            index[i]._packedHash = 0;
+            index[i]._dataSize = 0;
+        }
+    }
+    bool res = write(CBT_INDEX, 0, (const lUInt8*)index, sz, false);
+    delete[] index;
+"#,
+        r#"    bool res = false;
+    for ( int attempt = 0; attempt < 8; attempt++ ) {
+        count = _index.length();
+        CacheFileItem * before = findBlock(CBT_INDEX, 0);
+        CacheFileItem * index = new CacheFileItem[count]();
+        int sz = count * sizeof(CacheFileItem);
+        for ( int i = 0; i < count; i++ ) {
+            memcpy( &index[i], _index[i], sizeof(CacheFileItem) );
+            if (index[i]._dataType == CBT_INDEX) {
+                index[i]._dataHash = 0;
+                index[i]._packedHash = 0;
+                index[i]._dataSize = 0;
+            }
+        }
+        res = write(CBT_INDEX, 0, (const lUInt8*)index, sz, false);
+        delete[] index;
+        if ( !res || ( findBlock(CBT_INDEX, 0) == before && _index.length() == count ) )
+            break;
+    }
+"#,
+    ),
+    // Files saved before the fix above can list the index's own block as free.
+    // Never reuse free space that overlaps the index.
+    (
+        "crengine/src/lvtinydom.cpp",
+        r#"    CacheFileItem * indexitem = findBlock(CBT_INDEX, 0);
+    if ( !indexitem ) {
+        CRLog::error("CacheFile::readIndex: index block info doesn't match header");
+        return false;
+    }
+"#,
+        r#"    CacheFileItem * indexitem = findBlock(CBT_INDEX, 0);
+    if ( !indexitem ) {
+        CRLog::error("CacheFile::readIndex: index block info doesn't match header");
+        return false;
+    }
+    for ( int i = _freeIndex.length() - 1; i >= 0; i-- ) {
+        CacheFileItem * item = _freeIndex[i];
+        if ( item->_blockFilePos < indexitem->_blockFilePos + indexitem->_blockSize
+                && indexitem->_blockFilePos < item->_blockFilePos + item->_blockSize )
+            _freeIndex.remove( i );
+    }
+"#,
+    ),
     // Some repackaged EPUBs leave out the `mimetype` entry. crengine then
     // treats the book as a plain ZIP and shows the first file in it (often a
     // stray text file). Accept a ZIP without `mimetype` as an EPUB when it has
