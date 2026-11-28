@@ -537,6 +537,7 @@ mod tests {
         footnote_checks(&engine, &layout);
         missing_mimetype_checks(&engine, &layout, &book, pages);
         color_draw_checks(&engine, &layout);
+        image_scaling_checks(&engine, &layout);
         bookmark_checks(&engine, &layout, &book);
         textless_bookmark_checks(&engine, &layout);
         alignment_checks(&engine, &layout);
@@ -896,6 +897,87 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Raster images scale only by `PROP_RENDER_DPI` (not legacy `PROP_IMG_SCALING_*`
+    /// zoom-in multipliers) and use smooth interpolation on both RGBA and Gray8 paths.
+    fn image_scaling_checks(engine: &CreEngine, layout: &Layout) {
+        use std::collections::BTreeSet;
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("verso-img-scale-{}.epub", std::process::id()));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_fn(
+            16,
+            16,
+            |x, _| {
+                if x < 8 { image::Rgb([10, 220, 10]) } else { image::Rgb([10, 10, 180]) }
+            },
+        )
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+        let mut out = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        out.start_file("mimetype", opts.compression_method(zip::CompressionMethod::Stored)).unwrap();
+        out.write_all(b"application/epub+zip").unwrap();
+        out.start_file("META-INF/container.xml", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        out.start_file("content.opf", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Scale Fixture</dc:title></metadata><manifest><item id="block" href="block.xhtml" media-type="application/xhtml+xml"/><item id="inline" href="inline.xhtml" media-type="application/xhtml+xml"/><item id="img" href="split.png" media-type="image/png"/></manifest><spine><itemref idref="block"/><itemref idref="inline"/></spine></package>"#,
+        )
+        .unwrap();
+        out.start_file("split.png", opts).unwrap();
+        out.write_all(png.get_ref()).unwrap();
+        out.start_file("block.xhtml", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Block</title></head><body><div><img src="split.png" alt=""/></div></body></html>"#,
+        )
+        .unwrap();
+        out.start_file("inline.xhtml", opts).unwrap();
+        out.write_all(
+            br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Inline</title></head><body><p>Before <img src="split.png" alt=""/> after.</p></body></html>"#,
+        )
+        .unwrap();
+        out.finish().unwrap();
+
+        let big_font = Layout { font_size: 52, ..layout.clone() };
+        let mut doc = engine.open(&path, &big_font, None).unwrap();
+        assert!(doc.page_count() >= 2);
+        let (w, h) = (big_font.width as usize, big_font.height as usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        let mut block_colors = BTreeSet::new();
+        for (page, label) in [(0, "block"), (1, "inline")] {
+            doc.go_to_page(page);
+            doc.draw_rgba(&mut rgba, w * 4, false).unwrap();
+            let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0, 0);
+            for (i, p) in rgba.as_chunks::<4>().0.iter().enumerate() {
+                if p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 20 {
+                    let (x, y) = (i % w, i / w);
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                    if page == 0 {
+                        block_colors.insert([p[0], p[1], p[2]]);
+                    }
+                }
+            }
+            let (iw, ih) = (max_x + 1 - min_x, max_y + 1 - min_y);
+            assert!((46..=54).contains(&iw) && (46..=54).contains(&ih), "{label} scaled size {iw}x{ih}");
+        }
+        assert!(block_colors.len() >= 3, "expected smooth RGBA interpolation, got {block_colors:?}");
+
+        doc.go_to_page(0);
+        let mut gray = vec![255u8; w * h];
+        doc.draw(&mut gray, w, false).unwrap();
+        let shades: BTreeSet<u8> = gray.into_iter().filter(|&v| v < 250).collect();
+        assert!(shades.len() >= 3, "expected smooth Gray8 interpolation, got {shades:?}");
+
+        drop(doc);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Some repackaged EPUBs have no `mimetype` entry. They must still open as
     /// the book, not as the first file in the ZIP (here a stray text file).
     fn missing_mimetype_checks(engine: &CreEngine, layout: &Layout, book: &std::path::Path, pages: usize) {
@@ -1237,13 +1319,14 @@ mod tests {
                 }
             }
         }
-        // The image's page depends on the installed fonts. Its two light grays
-        // cover far more pixels than text smoothing or table shading do.
+        // The image's page depends on the installed fonts. Its 32x48 checkerboard
+        // of 180/220 grays renders at 100x150 (15,000 px) at 300 DPI, well above
+        // text smoothing in the 190..=215 band.
         let mut figure = false;
         for p in 0..rich.page_count() {
             rich.go_to_page(p);
             rich.draw(&mut buf, 600, false)?;
-            figure |= buf.iter().filter(|&&v| (150..=230).contains(&v)).count() > 40_000;
+            figure |= buf.iter().filter(|&&v| (190..=215).contains(&v)).count() > 10_000;
         }
         assert!(figure, "rich.md relative checkerboard image must render");
         assert!(rich_notes.get("1").is_some_and(|h| h.contains("First footnote explaining")), "{rich_notes:?}");

@@ -1126,6 +1126,17 @@ VersoCreDoc *verso_cre_new(int width, int height, int dpi) {
         v->setPageHeaderInfo(0); // no crengine status bar; Verso draws its own
         CRPropRef props = LVCreatePropsContainer();
         props->setInt(PROP_RENDER_DPI, dpi);      // CSS units scale with the screen
+        // PROP_RENDER_DPI already scales CSS and native image sizes to screen DPI.
+        // Disable crengine's legacy zoom-in/out multipliers, which otherwise double
+        // small block images and double/triple inline images at >=32/>=50 px fonts.
+        props->setInt(PROP_IMG_SCALING_ZOOMIN_BLOCK_MODE, 0);
+        props->setInt(PROP_IMG_SCALING_ZOOMIN_BLOCK_SCALE, 1);
+        props->setInt(PROP_IMG_SCALING_ZOOMIN_INLINE_MODE, 0);
+        props->setInt(PROP_IMG_SCALING_ZOOMIN_INLINE_SCALE, 1);
+        props->setInt(PROP_IMG_SCALING_ZOOMOUT_BLOCK_MODE, 0);
+        props->setInt(PROP_IMG_SCALING_ZOOMOUT_BLOCK_SCALE, 1);
+        props->setInt(PROP_IMG_SCALING_ZOOMOUT_INLINE_MODE, 0);
+        props->setInt(PROP_IMG_SCALING_ZOOMOUT_INLINE_SCALE, 1);
         props->setInt(PROP_FONT_KERNING, 2);      // HarfBuzz light (see verso_cre_set_shaping)
         props->setInt(PROP_FONT_HINTING, 2);      // autohinter (as KOReader)
         props->setInt(PROP_EMBEDDED_STYLES, 1);
@@ -1321,12 +1332,14 @@ int verso_cre_draw(VersoCreDoc *doc, uint8_t *buf, int width, int height, int st
         doc->view->Render();
         if (stride == width) {
             LVGrayDrawBuf draw(width, height, 8, buf);
+            draw.setSmoothScalingImages(true);
             if (dark)
                 draw.setInvertImages(true);
             doc->view->Draw(draw, false);
         } else {
             std::vector<uint8_t> tmp((size_t)width * height);
             LVGrayDrawBuf draw(width, height, 8, tmp.data());
+            draw.setSmoothScalingImages(true);
             if (dark)
                 draw.setInvertImages(true);
             doc->view->Draw(draw, false);
@@ -1356,6 +1369,7 @@ int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, i
         doc->view->Render();
         if (stride == width * 4 && (((uintptr_t)buf) & 3) == 0) {
             LVColorDrawBuf draw(width, height, buf, 32);
+            draw.setSmoothScalingImages(true);
             if (dark) {
                 draw.setInvertImages(true);
                 draw.setInvertColors(true);
@@ -1367,6 +1381,7 @@ int verso_cre_draw_rgba(VersoCreDoc *doc, uint8_t *buf, int width, int height, i
             }
         } else {
             LVColorDrawBuf draw(width, height, 32);
+            draw.setSmoothScalingImages(true);
             if (dark) {
                 draw.setInvertImages(true);
                 draw.setInvertColors(true);
