@@ -19,6 +19,12 @@ use crate::ui::widget::DrawCx;
 use crate::ui::widgets::{Button, ButtonKind, Sheet, TopBar};
 use verso_update::launcher::{self, EXIT_RESTART};
 
+/// The ready block's height in portrait: the address lines (3 + 8 + 12 + 10 mm)
+/// above the QR code (34 mm), and 1 mm of air. The paragraph beside the QR code
+/// is two lines at most, so it ends inside this.
+/// `draw_ready` lays out to these numbers; keep them together.
+const READY_MM: f32 = 3.0 + 8.0 + 12.0 + 10.0 + 34.0 + 1.0;
+
 pub struct TransferScreen {
     screen: Rect,
     top: TopBar,
@@ -184,11 +190,12 @@ impl TransferScreen {
         } else {
             let w = content.w.min(t.mm(110.0));
             let x = content.x + (content.w - w) / 2;
-            let info_h = t.mm(70.0).min((bottom - content.y) * 2 / 3);
+            // The ready block needs its full height; the list takes what is left.
+            let info_h = t.mm(READY_MM).min(bottom - content.y);
             let list_y = content.y + info_h;
             (
                 Rect::new(x, content.y, w, info_h),
-                Rect::new(x, list_y, w, bottom - t.mm(4.0) - list_y),
+                Rect::new(x, list_y, w, bottom - t.mm(2.0) - list_y),
                 Rect::new(x, bottom, w, t.button_h),
             )
         };
