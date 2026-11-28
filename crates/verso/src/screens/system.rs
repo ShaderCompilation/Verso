@@ -19,7 +19,7 @@ use crate::screens::transfer::TransferScreen;
 use crate::screens::update::{GoBackSheet, OfferEvent, OfferSheet, UpdateScreen, WhatsNewSheet};
 use crate::screens::{Action, EventCx, RelayoutState, Screen};
 use crate::store::{
-    DarkVariant, FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider,
+    DarkRendering, FolderPreview, Orientation, Settings, SleepScreen, Store, TapZones, TranslateProvider,
 };
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::{FILL, INK, INK_FILL, INK2, LINE, PAPER, Theme};
@@ -51,6 +51,64 @@ const SSH_RECHECK_FOR: Duration = Duration::from_secs(90);
 
 /// Full-flash intervals offered in Settings (0 = never).
 const FLASH_CHOICES: [u32; 4] = [1, 6, 12, 0];
+
+/// The dark refresh choices until the dark mode sheet gets a row per setting:
+/// each sets `dark_rendering` and `dark_full_updates`.
+struct DarkChoice {
+    label: &'static str,
+    summary: &'static str,
+    note: &'static str,
+    rendering: DarkRendering,
+    full_updates: bool,
+}
+const DARK_CHOICES: [DarkChoice; 5] = [
+    DarkChoice {
+        label: "Eclipse (partial)",
+        summary: "Eclipse",
+        note: "Software pixel flip with partial eclipse updates (GLKW16). No flash on page turns; leaves the Kindle display driver untouched. The default.",
+        rendering: DarkRendering::Eclipse,
+        full_updates: false,
+    },
+    DarkChoice {
+        label: "Eclipse (full)",
+        summary: "Eclipse full",
+        note: "Software pixel flip with full eclipse updates (GLKW16). Less ghosting than partial, with a brief flash on each update.",
+        rendering: DarkRendering::Eclipse,
+        full_updates: true,
+    },
+    DarkChoice {
+        label: "Driver night (full)",
+        summary: "Driver full",
+        note: "Kindle driver night mode with full eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit.",
+        rendering: DarkRendering::DriverNight,
+        full_updates: true,
+    },
+    DarkChoice {
+        label: "Driver night (partial)",
+        summary: "Driver partial",
+        note: "Kindle driver night mode with partial eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit.",
+        rendering: DarkRendering::DriverNight,
+        full_updates: false,
+    },
+    DarkChoice {
+        label: "REAGL",
+        summary: "REAGL",
+        note: "Software pixel flip with standard light-mode waveforms (REAGL). Useful on panels where eclipse modes ghost more.",
+        rendering: DarkRendering::Reagl,
+        full_updates: false,
+    },
+];
+
+/// The choice in `DARK_CHOICES` matching `settings` (REAGL ignores full updates).
+fn dark_choice(settings: &Settings) -> usize {
+    DARK_CHOICES
+        .iter()
+        .position(|c| {
+            c.rendering == settings.dark_rendering
+                && (c.rendering == DarkRendering::Reagl || c.full_updates == settings.dark_full_updates)
+        })
+        .unwrap_or(0)
+}
 
 /// The offered choice closest to `every`, for hand-edited settings.
 fn flash_choice(every: u32) -> usize {
@@ -283,7 +341,7 @@ impl SystemSettings {
         // Covers is disabled for now; see FolderPreview::OFFERED.
         let previews = Segmented::texts(&["Stack", "Latest", "Icon"], selected);
         let dark_refresh_entry =
-            List::new(vec![Row::new("Dark mode").value(settings.dark_variant.summary()).chevron()]);
+            List::new(vec![Row::new("Dark mode").value(DARK_CHOICES[dark_choice(&settings)].summary).chevron()]);
 
         let mut add_folder = Button::new("Add folder", ButtonKind::Secondary).with_icon(Icon::Folder);
         add_folder.place(Rect::new(content.x, 0, content.w, t.mm(CONTROL_MM)), t);
@@ -609,7 +667,7 @@ impl SystemSettings {
     fn display_gesture(&mut self, g: &Gesture, cx: &mut EventCx) -> Action {
         if let Some(ListEvent::Tapped(_)) = self.dark_refresh_entry.on_gesture(g) {
             self.dark_refresh_sheet =
-                Some(DarkModeSheet::new(cx.theme, self.screen, self.store.settings().dark_variant));
+                Some(DarkModeSheet::new(cx.theme, self.screen, dark_choice(&self.store.settings())));
             return Action::None;
         }
         // Collections shows the new previews when Settings closes.
@@ -643,26 +701,28 @@ impl SystemSettings {
         Action::None
     }
 
-    fn refresh_dark_variant(&mut self) {
-        let variant = self.store.settings().dark_variant;
+    fn refresh_dark_choice(&mut self) {
+        let choice = dark_choice(&self.store.settings());
         if let Some(row) = self.dark_refresh_entry.rows.first_mut() {
-            row.value = Some(variant.summary().into());
+            row.value = Some(DARK_CHOICES[choice].summary.into());
         }
         if let Some(sheet) = &mut self.dark_refresh_sheet {
-            sheet.sync(variant);
+            sheet.sync(choice);
         }
     }
 
     fn handle_dark_mode_event(&mut self, event: DarkModeEvent, cx: &mut EventCx) -> Action {
         match event {
             DarkModeEvent::Close => self.dark_refresh_sheet = None,
-            DarkModeEvent::Select(variant) => {
-                if self.save(cx, "dark mode", |s| s.dark_variant = variant) {
-                    self.refresh_dark_variant();
-                    return Action::DarkVariant(variant);
-                }
-                if let Some(sheet) = &mut self.dark_refresh_sheet {
-                    sheet.sync(self.store.settings().dark_variant);
+            DarkModeEvent::Select(i) => {
+                let choice = &DARK_CHOICES[i];
+                let saved = self.save(cx, "dark mode", |s| {
+                    s.dark_rendering = choice.rendering;
+                    s.dark_full_updates = choice.full_updates;
+                });
+                self.refresh_dark_choice();
+                if saved {
+                    return Action::DarkRefresh(self.store.settings().dark_refresh());
                 }
             }
         }
@@ -1417,7 +1477,7 @@ impl SystemSettings {
 
 impl Screen for SystemSettings {
     fn on_return(&mut self, cx: &mut EventCx) {
-        self.refresh_dark_variant();
+        self.refresh_dark_choice();
         self.refresh_translate();
         if let Some(sheet) = &mut self.translate_sheet {
             sheet.sync(cx.theme, &self.store.settings());
@@ -1581,7 +1641,7 @@ impl Screen for SystemSettings {
         let saves = self.store.settings_saves();
         if saves != self.settings_seen {
             self.settings_seen = saves;
-            self.refresh_dark_variant();
+            self.refresh_dark_choice();
             self.refresh_translate();
             if let Some(sheet) = &mut self.translate_sheet {
                 sheet.sync(cx.theme, &self.store.settings());
@@ -1936,7 +1996,8 @@ impl TranslateSheet {
 
 enum DarkModeEvent {
     Close,
-    Select(DarkVariant),
+    /// An index into `DARK_CHOICES`.
+    Select(usize),
 }
 
 /// Sheet for choosing how dark mode refreshes the e-ink display.
@@ -1944,11 +2005,12 @@ struct DarkModeSheet {
     sheet: Sheet,
     list: List,
     note: Rect,
-    selected: DarkVariant,
+    /// An index into `DARK_CHOICES`.
+    selected: usize,
 }
 
 impl DarkModeSheet {
-    fn new(t: &Theme, screen: Rect, selected: DarkVariant) -> Self {
+    fn new(t: &Theme, screen: Rect, selected: usize) -> Self {
         let landscape = screen.w > screen.h;
         let (sheet, row_h) = if landscape {
             let w = (screen.w * 11 / 20).max(t.mm(72.0)).min(screen.w);
@@ -1958,7 +2020,7 @@ impl DarkModeSheet {
             (Sheet::open("Dark mode refresh", h, screen, t), t.mm(10.0))
         };
         let c = sheet.content(t);
-        let list_h = row_h * DarkVariant::ALL.len() as i32;
+        let list_h = row_h * DARK_CHOICES.len() as i32;
         let mut list = List::new(Vec::new());
         list.place(Rect::new(c.x, c.y, c.w, list_h), row_h, 0);
         let note_y = c.y + list_h + t.mm(2.5);
@@ -1968,13 +2030,14 @@ impl DarkModeSheet {
         this
     }
 
-    fn sync(&mut self, selected: DarkVariant) {
+    fn sync(&mut self, selected: usize) {
         self.selected = selected;
-        self.list.rows = DarkVariant::ALL
+        self.list.rows = DARK_CHOICES
             .iter()
-            .map(|&variant| {
-                let row = Row::new(variant.label());
-                if variant == selected { row.check() } else { row }
+            .enumerate()
+            .map(|(i, choice)| {
+                let row = Row::new(choice.label);
+                if i == selected { row.check() } else { row }
             })
             .collect();
     }
@@ -1982,18 +2045,17 @@ impl DarkModeSheet {
     fn draw(&self, cx: &mut DrawCx) {
         self.sheet.draw(cx);
         self.list.draw(cx);
-        cx.paragraph(self.selected.note(), cx.theme.small.gray(INK2), self.note, HAlign::Left);
+        cx.paragraph(DARK_CHOICES[self.selected].note, cx.theme.small.gray(INK2), self.note, HAlign::Left);
     }
 
     fn on_gesture(&mut self, g: &Gesture) -> Option<DarkModeEvent> {
         if self.sheet.on_gesture(g) {
             return Some(DarkModeEvent::Close);
         }
-        if let Some(ListEvent::Tapped(i)) = self.list.on_gesture(g) {
-            let variant = DarkVariant::ALL[i];
-            if variant != self.selected {
-                return Some(DarkModeEvent::Select(variant));
-            }
+        if let Some(ListEvent::Tapped(i)) = self.list.on_gesture(g)
+            && i != self.selected
+        {
+            return Some(DarkModeEvent::Select(i));
         }
         None
     }
@@ -2170,12 +2232,12 @@ pub(super) fn fit_samples(t: &Theme, screen: Rect, text: &mut crate::gfx::TextRe
                 .body(tr.note, text_h(text, &tr.message(), t.small, tr.note.w)),
         );
     }
-    for variant in DarkVariant::ALL {
-        let dm = DarkModeSheet::new(t, screen, variant);
-        let buttons = (0..DarkVariant::ALL.len()).map(|i| dm.list.row_rect(i));
+    for (i, choice) in DARK_CHOICES.iter().enumerate() {
+        let dm = DarkModeSheet::new(t, screen, i);
+        let buttons = (0..DARK_CHOICES.len()).map(|i| dm.list.row_rect(i));
         samples.push(
             Parts::new("DarkModeSheet", dm.sheet.rect(), buttons)
-                .body(dm.note, text_h(text, variant.note(), t.small, dm.note.w)),
+                .body(dm.note, text_h(text, choice.note, t.small, dm.note.w)),
         );
     }
     samples
@@ -2468,16 +2530,20 @@ mod tests {
         draw(&mut s, &t167, 800, 600);
         let mut text = crate::gfx::TextRenderer::new();
         let row_w = s.right.w;
-        for variant in DarkVariant::ALL {
+        for choice in &DARK_CHOICES {
             let need = text.width("Dark mode", t167.body)
                 + t167.mm(3.0) as f32
-                + text.width(variant.summary(), t167.body)
+                + text.width(choice.summary, t167.body)
                 + t167.icon_small as f32
                 + t167.mm(2.0) as f32;
-            assert!(need <= row_w as f32, "{variant:?} summary overflows narrow landscape row: {need} > {row_w}");
+            assert!(
+                need <= row_w as f32,
+                "{} summary overflows narrow landscape row: {need} > {row_w}",
+                choice.summary
+            );
         }
 
-        // Open sheet, pick Driver night (full), and verify save + Action::DarkVariant.
+        // Open sheet, pick Driver night (full), and verify save + Action::DarkRefresh.
         let row = s.dark_refresh_entry.row_rect(0);
         let p = row.center();
         let mut toast = None;
@@ -2500,9 +2566,14 @@ mod tests {
         let cp = c_row.center();
         s.on_gesture(Gesture::Down(cp), &mut cx);
         let action = s.on_gesture(Gesture::Tap(cp), &mut cx);
-        assert!(matches!(action, Action::DarkVariant(DarkVariant::C)));
-        assert_eq!(store.settings().dark_variant, DarkVariant::C);
+        let driver_full = crate::store::DarkRefresh {
+            rendering: DarkRendering::DriverNight,
+            full_updates: true,
+            ..Default::default()
+        };
+        assert!(matches!(action, Action::DarkRefresh(d) if d == driver_full));
+        assert_eq!(store.settings().dark_refresh(), driver_full);
         assert_eq!(s.dark_refresh_entry.rows[0].value.as_deref(), Some("Driver full"));
-        assert_eq!(s.dark_refresh_sheet.as_ref().unwrap().selected, DarkVariant::C);
+        assert_eq!(s.dark_refresh_sheet.as_ref().unwrap().selected, 2);
     }
 }

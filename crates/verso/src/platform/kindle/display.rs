@@ -11,7 +11,7 @@ use fbink_sys as fb;
 use crate::gfx::Canvas;
 use crate::platform::flash::FlashFence;
 use crate::platform::framebuffer::{Format, Layout, Writer};
-use crate::platform::waveform::{DarkVariant, PanelCaps, plan_refresh};
+use crate::platform::waveform::{DarkRefresh, PanelCaps, plan_refresh};
 use crate::platform::{FrameCheck, Orientation, RefreshMode, Unsupported, Update};
 
 /// Static display & FBInk facts logged in the startup session header.
@@ -76,8 +76,8 @@ pub struct Display {
     pub touch_mirror_y: bool,
     /// Tracks an unawaited flashing refresh so the next write or handoff waits for it.
     flash_fence: FlashFence,
-    /// Dark-mode refresh variant (`Settings::dark_variant`, default Variant A).
-    dark_variant: DarkVariant,
+    /// Dark-mode waveform settings (`Settings::dark_refresh`).
+    dark_refresh: DarkRefresh,
     /// Driver night-mode cleanup: original `vInfo.grayscale` to restore on
     /// leaving night mode, native sleep, or drop.
     restore_grayscale: Option<u8>,
@@ -219,22 +219,22 @@ impl Display {
                 touch_mirror_x: st.touch_mirror_x,
                 touch_mirror_y: st.touch_mirror_y,
                 flash_fence: FlashFence::default(),
-                dark_variant: DarkVariant::default(),
+                dark_refresh: DarkRefresh::default(),
                 restore_grayscale: None,
                 failed_refreshes: 0,
             })
         }
     }
 
-    pub fn set_dark_variant(&mut self, variant: DarkVariant) {
-        if self.dark_variant != variant {
-            log::info!("dark mode refresh: {variant:?}");
-            self.dark_variant = variant;
+    pub fn set_dark_refresh(&mut self, dark: DarkRefresh) {
+        if self.dark_refresh != dark {
+            log::info!("dark mode refresh: {dark:?}");
+            self.dark_refresh = dark;
         }
     }
 
-    pub fn dark_variant(&self) -> DarkVariant {
-        self.dark_variant
+    pub fn dark_refresh(&self) -> DarkRefresh {
+        self.dark_refresh
     }
 
     /// Refreshes FBInk state and framebuffer mapping after `fbink_set_fb_info`
@@ -260,11 +260,11 @@ impl Display {
     }
 
     /// Engages or disengages driver night mode (`GRAYSCALE_8BIT_INVERTED`) to
-    /// match `dark && self.dark_variant.uses_driver_night_mode()`.
+    /// match `dark && self.dark_refresh.rendering.uses_driver_night_mode()`.
     /// Returns `true` if `writer.inverted()` changed and `/dev/fb0` needs a
     /// full rewrite.
     pub fn sync_driver_night_mode(&mut self, dark: bool) -> bool {
-        let want = dark && self.dark_variant.uses_driver_night_mode();
+        let want = dark && self.dark_refresh.rendering.uses_driver_night_mode();
         if want && self.restore_grayscale.is_none() {
             // SAFETY: valid zero-initialized structs passed to FBInk.
             let mut vinfo: fb::fb_var_screeninfo = unsafe { std::mem::zeroed() };
@@ -369,7 +369,7 @@ impl Display {
                 has_eclipse_wfm: self.session.has_eclipse_wfm,
                 is_mtk: self.session.is_mtk,
             };
-            let plan = plan_refresh(u.mode, canvas.is_dark(), caps, self.dark_variant);
+            let plan = plan_refresh(u.mode, canvas.is_dark(), caps, self.dark_refresh);
             self.cfg.wfm_mode = plan.waveform.to_fbink();
             self.cfg.is_flashing = plan.is_flashing;
             // SAFETY: FFI call with a valid fd and config.

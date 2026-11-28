@@ -285,7 +285,7 @@ fn run() -> Result<i32> {
     // One Store for every screen, so they share preferences and the dictionary service.
     let store = store::Store::new();
     let settings = store.settings();
-    platform.set_dark_variant(settings.dark_variant);
+    platform.set_dark_refresh(settings.dark_refresh());
     let orientation = settings.orientation;
     if orientation != platform::Orientation::Portrait {
         platform.set_orientation(orientation)?;
@@ -409,8 +409,8 @@ fn run() -> Result<i32> {
             log::error!("{e:#}");
             app.frontlight = platform.frontlight();
         }
-        if let Some(variant) = app.dark_variant_request() {
-            platform.set_dark_variant(variant);
+        if let Some(dark) = app.dark_refresh_request() {
+            platform.set_dark_refresh(dark);
         }
         let frame_started = Instant::now();
         let updates = app.frame();

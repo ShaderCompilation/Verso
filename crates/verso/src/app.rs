@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::geom::Rect;
 use crate::gfx::{Canvas, IconRenderer, TextRenderer};
 use crate::platform::{
-    Battery, DarkVariant, DeviceInfo, Frontlight, KeyAction, LightRange, Orientation, RefreshMode, TextInput, Update,
+    Battery, DarkRefresh, DeviceInfo, Frontlight, KeyAction, LightRange, Orientation, RefreshMode, TextInput, Update,
     Waker,
 };
 use crate::screens::system::{ExitChoice, ExitPrompt};
@@ -110,7 +110,7 @@ pub struct App {
     usb_connected: bool,
     wake_cleanup: Option<Instant>,
     dark_pending: Option<(bool, Instant)>,
-    dark_variant_request: Option<DarkVariant>,
+    dark_refresh_request: Option<DarkRefresh>,
     orientation: Orientation,
     /// A screen asked to turn the display; see `prepare_orientation`.
     orientation_request: Option<Orientation>,
@@ -156,7 +156,7 @@ impl App {
             usb_connected: false,
             wake_cleanup: None,
             dark_pending: None,
-            dark_variant_request: None,
+            dark_refresh_request: None,
             orientation: Orientation::Portrait,
             orientation_request: None,
             services: None,
@@ -924,8 +924,8 @@ impl App {
         self.light_request.take()
     }
 
-    pub fn dark_variant_request(&mut self) -> Option<DarkVariant> {
-        self.dark_variant_request.take()
+    pub fn dark_refresh_request(&mut self) -> Option<DarkRefresh> {
+        self.dark_refresh_request.take()
     }
 
     pub fn on_sleep(&mut self) {
@@ -1070,8 +1070,8 @@ impl App {
                 self.exit_code = Some(code);
             }
             Action::Orientation(o) => self.orientation_request = Some(o),
-            Action::DarkVariant(variant) => {
-                self.dark_variant_request = Some(variant);
+            Action::DarkRefresh(dark) => {
+                self.dark_refresh_request = Some(dark);
                 if self.dark_mode() {
                     self.refresh_all(RefreshMode::Full);
                 }
@@ -2399,28 +2399,30 @@ mod tests {
     }
 
     #[test]
-    fn dark_variant_action_queues_platform_update_and_flashes_only_when_dark() {
-        struct VariantScreen(DarkVariant);
+    fn dark_refresh_action_queues_platform_update_and_flashes_only_when_dark() {
+        struct VariantScreen(DarkRefresh);
         impl Screen for VariantScreen {
             fn draw(&mut self, _: &mut DrawCx) {}
             fn on_gesture(&mut self, g: Gesture, _: &mut EventCx) -> Action {
-                if matches!(g, Gesture::Tap(_)) { Action::DarkVariant(self.0) } else { Action::None }
+                if matches!(g, Gesture::Tap(_)) { Action::DarkRefresh(self.0) } else { Action::None }
             }
         }
         let info =
             DeviceInfo { name: "test".into(), width: 600, height: 800, dpi: 150, color: crate::gfx::ColorMode::Gray8 };
-        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(VariantScreen(DarkVariant::B)));
+        let full = DarkRefresh { full_updates: true, ..DarkRefresh::default() };
+        let mut app = App::new(&info, Theme::for_dpi(150), Box::new(VariantScreen(full)));
         app.frame();
 
         tap(&mut app, Point::new(100, 100));
-        assert_eq!(app.dark_variant_request(), Some(DarkVariant::B));
-        assert_eq!(app.dark_variant_request(), None);
-        assert!(app.frame().is_empty(), "light mode does not flash when switching dark refresh variant");
+        assert_eq!(app.dark_refresh_request(), Some(full));
+        assert_eq!(app.dark_refresh_request(), None);
+        assert!(app.frame().is_empty(), "light mode does not flash when switching dark refresh settings");
 
         app.set_dark(true);
-        app.stack[0] = Box::new(VariantScreen(DarkVariant::C));
+        let driver = DarkRefresh { rendering: crate::platform::DarkRendering::DriverNight, ..full };
+        app.stack[0] = Box::new(VariantScreen(driver));
         tap(&mut app, Point::new(100, 100));
-        assert_eq!(app.dark_variant_request(), Some(DarkVariant::C));
+        assert_eq!(app.dark_refresh_request(), Some(driver));
         assert_eq!(app.frame(), vec![Update { rect: Rect::new(0, 0, 600, 800), mode: RefreshMode::Full }]);
     }
 }

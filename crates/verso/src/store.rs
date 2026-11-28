@@ -18,7 +18,7 @@ use crate::library::LibraryIndex;
 use crate::library::collections::{Navigation, distinct_roots, normalize};
 pub use crate::online::translate::Provider as TranslateProvider;
 use crate::page_layout::PageLayout;
-pub use crate::platform::{DarkVariant, Orientation};
+pub use crate::platform::{DarkPictures, DarkRefresh, DarkRendering, Orientation};
 pub use crate::reader::TapZones;
 use anyhow::{Context, Result};
 pub use dictionary_folders::{
@@ -97,9 +97,17 @@ pub struct Settings {
     pub setup_done: bool,
     /// Light text on black across the whole app. Toggled from the Top Drawer.
     pub dark_mode: bool,
-    /// Dark-mode e-ink refresh mode (waveforms and optional driver night mode).
-    /// Settings → Display → Dark mode.
-    pub dark_variant: DarkVariant,
+    /// Page turns between full flashes in dark mode; `None` uses
+    /// `page_flash`. Settings → Display → Dark mode, like the rest below.
+    pub dark_page_flash: Option<u32>,
+    /// Chapter starts flash in dark mode too.
+    pub dark_chapter_flash: bool,
+    /// How dark image pages and cover grids refresh.
+    pub dark_pictures: DarkPictures,
+    /// Dark page turns and menus redraw every pixel in the area (eclipse only).
+    pub dark_full_updates: bool,
+    /// Eclipse waveforms, driver night mode or REAGL (for testing).
+    pub dark_rendering: DarkRendering,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -132,11 +140,23 @@ impl Default for Settings {
             deepl_api_key: None,
             setup_done: false,
             dark_mode: false,
-            dark_variant: DarkVariant::default(),
+            dark_page_flash: None,
+            dark_chapter_flash: false,
+            dark_pictures: DarkPictures::default(),
+            dark_full_updates: false,
+            dark_rendering: DarkRendering::default(),
         }
     }
 }
 impl Settings {
+    /// The dark-mode waveform settings the platform needs.
+    pub fn dark_refresh(&self) -> DarkRefresh {
+        DarkRefresh {
+            rendering: self.dark_rendering,
+            full_updates: self.dark_full_updates,
+            pictures: self.dark_pictures,
+        }
+    }
     /// Moves old fields into their replacements and clamps out-of-range values.
     pub fn normalize(&mut self) {
         self.page_layout.migrate(self.legacy_footer.take(), self.typography.legacy_margins.take());
@@ -727,23 +747,62 @@ fn normalize_settings(mut s: Settings) -> Settings {
 /// Reads settings field by field when the whole file doesn't parse, so one
 /// invalid value (a typo in a hand-edited enum) resets only that setting.
 fn read_settings(path: &Path) -> Settings {
-    if let Some(s) = read::<Settings>(path) {
-        return s;
-    }
-    let Some(serde_json::Value::Object(mut fields)) =
-        std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok())
-    else {
+    let Some(serde_json::Value::Object(mut fields)) = read::<serde_json::Value>(path) else {
         return Settings::default();
     };
-    fields.retain(|key, value| {
-        let single = serde_json::Map::from_iter([(key.clone(), value.clone())]);
-        let ok = serde_json::from_value::<Settings>(serde_json::Value::Object(single)).is_ok();
-        if !ok {
-            log::warn!("ignoring invalid setting {key} in {}", path.display());
+    let legacy = LegacyDarkVariant::find(&fields);
+    let mut settings = match serde_json::from_value::<Settings>(serde_json::Value::Object(fields.clone())) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("ignoring invalid {}: {e}", path.display());
+            fields.retain(|key, value| {
+                let single = serde_json::Map::from_iter([(key.clone(), value.clone())]);
+                let ok = serde_json::from_value::<Settings>(serde_json::Value::Object(single)).is_ok();
+                if !ok {
+                    log::warn!("ignoring invalid setting {key} in {}", path.display());
+                }
+                ok
+            });
+            serde_json::from_value(serde_json::Value::Object(fields)).unwrap_or_default()
         }
-        ok
-    });
-    serde_json::from_value(serde_json::Value::Object(fields)).unwrap_or_default()
+    };
+    if let Some(legacy) = legacy {
+        legacy.migrate(&mut settings);
+    }
+    settings
+}
+
+/// The five-way dark refresh picker that the `dark_*` settings replaced,
+/// read once from older files; `Settings` no longer writes it.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyDarkVariant {
+    A,
+    B,
+    C,
+    #[serde(alias = "c-partial")]
+    CPartial,
+    Reagl,
+}
+impl LegacyDarkVariant {
+    /// The old key, unless the file already has any of the new ones.
+    fn find(fields: &serde_json::Map<String, serde_json::Value>) -> Option<Self> {
+        const NEW: [&str; 5] =
+            ["dark_page_flash", "dark_chapter_flash", "dark_pictures", "dark_full_updates", "dark_rendering"];
+        if NEW.iter().any(|key| fields.contains_key(*key)) {
+            return None;
+        }
+        serde_json::from_value(fields.get("dark_variant")?.clone()).ok()
+    }
+    fn migrate(self, s: &mut Settings) {
+        (s.dark_rendering, s.dark_full_updates) = match self {
+            Self::A => (DarkRendering::Eclipse, false),
+            Self::B => (DarkRendering::Eclipse, true),
+            Self::C => (DarkRendering::DriverNight, true),
+            Self::CPartial => (DarkRendering::DriverNight, false),
+            Self::Reagl => (DarkRendering::Reagl, false),
+        };
+    }
 }
 fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     match std::fs::read(path) {
@@ -1140,6 +1199,58 @@ mod tests {
         std::fs::write(&path, "not json")?;
         assert_eq!(read_settings(&path).page_flash, DEFAULT_PAGE_FLASH);
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+    #[test]
+    fn old_dark_variant_migrates_once_and_new_fields_win() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("settings.json");
+        for (old, rendering, full_updates) in [
+            ("a", DarkRendering::Eclipse, false),
+            ("b", DarkRendering::Eclipse, true),
+            ("c", DarkRendering::DriverNight, true),
+            ("c_partial", DarkRendering::DriverNight, false),
+            ("c-partial", DarkRendering::DriverNight, false),
+            ("reagl", DarkRendering::Reagl, false),
+        ] {
+            // An invalid neighbour takes the field-by-field path, which migrates too.
+            for extra in ["", r#","sleep_screen":"nope""#] {
+                std::fs::write(&path, format!(r#"{{"dark_variant":"{old}","page_flash":6{extra}}}"#))?;
+                let s = read_settings(&path);
+                assert_eq!(
+                    (s.dark_rendering, s.dark_full_updates, s.page_flash),
+                    (rendering, full_updates, 6),
+                    "{old}"
+                );
+                assert_eq!(
+                    (s.dark_pictures, s.dark_page_flash, s.dark_chapter_flash),
+                    (DarkPictures::Changed, None, false)
+                );
+                let json = serde_json::to_string(&s)?;
+                assert!(!json.contains("dark_variant"), "{json}");
+            }
+        }
+        // Any new field means the old key is stale.
+        std::fs::write(&path, r#"{"dark_variant":"c","dark_pictures":"full"}"#)?;
+        let s = read_settings(&path);
+        assert_eq!(
+            (s.dark_rendering, s.dark_full_updates, s.dark_pictures),
+            (DarkRendering::Eclipse, false, DarkPictures::Full)
+        );
+        std::fs::write(&path, r#"{"dark_variant":"b","dark_page_flash":null}"#)?;
+        assert!(!read_settings(&path).dark_full_updates);
+        // The new fields round trip.
+        let s = Settings {
+            dark_page_flash: Some(12),
+            dark_chapter_flash: true,
+            dark_pictures: DarkPictures::NoFlash,
+            dark_full_updates: true,
+            dark_rendering: DarkRendering::Reagl,
+            ..Settings::default()
+        };
+        std::fs::write(&path, serde_json::to_vec(&s)?)?;
+        assert_eq!(read_settings(&path).dark_refresh(), s.dark_refresh());
+        assert_eq!(read_settings(&path).dark_page_flash, Some(12));
         Ok(())
     }
     #[test]

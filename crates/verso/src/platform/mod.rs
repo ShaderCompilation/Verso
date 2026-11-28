@@ -45,7 +45,7 @@ pub mod ssh;
 #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
 mod touch;
 pub mod waveform;
-pub use waveform::DarkVariant;
+pub use waveform::{DarkPictures, DarkRefresh, DarkRendering};
 pub mod wifi;
 
 /// How an area of the e-ink screen should be refreshed. The app states its
@@ -356,7 +356,7 @@ pub trait Platform {
     fn set_orientation(&mut self, orientation: Orientation) -> Result<()>;
 
     /// Selects how dark mode refreshes the e-ink panel (waveforms and driver night mode).
-    fn set_dark_variant(&mut self, _variant: DarkVariant) {}
+    fn set_dark_refresh(&mut self, _dark: DarkRefresh) {}
 
     /// Waits for the next event. Returns `None` if `timeout` passes first;
     /// `None` as the timeout waits forever.

@@ -214,7 +214,8 @@ impl Reader {
         let mut cache = PageCache::default();
         cache.reset(generation);
         let dark = settings.dark_mode;
-        let refresh = Refresh::new(settings.page_flash);
+        let mut refresh = Refresh::new(settings.page_flash);
+        refresh.set_dark(settings.dark_page_flash, settings.dark_chapter_flash);
         Self {
             settings_seen: store.settings_saves(),
             screen,
@@ -1524,6 +1525,13 @@ impl Reader {
         if self.settings.page_flash != saved.page_flash {
             self.settings.page_flash = saved.page_flash;
             self.refresh.set_every(saved.page_flash);
+        }
+        if (self.settings.dark_page_flash, self.settings.dark_chapter_flash)
+            != (saved.dark_page_flash, saved.dark_chapter_flash)
+        {
+            self.settings.dark_page_flash = saved.dark_page_flash;
+            self.settings.dark_chapter_flash = saved.dark_chapter_flash;
+            self.refresh.set_dark(saved.dark_page_flash, saved.dark_chapter_flash);
         }
     }
     fn save(&mut self) {
@@ -5421,6 +5429,8 @@ mod tests {
         settings.typography.size_pt = 20.0;
         settings.tap_zones = crate::reader::TapZones::Halves;
         settings.page_flash = 3;
+        settings.dark_page_flash = Some(2);
+        settings.dark_chapter_flash = true;
         settings.developer = true;
         settings.page_layout.top.on = true;
         r.store.save_settings(&settings)?;
@@ -5438,6 +5448,11 @@ mod tests {
         let modes: Vec<_> =
             (0..3u32).map(|i| r.refresh.turn(false, false, false, start + i * Duration::from_secs(1))).collect();
         assert_eq!(modes, [RefreshMode::Page, RefreshMode::Page, RefreshMode::Full]);
+        // And the dark interval and chapter-start flag.
+        let dark: Vec<_> = [(false, 10), (false, 11), (true, 12)]
+            .map(|(chapter, s)| r.refresh.turn(false, chapter, true, start + Duration::from_secs(s)))
+            .into();
+        assert_eq!(dark, [RefreshMode::Page, RefreshMode::Full, RefreshMode::Full]);
         let _ = std::fs::remove_dir_all(settings_path(&r).parent().unwrap());
         Ok(())
     }

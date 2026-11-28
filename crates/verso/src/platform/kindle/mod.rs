@@ -532,7 +532,7 @@ impl Platform for Kindle {
             format!("device: {} ({}, {}, id={:#06x})", s.device_name, s.codename, s.platform, s.device_id),
             self.profile_line.clone(),
             format!(
-                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, eclipse={}, {} dpi, mtk={}, inverted={}, dark_variant={:?}",
+                "display: view {}x{}+{}+{}, screen {}x{}, stride {}, {} bpp, pxfmt={}, color={}, eclipse={}, {} dpi, mtk={}, inverted={}, dark={:?}",
                 s.view_width,
                 s.view_height,
                 s.view_hori_origin,
@@ -547,7 +547,7 @@ impl Platform for Kindle {
                 s.dpi,
                 s.is_mtk,
                 s.inverted,
-                self.display.dark_variant(),
+                self.display.dark_refresh(),
             ),
             // Touch and page buttons are logged by `finish_startup`.
             format!(
@@ -572,8 +572,8 @@ impl Platform for Kindle {
         Ok(())
     }
 
-    fn set_dark_variant(&mut self, variant: super::DarkVariant) {
-        self.display.set_dark_variant(variant);
+    fn set_dark_refresh(&mut self, dark: super::DarkRefresh) {
+        self.display.set_dark_refresh(dark);
     }
 
     fn next_event(&mut self, timeout: Option<Duration>) -> Result<Option<Event>> {

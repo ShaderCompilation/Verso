@@ -52,71 +52,47 @@ impl Waveform {
     }
 }
 
-/// How dark mode refreshes the e-ink panel (`Settings::dark_variant`).
+/// How dark mode draws on the panel (`Settings::dark_rendering`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DarkVariant {
-    /// Eclipse waveforms; `GLKW16` uses `UPDATE_MODE_PARTIAL`.
+pub enum DarkRendering {
+    /// Software pixel flip with eclipse waveforms (`GLKW16` etc.).
     #[default]
-    A,
-    /// Eclipse waveforms; `GLKW16` uses `UPDATE_MODE_FULL` (`is_flashing = true`).
-    B,
-    /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`); `GLKW16` uses `UPDATE_MODE_FULL`.
-    C,
-    /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`); `GLKW16` uses `UPDATE_MODE_PARTIAL`.
-    #[serde(alias = "c-partial")]
-    CPartial,
-    /// Light waveforms (`REAGL` etc.) on flipped pixels.
+    Eclipse,
+    /// Driver night mode (`GRAYSCALE_8BIT_INVERTED`) with eclipse waveforms.
+    DriverNight,
+    /// Software pixel flip with the light waveforms (`REAGL` etc.).
     Reagl,
 }
 
-impl DarkVariant {
-    pub const ALL: [Self; 5] = [Self::A, Self::B, Self::C, Self::CPartial, Self::Reagl];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::A => "Eclipse (partial)",
-            Self::B => "Eclipse (full)",
-            Self::C => "Driver night (full)",
-            Self::CPartial => "Driver night (partial)",
-            Self::Reagl => "REAGL",
-        }
-    }
-
-    pub fn summary(self) -> &'static str {
-        match self {
-            Self::A => "Eclipse",
-            Self::B => "Eclipse full",
-            Self::C => "Driver full",
-            Self::CPartial => "Driver partial",
-            Self::Reagl => "REAGL",
-        }
-    }
-
-    pub fn note(self) -> &'static str {
-        match self {
-            Self::A => {
-                "Software pixel flip with partial eclipse updates (GLKW16). No flash on page turns; leaves the Kindle display driver untouched. The default."
-            }
-            Self::B => {
-                "Software pixel flip with full eclipse updates (GLKW16). Less ghosting than partial, with a brief flash on each update."
-            }
-            Self::C => {
-                "Kindle driver night mode with full eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit."
-            }
-            Self::CPartial => {
-                "Kindle driver night mode with partial eclipse updates. 8-bit Kindles only; restored on light mode, sleep and exit."
-            }
-            Self::Reagl => {
-                "Software pixel flip with standard light-mode waveforms (REAGL). Useful on panels where eclipse modes ghost more."
-            }
-        }
-    }
-
+impl DarkRendering {
     #[cfg_attr(not(feature = "kindle"), allow(dead_code))]
     pub fn uses_driver_night_mode(self) -> bool {
-        matches!(self, Self::C | Self::CPartial)
+        self == Self::DriverNight
     }
+}
+
+/// How dark image pages and cover grids (`RefreshMode::Clean`) refresh
+/// (`Settings::dark_pictures`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DarkPictures {
+    /// Like a page turn, without the flash fence.
+    NoFlash,
+    /// The GC-class waveform on changed pixels only (`UPDATE_MODE_PARTIAL`).
+    #[default]
+    Changed,
+    /// The GC-class waveform with a flash (`UPDATE_MODE_FULL`).
+    Full,
+}
+
+/// The waveform settings of dark mode, as `plan_refresh` needs them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DarkRefresh {
+    pub rendering: DarkRendering,
+    /// `GLKW16` uses `UPDATE_MODE_FULL` (every pixel in the area redraws).
+    pub full_updates: bool,
+    pub pictures: DarkPictures,
 }
 
 /// What `Display::present` sends to FBInk and whether it arms `FlashFence`.
@@ -143,13 +119,24 @@ pub struct RefreshPlan {
 /// `UPDATE_MODE_PARTIAL` for non-`Full`. `DUNM` is gated on `caps.is_mtk`
 /// because FBInk maps `DUNM` to `AUTO` on i.MX.
 ///
-/// `Clean` is `Full` in light mode. On a dark canvas it keeps the GC-class
-/// waveform (pre-flipped pictures are bright and grey, so `GLKW16` would leave
-/// ghosts) but with `UPDATE_MODE_PARTIAL`, so unchanged black stays black.
+/// Light mode ignores `dark`. `Clean` is `Full` in light mode. On a dark
+/// canvas it keeps the GC-class waveform (pre-flipped pictures are bright and
+/// grey, so `GLKW16` would leave ghosts) and `dark.pictures` picks the update
+/// mode: `UPDATE_MODE_PARTIAL` by default, so unchanged black stays black.
 #[cfg_attr(not(any(feature = "kindle", test)), allow(dead_code))]
-pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: DarkVariant) -> RefreshPlan {
+pub fn plan_refresh(mode: RefreshMode, is_dark: bool, caps: PanelCaps, dark: DarkRefresh) -> RefreshPlan {
+    if is_dark && mode == RefreshMode::Clean {
+        match dark.pictures {
+            DarkPictures::NoFlash => return plan_refresh(RefreshMode::Page, is_dark, caps, dark),
+            DarkPictures::Changed => {}
+            DarkPictures::Full => {
+                let plan = plan_refresh(RefreshMode::Full, is_dark, caps, dark);
+                return RefreshPlan { is_flashing: true, ..plan };
+            }
+        }
+    }
     let mark_flash_fence = mode >= RefreshMode::Clean;
-    if !dark || !caps.has_eclipse_wfm || variant == DarkVariant::Reagl {
+    if !is_dark || !caps.has_eclipse_wfm || dark.rendering == DarkRendering::Reagl {
         let waveform = if caps.has_color_panel {
             match mode {
                 RefreshMode::Fast => Waveform::Du,
@@ -171,7 +158,7 @@ pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: Dar
                 RefreshMode::Clean | RefreshMode::Full => Waveform::Gc16,
             }
         };
-        let is_flashing = mode == RefreshMode::Full || mode == RefreshMode::Clean && !dark;
+        let is_flashing = mode == RefreshMode::Full || mode == RefreshMode::Clean && !is_dark;
         return RefreshPlan { waveform, is_flashing, mark_flash_fence };
     }
 
@@ -199,8 +186,7 @@ pub fn plan_refresh(mode: RefreshMode, dark: bool, caps: PanelCaps, variant: Dar
             }
         }
     };
-    let is_flashing = mode == RefreshMode::Full
-        || (matches!(variant, DarkVariant::B | DarkVariant::C) && waveform == Waveform::Glkw16);
+    let is_flashing = mode == RefreshMode::Full || dark.full_updates && waveform == Waveform::Glkw16;
     RefreshPlan { waveform, is_flashing, mark_flash_fence }
 }
 
@@ -211,11 +197,24 @@ mod tests {
     const ALL_MODES: [RefreshMode; 5] =
         [RefreshMode::Fast, RefreshMode::Ui, RefreshMode::Page, RefreshMode::Clean, RefreshMode::Full];
 
+    /// Every combination of the dark refresh settings.
+    fn all_dark() -> Vec<DarkRefresh> {
+        let mut all = Vec::new();
+        for rendering in [DarkRendering::Eclipse, DarkRendering::DriverNight, DarkRendering::Reagl] {
+            for full_updates in [false, true] {
+                for pictures in [DarkPictures::NoFlash, DarkPictures::Changed, DarkPictures::Full] {
+                    all.push(DarkRefresh { rendering, full_updates, pictures });
+                }
+            }
+        }
+        all
+    }
+
     /// What a dark canvas gets without eclipse waveforms (or under `REAGL`):
     /// the light plans, except that `Clean` refreshes only changed pixels.
-    fn light_with_partial_clean(caps: PanelCaps, variant: DarkVariant) -> [RefreshPlan; 5] {
+    fn light_with_partial_clean(caps: PanelCaps) -> [RefreshPlan; 5] {
         ALL_MODES.map(|m| {
-            let plan = plan_refresh(m, false, caps, variant);
+            let plan = plan_refresh(m, false, caps, DarkRefresh::default());
             RefreshPlan { is_flashing: plan.is_flashing && m != RefreshMode::Clean, ..plan }
         })
     }
@@ -224,11 +223,9 @@ mod tests {
     fn light_waveforms_match_panel_color_and_only_clean_and_full_flash() {
         for has_eclipse_wfm in [false, true] {
             for is_mtk in [false, true] {
-                for variant in
-                    [DarkVariant::A, DarkVariant::B, DarkVariant::C, DarkVariant::CPartial, DarkVariant::Reagl]
-                {
+                for dark in all_dark() {
                     let mono = PanelCaps { has_color_panel: false, has_eclipse_wfm, is_mtk };
-                    let got: Vec<_> = ALL_MODES.map(|m| plan_refresh(m, false, mono, variant)).into();
+                    let got: Vec<_> = ALL_MODES.map(|m| plan_refresh(m, false, mono, dark)).into();
                     let ui = if is_mtk { Waveform::Gl16 } else { Waveform::Gc16 };
                     assert_eq!(
                         got,
@@ -242,7 +239,7 @@ mod tests {
                     );
 
                     let color = PanelCaps { has_color_panel: true, has_eclipse_wfm, is_mtk };
-                    let got: Vec<_> = ALL_MODES.map(|m| plan_refresh(m, false, color, variant)).into();
+                    let got: Vec<_> = ALL_MODES.map(|m| plan_refresh(m, false, color, dark)).into();
                     assert_eq!(
                         got,
                         vec![
@@ -256,8 +253,8 @@ mod tests {
                     // Light Clean is Full, field for field.
                     for caps in [mono, color] {
                         assert_eq!(
-                            plan_refresh(RefreshMode::Clean, false, caps, variant),
-                            plan_refresh(RefreshMode::Full, false, caps, variant)
+                            plan_refresh(RefreshMode::Clean, false, caps, dark),
+                            plan_refresh(RefreshMode::Full, false, caps, dark)
                         );
                     }
                 }
@@ -267,10 +264,11 @@ mod tests {
 
     #[test]
     fn dark_eclipse_waveforms_gate_on_has_eclipse_wfm_and_dunm_on_is_mtk() {
+        let default = DarkRefresh::default();
         // Mono MTK with eclipse waveforms (e.g. PW5 / PW6 / Scribe).
         let pw6 = PanelCaps { has_color_panel: false, has_eclipse_wfm: true, is_mtk: true };
         assert_eq!(
-            ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::A)),
+            ALL_MODES.map(|m| plan_refresh(m, true, pw6, default)),
             [
                 RefreshPlan { waveform: Waveform::Dunm, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
@@ -283,7 +281,7 @@ mod tests {
         // Non-MTK with eclipse waveforms: DUNM falls back to DU, eclipse modes stay on.
         let imx_eclipse = PanelCaps { has_color_panel: false, has_eclipse_wfm: true, is_mtk: false };
         assert_eq!(
-            ALL_MODES.map(|m| plan_refresh(m, true, imx_eclipse, DarkVariant::A)),
+            ALL_MODES.map(|m| plan_refresh(m, true, imx_eclipse, default)),
             [
                 RefreshPlan { waveform: Waveform::Du, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
@@ -296,7 +294,7 @@ mod tests {
         // Colorsoft (color + eclipse + MTK).
         let colorsoft = PanelCaps { has_color_panel: true, has_eclipse_wfm: true, is_mtk: true };
         assert_eq!(
-            ALL_MODES.map(|m| plan_refresh(m, true, colorsoft, DarkVariant::A)),
+            ALL_MODES.map(|m| plan_refresh(m, true, colorsoft, default)),
             [
                 RefreshPlan { waveform: Waveform::Dunm, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: false, mark_flash_fence: false },
@@ -307,36 +305,47 @@ mod tests {
         );
 
         // Without has_eclipse_wfm (PW4, Basic 3, PW3): fall back to light waveforms
-        // with PARTIAL for non-Full (Clean included) even under Variant B.
+        // with PARTIAL for non-Full (Clean included) even with full updates.
         for is_mtk in [false, true] {
-            for variant in [DarkVariant::A, DarkVariant::B] {
+            for full_updates in [false, true] {
+                let dark = DarkRefresh { full_updates, ..default };
                 let old_mono = PanelCaps { has_color_panel: false, has_eclipse_wfm: false, is_mtk };
                 assert_eq!(
-                    ALL_MODES.map(|m| plan_refresh(m, true, old_mono, variant)),
-                    light_with_partial_clean(old_mono, variant),
-                    "mono fallback is_mtk={is_mtk} {variant:?}"
+                    ALL_MODES.map(|m| plan_refresh(m, true, old_mono, dark)),
+                    light_with_partial_clean(old_mono),
+                    "mono fallback is_mtk={is_mtk} {dark:?}"
                 );
                 let old_color = PanelCaps { has_color_panel: true, has_eclipse_wfm: false, is_mtk };
                 assert_eq!(
-                    ALL_MODES.map(|m| plan_refresh(m, true, old_color, variant)),
-                    light_with_partial_clean(old_color, variant),
-                    "color fallback is_mtk={is_mtk} {variant:?}"
+                    ALL_MODES.map(|m| plan_refresh(m, true, old_color, dark)),
+                    light_with_partial_clean(old_color),
+                    "color fallback is_mtk={is_mtk} {dark:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn only_clean_and_full_mark_the_flash_fence_even_when_glkw16_uses_full_update_mode() {
+    fn full_updates_flash_only_glkw16_and_never_mark_the_flash_fence() {
         let pw6 = PanelCaps { has_color_panel: false, has_eclipse_wfm: true, is_mtk: true };
-        let plans = ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::B));
-        assert_eq!(plans, ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::C)));
+        let colorsoft = PanelCaps { has_color_panel: true, has_eclipse_wfm: true, is_mtk: true };
+        let eclipse = DarkRefresh::default();
+        let full = DarkRefresh { full_updates: true, ..eclipse };
+        let driver = DarkRefresh { rendering: DarkRendering::DriverNight, ..eclipse };
+        let driver_full = DarkRefresh { full_updates: true, ..driver };
+        for caps in [pw6, colorsoft] {
+            // Driver night mode uses the same waveforms as the pixel flip.
+            let plans = ALL_MODES.map(|m| plan_refresh(m, true, caps, full));
+            assert_eq!(plans, ALL_MODES.map(|m| plan_refresh(m, true, caps, driver_full)));
+            let partial = ALL_MODES.map(|m| plan_refresh(m, true, caps, eclipse));
+            assert_eq!(partial, ALL_MODES.map(|m| plan_refresh(m, true, caps, driver)));
+            for (plan, base) in plans.iter().zip(partial) {
+                let glkw16 = plan.waveform == Waveform::Glkw16;
+                assert_eq!(*plan, RefreshPlan { is_flashing: base.is_flashing || glkw16, ..base }, "{caps:?}");
+            }
+        }
         assert_eq!(
-            ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::CPartial)),
-            ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::A))
-        );
-        assert_eq!(
-            plans,
+            ALL_MODES.map(|m| plan_refresh(m, true, pw6, full)),
             [
                 RefreshPlan { waveform: Waveform::Dunm, is_flashing: false, mark_flash_fence: false },
                 RefreshPlan { waveform: Waveform::Glkw16, is_flashing: true, mark_flash_fence: false },
@@ -345,25 +354,36 @@ mod tests {
                 RefreshPlan { waveform: Waveform::Gck16, is_flashing: true, mark_flash_fence: true },
             ]
         );
-        // REAGL baseline uses light waveforms on dark canvases.
-        assert_eq!(
-            ALL_MODES.map(|m| plan_refresh(m, true, pw6, DarkVariant::Reagl)),
-            light_with_partial_clean(pw6, DarkVariant::A)
-        );
+        // REAGL uses light waveforms on dark canvases and ignores full updates.
+        for full_updates in [false, true] {
+            let reagl = DarkRefresh { rendering: DarkRendering::Reagl, full_updates, ..eclipse };
+            assert_eq!(ALL_MODES.map(|m| plan_refresh(m, true, pw6, reagl)), light_with_partial_clean(pw6));
+        }
     }
 
     #[test]
-    fn dark_variant_round_trips_serde_and_accepts_c_partial_alias() {
-        for variant in DarkVariant::ALL {
-            let json = serde_json::to_string(&variant).unwrap();
-            let decoded: DarkVariant = serde_json::from_str(&json).unwrap();
-            assert_eq!(decoded, variant);
+    fn dark_pictures_pick_partial_flashing_or_the_page_plan_for_clean() {
+        for has_color_panel in [false, true] {
+            for has_eclipse_wfm in [false, true] {
+                let caps = PanelCaps { has_color_panel, has_eclipse_wfm, is_mtk: true };
+                for dark in all_dark() {
+                    let changed = DarkRefresh { pictures: DarkPictures::Changed, ..dark };
+                    let plan = plan_refresh(RefreshMode::Clean, true, caps, dark);
+                    let partial = plan_refresh(RefreshMode::Clean, true, caps, changed);
+                    assert!(!partial.is_flashing && partial.mark_flash_fence, "{caps:?} {dark:?}");
+                    let want = match dark.pictures {
+                        DarkPictures::Changed => partial,
+                        DarkPictures::Full => RefreshPlan { is_flashing: true, ..partial },
+                        DarkPictures::NoFlash => plan_refresh(RefreshMode::Page, true, caps, dark),
+                    };
+                    assert_eq!(plan, want, "{caps:?} {dark:?}");
+                    assert!(dark.pictures != DarkPictures::NoFlash || !plan.mark_flash_fence);
+                    // Only Clean changes.
+                    for m in ALL_MODES.into_iter().filter(|&m| m != RefreshMode::Clean) {
+                        assert_eq!(plan_refresh(m, true, caps, dark), plan_refresh(m, true, caps, changed));
+                    }
+                }
+            }
         }
-        assert_eq!(serde_json::from_str::<DarkVariant>(r#""c-partial""#).unwrap(), DarkVariant::CPartial);
-        assert!(!DarkVariant::A.uses_driver_night_mode());
-        assert!(!DarkVariant::B.uses_driver_night_mode());
-        assert!(DarkVariant::C.uses_driver_night_mode());
-        assert!(DarkVariant::CPartial.uses_driver_night_mode());
-        assert!(!DarkVariant::Reagl.uses_driver_night_mode());
     }
 }

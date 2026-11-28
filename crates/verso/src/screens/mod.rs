@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use crate::geom::Rect;
 use crate::gfx::Icon;
-use crate::platform::{Battery, DarkVariant, KeyAction, Orientation, RefreshMode, TextInput, Update};
+use crate::platform::{Battery, DarkRefresh, KeyAction, Orientation, RefreshMode, TextInput, Update};
 use crate::ui::gesture::Gesture;
 use crate::ui::theme::Theme;
 use crate::ui::widget::DrawCx;
@@ -52,8 +52,8 @@ pub enum Action {
     /// Turn the screen. The app saves like on exit and rebuilds its screens
     /// at the new size as they were (see [`RelayoutState`]).
     Orientation(Orientation),
-    /// Apply a new dark-mode refresh variant (and flash if dark mode is on).
-    DarkVariant(DarkVariant),
+    /// Apply new dark-mode waveform settings (and flash if dark mode is on).
+    DarkRefresh(DarkRefresh),
     /// Open the Top Drawer (quick settings) over this screen.
     OpenTopDrawer,
 }

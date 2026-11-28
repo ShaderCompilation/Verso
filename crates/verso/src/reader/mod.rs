@@ -160,21 +160,32 @@ impl PageCache {
 pub const RAPID_TURN: Duration = Duration::from_millis(400);
 
 /// Counts page turns between full flashes. Pages with images always get a
-/// `Clean` (in dark mode it flashes only the changed pixels), and chapter
-/// starts flash in light mode (text on black ghosts little, so a dark chapter
-/// start isn't worth the white flash); `every` (0 = never) adds a periodic one.
+/// `Clean` (in dark mode `Settings::dark_pictures` decides how it looks), and
+/// chapter starts flash in light mode, and in dark mode only with
+/// `dark_chapter_flash` (text on black ghosts little, so by default a dark
+/// chapter start isn't worth the white flash); `every` (0 = never) adds a
+/// periodic one, and `dark_every` replaces it in dark mode. Light and dark
+/// share the count, so switching mid-book doesn't restart it.
 pub struct Refresh {
     since_flash: u32,
     every: u32,
+    dark_every: Option<u32>,
+    dark_chapter_flash: bool,
     last_turn: Option<Instant>,
 }
 impl Refresh {
     pub fn new(every: u32) -> Self {
-        Self { since_flash: 0, every, last_turn: None }
+        Self { since_flash: 0, every, dark_every: None, dark_chapter_flash: false, last_turn: None }
     }
     /// A new full-refresh interval (0: only images and chapter starts).
     pub fn set_every(&mut self, every: u32) {
         self.every = every;
+    }
+    /// The dark-mode interval (`None`: as light) and whether dark chapter
+    /// starts flash.
+    pub fn set_dark(&mut self, every: Option<u32>, chapter_flash: bool) {
+        self.dark_every = every;
+        self.dark_chapter_flash = chapter_flash;
     }
     /// The refresh for a page turn shown at `now`. A periodic flash that falls
     /// due while turns come less than [`RAPID_TURN`] apart waits for the first
@@ -184,9 +195,10 @@ impl Refresh {
         self.since_flash += 1;
         let rapid = self.last_turn.is_some_and(|t| now.saturating_duration_since(t) < RAPID_TURN);
         self.last_turn = Some(now);
-        let due = self.every > 0 && self.since_flash >= self.every;
-        let deferred = rapid && self.since_flash < self.every.saturating_mul(2);
-        if chapter_start && !dark || due && !deferred {
+        let every = if dark { self.dark_every.unwrap_or(self.every) } else { self.every };
+        let due = every > 0 && self.since_flash >= every;
+        let deferred = rapid && self.since_flash < every.saturating_mul(2);
+        if chapter_start && (!dark || self.dark_chapter_flash) || due && !deferred {
             self.since_flash = 0;
             RefreshMode::Full
         } else if image {
@@ -241,6 +253,19 @@ mod tests {
         // No periodic flash: nothing to defer.
         let mut r = Refresh::new(0);
         assert!((0..20).all(|i| r.turn(false, false, false, at(i * 200)) == page));
+        // Dark mode's own interval; light keeps its own, and they share the count.
+        let mut r = Refresh::new(0);
+        r.set_dark(Some(2), false);
+        let modes: Vec<_> = (0..4).map(|i| r.turn(false, false, true, at(i * 1000))).collect();
+        assert_eq!(modes, [page, full, page, full]);
+        assert!((4..8).all(|i| r.turn(false, false, false, at(i * 1000)) == page), "light never flashes");
+        // Unset, dark uses the light interval: 4 turns counted, 2 to go.
+        r.set_every(6);
+        r.set_dark(None, false);
+        assert_eq!([r.turn(false, false, true, at(8000)), r.turn(false, false, true, at(9000))], [page, full]);
+        // With the flag, a dark chapter start flashes and restarts the count.
+        r.set_dark(None, true);
+        assert_eq!([r.turn(false, true, true, at(10_000)), r.turn(false, false, true, at(11_000))], [full, page]);
     }
     #[test]
     fn zones_prioritise_menu_and_leave_forward_accessible_on_both_edges() {
